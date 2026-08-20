@@ -1,0 +1,253 @@
+package query
+
+import "testing"
+
+func TestStream_AlwaysScopedToCutoff(t *testing.T) {
+	q := New(7, 11, 4242) // tenant 7, project 11, cutoff 4242
+	got := q.Stream(50, nil, nil, "", Range{})
+	if !contains(got.SQL, "tenant_id = ?") || !contains(got.SQL, "project_id = ?") || !contains(got.SQL, "seq >= ?") {
+		t.Fatalf("Stream must always scope to tenant+project+cutoff; got:\n%s", got.SQL)
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+	if !contains(got.SQL, "LIMIT 50") {
+		t.Fatalf("limit must appear in SQL; got:\n%s", got.SQL)
+	}
+}
+
+func TestStream_FiltersAppendConditions(t *testing.T) {
+	q := New(1, 2, 3)
+	got := q.Stream(10, []string{"error"}, []string{"api"}, "oom", Range{})
+	for _, want := range []string{"level = 'error'", "service IN (?)", "message ILIKE ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("filter %q missing from SQL:\n%s", want, got.SQL)
+		}
+	}
+	// Args order: tenant, project, cutoff, service, search (levels are inlined
+	// from the validated enum, never bound).
+	if len(got.Args) != 5 {
+		t.Fatalf("expected 5 args, got %d (%v)", len(got.Args), got.Args)
+	}
+	if got.Args[3] != "api" {
+		t.Fatalf("service must be bound as an arg; got %v", got.Args)
+	}
+	if got.Args[4] != "%oom%" {
+		t.Fatalf("search must be wrapped as ILIKE %%…%%; got %v", got.Args[4])
+	}
+}
+
+func TestStream_MultiServiceBindsEveryName(t *testing.T) {
+	// The picker is checkboxes now: two picked services are one IN over both,
+	// and the unlabelled service rides as the empty string, a value like any
+	// other — not a dropped filter.
+	got := New(1, 2, 3).Stream(10, nil, []string{"api", ""}, "", Range{})
+	if !contains(got.SQL, "service IN (?, ?)") {
+		t.Fatalf("two services must bind two placeholders; got:\n%s", got.SQL)
+	}
+	if got.Args[3] != "api" || got.Args[4] != "" {
+		t.Fatalf("both names (including the empty one) must be bound; got %v", got.Args)
+	}
+}
+
+func TestStream_InfoBucketIsEverythingButErrorAndWarn(t *testing.T) {
+	// The panel's third bucket has to partition the stream with the other two,
+	// or debug lines vanish from every combination that includes "info".
+	got := New(1, 2, 3).Stream(10, []string{"warn", "info"}, nil, "", Range{})
+	if !contains(got.SQL, "(level = 'warn' OR level NOT IN ('error', 'warn'))") {
+		t.Fatalf("info must mean NOT error/warn, OR-joined with the picked levels; got:\n%s", got.SQL)
+	}
+}
+
+func TestStream_UnknownLevelIsDroppedNotBound(t *testing.T) {
+	// Levels are inlined into SQL, so anything outside the enum must be dropped
+	// here — matched literally it would be an injection seam.
+	got := New(1, 2, 3).Stream(10, []string{"fatal'; DROP TABLE logs;--"}, nil, "", Range{})
+	if contains(got.SQL, "DROP TABLE") || contains(got.SQL, "level = ") {
+		t.Fatalf("unknown level must leave no trace in the predicate; got:\n%s", got.SQL)
+	}
+}
+
+func TestServices_ListsTheWindowsServicesWithCounts(t *testing.T) {
+	q := New(7, 11, 4242)
+	got := q.Services(0)
+	for _, want := range []string{"GROUP BY service", "count()", "tenant_id = ?", "project_id = ?", "seq >= ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("Services must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+}
+
+func TestServices_IsNeverFilteredByService(t *testing.T) {
+	// The list is what the picker is built from. Filtering it by the service
+	// already picked would leave the picker holding one option — the reader's own
+	// choice — with no way back to the rest of the window.
+	got := New(1, 2, 3).Services(0)
+	if contains(got.SQL, "service = ?") {
+		t.Fatalf("Services must not filter by service; got:\n%s", got.SQL)
+	}
+}
+
+func TestVolume_GroupsByMinute(t *testing.T) {
+	q := New(1, 2, 3)
+	got := q.Volume(1, nil, nil)
+	if !contains(got.SQL, "toStartOfMinute(ts)") || !contains(got.SQL, "seq >= ?") {
+		t.Fatalf("volume must group by minute within the cutoff; got:\n%s", got.SQL)
+	}
+}
+
+func TestVolume_FollowsTheFilters(t *testing.T) {
+	// The strip sits directly above the lines it describes. Left unfiltered it
+	// drew the whole window's mass over a stream narrowed to one service — a
+	// chart and a list, side by side, counting different things.
+	got := New(1, 2, 3).Volume(1, []string{"error"}, []string{"api"})
+	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
+		t.Fatalf("volume must honour the stream's filters; got:\n%s", got.SQL)
+	}
+	if len(got.Args) != 4 || got.Args[3] != "api" {
+		t.Fatalf("service must be bound as an arg; got %v", got.Args)
+	}
+}
+
+func TestSlice_RangeInclusiveOfCutoff(t *testing.T) {
+	q := New(1, 2, 3000)
+	got := q.Slice(1000, 2000, 500)
+	// Slice uses fromSeq/toSeq directly but still carries the cutoff so a query
+	// can't reach below the visible window even with a crafted range.
+	if !contains(got.SQL, "seq >= ?") {
+		t.Fatalf("slice must still enforce the cutoff; got:\n%s", got.SQL)
+	}
+	assertArgsHave(t, got.Args, int64(1), int64(2), int64(1000), int64(2000))
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return len(needle) == 0
+}
+
+func assertArgsHave(t *testing.T, args []any, wants ...int64) {
+	t.Helper()
+	for _, w := range wants {
+		found := false
+		for _, a := range args {
+			if v, ok := a.(int64); ok && v == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("args %v missing expected int64 %d", args, w)
+		}
+	}
+}
+
+func TestSummary_ScopedToCutoff(t *testing.T) {
+	// The cutoff is the whole point: "does this project send anything" must be
+	// answered about the VISIBLE window, or a project whose lines have all been
+	// displaced by the ring would still read as connected.
+	q := New(7, 11, 4242)
+	got := q.Summary()
+	for _, want := range []string{"count()", "max(ts)", "tenant_id = ?", "project_id = ?", "seq >= ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("Summary must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+}
+
+func TestBeyondErrors_CountsOnlyTheDisplacedTail(t *testing.T) {
+	// "Beyond the window" means between retain_seq and cutoff_seq: lines still
+	// stored but no longer shown (§3.3.1). A query that dropped either bound
+	// would count the visible window too and turn the quiet "zero is silence"
+	// footnote into a permanent alarm.
+	q := New(3, 4, 900) // cutoff 900
+	got := q.BeyondErrors(100)
+	for _, want := range []string{"seq >= ?", "seq < ?", "level = 'error'"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("BeyondErrors must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(3), int64(4), int64(100), int64(900))
+}
+
+func TestLatestExplain_StaysInsideTheWindow(t *testing.T) {
+	// The AI read is sold as "your last N lines"; reading below the cutoff would
+	// quietly hand the model lines the plan says the account can no longer see.
+	q := New(5, 6, 777)
+	got := q.LatestExplain(20)
+	if !contains(got.SQL, "seq >= ?") || !contains(got.SQL, "LIMIT 20") {
+		t.Fatalf("LatestExplain must scope to the cutoff and limit; got:\n%s", got.SQL)
+	}
+	assertArgsHave(t, got.Args, int64(5), int64(6), int64(777))
+}
+
+func TestCutoffSeq_IsReportedAsBuilt(t *testing.T) {
+	// /v1/plan reports this number to the account; it must be the same boundary
+	// the queries use, not a recomputed one.
+	if got := New(1, 2, 4242).CutoffSeq(); got != 4242 {
+		t.Fatalf("CutoffSeq() = %d, want 4242", got)
+	}
+}
+
+func TestEventSeen_ScopedAndNamed(t *testing.T) {
+	q := New(7, 11, 4242)
+	got := q.EventSeen("install_verified")
+	for _, want := range []string{"tenant_id = ?", "project_id = ?", "seq >= ?", "message = ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("EventSeen must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+	if got.Args[3] != "install_verified" {
+		t.Fatalf("event name must be a bound arg; got %v", got.Args)
+	}
+}
+
+func TestRecentEvents_ScopedGroupedLimited(t *testing.T) {
+	q := New(7, 11, 4242)
+	got := q.RecentEvents(15*60*1e9, 12) // 15 minutes in time.Duration units
+	for _, want := range []string{"GROUP BY message", "LIMIT 12", "tenant_id = ?", "project_id = ?", "seq >= ?", "ts >= ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("RecentEvents must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+}
+
+// The incident slice's read. Two properties, and the second is the one the
+// change exists for: the failing lines have to outrank the tail, but the
+// filter must never be exclusive, or an incident with no error-level logs
+// freezes an empty slice and the card drops the pane it has today.
+func TestEvidence_RanksErrorsAndWarningsAboveTheTail(t *testing.T) {
+	q := New(7, 11, 4242)
+	got := q.Evidence(12)
+
+	if !contains(got.SQL, "ORDER BY level IN ('error', 'warn') DESC") {
+		t.Fatalf("errors and warnings must sort first; got:\n%s", got.SQL)
+	}
+	if !contains(got.SQL, "seq DESC") {
+		t.Fatalf("within a rank the newest line still wins; got:\n%s", got.SQL)
+	}
+	// The tie-break IS the top-up: without a level predicate in WHERE, a window
+	// holding no errors still returns its newest ordinary lines.
+	if contains(got.SQL, "WHERE") && contains(got.SQL, "level =") {
+		t.Fatalf("the level must rank, never filter; got:\n%s", got.SQL)
+	}
+	if !contains(got.SQL, "LIMIT 12") {
+		t.Fatalf("limit must appear in SQL; got:\n%s", got.SQL)
+	}
+}
+
+func TestEvidence_AlwaysScopedToCutoff(t *testing.T) {
+	q := New(7, 11, 4242)
+	got := q.Evidence(12)
+	for _, want := range []string{"tenant_id = ?", "project_id = ?", "seq >= ?"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("Evidence must scope like Stream (%s); got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
+}

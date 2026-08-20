@@ -1,0 +1,77 @@
+/* Above the tab bar (25), below Modal (100) — a modal opened from a sheet
+   row must still win. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* Glass, like the bar that opens it: the sheet rises from the tab bar, so a
+   flat opaque panel arriving over a glass one would break the illusion at
+   the exact moment the two touch. */
+.sheet {
+  position: fixed;
+  inset: auto 0 0 0;
+  max-height: calc(100dvh - var(--header-h));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-bottom: none;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--space-3) var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.grabber {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.navItem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text-body);
+  font-size: var(--text-sm);
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.navItemActive {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.navItemActive::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 0;
+  background: var(--ok);
+}
+
+/* This sheet only ever exists on a touch screen, so it never sees a cursor:
+   the press tint is the only feedback a tap can get. */
+.navItem:active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}

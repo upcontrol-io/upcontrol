@@ -1,0 +1,6 @@
+{
+  "plan": "Free",
+  "httpChecks": { "used": 2, "max": 3 },
+  "logWindow": { "lines": 25000, "approxHours": 14 },
+  "incidentHistoryDays": 30
+}

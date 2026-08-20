@@ -1,0 +1,73 @@
+# Edge for a self-hosted Upcontrol box: one origin for the app and the API.
+# That is not cosmetic — the session cookie is HttpOnly and same-site, so a
+# front on a different origin looks permanently signed out.
+#
+# UC_DOMAIN set (compose passes it from .env): Caddy provisions a public
+# certificate for that name. Unset it defaults to `localhost`, which Caddy
+# signs with its internal CA — and the https:// catch-all below covers the
+# box's IP or any LAN name the same way.
+{
+	admin off
+	# No automatic HTTP→HTTPS redirects: Caddy would inject one for the
+	# `localhost` site AHEAD of the :80 ingest block below, turning
+	# POST http://localhost/i into a 308 (an IP host dodged it, a hostname
+	# did not — found in the cold-install rehearsal). The :80 block's own
+	# redir covers browsers; ACME challenges are answered regardless.
+	auto_https disable_redirects
+}
+
+(app) {
+	# The API surface, exactly. `/i` is the ingest door, `/hooks/*` receives
+	# provider events, and the connect-go ProbeService rides the same upstream
+	# because it is mounted on the same port.
+	@api path /v1/* /public/* /i /hooks/* /health /upcontrol.probe.v1.ProbeService/*
+	handle @api {
+		reverse_proxy ucapi:8080 {
+			health_uri /health
+			health_interval 5s
+			health_timeout 2s
+		}
+	}
+
+	# Everything else is the app.
+	handle {
+		reverse_proxy front:80
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+{$UC_DOMAIN} {
+	import app
+}
+
+# Domainless fallback: any other host (the machine's IP, a LAN name) gets a
+# certificate minted on demand by the internal CA. Browsers warn until the CA
+# is trusted; the README covers exporting it. Internal issuance has no rate
+# limits, so on-demand here cannot be abused the way ACME on-demand can.
+https:// {
+	tls internal {
+		on_demand
+	}
+	import app
+}
+
+# Plain HTTP serves the ingest doors ONLY (Decision 11): the Node SDK and CLI
+# can deliver events without trusting the internal CA on domainless installs.
+# Everything else is redirected to HTTPS. (With a real domain Caddy still
+# answers ACME challenges on :80 ahead of this block.)
+:80 {
+	@ingest {
+		method POST
+		path /i /v1/event
+	}
+	handle @ingest {
+		reverse_proxy ucapi:8080
+	}
+	handle {
+		redir https://{host}{uri} 308
+	}
+}

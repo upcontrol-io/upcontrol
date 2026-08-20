@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Upcontrol</title>
+    <meta name="description" content="Self-hosted monitoring: uptime, logs and the why behind an incident." />
+    <meta name="theme-color" content="#16181b" />
+
+    <!-- The Viewfinder mark. The SVG flips its ink with the browser chrome's
+         scheme (dark mark on a light UI, white on a dark one); the ICO is the
+         fallback for browsers without SVG icon support. sizes="32x32" on it
+         keeps Chrome from preferring the ICO over the SVG. -->
+    <link rel="icon" href="/favicons/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicons/svg/favicon.svg" type="image/svg+xml" />
+    <!-- Square and opaque on purpose: iOS applies its own mask, and a
+         pre-rounded tile would show its transparent corners outside that mask. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicons/apple-touch-icon-180.png" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Set the theme attribute before first paint to avoid a flash of the wrong theme.
+      (function () {
+        var stored = localStorage.getItem('uc-theme');
+        var theme = stored || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = theme;
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.content = theme === 'light' ? '#f2f2ef' : '#16181b';
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

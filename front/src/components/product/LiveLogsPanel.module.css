@@ -1,0 +1,301 @@
+/* The live window. Deliberately plain next to LogsPanel: no container tabs, no
+   small multiples, no window pills — those describe data the backend does not
+   serve yet, and an empty tile is worse than no tile. */
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+/* Sunken like IncidentCard's header/pager: a toolbar strip recessed from the
+   raised card around it, not flush with it. */
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+/* .title is gone with the panel's own <h2>: the page heading names this screen
+   now, and the panel does not restate it. */
+
+.count {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The two pickers sit at the trailing edge of the head, service first (the
+   broader cut), levels beside it. */
+.filter {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.filterControl {
+  height: 28px;
+  font-size: var(--text-xs);
+}
+
+.cta {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--text-primary);
+  color: var(--bg-page);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+/* Sunken like CodeBlock's terminal body: the stream reads as a console recessed
+   into the card, not as plain text sitting on the card's own surface. */
+/* Wraps the stream so the overview ruler can sit over the scrollbar's track
+   without scrolling with the content. */
+.streamWrap {
+  position: relative;
+}
+
+.stream {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  max-height: 360px;
+  overflow: auto;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 20px;
+}
+
+/* The overview ruler: warn/amber and error/red marks at each line's measured
+   position in the scroll content — a map of where the trouble is, in its own
+   lane just inside the scrollbar's gutter (the inline `right` carries the
+   measured gutter width: an overlay would paint over the native thumb and no
+   z-index reaches it). pointer-events stays off; info lines get no mark on
+   purpose. */
+.ruler {
+  position: absolute;
+  top: 0;
+  right: 0; /* fallback; the measured gutter rides inline */
+  bottom: 0;
+  width: 6px;
+  pointer-events: none;
+}
+
+.rulerError,
+.rulerWarn {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-radius: 1px;
+}
+
+.rulerError {
+  background: var(--down);
+}
+
+.rulerWarn {
+  background: var(--check);
+}
+
+/* Same column rhythm as the mock stream: time, source, level, message — the
+   message column starts at one x down the whole pane, so a long service name
+   never shifts the text the eye is scanning. */
+.row {
+  display: grid;
+  grid-template-columns: 66px 84px 52px minmax(0, 1fr);
+  gap: 0 var(--space-3);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.rowError {
+  background: var(--down-bg);
+}
+
+.time,
+.service,
+.level {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-body);
+}
+
+@media (max-width: 700px) {
+  /* The head's one-line layout assumed a desktop's width: on a phone the count
+     sentence got squeezed into a one-word-per-line column and the pickers ran
+     off the right edge. The collapse is explicit — title and count share the
+     first line (the count wraps as a sentence), the two pickers take a full
+     line below and split it between them. */
+  .head {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .filter {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  /* Each MultiSelect root, then its trigger: both stretch so the pair shares
+     the line evenly and the chevron marks the trailing edge of its half. */
+  .filter > * {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .filterControl {
+    flex: 1;
+    min-width: 0;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 560px) {
+  /* The phone drops the service column rather than shrinking every column past
+     legibility; the level still carries the row's meaning. */
+  .row {
+    grid-template-columns: 62px 46px minmax(0, 1fr);
+  }
+
+  .service {
+    display: none;
+  }
+}
+
+/* Rows are Explain-selectable, the same affordance the mock panel carries. */
+.row {
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .row:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.rowSelected {
+  box-shadow: inset 2px 0 0 var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* The selection's own row, under the stream: the count of picked lines and the
+   actions on them. The head keeps describing the window, not the selection.
+   flex-wrap: the count carries the server's cap sentence ("one line is too
+   long to read") right beside the Explain button, the same long-text-next-
+   to-a-button shape as Settings.module.css's .rotateRow. Without wrap it
+   pushes the button toward the edge of a narrow phone instead of dropping
+   to its own line. */
+.selectBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.selectCount {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The server's line cap, shown only once the selection is past it — the count
+   says how many, this says why the read button beside it refuses. */
+.selectCap {
+  margin-left: var(--space-2);
+  color: var(--text-muted);
+}
+
+.selectActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The one filled-color control in this panel, on purpose (owner decision): AI
+   Explain is a feature to be used, not just available, so it reads as a CTA
+   rather than another achromatic secondary action. Reuses --accent rather than
+   a new hue — the app's other named exception (code syntax, LogMessage) — so
+   the page still carries a single accent, not two. --inverse flips per theme
+   the same way Button's primary variant does, so contrast holds both ways. */
+.explainButton {
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--inverse);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  transition: opacity var(--duration-hover) var(--ease);
+}
+
+.explainButton:hover:not(:disabled) {
+  opacity: 0.86;
+}
+
+.explainButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The read lands under the stream that produced it. */
+.read {
+  padding: var(--space-4);
+  border-top: 1px solid var(--line);
+  scroll-margin-top: 72px;
+  scroll-margin-bottom: 96px;
+}
+
+.readText {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-body);
+  white-space: pre-wrap;
+}
+
+/* The reading mark sits where the answer will land; the block keeps roughly
+   the skeleton's height so the panel does not jump when the answer arrives. */
+.readChase {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-6) 0;
+  color: var(--text-primary);
+}
+
+/* Dark's --bg-sunken carries enough weight to read as a recessed console
+   against --bg-raised. The same tokens in light are close enough in value AND
+   both warm-toned that the identical treatment reads as a dirty stain across
+   the whole head+stream area rather than a deliberate recess. Reaching for yet
+   another gray step doesn't fix that — it's the same trick with a smaller
+   number. Tinting with --accent instead does two things a gray step can't: it
+   reads as an intentional colour choice rather than a value error, and it ties
+   the panel to the Explain button below, which is the one other place this
+   page spends its single accent. Kept to a whisper (4-10% mix into the card's
+   own --bg-raised) so it stays a tint, not a colour block — the same restraint
+   the aurora rule already applies to this token elsewhere in the app. */
+:global(html[data-theme='light']) .head {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+}
+
+:global(html[data-theme='light']) .stream {
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-raised));
+}

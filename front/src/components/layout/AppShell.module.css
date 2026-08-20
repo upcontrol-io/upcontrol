@@ -1,0 +1,181 @@
+.shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100dvh;
+  background: var(--bg-base);
+}
+
+/* Pinned, and its own scroll context. As an ordinary grid column it travelled
+   with the page, so on a long screen (Settings runs 1871px) the whole nav and
+   the Settings link left the viewport — navigation you have to scroll back up
+   to reach. The commercial shell solves it the same way (AccountShell.module
+   .css), offsetting `top` by its header; this shell has no header row above
+   the grid, so the offset is zero. */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-4);
+  border-right: 1px solid var(--line);
+}
+
+/* Lockup left, theme toggle right — the same pair the commercial header
+   wears, folded into the sidebar's top row. */
+.brandRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-3);
+}
+
+/* The lockup draws itself (mark + bitmap word, currentColor); the class
+   supplies only colour. */
+.wordmark {
+  color: var(--text-primary);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.navGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Aligned to the nav items' own text inset, so the label reads as their
+   heading rather than as a stray line above them. */
+.navGroupLabel {
+  padding: 0 var(--space-3) var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.navItem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: var(--control-md);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.navItem:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.navItemActive {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* The current-item marker is a straight green bar (user decision — the one
+   named exception to the achromatic rule). A pseudo-element is not clipped
+   by the radius, so the edge stays square top to bottom. */
+.navItemActive::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 0;
+  background: var(--ok);
+}
+
+.navSpacer {
+  flex: 1;
+}
+
+/* Pinned below the spacer, its own row rather than a third navGroup entry:
+   Settings is not a fourth thing to watch, it is the door out of watching. */
+.settingsItem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-md);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.settingsItem:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.content {
+  padding: var(--space-6);
+  min-width: 0;
+}
+
+/* Below 700px the sidebar sheds its nav (the fixed BottomTabBar takes over
+   navigation, thumb's reach beats a drawer) and becomes a slim sticky header:
+   brand and theme toggle only, the same pair the commercial app's header
+   keeps pinned. */
+@media (max-width: 700px) {
+  /* Two rows, and the second one takes the slack. Without the explicit track
+     list both rows are `auto`, `align-content` resolves to `normal`, and a grid
+     carrying `min-height: 100dvh` hands the leftover height to BOTH of them —
+     so on any page shorter than the screen a 57px header measured 246.7px and
+     ate a quarter of the phone. */
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    height: auto;
+    /* Undoes the desktop scroll context: a header row has nothing to scroll,
+       and a scroll container would clip the theme toggle's focus ring. */
+    overflow: visible;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: var(--space-3) var(--space-4);
+    padding-top: calc(var(--space-3) + env(safe-area-inset-top, 0px));
+    background: var(--bg-base);
+  }
+
+  .brandRow {
+    flex: 1;
+    padding: 0;
+  }
+
+  .nav,
+  .navSpacer,
+  .settingsItem,
+  .wiring {
+    display: none;
+  }
+
+  /* Content clears the fixed tab bar the same way AccountShell's does: the
+     bar's own height, the gap it floats by, and the home-indicator inset. */
+  .content {
+    padding: var(--space-4) var(--space-4)
+      calc(var(--space-8) + var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px));
+  }
+}

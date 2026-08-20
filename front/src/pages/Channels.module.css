@@ -1,0 +1,194 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: var(--measure-page);
+}
+
+
+
+.list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.rowMain {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+
+.kind {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+  width: 72px;
+  flex-shrink: 0;
+}
+
+.targetCell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1;
+}
+
+.target {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.testOutcome {
+  font-size: var(--text-caption);
+  color: var(--text-body);
+}
+
+/* The square the monitors table uses for the same job, so the one control that
+   removes a row looks the same wherever a row can be removed. It had no border
+   at all here, which left a bare glyph carrying a destructive action. */
+.remove {
+  position: relative;
+  flex-shrink: 0;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    border-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.remove:hover {
+  background: var(--down-bg);
+  border-color: var(--down);
+  color: var(--down);
+}
+
+.confirmStrip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+
+.confirmText {
+  font-size: var(--text-sm);
+  color: var(--text-body);
+}
+
+.connectables {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--space-3);
+}
+
+.tile {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.tileHead {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tileHead:hover {
+  background: var(--bg-hover);
+}
+
+.tileName {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tileHint {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.tileBody {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.tileBody > label {
+  flex: 1;
+}
+
+.tileLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-md);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.tileLink:hover {
+  background: var(--bg-hover);
+}
+
+/* The global `.uc-app` touch floor in global.css never reaches this page (the
+   self-host shell's root carries no such class), so every control here needs
+   its own floor. Height only, per the tap-min convention. */
+@media (max-width: 700px) {
+  .rowMain > button,
+  .confirmStrip > button,
+  .tileBody > button,
+  .tileBody input,
+  .tileLink {
+    min-height: var(--tap-min);
+  }
+
+  .remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Same shape as Settings.module.css's .rotateRow: an outcome sentence next
+     to two buttons. Without wrap, a long confirm sentence pushes Delete off
+     the edge of a narrow phone. */
+  .confirmStrip {
+    flex-wrap: wrap;
+  }
+}

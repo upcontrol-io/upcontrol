@@ -1,0 +1,44 @@
+// `import '@upcontrol/sdk/auto'` - the one-line entry (cli/SPEC.md §5.1):
+// app_started on boot, unhandled_exception on crashes, best-effort flush when
+// the event loop drains. Deliberately uses only observers that DO NOT change
+// process behavior: uncaughtExceptionMonitor observes without preventing the
+// crash, and beforeExit fires only on a naturally draining loop. No SIGTERM
+// handler - installing one would alter the process's default signal behavior,
+// which an observability library must never do.
+
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { track, flush } from './index.js';
+
+function appVersion(): string {
+  try {
+    const raw = readFileSync(join(process.cwd(), 'package.json'), 'utf8');
+    const v = JSON.parse(raw).version;
+    return typeof v === 'string' && v ? v : '0';
+  } catch {
+    return '0';
+  }
+}
+
+const g = globalThis as { __upcontrolAuto?: boolean };
+if (!g.__upcontrolAuto) {
+  g.__upcontrolAuto = true;
+
+  track('app_started', {
+    version: appVersion(),
+    env: process.env.NODE_ENV || 'production',
+  });
+
+  process.on('uncaughtExceptionMonitor', (err: unknown) => {
+    try {
+      const e = err instanceof Error ? err : new Error(String(err));
+      track('unhandled_exception', { error_type: e.name || 'Error' });
+    } catch {
+      /* never interfere with the crash path */
+    }
+  });
+
+  process.on('beforeExit', () => {
+    void flush();
+  });
+}

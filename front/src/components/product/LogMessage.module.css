@@ -1,0 +1,27 @@
+/* JSON inside a log line. The tones are the reference-accent set from
+   tokens.css, the same ones CodeBlock uses, so a payload reads identically
+   whether it is in the docs or in the live stream. Status colours are not
+   touched — a log level is still the only saturated thing in a row. */
+
+.key {
+  color: var(--accent);
+}
+
+.string {
+  color: var(--code-string);
+}
+
+.number {
+  color: var(--code-number);
+}
+
+.literal {
+  color: var(--code-number);
+  font-style: italic;
+}
+
+/* Braces, colons and commas step back so the values carry the line. Same tone
+   as a code comment, which is the quietest legible text in the system. */
+.punct {
+  color: var(--code-comment);
+}

@@ -1,0 +1,141 @@
+.wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+/* The trigger wears the Select control's clothes (Field.module.css) so the
+   two kinds of picker read as one family wherever they sit side by side. */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-md);
+  padding: 0 var(--space-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  transition: border-color var(--duration-hover) var(--ease);
+}
+
+.chevron {
+  color: var(--text-muted);
+  transition: transform var(--duration-hover) var(--ease);
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+/* Same layer class as Tooltip (50); Modal keeps 100. */
+.pop {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  max-height: 280px;
+  overflow: auto;
+  padding: var(--space-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Overrides Checkbox's inline-flex: a menu row takes the whole width so the
+   note can sit at the trailing edge and the hover surface has no gaps. */
+.row {
+  display: flex;
+  width: 100%;
+  padding: var(--space-2);
+  border-radius: 4px;
+  font-size: var(--text-sm);
+}
+
+@media (hover: hover) {
+  .row:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.rowLabel {
+  color: var(--text-body);
+}
+
+.note {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.divider {
+  border-top: 1px solid var(--line);
+  margin: var(--space-1) 0;
+}
+
+/* ---- Phone tier: the menu is a bottom sheet ------------------------------
+   Not a style choice. As a dropdown this control was unreachable below 700px:
+   `right: 0` put a 200px menu at x = -11 on a 390px screen, and the logs
+   panel's `overflow: hidden` clipped the rest, so a tap on a row hit the page
+   behind it. The sheet is portalled to the body, which leaves every clipping
+   ancestor behind, and it arrives under the thumb. Same shape and the same
+   z-index band as MoreSheet — one bottom-sheet idiom in this product. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.sheet {
+  position: fixed;
+  inset: auto 0 0 0;
+  max-height: calc(100dvh - var(--header-h));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-bottom: none;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--space-3) var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.grabber {
+  width: 36px;
+  height: 4px;
+  flex-shrink: 0;
+  align-self: center;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+}
+
+/* The trigger's own label, restated: the sheet covers the row it came from. */
+.sheetTitle {
+  padding: var(--space-2) var(--space-1) var(--space-1);
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+/* The sheet lives outside `.uc-app`, so global.css's phone touch floor never
+   reaches it — and a row here is a <label>, which that rule does not target
+   anyway. Stated locally, or the rows stay at their cursor size. */
+.sheet .row {
+  min-height: var(--tap-min);
+  align-items: center;
+}

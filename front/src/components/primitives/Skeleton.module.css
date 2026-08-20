@@ -1,0 +1,5 @@
+.bar {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}

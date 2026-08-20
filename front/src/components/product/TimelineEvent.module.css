@@ -1,0 +1,92 @@
+/* Row geometry verbatim from 05-dashboard.dc.html: 78px time column, 22px glyph,
+   8px vertical padding — the timeline must stay compact next to the log slice. */
+.row {
+  display: grid;
+  grid-template-columns: 78px 22px minmax(0, 1fr);
+  grid-template-areas: 'time glyph text';
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-2) 0;
+}
+
+.time {
+  grid-area: time;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 1px;
+  text-align: right;
+}
+
+/* Absolute time reads primary, relative reads faint — time always ships both (brief §5). */
+.timeAbs {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.ago {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.3;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.glyph {
+  grid-area: glyph;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.text {
+  grid-area: text;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-primary);
+  padding-top: 2px;
+  /* Entries are built server-side as the monitor's own target spliced into a
+     sentence ("mon.Target + ' stopped responding'"), so the text can carry one
+     unbroken URL — without this the grid track it sits in forces the whole
+     timeline row wider than a 375px card. */
+  overflow-wrap: anywhere;
+}
+
+/* Later, consequence-side events recede to body color (ref timelineData fg). */
+.textDim {
+  color: var(--text-body);
+}
+
+/* On a phone the 78px time rail would leave the event text ~90px wide. Stack the
+   timestamp on its own line instead — the glyph rail stays as the anchor.
+   Must come after the base rules: a media query adds no specificity, so an
+   earlier block would lose every property the base rules also declare. */
+@media (max-width: 560px) {
+  .row {
+    grid-template-columns: 22px minmax(0, 1fr);
+    grid-template-areas:
+      'glyph time'
+      'glyph text';
+    gap: 2px var(--space-2);
+  }
+
+  .time {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--space-2);
+    text-align: left;
+  }
+
+  .text {
+    padding-top: 0;
+  }
+}

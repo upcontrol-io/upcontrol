@@ -1,0 +1,31 @@
+# Source-build override: `docker compose -f docker-compose.yml -f
+# docker-compose.build.yml up -d --build` builds the images from this checkout
+# instead of pulling from ghcr.io. install.sh --from-source uses it.
+services:
+  migrate:
+    build:
+      context: ../back
+      args:
+        GOEXPERIMENT: jsonv2
+
+  ucapi:
+    build:
+      context: ../back
+      args:
+        GOEXPERIMENT: jsonv2
+
+  ucworker:
+    build:
+      context: ../back
+      args:
+        GOEXPERIMENT: jsonv2
+
+  ucprobe:
+    build:
+      context: ../back
+      args:
+        GOEXPERIMENT: jsonv2
+
+  front:
+    build:
+      context: ../front

@@ -1,0 +1,37 @@
+<!-- ClickHouse server overrides for a self-hosted Upcontrol box. Loaded as a
+  config.d drop-in. Beyond the network settings the dev compose also sets,
+  this caps memory for a 4GB machine: the server itself stays under 800M so
+  the container's 1200M limit is never the thing that kills a query. -->
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>true</console>
+    </logger>
+    <listen_host>0.0.0.0</listen_host>
+    <!-- Native protocol (9000) is what clickhouse-go/v2 uses; HTTP (8123) is
+         for clickhouse-client and migrations. -->
+    <tcp_port>9000</tcp_port>
+    <http_port>8123</http_port>
+    <!-- Single node: no interserver, no keeper. -->
+    <interserver_http_port remove="remove"/>
+
+    <!-- Low-memory tuning, sized for the README's 4GB resource floor.
+         800M hard server cap; caches and background pools shrunk to match.
+         A box with more RAM can raise these — they are a floor-friendly
+         default, not a recommendation. -->
+    <max_server_memory_usage>800000000</max_server_memory_usage>
+    <mark_cache_size>134217728</mark_cache_size>
+    <uncompressed_cache_size>67108864</uncompressed_cache_size>
+    <index_mark_cache_size>33554432</index_mark_cache_size>
+    <max_concurrent_queries>32</max_concurrent_queries>
+    <background_pool_size>4</background_pool_size>
+    <background_schedule_pool_size>4</background_schedule_pool_size>
+    <!-- These defaults assume the 16-thread pool; with 4 threads (x2
+         concurrency ratio = 8 slots) the server refuses to boot unless the
+         free-slot thresholds fit inside the pool. -->
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>3</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_mutation>4</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>4</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+</clickhouse>

@@ -1,0 +1,57 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  /* Containing block for the ::after tap overlay below — also the positioning
+     the `uc-tap-inline` contract in global.css asks the wearer to provide. */
+  position: relative;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-body);
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.sm {
+  width: var(--control-sm);
+  height: var(--control-sm);
+}
+
+.md {
+  width: var(--control-md);
+  height: var(--control-md);
+}
+
+/* An icon button has no label to widen it, so it used to square its whole box
+   off to 44×44 on the phone — which made it the biggest thing in every row it
+   sat in: the header's theme toggle towered over the 32px Dashboard pill, the
+   Explain card's close button over its own 12px label. Grow the hit area
+   instead of the box (the same answer as the switch and the log chevron): the
+   chip keeps its control size and a transparent 44×44 overlay is what the
+   finger hits. The `uc-tap-inline` class on the component escapes global.css's
+   `.uc-app` height floor; this rule carries the same overlay to icon buttons
+   outside `.uc-app` (docs toolbars), where that floor never applied. */
+@media (max-width: 700px) {
+  .button::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--tap-min));
+    height: max(100%, var(--tap-min));
+    transform: translate(-50%, -50%);
+  }
+}

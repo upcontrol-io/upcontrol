@@ -1,0 +1,79 @@
+/* Same rationale as the commercial app's bar: floats clear of the edges so
+   glass has content to show through, rather than sitting flush across the
+   bottom with page background under three of its four sides.
+   Only rendered ≤700px — AppShell's sidebar owns the rest. */
+.bar {
+  display: none;
+  position: fixed;
+  inset: auto var(--space-3) calc(var(--tabbar-gap) + env(safe-area-inset-bottom, 0px)) var(--space-3);
+  z-index: 25;
+  height: var(--tabbar-h);
+  border-radius: var(--radius-pill);
+}
+
+@media (max-width: 700px) {
+  .bar {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+/* The lozenge behind the current tab: one element that slides, five cells
+   wide here (PRIMARY_NAV's four plus More) — `--tab-index` is all the
+   component supplies. */
+.indicator {
+  position: absolute;
+  z-index: -1;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(20% - 6.4px);
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  border: 1px solid var(--glass-stroke);
+  transform: translateX(calc(var(--tab-index) * (100% + 6.4px)));
+  transition: transform var(--duration-page) var(--ease);
+}
+
+.indicatorHidden {
+  opacity: 0;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 44px;
+  border: none;
+  background: transparent;
+  color: var(--text-body);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  border-radius: var(--radius-pill);
+  transition:
+    color var(--duration-hover) var(--ease),
+    background-color var(--duration-hover) var(--ease);
+}
+
+.itemActive {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.item:active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.label {
+  line-height: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indicator {
+    transition: none;
+  }
+}

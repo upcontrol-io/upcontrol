@@ -1,0 +1,111 @@
+/* Only the layout is shared. Size and colour stay with the header that uses it —
+   each one is pixel-matched to its own .dc.html reference. */
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  transition: opacity var(--duration-hover) var(--ease);
+}
+
+/* Opacity, not colour: this same mark sits on the landing's hero gradient and
+   on both chrome themes, and only opacity reads correctly on all of them. */
+.wordmark:hover {
+  opacity: 0.72;
+}
+
+/* Optical alignment: the mark reads high against the word's cap-height,
+   because its corner brackets reach the full box. */
+.mark {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.word {
+  flex-shrink: 0;
+  /* Sits a size larger than the mark (Wordmark.tsx's WORD_SIZE_STEP) and
+     5px lower — baseline-adjacent to the mark's brackets rather than
+     centred through them (user decision, Aug 15, 2026). */
+  margin-top: 5px;
+}
+
+/* The kit's 3a Typewriter, hover-only. At rest
+   every letter and caret sits at its plain CSS default (letters visible,
+   carets opacity: 0) — nothing here is a loading state, so nothing may be
+   invisible until a hover starts it.
+
+   Timing: letter i is held hidden through [0, i x .117s) by the animation's
+   own delay, and steps(1, end) reveals it at that step's end (ucType's own
+   cadence). Its caret occupies exactly that same window (no
+   fill on either side, base opacity 0) — so the caret leads the letter it
+   is about to reveal, the way a real cursor does. After the last letter
+   (9 x .117 = 1.053s) the parked end-caret blinks for as long as the
+   pointer stays. Unhovering removes every animation, so the word is
+   instantly whole again — CSS animations only apply while :hover matches,
+   and with no animation there is nothing left to hold a letter hidden or a
+   caret lit. */
+
+.caret,
+.caretEnd {
+  fill: var(--ok);
+  opacity: 0;
+}
+
+/* Hover-gated behind (hover: hover): on touch there is no pointer to rest on
+   the wordmark, and a sticky tap-hover would type over a navigation. */
+@media (hover: hover) {
+  .wordmark:hover .letter {
+    animation: wm-type 0.117s steps(1, end) calc(var(--i) * 0.117s) both;
+  }
+
+  .wordmark:hover .caret {
+    animation: wm-caret 0.117s steps(1, end) calc(var(--i) * 0.117s);
+  }
+
+  .wordmark:hover .caretEnd {
+    animation: wm-blink 1.06s steps(1, end) 1.053s infinite;
+  }
+}
+
+@keyframes wm-type {
+  from {
+    visibility: hidden;
+  }
+  to {
+    visibility: visible;
+  }
+}
+
+/* steps(1, end) holds the from-frame for the whole window; with no fill the
+   caret returns to its base opacity: 0 on both sides of it. */
+@keyframes wm-caret {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes wm-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* The global reduced-motion kill zeroes durations but not delays, and
+   wm-type fills backwards — the staggered hold at `hidden` would strobe the
+   word letter by letter. Kill the whole family locally instead (the hero
+   entrance lesson). */
+@media (prefers-reduced-motion: reduce) {
+  .wordmark .letter,
+  .wordmark .caret,
+  .wordmark .caretEnd {
+    animation: none !important;
+  }
+}

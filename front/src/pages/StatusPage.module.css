@@ -1,0 +1,277 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: var(--measure-page);
+}
+
+
+.label {
+  font-size: var(--text-caption);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* The same grammar as Sources' connected-hook card: the one ok-tinted surface
+   on the screen, read together with the dot and the word "Live" — colour never
+   carries it alone (brief §1). The gear in the corner holds the settings the
+   card used to spend a whole section on (custom domain). */
+.urlCard {
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line));
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, var(--ok-bg), transparent 130%),
+    var(--bg-raised);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.urlHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.urlStatus {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The Alerts rows' 32px square, one glyph size up — it is the card's only
+   control besides Copy/Visit, and it sits alone in the corner. */
+.gearButton {
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.gearButton:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.urlRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The address is the card's deliverable, so it reads as a field — the shared
+   CopyField (components/code), its copy control inside the right edge. It
+   keeps a width floor so a long address scrolls inside itself on a phone
+   instead of pushing Visit off the row. */
+.urlField {
+  flex: 1;
+  min-width: min(220px, 100%);
+}
+
+.visitLink {
+  /* Matches CopyField's 36px track, or the row reads two different heights. */
+  height: 36px;
+  padding: 0 var(--space-3);
+  flex-shrink: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+.visitLink:hover {
+  background: var(--bg-hover);
+}
+
+/* A button-shaped anchor, so the phone floor in global.css (which targets real
+   buttons, to leave prose links alone) does not reach it. */
+@media (max-width: 700px) {
+  .visitLink {
+    min-height: var(--tap-min);
+  }
+}
+
+/* Only lives in the gear's modal now — full width of the panel. */
+.input {
+  height: 40px;
+  padding: 0 var(--space-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+}
+
+/* ---- The gear's modal (custom domain) ------------------------------------ */
+
+.domainField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.domainTitleRow {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.domainTitle {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Same mono pill as Alerts' paid rows — a plan fact, not a warning. */
+.paidChip {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.dnsSteps {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.stepList {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.stepList li::marker {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.stepList code {
+  font-family: var(--font-mono);
+  color: var(--text-body);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+.componentsSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.sublabel {
+  font-size: var(--text-caption);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 22px;
+  flex-shrink: 0;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-sunken);
+  display: inline-flex;
+  align-items: center;
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    border-color var(--duration-hover) var(--ease);
+}
+
+/* .toggle is `<button role="switch">` (StatusPage.tsx), which .uc-app's own
+   switch-overlay rule already grows to a 44px hit area — no local override
+   needed here. */
+
+/* Both switches are live controls — the dashed one opens the Upgrade modal
+   rather than being disabled (app-alignment.md), so it answers to the cursor
+   exactly like the other one. */
+.toggle:hover {
+  border-color: var(--text-muted);
+}
+
+/* Off because it is a trade, not because it is broken — so it stays legible and
+   clickable. Declared after `.toggle`: the shorthand `border` there sets
+   border-style too, so at equal specificity whichever comes last wins, and this
+   rule sitting above it meant the dashed edge never actually rendered. */
+.toggleLocked {
+  border-style: dashed;
+}
+
+.toggleOn {
+  background: var(--text-primary);
+}
+
+/* The knob travels rather than teleports: switching by `justify-content` cannot
+   be transitioned, so the state change happened between two frames with nothing
+   in between. 14px is the track's inner width (30px) less the knob (16px). */
+.toggleKnob {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--text-muted);
+  display: block;
+  transition: transform var(--duration-disclosure) var(--ease);
+}
+
+.toggleOn .toggleKnob {
+  transform: translateX(14px);
+}
+
+.toggleOn .toggleKnob {
+  background: var(--inverse);
+}
+
+.toggleLabel {
+  font-size: var(--text-sm);
+  color: var(--text-body);
+}
+
+.toggleLabelMuted {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}

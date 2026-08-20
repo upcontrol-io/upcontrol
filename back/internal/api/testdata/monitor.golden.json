@@ -1,0 +1,10 @@
+{
+  "id": "mon_2",
+  "type": "Website",
+  "name": "example.com/checkout",
+  "target": "https://example.com/checkout",
+  "status": "ok",
+  "interval": "5m",
+  "keyword": "Add to cart",
+  "expiry": { "ssl": "SSL Nov 2, in 84 days", "domain": "domain Mar 14, in 217 days" }
+}

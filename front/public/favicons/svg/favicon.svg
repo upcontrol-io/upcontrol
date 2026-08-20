@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+  <style>.ink{fill:#161826}@media (prefers-color-scheme:dark){.ink{fill:#FFFFFF}}</style>
+  <rect class="ink" x="1" y="1" width="5" height="2"></rect>
+  <rect class="ink" x="1" y="3" width="2" height="3"></rect>
+  <rect class="ink" x="10" y="1" width="5" height="2"></rect>
+  <rect class="ink" x="13" y="3" width="2" height="3"></rect>
+  <rect class="ink" x="1" y="13" width="5" height="2"></rect>
+  <rect class="ink" x="1" y="10" width="2" height="3"></rect>
+  <rect class="ink" x="10" y="13" width="5" height="2"></rect>
+  <rect class="ink" x="13" y="10" width="2" height="3"></rect>
+  <rect x="7" y="5" width="2" height="1" fill="#2FBF62"></rect>
+  <rect x="6" y="6" width="4" height="1" fill="#2FBF62"></rect>
+  <rect x="5" y="7" width="6" height="2" fill="#2FBF62"></rect>
+  <rect x="6" y="9" width="4" height="1" fill="#2FBF62"></rect>
+  <rect x="7" y="10" width="2" height="1" fill="#2FBF62"></rect>
+</svg>

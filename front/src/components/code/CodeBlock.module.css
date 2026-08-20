@@ -1,0 +1,97 @@
+.wrap {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+
+/* Inside CodeTabs the frame belongs to the container, so the block drops its
+   own. Declared after .wrap so it wins on equal specificity. */
+.embedded {
+  border: none;
+  border-radius: 0;
+}
+
+.copy {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  opacity: 0;
+  transition: opacity var(--duration-hover) var(--ease);
+}
+
+.wrap:hover .copy,
+.copy:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .copy {
+    opacity: 1;
+  }
+}
+
+.body {
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.gutter {
+  padding: 14px 0 14px 14px;
+  color: var(--text-faint);
+  text-align: right;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.pre {
+  flex: 1;
+  margin: 0;
+  padding: 14px;
+  color: var(--text-body);
+  white-space: pre;
+}
+
+.line {
+  padding: 0 var(--space-2);
+  margin: 0 calc(-1 * var(--space-2));
+}
+
+.line.highlighted {
+  background: var(--bg-hover);
+}
+
+/* Grammar-aware highlighting on one cool hue family (--accent and its two
+   neighbours), never the status colours. Three coloured roles, not six: the
+   distinctions that earn their keep are string-vs-code and comment-vs-code.
+
+   Comments stay achromatic on purpose — their job is to recede, and colouring
+   them works against that. The key and the endpoint stay the brightest thing
+   in the block, because they are what the reader came to copy. */
+.tokComment {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.tokString {
+  color: var(--code-string);
+}
+
+.tokKw {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.tokNum {
+  color: var(--code-number);
+}
+
+.tokKey {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-bottom: 1px dotted var(--line-strong);
+}

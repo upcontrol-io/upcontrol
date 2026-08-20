@@ -1,0 +1,302 @@
+# Self-host compose for Upcontrol (the OSS package). One box, prod mode,
+# pulled images by default — `docker compose -f docker-compose.yml -f
+# docker-compose.build.yml up -d --build` builds from source instead.
+#
+# ./install.sh writes .env and secrets/ and brings this up; the README's
+# quickstart is the manual equivalent. Memory limits are sized for a 4GB box
+# (2GB + active swap is the floor) — see README.md.
+services:
+  postgres:
+    image: postgres:18.6
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    volumes:
+      # PG 18 images: PGDATA is /var/lib/postgresql/18/docker, VOLUME is
+      # /var/lib/postgresql — a .../data mount would strand the cluster
+      # outside the volume.
+      - pgdata:/var/lib/postgresql
+    environment:
+      POSTGRES_DB: upcontrol
+      POSTGRES_USER: upcontrol
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U upcontrol"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    # Pinned to a versioned tag on purpose: `latest` crossing a ClickHouse
+    # major on a routine pull is how a self-host loses its weekend. Updates
+    # move this pin deliberately, one major at a time (README, "Updating").
+    image: clickhouse/clickhouse-server:24.8
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+    volumes:
+      - chdata:/var/lib/clickhouse
+      # Low-memory drop-in: caps the server at 800M so it fits the limit above.
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/upcontrol.xml:ro
+      # db/clickhouse is NOT mounted as docker-entrypoint-initdb.d here: the
+      # `migrate` service below already applies it with the native driver,
+      # scoped to CLICKHOUSE_DB. The image's own init mechanism runs mounted
+      # .sql files through clickhouse-client with no --database, which lands
+      # every table in `default` instead — a second, uncoordinated copy of
+      # the same schema (rehearsal #2 finding, 2026-08-20).
+      #
+      # Measured, not assumed (rehearsal #4): on a stand installed under the
+      # old mount, all 18 tables carry the SAME metadata_modification_time —
+      # the second the volume was first initialised — and every one holds 0
+      # rows. Running `ucapi migrate` against a real 24.8 with this file's own
+      # environment creates 18 tables in `upcontrol` and none in `default`.
+      # So the migrate path never made duplicates and this mount always did.
+      #
+      # Removing the mount fixes new installs only. A stand that predates it
+      # keeps its empty copies forever: they are inert, but `SHOW TABLES FROM
+      # default` will show them, and the cleanup is a DROP per table after
+      # confirming 0 rows in system.parts.
+    environment:
+      CLICKHOUSE_DB: upcontrol
+      CLICKHOUSE_USER: upcontrol
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
+    secrets:
+      - ch_password
+    ulimits:
+      nofile: 262144
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'clickhouse-client --user upcontrol --password "$$(cat /run/secrets/ch_password)" --query ''SELECT 1'' || exit 1',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Runs `ucapi migrate` once before ucapi starts: PG (goose) + CH (raw SQL).
+  migrate:
+    image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
+    command: ["ucapi", "migrate"]
+    volumes:
+      - ../db:/db:ro
+    environment:
+      # dev on purpose: prod-mode config validation demands the full serving
+      # env (node token and friends) that a one-shot migration never reads.
+      UC_ENVIRONMENT: dev
+      UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
+      UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+      UC_CLICKHOUSE_ADDR: clickhouse:9000
+      UC_CLICKHOUSE_DB: upcontrol
+      UC_CLICKHOUSE_USER: upcontrol
+      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
+      UC_PG_MIGRATIONS_DIR: /db/postgres
+      UC_CH_MIGRATIONS_DIR: /db/clickhouse
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    secrets:
+      - pg_password
+      - ch_password
+
+  ucapi:
+    image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
+    command: ["ucapi"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    volumes:
+      # The ingest WAL. A named volume, not container scratch: the spool is
+      # the durability promise behind POST /i's receipt, and it must survive
+      # container recreation. Mounted at /spool because the image prepares
+      # THAT directory with the right owner (uc:uc) — a first-use volume
+      # copies its ownership. Any other mount point is created root:root and
+      # the API boots dead with "permission denied" on the WAL.
+      - spool:/spool
+    environment:
+      # Prod mode: Secure cookies, no magic-link code in HTTP responses.
+      UC_ENVIRONMENT: prod
+      UC_HTTP_ADDR: ":8080"
+      UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
+      UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+      UC_CLICKHOUSE_ADDR: clickhouse:9000
+      UC_CLICKHOUSE_DB: upcontrol
+      UC_CLICKHOUSE_USER: upcontrol
+      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
+      UC_NODE_TOKEN_FILE: /run/secrets/node_token
+      UC_SECRET_KEY_HEX_FILE: /run/secrets/secret_key_hex
+      UC_SPOOL_DIR: /spool
+      # Self-host identity: new tenants land on the Self-hosted plan, and the
+      # anonymous project mint answers 404.
+      UC_SELF_HOSTED: "1"
+      # Auth. `none` (the package default) provisions one owner at boot and
+      # every request acts as them — no sign-in screen, no mailer needed.
+      # `magic-link` restores email sign-in; without SMTP the code lands in
+      # this container's log (README, "Signing in").
+      UC_AUTH: ${UC_AUTH:-none}
+      UC_OWNER_EMAIL: ${UC_OWNER_EMAIL:-owner@localhost}
+      # SMTP (optional): email alerts and magic-link sign-in mail. Empty host
+      # = no mailer. The relay password lives in secrets/smtp_password; an
+      # empty file means "no password".
+      UC_SMTP_HOST: ${UC_SMTP_HOST:-}
+      UC_SMTP_PORT: ${UC_SMTP_PORT:-587}
+      UC_SMTP_USERNAME: ${UC_SMTP_USERNAME:-}
+      UC_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      UC_SMTP_FROM: ${UC_SMTP_FROM:-}
+      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-Upcontrol}
+      # Telegram (optional): token from @BotFather in secrets/, handle here.
+      # Both empty = the app offers no Telegram destination at all.
+      UC_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+      UC_TELEGRAM_BOT_USERNAME: ${UC_TELEGRAM_BOT_USERNAME:-}
+      # AI provider behind Explain (optional, OpenAI-format). No key = Explain
+      # is off; the app's Settings screen also takes key, model and base URL
+      # at runtime — those win over the values here.
+      UC_AI_API_KEY_FILE: /run/secrets/ai_api_key
+      UC_AI_BASE_URL: ${UC_AI_BASE_URL:-https://api.openai.com/v1}
+      UC_AI_MODEL: ${UC_AI_MODEL:-gpt-4o-mini}
+      UC_AI_TIMEOUT: ${UC_AI_TIMEOUT:-60s}
+      UC_PUBLIC_ORIGIN: ${UC_PUBLIC_ORIGIN:-http://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    secrets:
+      - pg_password
+      - ch_password
+      - node_token
+      - secret_key_hex
+      - telegram_bot_token
+      - smtp_password
+      - ai_api_key
+
+  ucworker:
+    image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
+    command: ["ucworker"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    environment:
+      UC_ENVIRONMENT: prod
+      UC_HTTP_ADDR: ":8090"
+      UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
+      UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+      UC_CLICKHOUSE_ADDR: clickhouse:9000
+      UC_CLICKHOUSE_DB: upcontrol
+      UC_CLICKHOUSE_USER: upcontrol
+      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
+      UC_NODE_TOKEN_FILE: /run/secrets/node_token
+      UC_SECRET_KEY_HEX_FILE: /run/secrets/secret_key_hex
+      # Alert email rides SMTP directly on a self-host (no email agent here):
+      # same variables ucapi uses for magic links.
+      UC_SMTP_HOST: ${UC_SMTP_HOST:-}
+      UC_SMTP_PORT: ${UC_SMTP_PORT:-587}
+      UC_SMTP_USERNAME: ${UC_SMTP_USERNAME:-}
+      UC_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      UC_SMTP_FROM: ${UC_SMTP_FROM:-}
+      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-Upcontrol}
+      UC_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+      UC_TELEGRAM_BOT_USERNAME: ${UC_TELEGRAM_BOT_USERNAME:-}
+      # Detection job (error-rate incidents): on by default; 0 switches it off.
+      UC_DETECT_ENABLED: ${UC_DETECT_ENABLED:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    secrets:
+      - pg_password
+      - ch_password
+      - node_token
+      - secret_key_hex
+      - telegram_bot_token
+      - smtp_password
+
+  ucprobe:
+    image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
+    command: ["ucprobe"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      UC_ENVIRONMENT: prod
+      UC_HTTP_ADDR: ":8095"
+      UC_NODE_TOKEN_FILE: /run/secrets/node_token
+    # ucprobe deliberately has NO database credentials (invariant 1).
+    depends_on:
+      ucapi:
+        condition: service_started
+    secrets:
+      - node_token
+
+  front:
+    image: ghcr.io/upcontrol-io/upcontrol-front:${UC_VERSION:-latest}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # With a real domain Caddy provisions a public certificate; the
+      # `localhost` default keeps the internal CA (see Caddyfile).
+      UC_DOMAIN: ${UC_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on:
+      - ucapi
+      - front
+
+volumes:
+  pgdata: {}
+  chdata: {}
+  caddydata: {}
+  spool: {}
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+  ch_password:
+    file: ./secrets/ch_password
+  node_token:
+    file: ./secrets/node_token
+  secret_key_hex:
+    file: ./secrets/secret_key_hex
+  # Optional: an empty file means "no bot", which every service handles.
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
+  # Optional: an empty file means "no SMTP password" (e.g. an open relay).
+  smtp_password:
+    file: ./secrets/smtp_password
+  # Optional: an empty file means "no AI provider key" — Explain stays off
+  # until one arrives here or through the app's Settings screen.
+  ai_api_key:
+    file: ./secrets/ai_api_key

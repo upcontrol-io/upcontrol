@@ -1,0 +1,21 @@
+version: v2
+modules:
+  - path: rpc
+deps:
+  # google/protobuf/timestamp.proto lives in the well-known types module.
+  - buf.build/protocolbuffers/wellknowntypes
+lint:
+  use:
+    - STANDARD
+  # The plan places the proto at rpc/probe/v1/ (not rpc/upcontrol/probe/v1/);
+  # we deliberately do not mirror the package path into the directory tree.
+  ignore_only:
+    PACKAGE_DIRECTORY_MATCH:
+      - rpc/probe/v1/probe.proto
+breaking:
+  use:
+    - FILE
+  # A probe in a second region updates separately from ucapi and versions
+  # diverge for hours: field additions must be allowed across a PATCH, only
+  # removals/renumbers break. buf breaking enforces this in CI (plan §4.3).
+  ignore_unstable_packages: false

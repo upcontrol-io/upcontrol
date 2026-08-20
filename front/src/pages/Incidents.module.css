@@ -1,0 +1,73 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: var(--measure-page);
+}
+
+
+
+.list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap-min);
+  padding: var(--space-3) var(--space-4);
+  text-decoration: none;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+/* Status is never colour alone: the dot's shape differs (filled vs outline)
+   and the row's meta says ongoing/closed in words. */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dotDown {
+  background: var(--down);
+}
+
+.dotClosed {
+  background: transparent;
+  border: 1px solid var(--text-faint);
+}
+
+.rowTitle {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  margin-left: auto;
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.foot {
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}

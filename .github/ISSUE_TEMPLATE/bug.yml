@@ -1,0 +1,40 @@
+name: Bug report
+description: Something behaves wrong on a self-hosted instance.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Questions and setup help belong in
+        [Discussions](https://github.com/upcontrol-io/upcontrol/discussions);
+        security issues go to SECURITY.md, never here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `docker compose logs ucapi --tail 100` (or the relevant service).
+        Scrub keys and addresses before pasting.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag, or the commit for a source build.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Ubuntu 24.04, Docker 27, 4GB RAM
+    validations:
+      required: true

@@ -1,0 +1,2483 @@
+openapi: 3.0.3
+info:
+  title: upcontrol API
+  version: 1.0.0
+  description: |
+    The front-facing contract for upcontrol. Generated into a strict Go server
+    (oapi-codegen) and into TS types for `front/src/lib/api.d.ts`. Response
+    shapes are pinned to `front/src/lib/mockData.ts` — a contract test
+    (build-plan §2.7) checks each against golden JSON taken from the mocks.
+
+    Rules from the plan (§4.4):
+      - Version in the path (/v1), not a header.
+      - Errors are one shape: `{error: {code, message, upgrade?}}`. The optional
+      - Errors are one shape: `{error: {code, message, upgrade?}}`. The optional
+        text reason. No `disabled`, no `navigate('/plan')`.
+      - Pagination only on unbounded lists: incidents, logs. Monitors, channels
+        and recipients are plan-bounded and returned whole.
+      - `null` is never used for "no value": the field is omitted. "Zero is
+        silence" — an absent field does not render.
+      - All timestamps are RFC 3339 UTC.
+      - `POST /i` and `POST /hooks/{provider}` are `x-hand-written: true`: they
+        exist here for the /docs/api page but are implemented by hand (the
+        generator's validation is forbidden on /i by §4.5).
+
+servers:
+  - url: http://localhost:5173
+    description: local dev (front dev server proxies to ucapi)
+
+# ---------------------------------------------------------------------------
+# Common building blocks
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: uc_session
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Upcontrol-Key
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No session, or the key is not ours.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PaymentRequired:
+      description: |
+        A plan gate blocked the action. The `upgrade` object carries a text
+        reason; the client routes this to its upgrade prompt. No other
+        paid-wall path exists.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource does not exist or belongs to another tenant.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Idempotent replay with a different body, or state conflict.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate limited (always with Retry-After).
+      headers:
+        Retry-After:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: "plan_limit_exceeded" }
+            message: { type: string }
+            upgrade:
+              type: object
+              description: Present only on 402. Drives the client's upgrade prompt.
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  example: "Free allows 3 HTTP checks."
+                highlight:
+                  type: string
+                  description: Optional row to highlight on the pricing table.
+
+    # --- account ------------------------------------------------------------
+    Plan:
+      type: string
+      # Self-hosted is the OSS install's plan (UC_SELF_HOSTED=1): one generous
+      # entitlement row, never purchasable, never on the pricing page.
+      enum: [Free, Indie, Growth, Agency, Self-hosted]
+    Billing:
+      type: string
+      enum: [monthly, annual]
+    Account:
+      type: object
+      required: [id, name, email, initials, plan, billing]
+      properties:
+        id: { type: string, example: "usr_1" }
+        name: { type: string, example: "Anna Kovacs" }
+        email: { type: string, format: email }
+        initials: { type: string, example: "AK" }
+        plan: { $ref: "#/components/schemas/Plan" }
+        billing: { $ref: "#/components/schemas/Billing" }
+        # The member's role in this workspace (from tenant_member). Absent for
+        # accounts predating roles; `notify` gates every management write.
+        role: { type: string, enum: [notify, login] }
+    Project:
+      type: object
+      required: [id, domain, createdAt]
+      properties:
+        id: { type: string, example: "prj_1" }
+        domain: { type: string, example: "example.com" }
+        createdAt: { type: string, format: date-time }
+    MeResponse:
+      type: object
+      required: [account, project]
+      properties:
+        account: { $ref: "#/components/schemas/Account" }
+        project: { $ref: "#/components/schemas/Project" }
+
+    # --- dashboard / monitors ----------------------------------------------
+    HealthStatus:
+      type: string
+      enum: [ok, check, down, nodata]
+    Monitor:
+      type: object
+      required: [id, type, name, target, status, interval]
+      properties:
+        id: { type: string, example: "mon_1" }
+        type:
+          type: string
+          enum: [Website, Heartbeat]
+        name: { type: string }
+        target: { type: string, example: "https://example.com" }
+        status: { $ref: "#/components/schemas/HealthStatus" }
+        interval: { type: string, example: "5m" }
+        keyword:
+          type: string
+          description: Optional assertion on the response body ("Page must contain").
+        expiry:
+          type: object
+          description: >
+            SSL and domain expiry, pre-baked for display. Absent for heartbeat,
+            and absent entirely until one of the two has been read. Each half is
+            present only when there is a date for it — "domain —" says we have
+            not looked yet, not when the domain expires, and the row printed it
+            under every check whose certificate we already had.
+          properties:
+            ssl: { type: string, example: "SSL Nov 2, in 84 days" }
+            domain: { type: string, example: "domain Mar 14, in 217 days" }
+    MonitorCreate:
+      type: object
+      required: [type, name, target, interval]
+      properties:
+        type:
+          type: string
+          enum: [Website, Heartbeat]
+        name: { type: string }
+        target: { type: string }
+        keyword: { type: string }
+        interval:
+          type: string
+          enum: ["1m", "5m", "15m", "30m", "1h"]
+    MonitorPatch:
+      type: object
+      properties:
+        name: { type: string }
+        target: { type: string }
+        keyword: { type: string }
+        interval:
+          type: string
+          enum: ["1m", "5m", "15m", "30m", "1h"]
+        paused: { type: boolean }
+
+    # --- sources ------------------------------------------------------------
+    Source:
+      type: object
+      required: [id, mark, name, status, lastSignal, paused]
+      properties:
+        id: { type: string }
+        mark: { type: string, example: "URL" }
+        kind:
+          type: string
+          example: "deployhooks"
+          description: >-
+            The connect tile this row came from. Absent on the derived sources
+            (site checks, logs), which are facts about what arrived rather than
+            connections. There is one connection per kind, so a tile whose key
+            appears here is already connected and must not offer to add a second.
+        name: { type: string }
+        status: { $ref: "#/components/schemas/HealthStatus" }
+        lastSignal: { type: string, example: "up · 4s ago" }
+        paused: { type: boolean }
+        hookToken:
+          type: string
+          example: "8f2ac41d9b0e4d6bb30d0f02d9101723"
+          description: >-
+            The connection's inbound-hook credential (universal hooks): the
+            front renders {origin}/hooks/{hookToken}, and anything that can
+            POST JSON to that URL lands as this project's events. Present on
+            connection rows only — the derived sources have no inbound URL.
+        lastEvent:
+          type: string
+          example: "github_push"
+          description: >-
+            The normalized name of the last event received on this
+            connection's hook — the panel's receipt. Absent until the first
+            event lands.
+        duringIncident:
+          type: object
+          description: What this source reads like while the incident is open.
+          required: [status, label]
+          properties:
+            status: { $ref: "#/components/schemas/HealthStatus" }
+            label: { type: string }
+    ConnectableSource:
+      type: object
+      required: [key, name, setupTime]
+      properties:
+        key: { type: string, example: "installer" }
+        name: { type: string }
+        setupTime: { type: string, example: "1 command" }
+        installer:
+          type: boolean
+          description: Opens the installer card rather than connecting something.
+        docs:
+          {
+            type: string,
+            description: "A tile that leads nowhere is not an offer.",
+          }
+    SourcesResponse:
+      type: object
+      required: [sources, connectableSources]
+      properties:
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+        connectableSources:
+          type: array
+          items: { $ref: "#/components/schemas/ConnectableSource" }
+
+    # --- keys ---------------------------------------------------------------
+    ApiKey:
+      type: object
+      required: [id, prefix, createdAt]
+      description: |
+        The active API key. The full secret is never stored and never returned
+        by GET /v1/keys — only this identifier (the prefix). The full key is
+        returned exactly once by POST /v1/keys/rotate.
+      properties:
+        id: { type: string, example: "key_1" }
+        prefix: { type: string, example: "uc_live_8f2ac41d9b0e" }
+        createdAt: { type: string, format: date-time }
+    RotatedKey:
+      type: object
+      required: [id, prefix, createdAt, value]
+      description: |
+        POST /v1/keys/rotate's answer — the ONE place the full key ever
+        appears. `value` is shown exactly once and is not retrievable again;
+        `prefix` is what GET /v1/keys lists from here on.
+      properties:
+        id: { type: string, example: "key_2" }
+        prefix: { type: string, example: "uc_live_8f2ac41d9b0e" }
+        createdAt: { type: string, format: date-time }
+        value: { type: string, example: "uc_live_8f2ac41d9b0e6c31a57f92d4" }
+    KeyUsageEntry:
+      type: object
+      required: [time, endpoint, status]
+      properties:
+        time: { type: string, example: "15:12" }
+        endpoint: { type: string, example: "POST /v1/event" }
+        status: { type: integer, example: 202 }
+    KeysResponse:
+      type: object
+      required: [key, usage]
+      properties:
+        key: { $ref: "#/components/schemas/ApiKey" }
+        usage:
+          type: array
+          items: { $ref: "#/components/schemas/KeyUsageEntry" }
+
+    # --- channels / recipients ---------------------------------------------
+    ChannelKind:
+      type: string
+      enum: [telegram, email, discord, slack, webhook]
+    NotifySettings:
+      type: object
+      description: >
+        What this channel is notified about (docs/plans/channel-notify-settings.md).
+        The server stores keys sparsely (absent = default) but always RETURNS the
+        resolved object, so a screen renders state, not guesses. These pick which
+        classes of alert land on the destination — not a per-monitor matrix.
+      required:
+        [
+          websiteDown,
+          errorLogs,
+          repeatingErrorLogs,
+          repeatWindowMin,
+          resolveFollowUp,
+        ]
+      properties:
+        websiteDown:
+          type: boolean
+          description: The incident-open page. Default true — what already sends today.
+        errorLogs:
+          type: boolean
+          description: >
+            Every new error fingerprint in the log stream. One axis with
+            repeatingErrorLogs (none / every new / only repeating): setting one
+            true turns the other off, and a row carrying both resolves to the
+            stricter repeating-only reading. Default false.
+        repeatingErrorLogs:
+          type: boolean
+          description: >
+            Only errors repeating inside repeatWindowMin — the noise filter.
+            Mutually exclusive with errorLogs (see there). Default false.
+        repeatWindowMin:
+          type: integer
+          minimum: 1
+          maximum: 120
+          description: The repeat window in minutes. Default 5.
+        resolveFollowUp:
+          type: boolean
+          description: >
+            Paid plans only: one follow-up 15 minutes after the page — "recovered"
+            if the incident closed, "still down" if not. Setting it true on Free
+            answers 402 plan_limit_exceeded with upgrade.reason.
+    AlertChannel:
+      type: object
+      required: [id, kind, target]
+      properties:
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/ChannelKind" }
+        target: { type: string, description: "A handle, an address or a URL." }
+        note:
+          type: string
+          description: One extra line, only where the channel behaves differently.
+        notify: { $ref: "#/components/schemas/NotifySettings" }
+    ConnectableChannel:
+      type: object
+      required: [kind, name, field, hint]
+      properties:
+        kind: { $ref: "#/components/schemas/ChannelKind" }
+        name: { type: string }
+        field: { type: string, example: "Webhook URL" }
+        placeholder:
+          type: string
+          description: Absent for a channel that is not added by typing an address.
+        link:
+          type: string
+          description: >
+            Telegram only: the deep link that connects a chat. A chat id cannot
+            be typed into a form, so this channel is added by pressing Start —
+            the bot binds the chat when it hears from you. Absent when no bot is
+            configured, and then the Telegram tile is absent too.
+        hint: { type: string }
+    ChannelsResponse:
+      type: object
+      required: [channels, connectableChannels, undelivered]
+      properties:
+        channels:
+          type: array
+          items: { $ref: "#/components/schemas/AlertChannel" }
+        connectableChannels:
+          type: array
+          items: { $ref: "#/components/schemas/ConnectableChannel" }
+        undelivered:
+          type: integer
+          description: >
+            Alert deliveries that died in the queue over the last 24 h (class
+            `test` excluded — a failed test is already visible on its own row).
+            Zero means nothing is silently undelivered; the Alerts screen says
+            so out loud when it is not.
+    DeliveryState:
+      type: string
+      enum: [pending, sent, dead]
+      description: >
+        The delivery queue's own vocabulary. `pending` covers leased/retrying
+        too — to the reader the outcome is simply not known yet.
+    DeliveryStatusResponse:
+      type: object
+      required: [id, state]
+      properties:
+        id: { type: string }
+        state: { $ref: "#/components/schemas/DeliveryState" }
+        deadReason:
+          type: string
+          description: Present when state is `dead` — the reason the delivery died, shown to the owner.
+    RecipientRole:
+      type: string
+      enum: [notify, login]
+    Recipient:
+      type: object
+      required: [id, initials, name, role, status]
+      properties:
+        id: { type: string }
+        initials: { type: string }
+        name: { type: string }
+        # Absent for a Telegram-only member: their identity is the chat, not an
+        # address. The row then carries telegram: true instead.
+        email: { type: string, format: email }
+        telegram:
+          type: boolean
+          description: Present when this person is a verified Telegram recipient.
+        role: { $ref: "#/components/schemas/RecipientRole" }
+        status: { type: string, enum: [active, pending] }
+    TelegramInvite:
+      type: object
+      required: [id, role, status]
+      properties:
+        id: { type: string }
+        role: { $ref: "#/components/schemas/RecipientRole" }
+        status: { type: string, enum: [pending] }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    TelegramInviteCreated:
+      type: object
+      required: [id, role, link, expiresAt]
+      properties:
+        id: { type: string }
+        role: { $ref: "#/components/schemas/RecipientRole" }
+        link:
+          type: string
+          description: >
+            `t.me/<bot>?start=inv_<token>` — the one-time deep link. The token
+            appears exactly here and nowhere else: not in logs, not in telemetry,
+            not retrievable after this response.
+          example: "https://t.me/upcontrol_bot?start=inv_9f8e7d6c5b4a"
+        expiresAt: { type: string, format: date-time }
+    RecipientsResponse:
+      type: object
+      required: [recipients]
+      properties:
+        recipients:
+          type: array
+          items: { $ref: "#/components/schemas/Recipient" }
+        telegramInvites:
+          type: array
+          description: Pending one-time invite links (token not yet redeemed).
+          items: { $ref: "#/components/schemas/TelegramInvite" }
+        telegramEnabled:
+          type: boolean
+          description: Absent when no Telegram bot is configured — the screen then offers e-mail only.
+
+    # --- incidents ----------------------------------------------------------
+    TimelineEventKind:
+      type: string
+      enum: [deploy, error, payment, check, people]
+    TimelineEntry:
+      type: object
+      required: [time, ago, kind, text]
+      properties:
+        time: { type: string }
+        ago: { type: string }
+        kind: { $ref: "#/components/schemas/TimelineEventKind" }
+        text: { type: string }
+        dim:
+          type: boolean
+          description: Consequence-side events recede to body color.
+    IncidentResult:
+      type: object
+      required: [status, text]
+      properties:
+        status: { type: string, enum: [fixed, "still-down"] }
+        text: { type: string }
+    Incident:
+      type: object
+      required:
+        [
+          id,
+          title,
+          status,
+          since,
+          durationMinutes,
+          ongoing,
+          timeline,
+          logSlice,
+          affectedCount,
+        ]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { $ref: "#/components/schemas/HealthStatus" }
+        since: { type: string }
+        durationMinutes: { type: integer }
+        ongoing: { type: boolean }
+        timeline:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineEntry" }
+        logSlice:
+          type: array
+          items: { type: string }
+        affectedCount: { type: integer }
+        result:
+          # Absent while the incident is open; null is never used.
+          $ref: "#/components/schemas/IncidentResult"
+        errorFirstSeenDaysAgo:
+          type: integer
+          description: First-seen of the error series, in days. Absent = no wall.
+        historyDaysLeft:
+          type: integer
+          description: Days until this incident leaves Free's 30-day history.
+
+    # --- logs ---------------------------------------------------------------
+    LogLevel:
+      type: string
+      enum: [info, warn, error]
+    # The live window's line, as it comes out of the ring: an absolute timestamp
+    # and the seq that orders it. (The mock's LogLine carries offsetSec/time
+    # instead, because it is generated relative to a frozen "now".)
+    LogLine:
+      type: object
+      required: [seq, ts, level, message]
+      properties:
+        seq:
+          {
+            type: string,
+            description: "Ring sequence number, as a string (it exceeds 2^53).",
+          }
+        ts: { type: string, format: date-time }
+        level: { $ref: "#/components/schemas/LogLevel" }
+        service: { type: string }
+        message: { type: string }
+    VolumeBucket:
+      type: object
+      required: [minute, level, lines]
+      properties:
+        minute: { type: string, format: date-time }
+        level: { $ref: "#/components/schemas/LogLevel" }
+        lines: { type: integer }
+    LogsResponse:
+      type: object
+      required: [lines, volume]
+      properties:
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/LogLine" }
+        volume:
+          type: array
+          items: { $ref: "#/components/schemas/VolumeBucket" }
+        total:
+          type: integer
+          description: "Lines in the window before the stream limit. The panel prints 'showing N of total' rather than implying the window is what fits on screen."
+        services:
+          type: array
+          description: "The services present in the window, most lines first. Never narrowed by the `service` parameter — this is what the picker is built from, so filtering it would leave the reader holding their own choice and no way back."
+          items: { $ref: "#/components/schemas/LogService" }
+    LogService:
+      type: object
+      required: [name, lines]
+      properties:
+        name:
+          type: string
+          description: "The service label. Empty for lines that carried none."
+        lines: { type: integer }
+    ExplainResponse:
+      # Triage shape (ai-provider plan decision 5). `fix`/`command` nullables
+      # are that decision's deliberate exception to the "null is never used"
+      # rule above: the triage contract distinguishes "no fix defensible" and
+      # "no runnable command" as facts of the answer, not as absent fields.
+      type: object
+      required: [problem, cause, confidence, fix, investigate, cached, used, limit]
+      properties:
+        problem:
+          type: string
+          description: "What the lines show, as fact — the model's own read, never derived."
+        cause:
+          type: string
+          description: "Best guess at why — graded by `confidence`, never by hedged wording alone."
+        confidence: { type: string, enum: [high, medium, low] }
+        # severity/area are the incident scenario's additions (its prompt asks
+        # for them); the log-selection explain leaves both null. Optional on
+        # purpose: one answer shape serves both scenarios.
+        severity:
+          type: string
+          enum: [critical, major, minor]
+          nullable: true
+          description: "The incident's blast radius graded from the evidence alone. Set only by the incident scenario (POST /v1/incidents/{id}/explain); null from the log-selection explain."
+        area:
+          type: string
+          nullable: true
+          description: "Where the problem lives, in one or two words taken from the input (a service name, API, database). Set only by the incident scenario; null from the log-selection explain."
+        fix:
+          type: string
+          nullable: true
+          description: "A concrete suggested solution, or null when none is defensible from the lines."
+        investigate:
+          type: array
+          description: "1 to 5 ordered next steps."
+          items: { $ref: "#/components/schemas/ExplainStep" }
+        cached: { type: boolean }
+        used: { type: integer, description: "Monthly explain calls used." }
+        limit: { type: integer, description: "Monthly explain quota; 0 = unlimited." }
+        prompt:
+          type: string
+          description: >-
+            Dev observability: the exact user-message bytes sent to the model
+            (the system prompt is static and lives in the scenario registry).
+            Empty string on a cache hit — no call was made.
+    ExplainPreviewResponse:
+      type: object
+      required: [system, user, model, temperature, max_output_tokens]
+      properties:
+        system: { type: string, description: "The scenario's static system prompt (scenario.go)." }
+        user: { type: string, description: "The composed user message: project spec, server context, the log lines." }
+        model:
+          type: string
+          nullable: true
+          description: >-
+            The wired brain's identity — 'openai:<base>:<model>' — or null
+            when no API key is configured anywhere (env or the Settings-set
+            instance key). Null is the client's "Explain is off" fact: the
+            explain endpoints answer 503 ai_not_configured until a key
+            arrives.
+        temperature: { type: number }
+        max_output_tokens: { type: integer }
+    ExplainStep:
+      type: object
+      required: [step, command]
+      properties:
+        step: { type: string }
+        command:
+          type: string
+          nullable: true
+          description: "A runnable command for this step, or null when none exists."
+
+    # --- plan ---------------------------------------------------------------
+    UsedMax:
+      type: object
+      required: [used, max]
+      properties:
+        used: { type: integer }
+        max: { type: integer }
+    LogWindow:
+      # Depth, not consumption: the ring holds `lines` and nothing is ever "used
+      # up" (backend-from-new-plan.md decision 0.3), so there is no remainder to
+      # draw and the client renders this as a sentence.
+      #
+      # `wasApproxHours` used to sit here as a boolean, which is a shape its own
+      # name contradicts — it was meant to be the ring's earlier depth in hours,
+      # so the client could say "was ≈ 21 h in June". The server never computed
+      # it and answered a hardcoded `true`, and the one client expression that
+      # read it compared it as a number. Removed rather than typed correctly:
+      # nothing measures an earlier reading, and a field nobody can fill is a
+      # standing invitation to fill it with a guess.
+      type: object
+      required: [lines, approxHours]
+      properties:
+        lines: { type: integer }
+        approxHours:
+          type: number
+          description: "The plan's window in hours (plan_entitlement.window_hours) — a plan fact, not a measurement of this tenant's log rate."
+    BeyondWindow:
+      type: object
+      required: [errors, hours]
+      properties:
+        errors:
+          {
+            type: integer,
+            description: "0 = the field is omitted (zero is silence).",
+          }
+        hours: { type: integer }
+    PlanResponse:
+      type: object
+      required: [plan, httpChecks, logWindow, incidentHistoryDays]
+      properties:
+        plan: { $ref: "#/components/schemas/Plan" }
+        minIntervalSec:
+          type: integer
+          example: 300
+          description: >
+            The fastest a check may run on this plan — 300 on Free, 60 on every
+            paid one. The picker still offers the faster options and opens
+            the upgrade prompt when one is chosen (a paid wall is never a
+            disabled control); this number is only how it knows where the wall is.
+        httpChecks: { $ref: "#/components/schemas/UsedMax" }
+        aiExplains:
+          description: "Absent on plans with unlimited AI; never null."
+          allOf:
+            - $ref: "#/components/schemas/UsedMax"
+        logWindow: { $ref: "#/components/schemas/LogWindow" }
+        telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
+        beyondWindow:
+          description: "Absent when there are zero errors beyond the window."
+          allOf:
+            - $ref: "#/components/schemas/BeyondWindow"
+        incidentHistoryDays: { type: integer }
+
+    # --- status page / public ----------------------------------------------
+    PublicComponent:
+      type: object
+      required: [key, name, shown, uptime, bars]
+      properties:
+        key:
+          type: string
+          description: The monitor's public id — a component IS a check.
+        name: { type: string }
+        shown: { type: boolean }
+        uptime: { type: string, example: "99.99%" }
+        bars:
+          type: array
+          description: >
+            One status per bucket, oldest first. The page draws exactly this
+            many bars: the checks table keeps 7 days, so a longer strip would
+            be drawing days nobody observed. What a bucket covers is
+            `barSpanSec` — a day normally, the check's own interval while the
+            monitor is younger than a day.
+          items: { $ref: "#/components/schemas/HealthStatus" }
+        barSpanSec:
+          type: integer
+          example: 86400
+          description: >
+            Seconds one bar covers. 86400 once there is more than a day of
+            history; otherwise the monitor's check interval, so a page opened an
+            hour after signing up fills as the fleet works instead of showing six
+            empty days for a week. The page prints its own axis from this number
+            and must not assume days.
+    StatusPageResponse:
+      type: object
+      required:
+        [slug, title, components, showNetwork, showIncidents, showPoweredBy]
+      properties:
+        slug:
+          type: string
+          description: The public URL segment. Assigned by us, never taken from the body.
+        title: { type: string }
+        domain:
+          type: string
+          description: Custom domain, from the first paid plan. Empty until set.
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/PublicComponent" }
+        network:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkTile" }
+        showNetwork: { type: boolean }
+        showIncidents: { type: boolean }
+        showPoweredBy: { type: boolean }
+    NetworkTile:
+      description: >
+        One phase of the request, as a median over the last 24 h of successful
+        probes. Measured from the checks table (dns_ms / connect_ms / tls_ms /
+        total_ms), never sample data — a phase that never ran (no handshake on a
+        plaintext host) is absent rather than reported as zero.
+      type: object
+      required: [label, value, note, status]
+      properties:
+        label: { type: string, example: "tls" }
+        value: { type: string, example: "35 ms" }
+        note: { type: string, example: "handshake" }
+        status: { $ref: "#/components/schemas/WatchStatus" }
+    StatusPageUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        domain: { type: string }
+        shown:
+          type: object
+          additionalProperties: { type: boolean }
+          description: Component key → published. Absent keys default to published.
+        showNetwork: { type: boolean }
+        showIncidents: { type: boolean }
+        showPoweredBy: { type: boolean }
+    PublicIncident:
+      type: object
+      required: [title, since, ongoing]
+      properties:
+        title: { type: string }
+        since: { type: string }
+        status: { $ref: "#/components/schemas/HealthStatus" }
+        ongoing: { type: boolean }
+    PublicStatusResponse:
+      type: object
+      required: [components, incidents, updatedAt]
+      properties:
+        title: { type: string }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/PublicComponent" }
+        incidents:
+          type: array
+          items: { $ref: "#/components/schemas/PublicIncident" }
+        network:
+          description: Empty when the owner has the section switched off, or when nothing has been measured yet.
+          type: array
+          items: { $ref: "#/components/schemas/NetworkTile" }
+        showIncidents:
+          description: >
+            Whether the incident-history SECTION is published — a different
+            question from whether it is empty. Absent (or true) draws it; false
+            removes the heading too, which is what the owner's switch means.
+          type: boolean
+        updatedAt: { type: string, format: date-time }
+        poweredBy: { type: boolean }
+
+    # --- landing watch ------------------------------------------------------
+    WatchStatus:
+      type: string
+      enum: [ok, check, down, nodata]
+    WatchRow:
+      type: object
+      required: [id, name, meta, status]
+      properties:
+        id:
+          description: >
+            The row's absolute URL. It doubles as the identifier so WatchRequest
+            can send the ticked ids straight back as `targets` — there is no
+            lookup table in between, and the server re-validates every one.
+          type: string
+          example: "https://example.com/pricing"
+        name: { type: string }
+        meta: { type: string }
+        status: { $ref: "#/components/schemas/WatchStatus" }
+        recommended:
+          description: >
+            Whether this row is a sensible default to tick. Sent by the server so
+            the client keeps no opinion of its own about what a good default is.
+          type: boolean
+    WatchGroup:
+      type: object
+      required: [title, source, rows]
+      properties:
+        title: { type: string }
+        source: { type: string }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/WatchRow" }
+    NetworkCheck:
+      type: object
+      required: [label, value, note, status]
+      properties:
+        label: { type: string }
+        value: { type: string }
+        note: { type: string }
+        status: { $ref: "#/components/schemas/WatchStatus" }
+    ProbeStage:
+      description: >
+        One phase of the live request. Only measured phases are sent: an IP
+        literal has no dns stage, a plaintext host has no tls stage. Absence
+        means "never measured", never "took zero" (zero is silence, see the
+        header rules) — the client shows unknown rather than 0 ms.
+
+        The corollary is that a phase which WAS measured is sent even at
+        `ms: 0`. `wait` and `html` are derived from timings already held, so
+        they exist whenever a response arrived: a small single-page shell
+        genuinely finishes in the same millisecond as its first byte, and
+        dropping it would claim we never looked.
+      type: object
+      required: [label, ms]
+      properties:
+        label:
+          description: >
+            `wait` is the server thinking once the connection exists, NOT
+            time-to-first-byte: TTFB is measured from the start of the request
+            and already contains dns+tcp+tls, so emitting it here would make the
+            bars sum past the total. Derived as ttfb-(dns+tcp+tls); `html` is
+            the tail after the first byte. The stages sum to probe.total_ms.
+          type: string
+          enum: [dns, tcp, tls, wait, html]
+        ms: { type: integer, format: int32, minimum: 0 }
+    ProbeResult:
+      description: >
+        The raw outcome of the live request. Field names are snake_case here
+        because that is the shape already on the wire; the rest of /v1 is
+        camelCase.
+      type: object
+      required: [ok, status_code, total_ms, error_class]
+      properties:
+        ok: { type: boolean }
+        status_code: { type: integer, format: int32 }
+        total_ms: { type: integer, format: int32 }
+        error_class: { type: string, example: "none" }
+    CheckResponse:
+      type: object
+      required: [groups, networkChecks]
+      properties:
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/WatchGroup" }
+        networkChecks:
+          description: >
+            One row per fact the probe actually established. A fact it cannot
+            measure yet (error page, security headers, health URL) is omitted,
+            not faked — the landing renders those as unknown.
+          type: array
+          items: { $ref: "#/components/schemas/NetworkCheck" }
+        stages:
+          type: array
+          items: { $ref: "#/components/schemas/ProbeStage" }
+        probe:
+          $ref: "#/components/schemas/ProbeResult"
+        watchLimit:
+          description: >
+            How many of these rows a new account may actually watch, from the
+            free plan's http_checks entitlement. Sent because plan numbers live
+            in one place; a client that hardcoded it would be a second source
+            for a number Pricing already owns.
+          type: integer
+          format: int32
+          example: 3
+    WatchRequest:
+      type: object
+      required: [host, email]
+      properties:
+        host: { type: string, example: "example.com" }
+        email: { type: string, format: email }
+        targets:
+          description: >
+            The ticked rows' ids (absolute URLs) to watch alongside the host.
+            Untrusted: the server keeps only the ones on `host` and creates no
+            more than the plan allows. Absent means "just the host".
+          type: array
+          items: { type: string }
+          example: ["https://example.com/pricing"]
+    WatchResponse:
+      type: object
+      required: [statusUrl]
+      properties:
+        statusUrl: { type: string, example: "https://status.example.com" }
+        slug: { type: string, example: "prj-42" }
+        watching:
+          description: How many checks now exist, after the plan's ceiling applied.
+          type: integer
+          format: int32
+        login:
+          $ref: "#/components/schemas/WatchLogin"
+    WatchLogin:
+      description: >
+        How the visitor gets into the account this call just created. A
+        magic-link code is always issued; in prod it is delivered by email and
+        this object is empty, because returning a login token to an anonymous
+        caller who typed somebody else's address is account takeover. In dev the
+        code rides the response so the flow works without an inbox — the same
+        relaxation POST /v1/auth/magic-link makes.
+      type: object
+      properties:
+        dev_token:
+          description: Dev builds only. Redeem via POST /v1/auth/magic-link.
+          type: string
+
+    # --- overview (dashboard aggregate) ------------------------------------
+    Metric:
+      type: object
+      required: [label, value, note, spark]
+      properties:
+        label: { type: string }
+        value: { type: string }
+        note: { type: string }
+        spark:
+          type: array
+          items: { type: number }
+    LadderRung:
+      type: object
+      required: [key, title, done]
+      properties:
+        key: { type: string }
+        title: { type: string }
+        done: { type: boolean }
+    OverviewResponse:
+      type: object
+      required: [sources, monitors, metrics, ladder]
+      properties:
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+        monitors:
+          type: array
+          items: { $ref: "#/components/schemas/Monitor" }
+        incident:
+          description: Absent when nothing is open.
+          allOf:
+            - $ref: "#/components/schemas/Incident"
+        metrics:
+          type: array
+          items: { $ref: "#/components/schemas/Metric" }
+        uptime:
+          type: object
+          description: >
+            Availability over the last 24 h, measured. It is NOT one of `metrics`
+            — those are the product tiles (sign-ups, latency), and with them
+            hidden by the MVP trim the uptime card was the only one left, so the
+            grid stretched it into a full-width banner holding one bare number.
+            The Dashboard prints it in its calm line instead. Absent when no
+            check has run in the window: 100% for a probe that never ran is the
+            one number a monitoring product may not make up.
+          required: [value, note]
+          properties:
+            value: { type: string, example: "99.98%" }
+            note: { type: string, example: "last 24h" }
+        ladder:
+          type: array
+          items: { $ref: "#/components/schemas/LadderRung" }
+        health:
+          description: >
+            The 7-day health line: 42 four-hour segments ending now, computed
+            from the checks table (which keeps exactly 7 days). Absent when the
+            tenant has no checks at all — the line is a record of what was
+            observed, so with nothing observed there is no line to draw.
+          $ref: "#/components/schemas/HealthLine"
+
+    HealthLine:
+      type: object
+      required: [uptimeLabel, segments]
+      properties:
+        uptimeLabel: { type: string }
+        segments:
+          type: array
+          items: { $ref: "#/components/schemas/HealthStatus" }
+
+    # --- ingest receipt (POST /i) -----------------------------------------
+    IngestWarning:
+      type: object
+      required: [code, count]
+      properties:
+        code:
+          type: string
+          enum:
+            - ts_absent
+            - level_unknown
+            - key_in_body
+            - field_cap_exceeded
+            - scrubbed
+            - reserved_prefix
+            - cardinality_capped
+            - attr_key_capped
+            - late_arrival
+            - sampling_raised
+            - class_shed
+        count: { type: integer }
+    IngestReceipt:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: integer }
+        metrics:
+          type: integer
+          description: >-
+            Lines recognised as metric readings (metric+value) rather than log
+            lines, counted separately so a mixed batch stays legible.
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/IngestWarning" }
+        sampling:
+          type: object
+          description: Present when the server instructed the client to sample.
+          required: [level, keep]
+          properties:
+            level: { type: string, enum: [debug, info, warn, error] }
+            keep: { type: number, description: "0.0–1.0 fraction to keep." }
+
+    # --- project meta (installer spec) --------------------------------------
+    ProjectMeta:
+      # The installer-collected project spec (ai-provider plan decision 15b):
+      # ONLY these five fields. Never dependency lists, versions, file paths,
+      # git remotes, env values or code — `npx upcontrol init` prints the exact
+      # spec before sending and `--no-meta` skips the upload entirely.
+      type: object
+      properties:
+        name: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 200 }
+        framework: { type: string, maxLength: 200 }
+        runtime: { type: string, maxLength: 200 }
+        language: { type: string, maxLength: 200 }
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+  /health:
+    get:
+      tags: [platform]
+      summary: Liveness + readiness (combined).
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  checks: { type: object }
+        "503":
+          description: A dependency is down.
+
+  /v1/auth/telegram:
+    post:
+      tags: [auth]
+      summary: Sign in / up via Telegram Mini App initData.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [initData]
+              properties:
+                initData: { type: string }
+      responses:
+        "200":
+          description: Signed in; uc_session cookie set.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Account" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/google:
+    post:
+      tags: [auth]
+      summary: Sign in / up via Google OAuth code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: Signed in; uc_session cookie set.
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Account" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/magic-link:
+    post:
+      tags: [auth]
+      summary: Request or redeem a magic link.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                token:
+                  type: string
+                  description: Present when redeeming the link, absent when requesting.
+      responses:
+        "202":
+          description: Link sent (always, to avoid email enumeration).
+        "200":
+          description: Redeemed; uc_session cookie set.
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Account" } },
+            }
+
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session cookie.
+      responses:
+        "204": { description: Logged out. }
+
+  /v1/me:
+    get:
+      tags: [auth]
+      summary: The account + active project. Called by every app screen on load.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/MeResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/overview:
+    get:
+      tags: [dashboard]
+      summary: The Dashboard aggregate.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/OverviewResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/monitors:
+    get:
+      tags: [monitors]
+      summary: All monitors (plan-bounded, returned whole — no pagination).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Monitor" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [monitors]
+      summary: Create a monitor.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/MonitorCreate" } },
+          }
+      responses:
+        "201":
+          description: Created
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Monitor" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/checks/{id}:
+    patch:
+      tags: [monitors]
+      summary: |
+        Alias of PATCH /v1/monitors/{id} (audit §6): the docs say "check"
+        because a component IS a check — the endpoint they name has to exist.
+        Same handler, same semantics; agents and external clients may use
+        either path.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/MonitorPatch" } },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Monitor" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/monitors/{id}:
+    patch:
+      tags: [monitors]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/MonitorPatch" } },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Monitor" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [monitors]
+      summary: |
+        Delete a monitor. A check can be deleted (a typo in the third URL on Free
+        must not occupy a slot forever); deletion asks first in the UI.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/sources:
+    get:
+      tags: [sources]
+      summary: Connected sources + what is still connectable.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/SourcesResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/sources/{kind}/connect:
+    post:
+      tags: [sources]
+      summary: Connect a source (e.g. deployhooks, grafana).
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Source" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/sources/{id}:
+    patch:
+      tags: [sources]
+      summary: Pause or resume a connected source.
+      description: >
+        Pausing keeps the row and stops reading it. Only sources the tenant
+        connected can be paused: `src_checks` and `src_logs` are derived from
+        what has arrived and answer 400.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paused]
+              properties:
+                paused: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, paused]
+                properties:
+                  id: { type: string }
+                  paused: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [sources]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Disconnected. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/export:
+    get:
+      tags: [account]
+      summary: Everything this account owns, as one JSON document.
+      description: >
+        Checks, incidents (with their frozen log slices), channels and people.
+        Secrets are never included: an export is a copy of the record, not of
+        the credentials.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/project:
+    delete:
+      tags: [account]
+      summary: Delete the project and everything under it.
+      description: >
+        Irreversible. Every table hangs off tenant/project with ON DELETE
+        CASCADE, and the session is cleared with it.
+      responses:
+        "204": { description: Deleted. The session cookie is cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/keys:
+    get:
+      tags: [sources]
+      summary: The active API key + recent usage (Sources #key).
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/KeysResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/keys/rotate:
+    post:
+      tags: [sources]
+      summary: |
+        Rotate the active key. The old key stays valid for a 24h overlap window,
+        then 401s — a rotation that kills a deployed app fails at the customer.
+      responses:
+        "200":
+          description: Rotated; the new key is returned.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/RotatedKey" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/channels:
+    get:
+      tags: [alerts]
+      summary: Connected channels + what is still connectable.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/ChannelsResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [alerts]
+      summary: Add a channel (one field — a destination and nothing else).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, target]
+              properties:
+                kind: { $ref: "#/components/schemas/ChannelKind" }
+                target: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/AlertChannel" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/channels/{id}:
+    patch:
+      tags: [alerts]
+      summary: Change what the channel is notified about.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notify: { $ref: "#/components/schemas/NotifySettings" }
+      responses:
+        "200":
+          description: Updated; the resolved settings are returned.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/AlertChannel" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [alerts]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/telegram/invites:
+    post:
+      tags: [alerts]
+      summary: >
+        Mint a one-time Telegram invite link (role chosen at invite, default
+        notify). Counts active + pending recipients against the plan's
+        telegram_recipients axis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/RecipientRole" }
+      responses:
+        "201":
+          description: Created — the link carries the token exactly once.
+          content:
+            application/json:
+              { schema: { $ref: "#/components/schemas/TelegramInviteCreated" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/telegram/invites/{id}:
+    patch:
+      tags: [alerts]
+      summary: Change the role an unredeemed invite will grant.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/RecipientRole" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              { schema: { $ref: "#/components/schemas/TelegramInvite" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [alerts]
+      summary: Burn an unredeemed invite (it can no longer be redeemed).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Burned. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/channels/{id}/test:
+    post:
+      tags: [alerts]
+      summary: Send a test through the production queue (new-plan §6).
+      description: >
+        Queues a real delivery and answers with its queue id, so the caller can
+        poll GET /v1/deliveries/{id} for the OUTCOME. `sent` is a fact the
+        delivery pipeline reports, never something this endpoint promises on
+        the queue's behalf.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: Queued — the delivery's id is in the body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryStatusResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/deliveries/{id}:
+    get:
+      tags: [alerts]
+      summary: One delivery's outcome, from the queue itself.
+      description: >
+        The honest answer behind "Send test" (prod audit §3): a delivery is
+        `sent` only when the queue row says so, and `dead` carries the reason it
+        died. Anything else means the outcome is not known yet.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryStatusResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/recipients:
+    get:
+      tags: [alerts]
+      summary: People, Telegram members and pending invite links (the growth loop).
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/RecipientsResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [alerts]
+      summary: Invite a person (role chosen at invite, default notify).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/RecipientRole" }
+      responses:
+        "201":
+          description: Created (pending until accepted).
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Recipient" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/recipients/{id}:
+    patch:
+      tags: [alerts]
+      summary: Change a recipient's role (the owner row carries no role control).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/RecipientRole" }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Recipient" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [alerts]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/incidents:
+    get:
+      tags: [incidents]
+      summary: Incident history (newest first). Returns the latest 20.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Incident" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/incidents/{id}:
+    get:
+      tags: [incidents]
+      summary: One incident with its timeline, log slice and result.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Incident" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/incidents/{id}/explain:
+    post:
+      tags: [incidents]
+      summary: >-
+        Explain one incident: the server assembles the evidence (incident
+        facts, timeline, frozen log slice), so the request carries no body.
+        402 routes to the upgrade prompt when over quota.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK — severity/area are set (non-null) only by this scenario.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/ExplainResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: >-
+            ai_not_configured — no API key anywhere (env or the Settings-set
+            instance key). Explain is off, not degraded; the message names
+            where the key goes.
+
+  /v1/instance/ai:
+    put:
+      tags: [instance]
+      summary: >-
+        Self-host only (the hosted cloud answers 404): store the instance's
+        AI settings — API key, model, base URL — each optional, so changing
+        the model never demands re-pasting the key. Values are sealed
+        (AES-256-GCM under UC_SECRET_KEY_HEX) before they land in Postgres
+        and take effect on the next Explain — no restart. Nothing here is
+        ever returned by any endpoint; presence is read through the explain
+        preview's `model`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key:
+                  type: string
+                  description: >-
+                    An OpenAI-format API key (like sk-...). Any
+                    OpenAI-compatible provider's key works.
+                model:
+                  type: string
+                  description: The model name as the provider spells it, e.g. gpt-4o-mini.
+                baseUrl:
+                  type: string
+                  description: >-
+                    The chat-completions endpoint's base, e.g.
+                    https://api.openai.com/v1 — any OpenAI-compatible proxy
+                    or gateway. Empty keeps the env-configured one.
+      responses:
+        "204": { description: Stored. }
+        "400": { description: invalid_key / invalid_model / invalid_base_url / nothing_to_store — the message names the fix. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role — changing the instance's brain is a login-role act. }
+        "404": { description: Not a self-host — this door does not exist on the hosted cloud. }
+        "503": { description: secret_key_missing — no UC_SECRET_KEY_HEX to seal with. }
+    delete:
+      tags: [instance]
+      summary: >-
+        Self-host only: remove every Settings-set AI value. Env config, if
+        any, takes over; otherwise Explain turns off.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { description: Not a self-host. }
+
+  /v1/instance/telegram-bot:
+    put:
+      tags: [instance]
+      summary: >-
+        Self-host only (the hosted cloud answers 404): store the Telegram
+        bot's token and username. Sealed like the AI key. Alerts pick the
+        token up on the next send and the Channels/recipients surfaces
+        appear immediately; the bot's /start linking and Mini App sign-in
+        bind at boot, so they follow on the next restart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, username]
+              properties:
+                token:
+                  type: string
+                  description: The token exactly as @BotFather printed it.
+                username:
+                  type: string
+                  description: The bot's username, with or without the leading @.
+      responses:
+        "204": { description: Stored. }
+        "400": { description: invalid_token / invalid_username — shape refusals with the fix in the message. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { description: Not a self-host. }
+        "503": { description: secret_key_missing — no UC_SECRET_KEY_HEX to seal with. }
+    delete:
+      tags: [instance]
+      summary: >-
+        Self-host only: remove the Settings-set bot token and username. Env
+        config, if any, takes over; otherwise the Telegram surface folds
+        away.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { description: Not a self-host. }
+
+  /v1/instance/smtp:
+    put:
+      tags: [instance]
+      summary: >-
+        Self-host only (the hosted cloud answers 404): store the SMTP relay
+        for sign-in mail and email alerts. Each field optional — send only
+        what changes — sealed like the AI key, resolved per message, so a
+        saved relay works with no restart. Values are never returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host:
+                  type: string
+                  description: Relay hostname alone (no scheme, no port), like smtp.eu.mailgun.org.
+                port:
+                  type: string
+                  description: "Relay port as a string; usually 587 (STARTTLS) or 465. Default: 587."
+                username:
+                  type: string
+                  description: Relay login, often the sending address itself.
+                password:
+                  type: string
+                  description: Relay password or app password.
+                from:
+                  type: string
+                  description: The From address; most relays insist it is a verified one.
+      responses:
+        "204": { description: Stored. }
+        "400": { description: invalid_host / invalid_port / invalid_username / invalid_password / invalid_from / nothing_to_store — refusals with the fix in the message. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { description: Not a self-host. }
+        "503": { description: secret_key_missing — no UC_SECRET_KEY_HEX to seal with. }
+    delete:
+      tags: [instance]
+      summary: >-
+        Self-host only: remove every Settings-set SMTP value. Env config
+        (UC_SMTP_*), if any, takes over; otherwise email is off and sign-in
+        codes land in the ucapi log again.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { description: Not a self-host. }
+
+  /v1/logs:
+    get:
+      tags: [logs]
+      summary: A bounded window of logs, not an explorer (product-plan).
+      parameters:
+        - in: query
+          name: window
+          description: >
+            A trailing window for `total` and `services`, kept from before the
+            timeline existed. An explicit `from`/`to` always wins: the two are
+            the same question asked twice, and honouring both would count a
+            slice of a slice.
+          schema:
+            { type: string, enum: ["5m", "15m", "30m", "1h", "2h", "24h"] }
+        - in: query
+          name: level
+          description: >
+            Repeatable. Any combination of the panel's three buckets; `info`
+            covers every line that is neither an error nor a warning (debug
+            included). Absent means every level.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: ["error", "warn", "info"] }
+        - in: query
+          name: from
+          description: >
+            Start of the range the reader picked on the timeline, inclusive.
+            Narrows `lines` and `total` only — `volume` and `services` are
+            deliberately NOT narrowed, because the strip is the map the range is
+            picked on and a map that shrinks to the territory already chosen
+            cannot get the reader back. Unparseable values are ignored rather
+            than defaulted: a bad timestamp must not invent a narrower window
+            than was asked for.
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          description: >
+            End of the range, exclusive. Independent of `from` — either bound
+            may be sent alone. A range that does not move forwards is dropped
+            whole; it is a bug on the wire, not a request for zero lines.
+          schema: { type: string, format: date-time }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: service
+          description: >
+            Repeatable. The window narrows to lines from any of the named
+            services; an empty value means the unlabelled service. Absent means
+            every service.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/LogsResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/logs/explain/preview:
+    post:
+      tags: [logs]
+      summary: >-
+        The exact prompt a Explain call with these lines would send — composed,
+        not executed. No model call, no quota, no throttle slot. An empty
+        `lines` is valid: Settings calls it that way solely to read `model`,
+        the wired brain's identity (or null, Explain's off-fact).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lines]
+              properties:
+                lines:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/ExplainPreviewResponse" } },
+            }
+        "400":
+          description: Malformed body, or over the input caps (`input_too_large`) — not an empty selection, which is valid here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/logs/explain:
+    post:
+      tags: [logs]
+      summary: Explain a log selection. 402 routes to the upgrade prompt when over quota.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lines]
+              properties:
+                lines:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/ExplainResponse" } },
+            }
+        "400":
+          description: >-
+            Empty selection (`missing_lines`), or over the input caps — more
+            than 100 lines, a line past 2000 bytes, or 32 KiB total
+            (`input_too_large`, message states the caps).
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: >-
+            ai_not_configured — no API key anywhere (env or the Settings-set
+            instance key). Explain is off, not degraded; the message names
+            where the key goes.
+
+  /v1/plan:
+    get:
+      tags: [plan]
+      summary: Plan numbers (single-sourced with Pricing.tsx — no invented gates).
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/PlanResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status-page:
+    get:
+      tags: [statuspage]
+      summary: What this tenant publishes, with measured uptime per component.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/StatusPageResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [statuspage]
+      summary: Save what the page publishes.
+      description: >
+        Only the owner's decisions are stored — which components are published,
+        the title, the domain and the section switches. The components are the
+        tenant's checks and their uptime is measured, so neither is accepted here.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/StatusPageUpdate" } },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/StatusPageResponse" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- public (no auth) ----------------------------------------------------
+  /public/status/{slug}:
+    get:
+      tags: [public]
+      security: []
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                {
+                  schema: { $ref: "#/components/schemas/PublicStatusResponse" },
+                },
+            }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /public/check:
+    post:
+      tags: [public]
+      security: []
+      summary: Probe a host (rate-limited per IP, cached per domain).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string, example: "example.com" }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/CheckResponse" } },
+            }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /public/watch:
+    post:
+      tags: [public]
+      security: []
+      summary: Start watching a host; sends a confirmation email (7-day pending TTL).
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/WatchRequest" } },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/WatchResponse" } },
+            }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /v1/projects/anonymous:
+    post:
+      tags: [install]
+      security: []
+      x-hand-written: true
+      summary: |
+        Mint an anonymous project (cli/SPEC.md §7.1): tenant + project + API key
+        with no person attached, so `npx upcontrol init` works before signup.
+        The body carries CLI/agent versions only — no email, no hostname, no
+        paths. The key rides the response exactly once; the claim token is the
+        one-time proof that later attaches a signed-in person to the tenant.
+        Claiming never changes the key. Per-IP throttled.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cli_version: { type: string }
+                agent_version: { type: string }
+                platform: { type: string }
+                arch: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projectId, key, claimToken, claimUrl]
+                properties:
+                  projectId: { type: string }
+                  key: { type: string, description: Shown exactly once. }
+                  claimToken: { type: string }
+                  claimUrl: { type: string }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /v1/claim:
+    post:
+      tags: [install]
+      x-hand-written: true
+      summary: |
+        Attach the signed-in person to the anonymous tenant the claim token
+        names (cli/SPEC.md §7.3). One-time: the token hash is cleared on
+        success. Idempotent for an already-claimed member only via membership's
+        ON CONFLICT; an unknown or spent token is 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claimToken]
+              properties:
+                claimToken: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [claimed]
+                properties:
+                  claimed: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/install/status:
+    get:
+      tags: [install]
+      security:
+        - apiKey: []
+      x-hand-written: true
+      summary: |
+        What `npx upcontrol verify` polls (cli/SPEC.md §8): key-authenticated
+        (X-Upcontrol-Key or Bearer), answers whether install_verified has
+        arrived inside the visible window, how many lines the window holds, and
+        which message names arrived in the last 15 minutes — enough to tell
+        "key never worked" from "points placed in code that has not run" from
+        "names drifted off the dictionary".
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verified, lines, recent]
+                properties:
+                  verified: { type: boolean }
+                  verifiedAt: { type: string, format: date-time }
+                  lines: { type: integer }
+                  recent:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, count, lastAt]
+                      properties:
+                        name: { type: string }
+                        count: { type: integer }
+                        lastAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/install/token:
+    post:
+      tags: [install]
+      x-hand-written: true
+      summary: |
+        Mint the one-time install token the dashboard's install card embeds in
+        `npx upcontrol init --token ...` (front-distribution-alignment.md §1).
+        Session-authed; bound to the session's project; TTL 10 minutes;
+        single-use. The dashboard never shows a bare `npx upcontrol` — signed
+        out of the terminal it would mint an anonymous project and route this
+        account's logs past it.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, command, expiresAt]
+                properties:
+                  token: { type: string }
+                  command: { type: string }
+                  expiresAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/install/redeem:
+    post:
+      tags: [install]
+      security: []
+      x-hand-written: true
+      summary: |
+        Burn an install token and issue an ADDITIONAL api_key for its project,
+        returning the secret exactly once (the CLI writes it into .env and
+        never prints it). Not a rotation - nothing deployed breaks. A spent,
+        expired or unknown token all answer the same 404. Per-IP throttled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key: { type: string, description: Shown exactly once. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /v1/project/meta:
+    put:
+      tags: [install]
+      security:
+        - apiKey: []
+      x-hand-written: true
+      summary: |
+        The installer's project-spec upload (ai-provider plan decision 15b):
+        `npx upcontrol init` PUTs the five optionally-filled fields it printed
+        to stdout, key-authenticated exactly like POST /i. Stored after the
+        ingest scrubber runs over every value and every newline is stripped
+        (the spec renders inside prompt fences); read only as Explain context.
+        Unknown keys are dropped, null fields are rejected as the type error
+        they are, and a value over 200 characters (counted as sent, before
+        redaction expands it) is rejected — never silently truncated. PUT
+        REPLACES the whole spec: a field left out of the body is dropped from
+        storage, so send every field the spec still carries, which is what
+        `init` does on each run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectMeta" }
+      responses:
+        "204": { description: Stored }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- hand-written (exist here for /docs/api; implemented by hand) --------
+  /i:
+    post:
+      tags: [ingest]
+      summary: |
+        The schemaless ingest endpoint. Body form is decided by a sniffer, not a
+        header. Always 2xx on sane input with a structured receipt; 401/429/503
+        only. Implemented by hand — the generator's validation is forbidden.
+      security:
+        - apiKey: []
+      x-hand-written: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { type: object, additionalProperties: true } }
+          application/x-ndjson: { schema: { type: string } }
+          text/plain: { schema: { type: string } }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/IngestReceipt" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: Spool full (always with Retry-After).
+          headers:
+            Retry-After: { schema: { type: string } }
+
+  /v1/event:
+    post:
+      tags: [ingest]
+      summary: |
+        The ingest endpoint the docs promise (audit §6): an alias over the same
+        pipeline as POST /i — spool, WAL, batcher, ClickHouse — never a second
+        one. The key is accepted "anywhere", literally: Authorization: Bearer,
+        ?key=, or a top-level `key` field in the body, whichever is found first.
+        The body is any shape the /i sniffer knows (NDJSON, JSON array, JSON
+        object, plain text, syslog, OTLP, Sentry, Alertmanager, Loki) and answers
+        with the same receipt. Implemented by hand, exactly like /i.
+      security:
+        - apiKey: []
+      x-hand-written: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { type: object, additionalProperties: true } }
+          application/x-ndjson: { schema: { type: string } }
+          text/plain: { schema: { type: string } }
+      parameters:
+        - in: query
+          name: key
+          required: false
+          schema: { type: string }
+          description: The project key, when it travels in the query string.
+      responses:
+        "200":
+          description: Accepted
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/IngestReceipt" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503":
+          description: Spool full (always with Retry-After).
+          headers:
+            Retry-After: { schema: { type: string } }
+
+  /hooks/{provider}:
+    post:
+      tags: [ingest]
+      summary: Inbound webhook from a provider (stripe, github, vercel, ...). Hand-written.
+      security: []
+      x-hand-written: true
+      parameters:
+        - in: path
+          name: provider
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { type: object, additionalProperties: true } }
+      responses:
+        "200": { description: Accepted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }

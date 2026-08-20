@@ -1,0 +1,257 @@
+/* The window's volume, as a viewport the reader drives. Sits directly above the
+   stream it describes, inside the logs panel's own frame. */
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+/* One line: what is under the cursor (or in view), then the controls. */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 24px;
+}
+
+/* Monospace so the numbers stop shuffling sideways as the cursor moves across
+   the strip — a readout that jitters is unreadable at hover speed. */
+.readout,
+.counts,
+.quiet,
+.tick,
+.edge {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.readout {
+  color: var(--text-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.counts {
+  display: flex;
+  gap: var(--space-3);
+  overflow: hidden;
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+
+/* Errors keep --down at full strength while the bulk is damped — the token
+   file's own rule for a stacked histogram: at equal saturation the mass floods
+   the strip and the red stops meaning anything. */
+.dotError,
+.barError {
+  background: var(--down);
+  fill: var(--down);
+}
+
+.dotWarn,
+.barWarn {
+  background: var(--check-fill);
+  fill: var(--check-fill);
+}
+
+.dotInfo,
+.barInfo {
+  background: var(--ok-fill);
+  fill: var(--ok-fill);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.step,
+.chip {
+  height: 24px;
+  min-width: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  transition:
+    color var(--duration-hover) var(--ease),
+    background var(--duration-hover) var(--ease);
+}
+
+@media (hover: hover) {
+  .step:hover:not(:disabled),
+  .chip:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+}
+
+.step:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* The zoom pair and the presets do different jobs — relative and absolute —
+   so they read as two groups rather than one run of six buttons. */
+.step + .chip {
+  margin-left: var(--space-3);
+}
+
+/* Keeps the slot, drops the control — see the Now button's own note. */
+.reserved {
+  visibility: hidden;
+}
+
+.chip[aria-pressed='true'] {
+  background: var(--bg-hover);
+  border-color: var(--line);
+  color: var(--text-primary);
+}
+
+.body {
+  position: relative;
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  user-select: none;
+  /* A horizontal drag belongs to the chart; a vertical one is the page. */
+  touch-action: pan-y;
+}
+
+.dragging {
+  cursor: grabbing;
+}
+
+/* The product's single focus ring (global.css) fires on `:focus-visible`, and
+   Chrome grants that to a tabindex'd div on a plain mouse click — so dragging
+   the strip drew a 2px ring around the whole chart. Suppressed here and put
+   back on `.ringed`, which only Tab and the arrow keys set: the keyboard
+   indicator is unchanged, the false positive is gone. */
+.body:focus-visible {
+  outline: none;
+}
+
+.ringed:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.svg {
+  display: block;
+}
+
+.hoverBand {
+  fill: var(--timeline-hover);
+}
+
+.crosshair {
+  stroke: var(--timeline-crosshair);
+  stroke-width: 1;
+}
+
+.brush {
+  fill: var(--timeline-select);
+  stroke: var(--timeline-select-edge);
+  stroke-width: 1;
+}
+
+.baseline {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+/* Absolute rather than a flex row: the labels sit at their own instants, not at
+   even intervals, and a tick has to stay under the column it names. */
+.axis {
+  position: relative;
+  height: 14px;
+  overflow: hidden;
+}
+
+/* The horizontal anchor is set inline: it depends on how close the label is to
+   an edge, which only the component knows. */
+.tick {
+  position: absolute;
+  top: 0;
+  color: var(--text-faint);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.hint {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}
+
+/* The gestures the hint names do not exist on a touch screen, and neither does
+   the hover readout that would teach them. */
+@media (hover: none) {
+  .hint {
+    display: none;
+  }
+}
+
+/* The ring is finite. Panning left stops here, and the reader is told why
+   rather than being left to conclude the data simply ran out. */
+.edge {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
+@media (max-width: 700px) {
+  /* No height/width rules for the chips here on purpose: global.css's
+     `.uc-app` floor already raises every button's min-height to --tap-min
+     below 700, and it deliberately leaves width alone — the same decision it
+     documents for the segmented pills. A local 44px min-width turned the zoom
+     pair into squares and pushed the whole row into three ragged lines. */
+  .controls {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+
+  /* The readout and the counts share the first line and wrap as text; base
+     `overflow: hidden` exists to keep the desktop head on one line and would
+     clip the last count here without an ellipsis to say so. */
+  .counts {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+    overflow: visible;
+  }
+
+  /* The chips take their own full line. Left-aligned: `margin-left: auto`
+     right-aligns a wrapped row, which reads as a layout accident on a phone.
+     Scrollable past the edge rather than wrapped into a second ragged row;
+     the vertical padding is headroom for the focus ring, which the scroll
+     container would otherwise clip. */
+  .actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding: var(--space-1) 0;
+  }
+}

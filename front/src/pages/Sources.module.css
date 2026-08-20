@@ -1,0 +1,714 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: var(--measure-page);
+}
+
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-4);
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  padding: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* Every card holds the height of the tallest variant — the one wearing the
+     stacked Pause/Disconnect column (26 + 6 + 26 content + 12px paddings +
+     1px borders). Without the floor, a derived card (Site checks) was shorter
+     than a connected one, and the row jumped when the buttons appeared. */
+  min-height: 84px;
+}
+
+/* The bare pictogram that replaced the boxed three-letter chip ("URL", "DEP"):
+   an abbreviation had to be decoded, the icon does not (Aug 14, 2026). */
+.mark {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.cardText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+}
+
+/* Stacked at the right edge, not inline with the name: side by side the two
+   controls ate the text column, and "Deploy hooks" wrapped around them. The
+   column has a fixed track so both buttons are the same width and their right
+   edges line up down the card. */
+.cardActions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.pauseButton {
+  height: 26px;
+  padding: 0 9px;
+  flex-shrink: 0;
+  text-align: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-body);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+.pauseButton:hover {
+  background: var(--bg-hover);
+}
+
+/* The confirm that replaces the two buttons while it is asked — the same light
+   confirm the recipient list and the check list use, never a native confirm()
+   and never ConfirmPanel (that one demands a PIN, for actions that reach into
+   the customer's own infrastructure). No question line: Remove/Keep in place of
+   Pause/Disconnect is the question. */
+.confirmRow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.confirmYes {
+  height: 26px;
+  padding: 0 9px;
+  flex-shrink: 0;
+  text-align: center;
+  border: 1px solid var(--down);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--down);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+.confirmYes:hover {
+  background: var(--down-bg);
+}
+
+/* This app never wires up global.css's `.uc-app` touch-floor rule (that class
+   never lands on AppShell's root here), so these two would ship their 26px
+   desktop height straight to a phone — the exact bug that rule was written to
+   fix elsewhere. Height only, never width (brief item 2): the column stack
+   just grows taller, nothing reflows sideways. */
+@media (max-width: 700px) {
+  .pauseButton,
+  .confirmYes {
+    min-height: var(--tap-min);
+  }
+}
+
+.connectSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.sectionLabel {
+  font-size: var(--text-caption);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.connectGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+.connectTile {
+  text-align: left;
+  text-decoration: none;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+.connectTile:hover {
+  background: var(--bg-hover);
+}
+
+/* Already connected: the dashed border is the "nothing here yet" cue, so a tile
+   that has a row above it takes the solid one. It is not colour alone — the meta
+   line under the name says so in words. */
+.connectTile[aria-pressed="true"] {
+  border-style: solid;
+  border-color: var(--line);
+}
+
+.connectName {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.connectTime {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.promptBox {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  overflow: hidden;
+  /* `#install` is a printed destination too (the logs panel's empty state sends
+     people straight here), so it clears the sticky header and the tab bar. */
+  scroll-margin-top: calc(var(--header-h) + var(--space-4));
+  scroll-margin-bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px) + var(--space-3));
+}
+
+.promptHead {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.promptTitle {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The agent picker row — scrolls sideways on a phone rather than wrapping,
+   the same answer the segmented window pills give in the logs panel. */
+.promptTabs {
+  padding: var(--space-3) var(--space-4) 0;
+  overflow-x: auto;
+}
+
+.promptStep {
+  display: block;
+  padding: var(--space-3) var(--space-4) 0;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-body);
+}
+
+/* The install path as discrete steps: a copyable thing gets a .copyRow of its
+   own, a direction to read stays plain text between them. */
+.promptSteps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.stepText {
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.promptNote {
+  display: block;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+
+/* ---- Project key (was its own Keys tab) ---------------------------------- */
+
+.keySection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  /* `/app/keys` is printed in the CLI and redirects here with a hash, so the
+     target has to clear the sticky header and the floating tab bar. */
+  scroll-margin-top: calc(var(--header-h) + var(--space-4));
+  scroll-margin-bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px) + var(--space-3));
+}
+
+.keyHead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.keyTitle {
+  font-size: var(--text-h3);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.keyNote {
+  font-size: var(--text-caption);
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.keyRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 40px;
+  padding: 0 6px 0 var(--space-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.keyValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-primary);
+}
+
+/* The two key actions sit side by side in .keyActions, so their box is one rule:
+   they were 28px/--text-xs and 32px/--text-sm, which read as two unrelated
+   controls that happened to share a row. Only the variant differs below — the
+   constructive one is secondary, the destructive one is danger. */
+.rowButton,
+.rotateButton {
+  height: 32px;
+  padding: 0 var(--space-3);
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.rowButton {
+  border: 1px solid var(--line-strong);
+  background: var(--bg-raised);
+  color: var(--text-body);
+}
+
+.rowButton:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.keyActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.rotateButton {
+  border: 1px solid var(--down);
+  background: transparent;
+  color: var(--down);
+}
+
+/* Button's `danger` variant convention. */
+.rotateButton:hover {
+  background: var(--down-bg);
+}
+
+.keyHint {
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}
+
+.keyHint a {
+  color: var(--text-body);
+}
+
+.logSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.logTable {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.logHead {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) 60px;
+  gap: var(--space-3);
+  padding: var(--space-2) 14px;
+  border-bottom: 1px solid var(--line-strong);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.logRow {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) 60px;
+  gap: var(--space-3);
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.logRow:last-child {
+  border-bottom: none;
+}
+
+.logTime {
+  color: var(--text-faint);
+}
+
+.logEndpoint {
+  color: var(--text-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logStatus {
+  color: var(--text-body);
+}
+
+/* Same stacking move as Monitors: below 560px the three-column log row keeps
+   time + status on one line and gives the endpoint its own full-width line
+   instead of ellipsising it into uselessness. */
+@media (max-width: 560px) {
+  .logHead {
+    display: none;
+  }
+
+  .logRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'time status'
+      'endpoint endpoint';
+    gap: 4px var(--space-3);
+  }
+
+  .logTime {
+    grid-area: time;
+  }
+
+  .logEndpoint {
+    grid-area: endpoint;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .logStatus {
+    grid-area: status;
+    justify-self: end;
+  }
+}
+
+.modalWarning {
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  line-height: 1.6;
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.modalCancel {
+  height: 40px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-body);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+/* Button's `ghost` variant convention. */
+.modalCancel:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.modalConfirm {
+  height: 40px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--down);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--down);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+/* Button's `danger` variant convention. */
+.modalConfirm:hover {
+  background: var(--down-bg);
+}
+
+/* Revealed after a source is connected: the URL its provider has to post to.
+   The connection exists on our side the moment the tile is pressed; this is the
+   half the reader has to carry to the other service. */
+/* The connected-hook card is a small win the screen should look pleased about:
+   the one ok-tinted surface here (the tint fades out downward so the panel
+   still sits on the page's neutral system), read together with the dot and the
+   word "Connected" — colour is the third voice, never the only one (brief §1).
+   The guide lives as the (i) in the corner instead of a link line under the
+   URL, which is what kept the card a row shorter. */
+.hookPanel {
+  margin-top: var(--space-4);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line));
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, var(--ok-bg), transparent 130%),
+    var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.hookHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.hookStatus {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The Tooltip wrapper hugs the link; auto-margin parks the pair in the corner. */
+.hookInfoSlot {
+  margin-left: auto;
+}
+
+/* A 36px square for a 22px glyph — the same footprint grammar as the row
+   buttons on Alerts, one size up because the corner pair are the card's only
+   controls. */
+.hookInfo {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition:
+    background-color var(--duration-hover) var(--ease),
+    color var(--duration-hover) var(--ease);
+}
+
+.hookInfo:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* A bare 36px link is under --tap-min. Same invisible-overlay pattern
+   IconButton already uses for a same-shaped control: the visible icon stays
+   its size (height only, never width — brief item 2) while a centred 44x44
+   hit box catches the tap. */
+@media (max-width: 700px) {
+  .hookInfo::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: var(--tap-min);
+    height: var(--tap-min);
+    transform: translate(-50%, -50%);
+  }
+}
+
+.hookLabel {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The receipt line under the URL — the panel's half of the test loop. */
+.hookReceipt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The copyable-value field itself is the shared CopyField component
+   (components/code) — the hook URL and every installer command render it. */
+
+/* The install card's receipt line — the same grammar as .hookReceipt: a
+   status dot that goes green only when real data has arrived. */
+.installReceipt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* Inline "generate a new one" inside the token hint — a link-shaped button,
+   not a second filled control fighting the CopyField beside it. */
+.regenLink {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: var(--text-body);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.regenLink:hover {
+  color: var(--text-primary);
+}
+
+.tokenError {
+  font-size: var(--text-xs);
+  color: var(--down);
+}
+
+/* The receipt is the card's state line, so it renders as a sibling of the
+   copy fields — a quiet sunken strip, same left edge, not prose hanging off
+   the card border (user feedback, Aug 15, 2026). The waiting dot is filled
+   and breathes (uc-pulse): "listening" is motion, not absence, and the
+   primitive's hollow nodata ring read as a dead control here. Achromatic on
+   purpose — nothing has happened yet, so no status color. */
+.installReceipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0 var(--space-4);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-body);
+}
+
+/* State tints follow the connected-hook card's grammar (--ok-bg fade over
+   bg-raised, status-mixed border) so the strip reads as a STATE, not as a
+   fourth copy field (user feedback, Aug 15, 2026). Waiting is the amber
+   "checking" axis — in progress, not a warning; never color alone: the dot
+   and the full label ride along. */
+.receiptWaiting {
+  border-color: color-mix(in srgb, var(--check) 30%, var(--line));
+  background:
+    linear-gradient(180deg, var(--check-bg), transparent 130%),
+    var(--bg-raised);
+}
+
+.receiptOk {
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--line));
+  background:
+    linear-gradient(180deg, var(--ok-bg), transparent 130%),
+    var(--bg-raised);
+}
+
+/* Inline commands in the card read as chips: mono, raised, bordered — the
+   same grammar as a keycap, so the eye finds the runnable thing. */
+.installReceipt code,
+.noteList code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 6px;
+  background: var(--bg-hover);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.waitDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--check);
+  flex: none;
+}
+
+/* The card's closing notes as scannable bullets, not a wall (user decision,
+   Aug 15, 2026). Same voice as .promptNote, one fact per line. */
+.noteList {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4)
+    calc(var(--space-4) + var(--space-2));
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.noteList li {
+  position: relative;
+  padding-left: 14px;
+}
+
+.noteList li::before {
+  content: "·";
+  position: absolute;
+  left: 2px;
+  color: var(--text-muted);
+}

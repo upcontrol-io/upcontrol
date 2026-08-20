@@ -1,0 +1,18 @@
+name: Feature request
+description: Something the product should do and does not.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What you are trying to accomplish and where the product stops you.
+        The problem, not the solution — "I cannot tell which deploy broke
+        checkout" travels further than "add a dropdown".
+    validations:
+      required: true
+  - type: textarea
+    id: alternative
+    attributes:
+      label: What you do today instead

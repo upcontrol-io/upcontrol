@@ -1,0 +1,14 @@
+# Build/test artifacts
+/ucapi
+/ucworker
+/ucprobe
+coverage.out
+.coverage-baseline
+*.test
+
+# Local ingest spool + WAL
+/spool/
+
+# Editor noise
+.idea/
+.vscode/

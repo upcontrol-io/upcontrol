@@ -1,0 +1,27 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: var(--measure-page);
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-decoration: none;
+  align-self: flex-start;
+}
+
+.back:hover {
+  color: var(--text-primary);
+}
+
+/* A plain link, so global.css's phone floor (which only reaches real buttons)
+   never raises it — set the same tap floor directly, height only. */
+@media (max-width: 700px) {
+  .back {
+    min-height: var(--tap-min);
+  }
+}

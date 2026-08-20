@@ -1,0 +1,6 @@
+{
+  "name": "upcontrol-cli-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Full CLI vertical against a live stack. Run explicitly: UC_CLI_E2E=1 node --test cli/e2e/e2e.test.ts"
+}

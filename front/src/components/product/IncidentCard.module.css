@@ -1,0 +1,385 @@
+/* Incident view per 05-dashboard.dc.html — the card is the only red-accented
+   surface on the page: red border, header on --down-bg, everything else stays
+   achromatic so the accent keeps its meaning. */
+.card {
+  /* Every pane inside the card shares this gutter; the phone tier tightens it
+     in one place at the bottom of this file. */
+  --pad: var(--space-5);
+  border: 1px solid var(--down);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+/* A closed incident keeps the layout and drops the alarm: red is reserved for
+   what is wrong *now*, or it stops meaning anything (design-brief §2.4). */
+.cardClosed {
+  border-color: var(--line-strong);
+}
+
+.header {
+  padding: var(--pad);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--down-bg);
+}
+
+.cardClosed .header {
+  background: var(--bg-sunken);
+}
+
+.cardClosed .headerDot {
+  background: transparent;
+  border: 1px solid var(--text-faint);
+}
+
+/* Paging through the history. Sits above the header rather than inside it: the
+   header is the incident, this is which incident you are looking at. */
+.pager {
+  padding: var(--space-2) var(--pad);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+.pagerLabel {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-body);
+}
+
+.pagerCount {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.pagerSpacer {
+  flex: 1;
+}
+
+/* The pager's three buttons are `IconButton`, so the bespoke `.pagerButton`
+   rule that used to live here is gone: it was a hand-copy of the primitive's
+   own styling at 28px instead of --control-sm, and it carried no tap overlay,
+   which put it under the touch floor on a phone. */
+
+/* ChevronIcon points down (it is the disclosure glyph), so a quarter turn each
+   way makes the pair read as back and forward. */
+.pagerPrev {
+  transform: rotate(90deg);
+}
+
+.pagerNext {
+  transform: rotate(-90deg);
+}
+
+.headerTitleWrap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  /* 260px is the point where the title stops sharing a line with the timestamp —
+     but never more than the card actually has, or the header overflows. */
+  min-width: min(260px, 100%);
+}
+
+.headerDot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: var(--down);
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+  /* The title is often the monitor's own target spliced into a sentence
+     ("mon.Target + ' stopped responding'" server-side), so it can arrive as one
+     unbroken URL — without this it forces the header wider than a 375px card. */
+  overflow-wrap: anywhere;
+}
+
+/* No nowrap: flex-wrap already gives this its own line when it doesn't fit
+   beside the title, and on a 320px screen it has to be able to break. */
+.since {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-body);
+}
+
+/* Timeline and the log slice side by side on wide screens (ref incidentCols). */
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  /* One height budget for both panes. A timeline row is 49px (the time column
+     is the tallest content at 33px, plus 16px of padding), so this is ten of
+     them. It lives here rather than in each pane because the two are grid
+     siblings and stretch to the same height anyway: two independent numbers
+     leave whichever pane is shorter padded with dead space, which is what the
+     log slice's own 190px did next to an uncapped timeline. */
+  --pane-max: 490px;
+}
+
+@media (max-width: 900px) {
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* No log slice to show: the second column would be an empty half-card with a
+   divider down the middle of it. */
+.bodyNoLogs {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.bodyNoLogs .timelinePane {
+  border-right: none;
+}
+
+.timelinePane {
+  padding: var(--space-4) var(--pad);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .timelinePane {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  max-height: var(--pane-max);
+  overflow-y: auto;
+  /* Without this, reaching the end of the timeline hands the scroll to the page
+     and the card jumps out from under the reader. The card is tall. */
+  overscroll-behavior: contain;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.chipDot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: var(--ok);
+}
+
+.logPane {
+  padding: var(--space-4) var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.logLabel {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.log {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-muted);
+  overflow: auto;
+  max-height: var(--pane-max);
+}
+
+.actions {
+  padding: 14px var(--pad);
+  border-top: 1px solid var(--line);
+}
+
+/* Triage — facts first (always true), guess last and labelled. */
+.triage {
+  padding: 14px var(--pad);
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* useScrollIntoView brings this panel up when it appears; the margins are what
+     stop it landing under the sticky header or behind the floating tab bar. */
+  scroll-margin-top: calc(var(--header-h) + var(--space-3));
+  /* The bar itself is inset by the home-indicator too (BottomTabBar `.bar`),
+     so the clearance counts it — without it the panel is short by the inset on
+     a real iPhone. */
+  scroll-margin-bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px) + var(--space-3));
+}
+
+/* The verdict line, the fact list, the fix note, the command block and the copy
+   row all lived here. They went with the derived prose they styled: the panel
+   is the model's answer now, rendered by ExplainAnswer, which brings its own
+   type scale and its own copy pair. */
+
+.triageBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.triageGuess {
+  display: block;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+
+/* The one wall a card state may carry (upgrade-cta-pass.md): a muted fact plus
+   the same 30px bordered button Plan's factButton and the stream's windowEdge
+   use — a fact with a door, never a banner. Inside triage it is the quiet
+   footer; as .expiryRow it closes the card after the result strip. */
+.wallRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding-top: var(--space-2);
+}
+
+.wallText {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.wallButton {
+  height: 30px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color var(--duration-hover) var(--ease);
+}
+
+/* Same gap as .actionButton above: this shell has no `.uc-app` wrapper to raise
+   a 30px button to the tap floor on its own, so the phone tier does it here. */
+@media (max-width: 700px) {
+  .wallButton {
+    min-height: var(--tap-min);
+  }
+}
+
+.wallButton:hover {
+  background: var(--bg-hover);
+}
+
+.expiryRow {
+  padding: 14px var(--pad);
+  border-top: 1px solid var(--line);
+}
+
+/* Result strip — closes the loop; background tone follows the phase. */
+.result {
+  padding: 14px var(--pad);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+.result_open {
+  background: transparent;
+}
+
+.result_running {
+  background: var(--check-bg);
+}
+
+.result_still {
+  background: var(--down-bg);
+}
+
+.result_fixed {
+  background: var(--ok-bg);
+}
+
+.resultDot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+}
+
+.resultDot_open,
+.resultDot_running {
+  background: var(--check);
+}
+
+.resultDot_still {
+  background: var(--down);
+}
+
+.resultDot_fixed {
+  background: var(--ok);
+}
+
+.resultText {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-body);
+}
+
+/* Phone tier: trim the pane gutter (--pad, set on .card) and drop the 24px title
+   to a size that doesn't wrap into four lines on a 320px screen. */
+@media (max-width: 560px) {
+  .card {
+    --pad: var(--space-4);
+  }
+
+  .title {
+    font-size: 20px;
+  }
+}
+
+/* The reading mark while the model answers — the same treatment as the logs
+   panel's `.readChase`, because it is the same wait for the same answer. */
+.triageChase {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-6) 0;
+  color: var(--text-primary);
+}

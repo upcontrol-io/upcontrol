@@ -1,0 +1,114 @@
+# golangci-lint v2 config. The non-default linters here exist to enforce the
+# build plan's invariants (§2):
+#   1. depguard  — ucprobe must not import internal/storage/** (invariant 1);
+#                  internal/detect must not read raw logs (invariant 2);
+#                  logs only via internal/ring (invariant 4).
+#   2. sloglint  — ban logging from `any`-typed values (invariant 8: no secret
+#                  reaches a log line through an untyped Attr).
+# Plus general quality: revive, gocritic, misspell, unparam.
+
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.26"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - revive
+    - gocritic
+    - misspell
+    - unparam
+    - bodyclose
+    - errorlint
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - copyloopvar
+    - sloglint
+
+  settings:
+    depguard:
+      rules:
+        # Invariant 1: the probe node holds no DB secrets and must not reach the
+        # storage layer, even transitively.
+        no-storage-in-probe:
+          list-mode: lax
+          files:
+            - "**/cmd/ucprobe/**"
+            - "**/internal/probe/**"
+          deny:
+            - pkg: go.upcontrol.io/back/internal/storage
+              desc: "invariant 1: ucprobe must not import internal/storage"
+            - pkg: go.upcontrol.io/back/internal/storage/pg
+              desc: "invariant 1: ucprobe must not import internal/storage/pg"
+            - pkg: go.upcontrol.io/back/internal/storage/ch
+              desc: "invariant 1: ucprobe must not import internal/storage/ch"
+
+        # Invariant 2: detectors reason over aggregates, never raw log rows.
+        no-raw-logs-in-detect:
+          list-mode: lax
+          files:
+            - "**/internal/detect/**"
+          deny:
+            - pkg: go.upcontrol.io/back/internal/storage/ch/logs
+              desc: "invariant 2: detect must not read raw logs; use aggregates"
+
+        # Invariant 4: the only path to the logs table is ring.QueryBuilder.
+        # lax mode = deny-list: the listed pkg is banned everywhere it applies,
+        # everything else (stdlib, our own non-logs packages) stays allowed.
+        logs-only-via-ring:
+          list-mode: lax
+          files:
+            - "**/internal/api/**"
+            - "**/internal/incident/**"
+            - "**/internal/detect/**"
+            - "**/cmd/ucapi/**"
+            - "**/cmd/ucworker/**"
+          deny:
+            - pkg: go.upcontrol.io/back/internal/storage/ch/logs
+              desc: "invariant 4: query logs only via ring.QueryBuilder"
+
+    staticcheck:
+      checks: ["all"]
+
+    # sloglint enforces consistent log/slog style. Invariant 8's hard rule
+    # (no secret in a log) is enforced by the ingest scrubber test (Phase 3)
+    # plus a custom ast-grep rule banning slog.Any on typed material.
+    sloglint: {}
+
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          disabled: true
+
+  exclusions:
+    presets:
+      - common-false-positives
+    paths:
+      - "(^|/)gen/" # generated; do not lint
+      - "(^|/)vendor/"
+    # Tests legitimately ignore error returns for brevity (w.Append(...));
+    # errcheck on _test.go is noise that crowds out real findings.
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  fix: false
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - go.upcontrol.io/back

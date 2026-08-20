@@ -1,0 +1,9 @@
+.wrap {
+  width: 100%;
+}
+
+/* StatusDot ships a label beside its dot; here the title carries the words, so
+   the dot stands alone as the marker that separates this from an empty state. */
+.dot {
+  gap: 0;
+}

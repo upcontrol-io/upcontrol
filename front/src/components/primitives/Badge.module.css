@@ -1,0 +1,64 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--line-strong);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-body);
+  white-space: nowrap;
+}
+
+.rect {
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+
+.pill {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.neutral {
+  color: var(--text-muted);
+}
+
+.new {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+}
+
+.beta {
+  color: var(--text-muted);
+}
+
+.deprecated {
+  color: var(--text-faint);
+  border-style: dashed;
+}
+
+.plan {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Status-graded tones (confidence, health): the tint rides in the surface and
+   border, never the text — the badge's word is the signal, colour only seconds it. */
+.ok {
+  background: var(--ok-bg);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line-strong));
+  color: var(--text-body);
+}
+
+.check {
+  background: var(--check-bg);
+  border-color: color-mix(in srgb, var(--check) 45%, var(--line-strong));
+  color: var(--text-body);
+}
+
+.down {
+  background: var(--down-bg);
+  border-color: color-mix(in srgb, var(--down) 45%, var(--line-strong));
+  color: var(--text-body);
+}

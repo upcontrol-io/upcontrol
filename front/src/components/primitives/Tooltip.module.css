@@ -1,0 +1,30 @@
+/* Bare on purpose: the wrapper positions and listens, it never decorates. It
+   used to carry `border-bottom: 1px dotted` and `cursor: default` — the look of
+   a glossary term — which every caller then inherited whether it wanted it or
+   not: a dotted line under each health-line segment and each status-page bar,
+   and a default cursor over a clickable button. No call site is a text term
+   (the landing's glossary is its own code), so the decoration had no owner.
+   `inline-flex` makes the wrapper hug its child exactly, which is also why
+   DocsShell had to patch it from the call site. */
+.trigger {
+  display: inline-flex;
+}
+
+/* Starts at the origin; the ref callback writes the real offsets before paint. */
+.bubble {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 50;
+  /* Never wider than the viewport it is clamped into (see Tooltip.tsx). */
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+  font-size: var(--text-caption);
+  font-family: var(--font-body);
+  color: var(--text-body);
+  line-height: 1.5;
+}

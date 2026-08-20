@@ -1,0 +1,297 @@
+@import './tokens.css';
+
+/* No @font-face here: no screen draws the display face — --font-display falls
+   back through its stack. Geist and Geist Mono load from Google in index.html. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html {
+  /* The product's own pressed/focus states replace the grey iOS tap flash;
+     :focus-visible below still gives keyboard users their ring. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-body);
+  font-family: var(--font-body);
+  font-size: var(--text-body-size);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Scrollbars are product chrome, not browser chrome: achromatic, no arrow
+   buttons, no track fill — a thumb on the same line colour as every other
+   divider. `scrollbar-width`/`scrollbar-color` cover Firefox and are the
+   standard; the ::-webkit- rules give Chrome/Safari the same thing with a
+   proper hover state and inset so the thumb doesn't touch the edge.
+   Both are inherited/applied from :root so every scroll container in the
+   product picks them up — never restyle a scrollbar per component. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  background-color: var(--scroll-thumb);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+
+/* One visible focus ring for the whole product — 2px, offset 2px (brief §5). */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* One pressed state for the whole product.
+   Hover says a thing is live; press says the tap landed. The product carried 83
+   `:hover` rules and not one `:active`, so on a phone — where there is no hover
+   at all — nothing on screen ever acknowledged a tap.
+   It lives here as a single rule rather than one per component for the same
+   reason the focus ring does: 130-odd call sites would drift. A 1px push is the
+   whole effect; it reads on any surface, needs no colour, and so survives the
+   achromatic rule and both themes. Immediate in both directions on purpose —
+   a press that eases in feels like lag.
+   Two opt-outs: `:disabled` (nothing to acknowledge) and `.uc-no-press`, for
+   full-bleed surfaces where a 1px shift would expose an edge (the drawer
+   backdrop) rather than read as a button. */
+button:not(:disabled):active,
+[role='button']:not([aria-disabled='true']):active,
+a[class]:active {
+  transform: translateY(1px);
+}
+
+/* Doubled class on purpose: the rule above scores (0,2,1) thanks to `:not()` and
+   the attribute selector, so a single class would lose to it and the opt-out
+   would silently do nothing. */
+.uc-no-press.uc-no-press:active {
+  transform: none;
+}
+
+/* The glass material, in one place.
+   A web approximation of Apple's Liquid Glass (see the token block for what is
+   and is not achievable in CSS). It lives here as a class for the same reason
+   `uc-reveal` and `uc-pulse` do: three modules use it, and a CSS Module cannot
+   share anything a fourth might need later.
+
+   The sheen is a background layer rather than a pseudo-element so the class
+   stays safe to drop on any element, including ones that already use ::before.
+
+   `isolation: isolate` matters: without it the backdrop-filter samples its way
+   up through parent stacking contexts and the blur silently stops working when
+   an ancestor gains a transform. */
+.uc-glass {
+  isolation: isolate;
+  background:
+    linear-gradient(to bottom, var(--glass-sheen), transparent 42%),
+    var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  border: 1px solid var(--glass-stroke);
+  box-shadow:
+    inset 0 1px 0 var(--glass-inner-top),
+    inset 0 -1px 0 var(--glass-inner-bottom),
+    var(--glass-shadow);
+}
+
+/* Glass depends on transparency, so when the reader has asked for less of it
+   the material has to become an ordinary opaque surface rather than a
+   half-legible one. Support for this query is uneven, which is exactly why the
+   tint above is already opaque enough to read against without any blur. */
+@media (prefers-reduced-transparency: reduce) {
+  .uc-glass {
+    background: var(--bg-raised);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: var(--line);
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Text arriving a line at a time — the AI triage read. Shipped as a global class
+   for the same reason as .uc-pulse below (a CSS Module rewrites keyframes names
+   it does not itself declare). Stagger with `animation-delay` on each line. */
+@keyframes uc-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.uc-reveal {
+  animation: uc-reveal var(--duration-disclosure) var(--ease) both;
+}
+
+/* Shared status-dot pulse — used by StatusDot and anything mid-check. */
+@keyframes uc-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The product's one "this is live" pulse: a checking status dot, an action
+   mid-test, the brand mark.
+   It lives here as a *class* rather than being referenced by name from each
+   CSS Module because a module rewrites every keyframes name it does not itself
+   declare — pointing the animation at a local name that was never defined, so
+   the element silently stops animating. Override the rate by setting
+   `--pulse-duration` on the element's own class. */
+.uc-pulse {
+  animation: uc-dot-pulse var(--pulse-duration, 1.8s) var(--ease) infinite;
+}
+
+/* Touch targets in the app.
+   Measured across all ten /app tabs at 390px, every one of them shipped its
+   desktop control sizes to the phone: Sources' Pause was 26px tall, Keys'
+   Show/Copy 28, Actions' Test 28, the status-page switch 22. Apple asks for
+   44pt and WCAG 2.5.8 floors at 24, so most of the product's own controls
+   missed both on the surface the product is designed for.
+
+   One rule instead of a media query in a dozen modules — the same argument as
+   the pressed state above. Scoped to `.uc-app` (AccountShell's root) rather
+   than applied globally: the landing page's instrument rows and the docs code
+   toolbars are laid out around their own heights, and growing those is a
+   different decision from making a control tappable.
+
+   Height only. A blanket `min-width` would stretch the segmented pills
+   (`5m 15m 30m`, `200 4xx 5xx`) into a row that no longer fits, and those are
+   already comfortably wide enough to hit. */
+@media (max-width: 700px) {
+  .uc-app :is(button, [role='button']):not([role='switch']):not(.uc-tap-inline) {
+    min-height: var(--tap-min);
+  }
+
+  /* Two exceptions, both controls whose small size *is* the design: a switch is
+     a 36x22 pill that becomes a lozenge at 44, and an inline affordance inside a
+     dense row (the log stream's JSON chevron) would stretch a 20px row to 44 and
+     make a third of the stream unreadable.
+     For both, the target grows without the control growing: a transparent
+     overlay centred on the box, 44 by 44, which is what the finger actually
+     hits. Growing the hit area rather than the box is the general answer
+     wherever a floor would cost layout. */
+  /* Only the switch gets a positioning context from here. `.uc-tap-inline` must
+     not: it is applied to controls that already position themselves, and this
+     rule outranks a single-class module selector (0,2,0 against 0,1,0), so it
+     silently overrode the log chevron's own `position: absolute` and dropped
+     the chip out of its row and into the flow below it. Anything wearing
+     `.uc-tap-inline` is responsible for being positioned; an absolutely
+     positioned element is already a containing block for its own ::after. */
+  .uc-app [role='switch'] {
+    position: relative;
+  }
+
+  .uc-app :is([role='switch'], .uc-tap-inline)::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--tap-min));
+    height: var(--tap-min);
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* iOS Safari zooms the page when a focused field's font is under 16px. Our
+   form type scale tops out at 13px, so on phone widths every field floors at
+   16px — max() leaves anything already larger alone. */
+@media (max-width: 700px) {
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
+}
+
+/* Every animation in the product is opt-out-able (brief §5). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The theme crossfade (lib/theme.ts). The universal selector above cannot
+   reach these — they are pseudo-elements of the transition, not of any
+   element — so the preference is honoured in JS as well as here. This block is
+   the belt for any later caller of startViewTransition that forgets the gate. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+}

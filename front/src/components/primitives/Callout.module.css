@@ -1,0 +1,34 @@
+.callout {
+  border-left: 2px solid var(--line-strong);
+  padding: 2px 0 2px 14px;
+  max-width: 60ch;
+}
+
+.note {
+  border-left-color: var(--line-strong);
+}
+
+.tip {
+  border-left-color: var(--ok);
+}
+
+.warning {
+  border-left-color: var(--check);
+}
+
+.danger {
+  border-left-color: var(--down);
+}
+
+.title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.body {
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--text-body);
+}

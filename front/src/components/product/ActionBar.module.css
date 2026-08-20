@@ -1,0 +1,29 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* The live incident screen (05-dashboard.dc.html) uses 38px action buttons with
+   14px labels and 14px side padding — the component reference's 36px applies to
+   the isolated library page only. */
+.actionButton {
+  height: 38px;
+  padding: 0 14px;
+  font-size: var(--text-sm);
+}
+
+/* 38px clears neither Apple's 44pt nor the app's own --tap-min: unlike a Button
+   rendered inside `.uc-app` (AccountShell's floor in global.css), this shell has
+   no such wrapper, so the phone floor has to be set here directly. */
+@media (max-width: 700px) {
+  .actionButton {
+    min-height: var(--tap-min);
+  }
+}

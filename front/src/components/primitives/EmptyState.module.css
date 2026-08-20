@@ -1,0 +1,41 @@
+.wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  padding: var(--space-8) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  /* The box fills its container and the *text* keeps the measure. It used to be
+     `max-width: 360px` on the box itself, which inside a full-width panel left a
+     narrow card stranded against the left edge with empty space beside it. */
+  width: 100%;
+}
+
+/* Inside a panel that already has a frame: no second border, no second surface. */
+.bare {
+  border: none;
+  background: transparent;
+  padding: var(--space-8) var(--space-6);
+}
+
+.icon {
+  color: var(--text-faint);
+  margin-bottom: var(--space-1);
+}
+
+.title {
+  font-size: var(--text-h3);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.body {
+  max-width: 42ch;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}

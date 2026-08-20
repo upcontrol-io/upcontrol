@@ -1,0 +1,96 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  transition:
+    opacity var(--duration-hover) var(--ease),
+    background-color var(--duration-hover) var(--ease),
+    border-color var(--duration-hover) var(--ease);
+}
+
+.sm {
+  height: var(--control-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--text-caption);
+}
+
+.md {
+  height: var(--control-md);
+  padding: 0 var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.lg {
+  height: var(--control-lg);
+  padding: 0 var(--space-6);
+  font-size: var(--text-body-size);
+}
+
+.primary {
+  background: var(--text-primary);
+  color: var(--inverse);
+}
+.primary:hover:not(:disabled) {
+  opacity: 0.86;
+}
+
+/* --control-edge, not --line-strong: this border IS the button, and a boundary
+   that carries a control is held to 3:1 (tokens.css). */
+.secondary {
+  background: transparent;
+  border-color: var(--control-edge);
+  color: var(--text-primary);
+}
+.secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ghost {
+  background: transparent;
+  color: var(--text-body);
+}
+.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.danger {
+  background: transparent;
+  border-color: var(--down);
+  color: var(--down);
+}
+.danger:hover:not(:disabled) {
+  background: var(--down-bg);
+}
+
+.button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.7;
+  animation: uc-spin 700ms linear infinite;
+}
+
+@keyframes uc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

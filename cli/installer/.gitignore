@@ -1,0 +1,3 @@
+# Build artifact: verbatim copy of ../plugin made by scripts/copy-skill.ts.
+# The source of truth is cli/plugin/ - never edit or commit the copy.
+skill/

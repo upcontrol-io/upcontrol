@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package upcontrol.probe.v1;
+
+option go_package = "go.upcontrol.io/back/gen/rpc/probe/v1;probev1";
+
+import "google/protobuf/timestamp.proto";
+
+// ProbeService is the contract between a regional probe node (ucprobe) and
+// ucapi. The probe holds NO database secrets (invariant 1): it only ever talks
+// to this service over connect-go, presenting a node token. The lease model is
+// pull-based — the probe asks for work at the pace the server sets — so a slow
+// or overloaded ucapi backpressures the fleet naturally.
+service ProbeService {
+  // Lease: the probe takes a batch of work. The lease has a TTL of two
+  // intervals; an unacked lease is re-issued after expiry.
+  rpc Lease(LeaseRequest) returns (LeaseResponse);
+  // SubmitResults: results in a batch. Idempotent per check_id.
+  rpc SubmitResults(SubmitResultsRequest) returns (SubmitResultsResponse);
+  // ReportBlind: the probe declares itself blind — this cycle's results were
+  // DISCARDED by the probe itself (e.g. its anchor sites were unreachable, so
+  // its measurements cannot be trusted). This is what prevents false incidents.
+  rpc ReportBlind(ReportBlindRequest) returns (ReportBlindResponse);
+}
+
+enum CheckKind {
+  CHECK_KIND_UNSPECIFIED = 0;
+  CHECK_KIND_WEBSITE = 1;
+}
+
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  ERROR_CLASS_NONE = 1;
+  ERROR_CLASS_DNS = 2;
+  ERROR_CLASS_CONNECT = 3;
+  ERROR_CLASS_TLS = 4;
+  ERROR_CLASS_TIMEOUT = 5;
+  ERROR_CLASS_STATUS = 6;
+  ERROR_CLASS_KEYWORD_MISSING = 7;
+  ERROR_CLASS_BLOCKED_TARGET = 8; // SSRF frontier: target forbidden
+  ERROR_CLASS_TOO_MANY_REDIRECTS = 9;
+}
+
+message LeaseRequest {
+  string node_id = 1;
+  string region = 2;
+  uint32 capacity = 3; // how many checks the node will take
+  string version = 4;
+}
+
+message CheckSpec {
+  string check_id = 1; // unique within this lease
+  uint64 monitor_id = 2;
+  CheckKind kind = 3;
+  string url = 4;
+  string method = 5; // GET by default
+  string keyword = 6; // empty = no assertion
+  uint32 timeout_ms = 7;
+  uint32 max_redirects = 8;
+  uint32 max_body_bytes = 9; // 65536; keyword monitors 262144
+  bool collect_expiry = 10; // SSL and domain opportunistically
+}
+
+message LeaseResponse {
+  repeated CheckSpec checks = 1;
+  google.protobuf.Timestamp lease_until = 2;
+  uint32 next_lease_after_ms = 3; // server sets the pace, not the client
+}
+
+message CheckResult {
+  string check_id = 1;
+  uint64 monitor_id = 2;
+  google.protobuf.Timestamp started_at = 3;
+  bool ok = 4;
+  uint32 status_code = 5;
+  ErrorClass error_class = 6;
+  string error_detail = 7; // no secrets, no body
+  uint32 dns_ms = 8;
+  uint32 connect_ms = 9;
+  uint32 tls_ms = 10;
+  uint32 ttfb_ms = 11;
+  uint32 total_ms = 12;
+  uint64 body_hash = 13;
+  uint32 redirect_count = 14;
+  google.protobuf.Timestamp ssl_expires_at = 15;
+  google.protobuf.Timestamp domain_expires_at = 16;
+}
+
+message SubmitResultsRequest {
+  string node_id = 1;
+  string region = 2;
+  repeated CheckResult results = 3;
+}
+message SubmitResultsResponse {
+  uint32 accepted = 1;
+}
+
+message ReportBlindRequest {
+  string node_id = 1;
+  string region = 2;
+  repeated string anchors_failed = 3;
+  uint32 discarded_results = 4;
+}
+message ReportBlindResponse {}

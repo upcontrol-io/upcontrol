@@ -1,0 +1,41 @@
+{
+  "name": "upcontrol",
+  "version": "0.1.2",
+  "description": "One command to wire upcontrol monitoring into your app through the coding agent you already use: installs the agent skill, pins the SDK, provisions a key, verifies data is flowing.",
+  "license": "MIT",
+  "homepage": "https://upcontrol.io",
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module",
+  "bin": {
+    "upcontrol": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "skill",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "monitoring",
+    "uptime",
+    "logs",
+    "observability",
+    "incidents",
+    "claude-code",
+    "cursor",
+    "codex",
+    "agent-skill"
+  ],
+  "scripts": {
+    "build": "node scripts/copy-skill.ts && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "pretest": "npm run build",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.5.0"
+  }
+}

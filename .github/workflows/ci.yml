@@ -1,0 +1,66 @@
+# CI for every push and PR. Deliberately secret-free: fork PRs run the same
+# three jobs with the same result, so a contributor's first PR is never
+# second-class.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  back:
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: back/go.mod
+          cache-dependency-path: back/go.sum
+      - name: Build and test
+        working-directory: back
+        run: |
+          go build ./...
+          go test ./...
+
+  front:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - name: Install
+        working-directory: front
+        run: npm ci
+      - name: Playwright browser
+        working-directory: front
+        run: npx playwright install --with-deps chromium
+      - name: Build and test
+        working-directory: front
+        run: |
+          npm run prod
+          npm run test
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compose files parse
+        working-directory: infra
+        run: |
+          # The secret files must exist for compose to resolve them; CI uses
+          # placeholders — nothing here is a real credential.
+          mkdir -p secrets
+          for s in pg_password ch_password node_token secret_key_hex \
+                   telegram_bot_token smtp_password ai_api_key; do
+            echo ci-placeholder > "secrets/$s"
+          done
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.build.yml config -q
+      - name: Installer syntax
+        run: sh -n infra/install.sh

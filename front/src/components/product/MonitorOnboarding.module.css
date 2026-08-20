@@ -1,0 +1,213 @@
+/* The status page's first-run block: one address in, discovery rows out,
+   nothing created until Start watching. Sits under the page's own h1, inside
+   the config screen's 680px column. */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--text-h3);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.body {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* The field grows; Add keeps its own width. */
+.addRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.hostCell {
+  flex: 1;
+  min-width: 0;
+}
+
+.scanButton {
+  flex-shrink: 0;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The pick-list is one raised card, the same surface language as the Public
+   URL card above it once the page is live. `overflow: hidden` lets the group
+   bands and row fills run to the card's own edge. */
+.resultsCard {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.group + .group {
+  border-top: 1px solid var(--line);
+}
+
+/* A sunken band, not a floating label: the fill is what separates "heading"
+   from "row" at a glance. */
+.groupHead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line);
+}
+
+.groupTitle {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Where the rows came from ("sitemap", "linked") — muted, right, and never a
+   fact about the site itself. */
+.groupSource {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+/* box · dot+word · name · meta. Both text columns are floored at 0 so a long
+   URL wraps inside its column instead of pushing the row past the page. The
+   row IS the Checkbox primitive (its hidden input is clipped-absolute, so it
+   takes no grid cell); scoped under .group so this grid outranks the
+   primitive's own inline-flex whatever the stylesheet order. */
+.group .row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+}
+
+.group .row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.group .row:hover {
+  background: var(--bg-hover);
+}
+
+/* A ticked row carries its choice as a fill, not only as the checkbox: the
+   selection has to be readable from across the card. Achromatic on purpose. */
+.group .rowTicked {
+  background: var(--bg-hover);
+}
+
+/* Reassurance + the act itself, one strip: nothing on this card is permanent,
+   and the sentence saying so sits beside the button that commits. */
+.cardFooter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+.footerNote {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* The dot's colour pair is set inline in the tsx — it is measured data, like
+   every other status dot in the product. */
+.dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+}
+
+.name {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.createButton {
+  flex-shrink: 0;
+}
+
+/* Phone floor: the row (the checkbox's own tap target), the field and the two
+   Buttons in this block. Button's own `.md` height is 40px and relies on
+   `.uc-app` to reach 44 (global.css) — this page is never wrapped in that
+   class, so Scan and Start watching are bumped locally instead. */
+@media (max-width: 700px) {
+  .group .row,
+  .hostCell input,
+  .scanButton,
+  .createButton {
+    min-height: var(--tap-min);
+  }
+}
+
+@media (max-width: 560px) {
+  .addRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* The sentence above the act, full width each: a squeezed side-by-side strip
+     leaves the button too narrow to read at 390px. */
+  .cardFooter {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* name+meta own the full width under the box/status pair, so a long URL and
+     its timing fact wrap as lines rather than fighting for half a phone. */
+  .group .row {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+
+  .meta {
+    grid-column: 3;
+  }
+}

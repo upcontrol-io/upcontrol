@@ -1,0 +1,13 @@
+# Secrets and local state
+.env
+infra/secrets/
+
+# Node / builds
+node_modules/
+dist/
+test-results/
+playwright-report/
+
+# Go
+back/coverage.out
+back/spool/

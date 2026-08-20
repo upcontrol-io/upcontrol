@@ -1,0 +1,20 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/storage/pg/queries"
+    # Clean schema for type inference: the goose migration carries Up/Down and
+    # sqlc would trip on the DROP section. schema.sql is the Up DDL verbatim.
+    schema: "internal/storage/pg/schema.sql"
+    gen:
+      go:
+        package: "pg"
+        out: "gen/pg"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        # The plan uses bigint internal keys and uuid public ids; sqlc maps
+        # these to int64 / [16]byte (pgx) respectively.
+        rename:
+          tenant_id: "TenantID"
+          project_id: "ProjectID"
+          public_id: "PublicID"

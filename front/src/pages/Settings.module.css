@@ -1,0 +1,141 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: var(--measure-form);
+}
+
+
+/* A card, not a hairline. This screen runs past 1800px on a phone and used to
+   be six sections separated by a 1px rule, every heading the same size — so
+   finding "Email relay" meant reading the whole page. The surface is the one
+   the Status page's URL card and the Sources tiles already use, so nothing new
+   is invented here, it is just applied where the wall was. */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+
+.sectionTitle {
+  font-size: var(--text-h3);
+  color: var(--text-primary);
+}
+
+.hint {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.hint code {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-body);
+}
+
+.nameRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.nameRow > label {
+  flex: 1;
+}
+
+/* The Telegram block puts token, username and Save on this row; at 390px that
+   left each control near 100px wide and the inputs unusable. Stacks below the
+   narrow breakpoint, the way the Email relay block under it already does. The
+   project-name form wears the same class and is better stacked here too. */
+@media (max-width: 560px) {
+  .nameRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* A vertical settings form: several inputs, one Save under them. */
+.stackForm {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.stackForm > label {
+  align-self: stretch;
+}
+
+.keyRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.keyValue {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.stepLabel {
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  margin-top: var(--space-2);
+}
+
+.linkButton {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--text-caption);
+  color: var(--text-body);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.linkButton:hover {
+  color: var(--text-primary);
+}
+
+.tokenError {
+  font-size: var(--text-caption);
+  color: var(--down);
+}
+
+.rotateRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.docsLink {
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}
+
+.docsLink a {
+  color: var(--text-muted);
+}
+
+.modalWarning {
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  margin-bottom: var(--space-4);
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}

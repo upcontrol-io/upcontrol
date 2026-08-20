@@ -1,0 +1,62 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.error {
+  color: var(--down);
+  font-size: var(--text-caption);
+}
+
+/* Quiet box, emphatic bottom rule — the shape is unchanged, the contrast is
+   not. The fill cannot identify this control on its own (--bg-sunken against
+   --bg-base is 1.09:1 in light), so the edge is the only thing saying "you can
+   type here", and it has to clear 3:1. The bottom rule carries that job at
+   --control-edge; the other three sides step up one token so the box still
+   closes without competing with it. */
+.control {
+  width: 100%;
+  padding: 0 var(--space-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-strong);
+  border-bottom: 2px solid var(--control-edge);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  transition: border-color var(--duration-hover) var(--ease);
+}
+
+.control:focus {
+  outline: none;
+  border-bottom-color: var(--focus);
+}
+
+.control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.controlInvalid,
+.controlInvalid:focus {
+  border-color: var(--down);
+  border-bottom-color: var(--down);
+}
+
+input.control {
+  height: var(--control-md);
+}
+
+select.control {
+  height: var(--control-md);
+  appearance: none;
+}
+
+textarea.control {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  resize: vertical;
+  font-family: inherit;
+}

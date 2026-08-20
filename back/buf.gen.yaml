@@ -1,0 +1,12 @@
+version: v2
+clean: false
+# No managed mode: the proto carries an explicit go_package that already agrees
+# with the source_relative output path (gen/rpc/probe/v1), so managed rewriting
+# would only desync the message-package import the connect plugin emits.
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: gen/rpc
+    opt: paths=source_relative
+  - remote: buf.build/connectrpc/go
+    out: gen/rpc
+    opt: paths=source_relative
