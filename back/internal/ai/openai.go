@@ -90,13 +90,15 @@ const modelCap = 128
 // refuses. "All OpenAI-compatible" endpoints disagree exactly here: OpenAI's
 // newer models reject max_tokens (use max_completion_tokens), older gateways
 // reject or ignore max_completion_tokens, reasoning models reject a
-// temperature. Learned from the provider's own 400, remembered per brain for
-// the life of the process — the first call after a boot pays one extra round
-// trip, nothing else does.
+// temperature, and the models that are not reasoning models reject the
+// reasoning_effort a scenario asks for. Learned from the provider's own 400,
+// remembered per brain for the life of the process — the first call after a
+// boot pays one extra round trip, nothing else does.
 type paramQuirk struct {
 	dropMaxTokens           bool
 	dropMaxCompletionTokens bool
 	dropTemperature         bool
+	dropReasoningEffort     bool
 }
 
 // paramQuirks maps LLM.ID() → paramQuirk.
@@ -132,6 +134,13 @@ func (q paramQuirk) adapt(err error) (paramQuirk, bool) {
 		q.dropMaxTokens = true
 	case !q.dropTemperature && refused("temperature"):
 		q.dropTemperature = true
+	// The mirror of the temperature case: a scenario names an effort, and a
+	// model that does no reasoning refuses to be asked for one. gpt-4o-mini
+	// answers "Unrecognized request argument supplied: reasoning_effort" and
+	// nothing here caught it, so the retry re-sent the same argument and the
+	// reader got a 500 from a provider that was working perfectly.
+	case !q.dropReasoningEffort && refused("reasoning_effort"):
+		q.dropReasoningEffort = true
 	default:
 		return q, false
 	}
@@ -162,7 +171,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, sc Scenario, input Input) (
 		paramQuirks.Store(brain, q)
 		slog.Info("ai: provider parameter quirk learned, retrying", "brain", brain,
 			"drop_max_tokens", q.dropMaxTokens, "drop_max_completion_tokens", q.dropMaxCompletionTokens,
-			"drop_temperature", q.dropTemperature)
+			"drop_temperature", q.dropTemperature, "drop_reasoning_effort", q.dropReasoningEffort)
 	}
 }
 
@@ -202,6 +211,9 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 	}
 	if q.dropTemperature {
 		reqShape.Temperature = 0
+	}
+	if q.dropReasoningEffort {
+		reqShape.ReasoningEffort = ""
 	}
 	body, err := json.Marshal(reqShape)
 	if err != nil {
