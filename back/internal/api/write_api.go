@@ -1128,7 +1128,7 @@ func (h *WriteAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int6
 	levels := parseLogLevels(q["level"])
 	services := q["service"]
 	lines := h.runLogRows(ctx, qb.Stream(streamLines, levels, services, q.Get("q"), within))
-	volume := h.runVolumeRows(ctx, qb.Volume(1, levels, services))
+	volume := h.runBucketRows(ctx, qb.Volume(levels, services), "minute")
 	total := h.runWindowCount(ctx, qb, countRange(window, within), levels, services, q.Get("q"))
 	if lines == nil {
 		lines = []map[string]any{}
@@ -1141,6 +1141,18 @@ func (h *WriteAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int6
 		// The panel prints "showing N of total" rather than implying the window
 		// is what fits on screen.
 		"total": total,
+	}
+	// Sub-minute resolution for the range the reader is holding, and only for
+	// that range. `volume` above stays the whole-ring map on purpose, so this
+	// cannot replace it: it says what one of its minutes is made of. Absent
+	// unless it adds something — DetailBucketSeconds answers 0 for a range wide
+	// enough that every bucket it could offer is coarser than the minute the map
+	// already draws, and the same numbers under a second name would be a claim
+	// about precision nobody measured.
+	if size := query.DetailBucketSeconds(parseBucketSeconds(q.Get("bucketSeconds")), within); size > 0 {
+		if rows := h.runBucketRows(ctx, qb.VolumeDetail(size, within, levels, services), "bucket"); rows != nil {
+			body["detail"] = map[string]any{"bucketSeconds": size, "buckets": rows}
+		}
 	}
 	// What the window holds, whatever is being read from it: the picker is built
 	// from this, so narrowing it by the service already picked would leave the
@@ -1187,6 +1199,21 @@ const streamLines = 1000
 // may be sent alone. Anything unparseable is dropped rather than defaulted, for
 // the same reason parseLogWindow drops an unknown enum: a bad timestamp must
 // not invent a narrower window than the reader asked for.
+// parseBucketSeconds reads the detail resolution the reader is asking for. A
+// value that is not a positive number is not an error worth refusing the whole
+// read over — it means no detail, and the strip falls back to its minutes,
+// which is what a client that never asked also gets.
+func parseBucketSeconds(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 func parseLogRange(q url.Values) query.Range {
 	var out query.Range
 	if t, err := time.Parse(time.RFC3339, q.Get("from")); err == nil {
@@ -1319,9 +1346,13 @@ func (h *WriteAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[
 	return out
 }
 
-// runVolumeRows executes the per-minute volume histogram query.
-func (h *WriteAPI) runVolumeRows(ctx context.Context, lq query.LogQuery) []map[string]any {
-	if h.ch == nil {
+// runBucketRows executes a histogram query — the per-minute map or the
+// range-bounded detail — and names the timestamp column what that answer calls
+// it. The two differ by one word on the wire because they measure different
+// widths, and calling a five-second count `minute` is the kind of name that
+// outlives the person who knew better.
+func (h *WriteAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key string) []map[string]any {
+	if h.ch == nil || lq.SQL == "" {
 		return nil
 	}
 	rows, err := h.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
@@ -1331,16 +1362,16 @@ func (h *WriteAPI) runVolumeRows(ctx context.Context, lq query.LogQuery) []map[s
 	defer func() { _ = rows.Close() }()
 	var out []map[string]any
 	for rows.Next() {
-		var minute time.Time
+		var at time.Time
 		var level string
 		var lines uint64
-		if err := rows.Scan(&minute, &level, &lines); err != nil {
+		if err := rows.Scan(&at, &level, &lines); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
-			"minute": minute.UTC().Format(time.RFC3339),
-			"level":  level,
-			"lines":  lines,
+			key:     at.UTC().Format(time.RFC3339),
+			"level": level,
+			"lines": lines,
 		})
 	}
 	return out

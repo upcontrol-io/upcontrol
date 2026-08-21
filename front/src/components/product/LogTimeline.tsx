@@ -11,6 +11,23 @@ export interface LogVolumeBucket {
 	lines: number;
 }
 
+/** One sub-minute bucket. `bucket`, not `minute`: at five seconds that name
+ *  would be a claim about precision nobody measured. */
+export interface LogDetailBucket {
+	bucket: string;
+	level: string;
+	lines: number;
+}
+
+/** Sub-minute counts for the range the reader is holding, when they asked for
+ *  them. `bucketSeconds` is the width the server actually used, which is not
+ *  always the width requested — it snaps a request up to a size it can answer,
+ *  so nothing below this can be drawn however far the reader zooms. */
+export interface LogVolumeDetail {
+	bucketSeconds: number;
+	buckets: LogDetailBucket[];
+}
+
 /** A viewport over the window: epoch milliseconds, half-open `[from, to)`. */
 export interface LogRange {
 	from: number;
@@ -19,6 +36,14 @@ export interface LogRange {
 
 export interface LogTimelineProps {
 	buckets: LogVolumeBucket[];
+	/**
+	 * Finer counts for the committed range, when one is held and the reader
+	 * asked. It never replaces `buckets`: those span the whole ring and are what
+	 * the domain and every zoomed-out column are read from, and a map narrowed to
+	 * the territory already chosen cannot get the reader back. This is only
+	 * consulted below a minute, where `buckets` has nothing left to say.
+	 */
+	detail?: LogVolumeDetail;
 	/**
 	 * Fires when the reader *settles* on a range — pointer up, key press, chip —
 	 * and never mid-drag. Panning re-renders this component on every frame; the
@@ -48,13 +73,26 @@ const COL_GAP = 1;
 /** Pixels an axis label needs before the next one starts colliding with it. */
 const TICK_MIN = 88;
 
-/** Bucket sizes, finest first. The source is per minute, so nothing below 1m
- *  exists to draw and anything the reader zooms into resolves to one of these. */
-const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * MINUTE);
+const SECOND = 1_000;
 
-/** The tightest zoom. Below five minutes the per-minute source is drawing five
- *  columns across a whole panel — magnification with no new information in it. */
+/** Bucket sizes, finest first. The sub-minute rungs are only reachable while a
+ *  `detail` answer is in hand — the ring's own strip is per minute, and drawing
+ *  a second's column from a minute's number would be inventing five-nines of
+ *  precision from one measurement. */
+const STEPS = [
+	...[1, 2, 5, 10, 15, 30].map((s) => s * SECOND),
+	...[1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * MINUTE),
+];
+
+/** The tightest zoom with nothing finer than minutes to draw from. Below five
+ *  of them the per-minute source is spreading five columns across a whole panel
+ *  — magnification with no new information in it. */
 const MIN_SPAN = 5 * MINUTE;
+
+/** The same rule one rung down: with detail in hand the floor is ten of its
+ *  buckets, so zooming stops exactly where the measurements stop, not where the
+ *  pixels do. */
+const MIN_DETAIL_COLUMNS = 10;
 
 /** Bottom to top. Errors sit on the baseline, so a run of them reads as one
  *  block against the axis rather than a band floating on ordinary traffic. */
@@ -91,27 +129,60 @@ interface Column {
 	total: number;
 }
 
+/** Folds either histogram's rows into one column per instant. The two answers
+ *  name their timestamp differently on the wire — `minute` for the ring's map,
+ *  `bucket` for the finer read — so the caller says which field to read rather
+ *  than this guessing from the shape. */
+function foldRows<T extends { level: string; lines: number }>(
+	rows: T[],
+	at: (row: T) => string,
+): Column[] {
+	const byInstant = new Map<number, Column>();
+	for (const row of rows) {
+		const t = Date.parse(at(row));
+		if (Number.isNaN(t)) continue;
+		let column = byInstant.get(t);
+		if (!column) {
+			column = { t, error: 0, warn: 0, info: 0, total: 0 };
+			byInstant.set(t, column);
+		}
+		const level: Level = row.level === "error" || row.level === "warn" ? row.level : "info";
+		column[level] += row.lines;
+		column.total += row.lines;
+	}
+	return [...byInstant.values()].sort((a, b) => a.t - b.t);
+}
+
 const clockFmt = new Intl.DateTimeFormat("en-US", {
 	hour: "2-digit",
 	minute: "2-digit",
 	hour12: false,
 });
 const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+const secondFmt = new Intl.DateTimeFormat("en-US", {
+	hour: "2-digit",
+	minute: "2-digit",
+	second: "2-digit",
+	hour12: false,
+});
 
-/** How precise a timestamp has to be to tell two of them apart at this zoom. */
+/** How precise a timestamp has to be to tell two of them apart at this zoom.
+ *  Under a few minutes that means seconds: hour:minute would print the same
+ *  label over every column of a burst and the axis would stop being one. */
 function markAt(t: number, span: number): string {
 	const d = new Date(t);
 	if (span > 4 * DAY) return dayFmt.format(d);
 	if (span > 12 * HOUR) return `${dayFmt.format(d)} ${clockFmt.format(d)}`;
+	if (span < 5 * MINUTE) return secondFmt.format(d);
 	return clockFmt.format(d);
 }
 
 /** Keeps a viewport inside the ring, at a span the reader is allowed to hold.
  *  Every navigation goes through here, so no gesture can strand the view past
  *  an edge or collapse it to nothing. */
-function clampRange(range: LogRange, domain: LogRange): LogRange {
+function clampRange(range: LogRange, domain: LogRange, minSpan: number): LogRange {
 	const full = domain.to - domain.from;
-	const span = Math.min(Math.max(range.to - range.from, MIN_SPAN), full);
+	const span = Math.min(Math.max(range.to - range.from, minSpan), full);
 	let from = range.from;
 	if (from + span > domain.to) from = domain.to - span;
 	if (from < domain.from) from = domain.from;
@@ -121,12 +192,18 @@ function clampRange(range: LogRange, domain: LogRange): LogRange {
 /** Scales the viewport around a fixed instant — the one under the cursor for a
  *  wheel, the centre for a key. Zooming around the middle when the pointer is
  *  at the edge slides the thing being pointed at out from under it. */
-function zoomedTo(view: LogRange, domain: LogRange, anchor: number, factor: number): LogRange {
+function zoomedTo(
+	view: LogRange,
+	domain: LogRange,
+	anchor: number,
+	factor: number,
+	minSpan: number,
+): LogRange {
 	const span = view.to - view.from;
-	const next = Math.min(Math.max(span * factor, MIN_SPAN), domain.to - domain.from);
+	const next = Math.min(Math.max(span * factor, minSpan), domain.to - domain.from);
 	const ratio = span === 0 ? 0.5 : (anchor - view.from) / span;
 	const from = anchor - ratio * next;
-	return clampRange({ from, to: from + next }, domain);
+	return clampRange({ from, to: from + next }, domain, minSpan);
 }
 
 /** Lines per level inside an exact instant range. The bars are drawn on aligned
@@ -171,34 +248,47 @@ function sumBetween(source: Column[], from: number, to: number): Column {
  * Colour never carries anything alone (brief §5): the readout states each level
  * in words and the hovered bucket prints its own numbers.
  */
-export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
-	// One row per source minute. Levels fold into the API's own three buckets:
-	// `debug` (and anything else a collector labelled a line with) arrives as its
-	// own group and belongs with `info`. The previous strip dropped those rows on
-	// the floor, so a debug-only minute drew as an empty column.
-	const source = useMemo(() => {
-		const byMinute = new Map<number, Column>();
-		for (const bucket of buckets) {
-			const t = Date.parse(bucket.minute);
-			if (Number.isNaN(t)) continue;
-			let row = byMinute.get(t);
-			if (!row) {
-				row = { t, error: 0, warn: 0, info: 0, total: 0 };
-				byMinute.set(t, row);
-			}
-			const level: Level =
-				bucket.level === "error" || bucket.level === "warn" ? bucket.level : "info";
-			row[level] += bucket.lines;
-			row.total += bucket.lines;
-		}
-		return [...byMinute.values()].sort((a, b) => a.t - b.t);
-	}, [buckets]);
+export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps) {
+	// One row per source bucket. Levels fold into the API's own three: `debug`
+	// (and anything else a collector labelled a line with) arrives as its own
+	// group and belongs with `info`. The previous strip dropped those rows on the
+	// floor, so a debug-only minute drew as an empty column.
+	const map = useMemo(
+		() => foldRows(buckets, (bucket) => bucket.minute),
+		[buckets],
+	);
+	// The fine rows, when the server sent any. They cover the committed range and
+	// nothing else, which is why they are a second source rather than the source:
+	// everything outside that range still has to come from the minutes.
+	const fine = useMemo(
+		() => (detail ? foldRows(detail.buckets, (bucket) => bucket.bucket) : []),
+		[detail],
+	);
 
+	// The domain is always the map's. Reading it from `fine` would shrink the
+	// whole strip to the range the reader just picked, leaving them zoomed in
+	// with nothing to navigate back out by.
 	const domain = useMemo<LogRange | null>(() => {
-		if (source.length === 0) return null;
-		return { from: source[0].t, to: source[source.length - 1].t + MINUTE };
-	}, [source]);
+		if (map.length === 0) return null;
+		return { from: map[0].t, to: map[map.length - 1].t + MINUTE };
+	}, [map]);
 	const hasDomain = domain !== null;
+
+	// Nothing below this was measured, so nothing below it is drawn: without a
+	// detail answer the finest real width is a minute, and with one it is
+	// whatever width the server says it used — never the width that was asked
+	// for, which it is free to coarsen.
+	const finest = fine.length > 0 && detail ? detail.bucketSeconds * SECOND : MINUTE;
+	const minSpan = fine.length > 0 ? finest * MIN_DETAIL_COLUMNS : MIN_SPAN;
+	const clamp = useCallback(
+		(range: LogRange, dom: LogRange) => clampRange(range, dom, minSpan),
+		[minSpan],
+	);
+	const zoom = useCallback(
+		(view: LogRange, dom: LogRange, anchor: number, factor: number) =>
+			zoomedTo(view, dom, anchor, factor, minSpan),
+		[minSpan],
+	);
 
 	// `null` is the whole window AND a standing promise to keep following it: the
 	// ring grows while the panel is open, and a reader who never navigated must
@@ -230,7 +320,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 			// every arriving line drags the reader off the thing they were reading.
 			const atEdge = current.to >= domain.to - MINUTE;
 			const wanted = atEdge ? { from: domain.to - held, to: domain.to } : current;
-			const next = clampRange(wanted, domain);
+			const next = clamp(wanted, domain);
 			return next.from === current.from && next.to === current.to ? current : next;
 		});
 	}, [domain]);
@@ -247,11 +337,19 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 		return () => observer.disconnect();
 	}, [hasDomain]);
 
-	// Level of detail: the finest bucket whose columns still clear COL_MIN.
+	// Level of detail: the finest bucket whose columns still clear COL_MIN, and
+	// never one finer than what was measured. `finest` is the floor, so a rung
+	// the source cannot fill is not a rung at all.
 	const step = useMemo(() => {
 		const room = Math.max(1, Math.floor(width / COL_MIN));
-		return STEPS.find((s) => span / s <= room) ?? STEPS[STEPS.length - 1];
-	}, [span, width]);
+		return (
+			STEPS.find((s) => s >= finest && span / s <= room) ?? STEPS[STEPS.length - 1]
+		);
+	}, [span, width, finest]);
+
+	// Below a minute only the fine rows can answer; at a minute and above the map
+	// is both complete and the only thing that covers the whole ring.
+	const source = step < MINUTE ? fine : map;
 
 	const columns = useMemo(() => {
 		const out: Column[] = [];
@@ -383,7 +481,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 			if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
 			event.preventDefault();
 			const shift = (event.deltaX / w) * (current.to - current.from);
-			setView(clampRange({ from: current.from + shift, to: current.to + shift }, dom));
+			setView(clamp({ from: current.from + shift, to: current.to + shift }, dom));
 			schedule();
 		};
 		el.addEventListener("wheel", onWheel, { passive: false });
@@ -427,7 +525,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 		}
 		const perPx = (drag.view.to - drag.view.from) / width;
 		const shift = (drag.x - x) * perPx;
-		setView(clampRange({ from: drag.view.from + shift, to: drag.view.to + shift }, domain));
+		setView(clamp({ from: drag.view.from + shift, to: drag.view.to + shift }, domain));
 	}
 
 	function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
@@ -454,7 +552,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 		const perPx = (drag.view.to - drag.view.from) / width;
 		const from = drag.view.from + Math.min(drag.x, x) * perPx;
 		const to = drag.view.from + Math.max(drag.x, x) * perPx;
-		commit(clampRange({ from, to }, domain));
+		commit(clamp({ from, to }, domain));
 	}
 
 	/** Zoom in on the instant under the pointer — the maps gesture, and the one
@@ -463,7 +561,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 	function onDoubleClick(event: ReactPointerEvent<HTMLDivElement>) {
 		if (!domain || width === 0) return;
 		const anchor = effective.from + (localX(event.clientX) / width) * span;
-		commit(zoomedTo(effective, domain, anchor, 0.5));
+		commit(zoom(effective, domain, anchor, 0.5));
 	}
 
 	function onPointerCancel() {
@@ -480,18 +578,18 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 		let next: LogRange | null;
 		switch (event.key) {
 			case "ArrowLeft":
-				next = clampRange({ from: effective.from - nudge, to: effective.to - nudge }, domain);
+				next = clamp({ from: effective.from - nudge, to: effective.to - nudge }, domain);
 				break;
 			case "ArrowRight":
-				next = clampRange({ from: effective.from + nudge, to: effective.to + nudge }, domain);
+				next = clamp({ from: effective.from + nudge, to: effective.to + nudge }, domain);
 				break;
 			case "+":
 			case "=":
-				next = zoomedTo(effective, domain, centre, 0.6);
+				next = zoom(effective, domain, centre, 0.6);
 				break;
 			case "-":
 			case "_":
-				next = zoomedTo(effective, domain, centre, 1.7);
+				next = zoom(effective, domain, centre, 1.7);
 				break;
 			case "Home":
 				next = null;
@@ -547,7 +645,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 					<button
 						type="button"
 						className={styles.step}
-						onClick={() => commit(zoomedTo(effective, domain, centre, 1.7))}
+						onClick={() => commit(zoom(effective, domain, centre, 1.7))}
 						disabled={atFull}
 						aria-label="Zoom out"
 					>
@@ -556,7 +654,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 					<button
 						type="button"
 						className={styles.step}
-						onClick={() => commit(zoomedTo(effective, domain, centre, 0.6))}
+						onClick={() => commit(zoom(effective, domain, centre, 0.6))}
 						disabled={span <= MIN_SPAN}
 						aria-label="Zoom in"
 					>
@@ -569,7 +667,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 							className={styles.chip}
 							aria-pressed={atEdge && Math.abs(span - preset.ms) <= MINUTE}
 							onClick={() =>
-								commit(clampRange({ from: domain.to - preset.ms, to: domain.to }, domain))
+								commit(clamp({ from: domain.to - preset.ms, to: domain.to }, domain))
 							}
 						>
 							{preset.label}
@@ -592,7 +690,7 @@ export function LogTimeline({ buckets, onRangeChange }: LogTimelineProps) {
 					<button
 						type="button"
 						className={`${styles.chip} ${atEdge ? styles.reserved : ""}`}
-						onClick={() => commit(clampRange({ from: domain.to - span, to: domain.to }, domain))}
+						onClick={() => commit(clamp({ from: domain.to - span, to: domain.to }, domain))}
 					>
 						Now
 					</button>

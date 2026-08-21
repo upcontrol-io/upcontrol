@@ -173,6 +173,7 @@ export const logs = (
 	services?: readonly string[],
 	levels?: readonly string[],
 	range?: { from: number; to: number } | null,
+	bucketSeconds?: number,
 ) => {
 	const params = new URLSearchParams();
 	for (const service of services ?? []) params.append("service", service);
@@ -180,6 +181,12 @@ export const logs = (
 	if (range) {
 		params.set("from", new Date(range.from).toISOString());
 		params.set("to", new Date(range.to).toISOString());
+		// Only ever sent with a range: detail describes a stretch the reader
+		// picked, and the server refuses it without both bounds. What comes back
+		// may be coarser than this asks — the answer carries the width it used.
+		if (bucketSeconds && bucketSeconds > 0) {
+			params.set("bucketSeconds", String(bucketSeconds));
+		}
 	}
 	const query = params.toString();
 	return fetchJSON<components["schemas"]["LogsResponse"]>(

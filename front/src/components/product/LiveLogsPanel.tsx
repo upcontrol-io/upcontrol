@@ -71,6 +71,23 @@ const EXPLAIN_MAX_LINE_BYTES = 2000;
 const EXPLAIN_MAX_TOTAL_BYTES = 32768;
 
 /** The bytes the server counts: UTF-8, not UTF-16 code units. */
+/** Roughly this many columns is what a strip has room for, so asking for a
+ *  width near the span divided by it keeps the request close to what will be
+ *  drawn. The server snaps whatever arrives to a width it can answer, so this
+ *  is an opening bid rather than a demand. */
+const DETAIL_COLUMNS = 120;
+
+/** How fine a histogram to ask for over the range the reader picked, or 0 for
+ *  none. Nothing is asked for above an hour: below a minute is the only place
+ *  the per-minute strip has run out of answers, and a wider range would just be
+ *  the same minutes rebuilt at cost. */
+function detailWidthFor(range: { from: number; to: number } | null): number {
+	if (!range) return 0;
+	const seconds = (range.to - range.from) / 1000;
+	if (seconds <= 0 || seconds > 3600) return 0;
+	return Math.max(1, Math.floor(seconds / DETAIL_COLUMNS));
+}
+
 const wireBytes = (text: string) => new TextEncoder().encode(text).length;
 
 /**
@@ -149,7 +166,7 @@ export function LiveLogsPanel() {
 	// chart and not this panel's several hundred rows.
 	const [range, setRange] = useState<LogRange | null>(null);
 	const { data, loading, failed } = useApiData(cacheKey, () =>
-		logsApi([...pickedServices], [...pickedLevels], range),
+		logsApi([...pickedServices], [...pickedLevels], range, detailWidthFor(range)),
 	);
 	// The last settled answer, held across cache-key changes. Picking a service
 	// asks a different question (a different key), and until it answers `data`
@@ -520,7 +537,11 @@ export function LiveLogsPanel() {
 			    empty state below, not an empty chart. It keeps describing the whole
 			    ring while a range is picked: the strip is the map, and a map that
 			    shrinks to the territory you already chose cannot get you back. */}
-			<LogTimeline buckets={answer?.volume ?? []} onRangeChange={setRange} />
+			<LogTimeline
+				buckets={answer?.volume ?? []}
+				detail={answer?.detail}
+				onRangeChange={setRange}
+			/>
 
 			{range && visible.length === 0 && awaiting ? (
 				// The pan has been sent and not yet answered. Anything else here is a

@@ -547,6 +547,26 @@ components:
         minute: { type: string, format: date-time }
         level: { $ref: "#/components/schemas/LogLevel" }
         lines: { type: integer }
+    DetailBucket:
+      type: object
+      required: [bucket, level, lines]
+      properties:
+        bucket:
+          type: string
+          format: date-time
+          description: "Start of the bucket. Named for what it is rather than reusing `minute`: at five seconds a field called minute is a claim about precision nobody measured."
+        level: { $ref: "#/components/schemas/LogLevel" }
+        lines: { type: integer }
+    VolumeDetail:
+      type: object
+      required: [bucketSeconds, buckets]
+      properties:
+        bucketSeconds:
+          type: integer
+          description: "The width actually used, which is not always the width asked for: the server snaps a request up to a size it can draw. Read it rather than assuming — the strip's columns are only as narrow as this says."
+        buckets:
+          type: array
+          items: { $ref: "#/components/schemas/DetailBucket" }
     LogsResponse:
       type: object
       required: [lines, volume]
@@ -557,6 +577,9 @@ components:
         volume:
           type: array
           items: { $ref: "#/components/schemas/VolumeBucket" }
+        detail:
+          $ref: "#/components/schemas/VolumeDetail"
+          description: "Sub-minute counts inside `from`/`to`, present only when `bucketSeconds` asked for a width finer than the minute `volume` carries. It never replaces `volume`: that one spans the whole ring and is the map the range was picked on, and a map narrowed to the territory already chosen cannot get the reader back."
         total:
           type: integer
           description: "Lines in the window before the stream limit. The panel prints 'showing N of total' rather than implying the window is what fits on screen."
@@ -2000,6 +2023,19 @@ paths:
           schema:
             type: array
             items: { type: string }
+        - in: query
+          name: bucketSeconds
+          description: >
+            Ask for sub-minute resolution inside `from`/`to`, returned as
+            `detail`. Both bounds are required — detail is what one minute of
+            the map is made of, so there has to be a minute it belongs to. The
+            value is a request, not a promise: the server snaps it up to a width
+            it can draw and answers with the one it used, and omits `detail`
+            entirely when every width it could offer would be coarser than the
+            minute `volume` already carries. Anything unparseable or not
+            positive means no detail, which is also what a client that never
+            asked receives.
+          schema: { type: integer, minimum: 1 }
       responses:
         "200":
           description: OK
