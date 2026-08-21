@@ -1,6 +1,9 @@
 package query
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestStream_AlwaysScopedToCutoff(t *testing.T) {
 	q := New(7, 11, 4242) // tenant 7, project 11, cutoff 4242
@@ -89,7 +92,7 @@ func TestServices_IsNeverFilteredByService(t *testing.T) {
 
 func TestVolume_GroupsByMinute(t *testing.T) {
 	q := New(1, 2, 3)
-	got := q.Volume(1, nil, nil)
+	got := q.Volume(nil, nil)
 	if !contains(got.SQL, "toStartOfMinute(ts)") || !contains(got.SQL, "seq >= ?") {
 		t.Fatalf("volume must group by minute within the cutoff; got:\n%s", got.SQL)
 	}
@@ -99,12 +102,79 @@ func TestVolume_FollowsTheFilters(t *testing.T) {
 	// The strip sits directly above the lines it describes. Left unfiltered it
 	// drew the whole window's mass over a stream narrowed to one service — a
 	// chart and a list, side by side, counting different things.
-	got := New(1, 2, 3).Volume(1, []string{"error"}, []string{"api"})
+	got := New(1, 2, 3).Volume([]string{"error"}, []string{"api"})
 	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
 		t.Fatalf("volume must honour the stream's filters; got:\n%s", got.SQL)
 	}
 	if len(got.Args) != 4 || got.Args[3] != "api" {
 		t.Fatalf("service must be bound as an arg; got %v", got.Args)
+	}
+}
+
+func TestDetailBucketSeconds_SnapsAndRefuses(t *testing.T) {
+	minute := Range{From: time.Unix(0, 0).UTC(), To: time.Unix(60, 0).UTC()}
+	cases := []struct {
+		name      string
+		requested int
+		within    Range
+		want      int
+	}{
+		{"a request the ladder has is kept", 5, minute, 5},
+		{"a request between rungs snaps up, never down", 3, minute, 5},
+		{"unasked means no detail", 0, minute, 0},
+		{"a range with no bounds has no minute to detail", 5, Range{}, 0},
+		{
+			// Every width this could answer at would be coarser than the minute
+			// `volume` already draws, so there is nothing to add.
+			name: "a range too wide for any offered width is refused",
+			// 600 buckets is the cap, so 60s buckets cover 10 hours; 11 is past it.
+			requested: 1,
+			within:    Range{From: time.Unix(0, 0).UTC(), To: time.Unix(11*3600, 0).UTC()},
+			want:      0,
+		},
+		{
+			// One second across an hour is 3600 buckets, past the cap — it
+			// coarsens rather than refusing, because a width that fits exists.
+			name:      "too many buckets at the asked width coarsens to one that fits",
+			requested: 1,
+			within:    Range{From: time.Unix(0, 0).UTC(), To: time.Unix(3600, 0).UTC()},
+			want:      10,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DetailBucketSeconds(c.requested, c.within); got != c.want {
+				t.Errorf("DetailBucketSeconds(%d) = %d, want %d", c.requested, got, c.want)
+			}
+		})
+	}
+}
+
+func TestVolumeDetail_BoundedAndFiltered(t *testing.T) {
+	within := Range{From: time.Unix(0, 0).UTC(), To: time.Unix(60, 0).UTC()}
+	got := New(1, 2, 3).VolumeDetail(5, within, []string{"error"}, []string{"api"})
+	if !contains(got.SQL, "toStartOfInterval(ts, INTERVAL 5 SECOND)") {
+		t.Fatalf("detail must bucket at the snapped width; got:\n%s", got.SQL)
+	}
+	// Unlike Volume, this one IS bounded: it describes a range the reader picked,
+	// and unbounded it would group the whole ring one bucket at a time.
+	if !contains(got.SQL, "ts >= ?") || !contains(got.SQL, "ts < ?") {
+		t.Fatalf("detail must be bounded by the range; got:\n%s", got.SQL)
+	}
+	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
+		t.Fatalf("detail must honour the stream's filters; got:\n%s", got.SQL)
+	}
+	if !contains(got.SQL, "seq >= ?") {
+		t.Fatalf("detail must stay inside the cutoff; got:\n%s", got.SQL)
+	}
+}
+
+func TestVolumeDetail_RefusedRequestBuildsNoQuery(t *testing.T) {
+	// A caller that asks for detail on an unbounded range gets no SQL at all,
+	// rather than a query that quietly scans the ring.
+	got := New(1, 2, 3).VolumeDetail(5, Range{}, nil, nil)
+	if got.SQL != "" {
+		t.Fatalf("an unanswerable detail request must build nothing; got:\n%s", got.SQL)
 	}
 }
 

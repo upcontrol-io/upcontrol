@@ -1728,6 +1728,8 @@ export interface paths {
                     q?: string;
                     /** @description Repeatable. The window narrows to lines from any of the named services; an empty value means the unlabelled service. Absent means every service. */
                     service?: string[];
+                    /** @description Ask for sub-minute resolution inside `from`/`to`, returned as `detail`. Both bounds are required — detail is what one minute of the map is made of, so there has to be a minute it belongs to. The value is a request, not a promise: the server snaps it up to a width it can draw and answers with the one it used, and omits `detail` entirely when every width it could offer would be coarser than the minute `volume` already carries. Anything unparseable or not positive means no detail, which is also what a client that never asked receives. */
+                    bucketSeconds?: number;
                 };
                 header?: never;
                 path?: never;
@@ -2889,9 +2891,25 @@ export interface components {
             level: components["schemas"]["LogLevel"];
             lines: number;
         };
+        DetailBucket: {
+            /**
+             * Format: date-time
+             * @description Start of the bucket. Named for what it is rather than reusing `minute`: at five seconds a field called minute is a claim about precision nobody measured.
+             */
+            bucket: string;
+            level: components["schemas"]["LogLevel"];
+            lines: number;
+        };
+        VolumeDetail: {
+            /** @description The width actually used, which is not always the width asked for: the server snaps a request up to a size it can draw. Read it rather than assuming — the strip's columns are only as narrow as this says. */
+            bucketSeconds: number;
+            buckets: components["schemas"]["DetailBucket"][];
+        };
         LogsResponse: {
             lines: components["schemas"]["LogLine"][];
             volume: components["schemas"]["VolumeBucket"][];
+            /** @description Sub-minute counts inside `from`/`to`, present only when `bucketSeconds` asked for a width finer than the minute `volume` carries. It never replaces `volume`: that one spans the whole ring and is the map the range was picked on, and a map narrowed to the territory already chosen cannot get the reader back. */
+            detail?: components["schemas"]["VolumeDetail"];
             /** @description Lines in the window before the stream limit. The panel prints 'showing N of total' rather than implying the window is what fits on screen. */
             total?: number;
             /** @description The services present in the window, most lines first. Never narrowed by the `service` parameter — this is what the picker is built from, so filtering it would leave the reader holding their own choice and no way back. */

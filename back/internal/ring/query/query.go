@@ -211,7 +211,11 @@ func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 // the strip sits directly above the lines it describes, and an unfiltered
 // chart over a filtered list is two counts of two different things, side by
 // side.
-func (q *QueryBuilder) Volume(bucketMinutes int, levels, services []string) LogQuery {
+// The bucket width is not a parameter: it is a minute, and was a minute even
+// when this took one, because every caller passed 1 and the SQL never read it.
+// A finer strip is VolumeDetail's job, bounded to a range — this one covers the
+// whole ring and cannot be allowed to return a row per second across it.
+func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
 	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
 	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
 	conditions, args = appendLevelFilter(conditions, args, levels)
@@ -220,6 +224,75 @@ func (q *QueryBuilder) Volume(bucketMinutes int, levels, services []string) LogQ
 		SQL: "SELECT toStartOfMinute(ts) AS minute, level, count() AS lines " +
 			"FROM logs WHERE " + strings.Join(conditions, " AND ") +
 			" GROUP BY minute, level ORDER BY minute",
+		Args: args,
+	}
+}
+
+// detailBuckets are the resolutions VolumeDetail will answer at, finest first.
+// A reader zooming into a burst is choosing between these, so they are the same
+// ladder the strip draws with; anything else would let the client ask for a
+// width it cannot render.
+var detailBuckets = []int{1, 2, 5, 10, 15, 30, 60}
+
+// maxDetailBuckets caps one answer. At the finest resolution this is ten
+// minutes of wall clock, which is more than a reader zoomed to seconds is
+// looking at, and it keeps a wide range from asking ClickHouse to group a whole
+// ring one second at a time.
+const maxDetailBuckets = 600
+
+// DetailBucketSeconds picks the resolution a detail read will actually use, or
+// 0 when there is no detail worth reading.
+//
+// Zero means "the per-minute map already answers this": either the caller asked
+// for nothing, or the range is wide enough that every allowed bucket would be
+// coarser than the minute Volume already returns. Detail exists to say what one
+// minute is made of — offering it at minute resolution would be the same
+// numbers under a second name.
+func DetailBucketSeconds(requested int, within Range) int {
+	if requested <= 0 || within.From.IsZero() || within.To.IsZero() {
+		return 0
+	}
+	span := within.To.Sub(within.From).Seconds()
+	if span <= 0 {
+		return 0
+	}
+	for _, size := range detailBuckets {
+		if size < requested {
+			continue
+		}
+		if span/float64(size) <= maxDetailBuckets {
+			return size
+		}
+	}
+	return 0
+}
+
+// VolumeDetail counts lines inside the range, bucketed at bucketSeconds: the
+// fine-grained companion to Volume, not a replacement for it. Volume stays the
+// whole-ring map for the reason its own comment gives, and this answers the
+// other half — what a single minute of it is made of, once the reader has
+// picked one.
+//
+// bucketSeconds is written into the SQL rather than bound, for the reason
+// appendRangeFilter gives: ClickHouse takes no bound parameter inside an
+// INTERVAL. It still never reaches the engine as caller text — the value is
+// snapped to one of detailBuckets first, so only an integer this package chose
+// can get there, and an unsnappable request yields no query at all.
+func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, services []string) LogQuery {
+	size := DetailBucketSeconds(bucketSeconds, within)
+	if size == 0 {
+		return LogQuery{}
+	}
+	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
+	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
+	conditions, args = appendLevelFilter(conditions, args, levels)
+	conditions, args = appendServiceFilter(conditions, args, services)
+	conditions, args = appendRangeFilter(conditions, args, within)
+	return LogQuery{
+		SQL: fmt.Sprintf(
+			"SELECT toStartOfInterval(ts, INTERVAL %d SECOND) AS bucket, level, count() AS lines "+
+				"FROM logs WHERE %s GROUP BY bucket, level ORDER BY bucket",
+			size, strings.Join(conditions, " AND ")),
 		Args: args,
 	}
 }
