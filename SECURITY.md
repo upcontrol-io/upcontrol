@@ -4,11 +4,11 @@
 
 Please do not open a public issue for anything security-sensitive.
 
-Email **security@upcontrol.io** with the details — what you found, how to
-reproduce it, and what an attacker could do with it. You will get a human
-reply within 72 hours, and a fix timeline once the report is confirmed.
-GitHub's [private vulnerability reporting](https://github.com/upcontrol-io/upcontrol/security/advisories/new)
-works too, if you prefer it.
+Use GitHub's [private vulnerability reporting](https://github.com/upcontrol-io/upcontrol/security/advisories/new),
+or email **contact@upcontrol.io** if you prefer. Either way, send what you
+found, how to reproduce it, and what an attacker could do with it. You will
+get a human reply within 72 hours, and a fix timeline once the report is
+confirmed.
 
 Please give us reasonable time to ship a fix before public disclosure; we
 credit reporters in the release notes unless you ask otherwise.
