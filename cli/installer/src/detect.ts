@@ -24,6 +24,9 @@ const ALIASES: Record<string, string> = {
   windsurf: 'windsurf',
 };
 
+// The number of distinct agents here is a published claim: both READMEs carry
+// a "works with N coding agents" badge that links back to this list. Adding an
+// agent means updating them, or the badge is asserting rather than measuring.
 const MARKERS: Array<[string, string]> = [
   ['CLAUDECODE', 'claude-code'],
   ['CLAUDE_CODE', 'claude-code'],

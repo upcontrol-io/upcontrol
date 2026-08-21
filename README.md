@@ -43,10 +43,12 @@ swap minimum), 10GB free disk.
 
 ## One command wires your app up
 
+[![Works with 10 coding agents](https://img.shields.io/badge/works%20with-10%20coding%20agents-blue)](cli/installer/src/detect.ts)
+
 Checks need nothing from your code. Logs do, and that is what
 [`npx upcontrol`](https://www.npmjs.com/package/upcontrol) is for — one
 command, for every agent (Claude Code, Cursor, Codex, Gemini CLI, Copilot,
-Windsurf):
+Windsurf, Amp, Aider, Cline, opencode):
 
 ```sh
 npx upcontrol

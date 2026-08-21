@@ -7,8 +7,11 @@ by the coding agent you already use.
 npx upcontrol
 ```
 
+[![Works with 10 coding agents](https://img.shields.io/badge/works%20with-10%20coding%20agents-blue)](https://github.com/upcontrol-io/upcontrol/blob/master/cli/installer/src/detect.ts)
+
 One command, for every agent (Claude Code, Cursor, Codex, Gemini CLI, Copilot,
-Windsurf). It does five deterministic things and runs no AI of its own:
+Windsurf, Amp, Aider, Cline, opencode). It does five deterministic things and
+runs no AI of its own:
 
 1. **Installs the upcontrol skill** into `.claude/skills/` and
    `.agents/skills/` (add `--copilot` for `.github/skills/`) - the canonical
