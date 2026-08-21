@@ -191,7 +191,10 @@ export const logs = (
 export type ExplainResult = components["schemas"]["ExplainResponse"];
 
 /** The AI read of a set of log lines. With no API key configured anywhere
- *  the server answers 503 ai_not_configured — its message names Settings. */
+ *  the server answers 503 ai_not_configured. Render its message rather than
+ *  a local string: on a self-host it names Settings, the door that takes a
+ *  key, and on a hosted instance it does not, because that door is not the
+ *  caller's to open. */
 export const explainLogs = (lines: string[]) =>
 	fetchJSON<ExplainResult>("/v1/logs/explain", {
 		method: "POST",

@@ -1433,7 +1433,7 @@ func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 	if err != nil {
 		if errors.Is(err, ai.ErrNotConfigured) {
 			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				"AI is not configured on this instance. Add an OpenAI-compatible API key in Settings.")
+				h.aiNotConfiguredMsg())
 			return
 		}
 		if errors.Is(err, ai.ErrOverQuota) {
@@ -1668,7 +1668,7 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	if err != nil {
 		if errors.Is(err, ai.ErrNotConfigured) {
 			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				"AI is not configured on this instance. Add an OpenAI-compatible API key in Settings.")
+				h.aiNotConfiguredMsg())
 			return
 		}
 		if errors.Is(err, ai.ErrOverQuota) {
@@ -1694,6 +1694,24 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		"limit":       res.Limit,
 		"prompt":      res.Prompt,
 	})
+}
+
+// aiNotConfiguredMsg answers the 503 with an instruction the caller can act
+// on, which is not the same sentence in both deployments.
+//
+// On a self-host the operator IS the person reading this, and the Settings
+// door accepts a key (see InstanceSettings), so naming it is the whole help.
+// On a hosted instance that door answers 404 to every tenant on purpose: an
+// instance-level knob writable from a tenant session would let one customer
+// steer everyone's brain. Sending a tenant there would be a control that
+// cannot act — so the hosted sentence states the fact and asks for nothing.
+// The key is the operator's to place, and their being without one is not a
+// task the caller can be handed.
+func (h *WriteAPI) aiNotConfiguredMsg() string {
+	if h.selfHosted {
+		return "AI is not configured on this instance. Add an OpenAI-compatible API key in Settings."
+	}
+	return "AI explains are not available on this instance."
 }
 
 // explainContext gathers the volatile server-known facts the prompt receives

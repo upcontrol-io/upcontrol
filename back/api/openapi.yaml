@@ -1797,8 +1797,10 @@ paths:
         "503":
           description: >-
             ai_not_configured — no API key anywhere (env or the Settings-set
-            instance key). Explain is off, not degraded; the message names
-            where the key goes.
+            instance key). Explain is off, not degraded. On a self-host the
+            message names Settings, the door that accepts a key; on a hosted
+            instance that door is not the caller's to open, so the message
+            states the fact and asks for nothing.
 
   /v1/instance/ai:
     put:
@@ -2075,8 +2077,10 @@ paths:
         "503":
           description: >-
             ai_not_configured — no API key anywhere (env or the Settings-set
-            instance key). Explain is off, not degraded; the message names
-            where the key goes.
+            instance key). Explain is off, not degraded. On a self-host the
+            message names Settings, the door that accepts a key; on a hosted
+            instance that door is not the caller's to open, so the message
+            states the fact and asks for nothing.
 
   /v1/plan:
     get:
