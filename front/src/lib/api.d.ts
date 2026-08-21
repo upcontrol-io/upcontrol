@@ -1368,7 +1368,7 @@ export interface paths {
                 402: components["responses"]["PaymentRequired"];
                 404: components["responses"]["NotFound"];
                 429: components["responses"]["TooManyRequests"];
-                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded; the message names where the key goes. */
+                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded. On a self-host the message names Settings, the door that accepts a key; on a hosted instance that door is not the caller's to open, so the message states the fact and asks for nothing. */
                 503: {
                     headers: {
                         [name: string]: unknown;
@@ -1850,7 +1850,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 402: components["responses"]["PaymentRequired"];
                 429: components["responses"]["TooManyRequests"];
-                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded; the message names where the key goes. */
+                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded. On a self-host the message names Settings, the door that accepts a key; on a hosted instance that door is not the caller's to open, so the message states the fact and asks for nothing. */
                 503: {
                     headers: {
                         [name: string]: unknown;
