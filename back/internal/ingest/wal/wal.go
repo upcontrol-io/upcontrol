@@ -53,7 +53,11 @@ func Open(path string) (*WAL, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
+	// No O_APPEND: Append seeks to the end itself, and one WAL file has exactly
+	// one owning process, so the flag buys nothing here — while on Windows it
+	// opens the handle for FILE_APPEND_DATA instead of FILE_WRITE_DATA, and
+	// Truncate then fails with "Access is denied".
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +117,9 @@ func (w *WAL) Checkpoint(offset int64) error {
 		if err != nil {
 			return err
 		}
+		// Retained, or every Checkpoint call opens a handle nothing closes:
+		// the branch below and Close both read w.cp.
+		w.cp = f
 		cp = f
 	} else {
 		cp = w.cp

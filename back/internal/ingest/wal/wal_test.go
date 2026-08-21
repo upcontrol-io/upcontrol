@@ -58,6 +58,12 @@ func TestCheckpointSkipsConsumed(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = off1
+	// The handle has to be retained, or each call leaks one: Close only ever
+	// closes w.cp. On Linux the leak is invisible (an open file still unlinks);
+	// on Windows it surfaces as a TempDir cleanup that cannot remove the file.
+	if w.cp == nil {
+		t.Error("Checkpoint left w.cp nil — the .cp handle is leaked, one per call")
+	}
 	var got []string
 	w.Replay(w.CheckpointOffset(), func(_ int64, data []byte) error {
 		got = append(got, string(data))
