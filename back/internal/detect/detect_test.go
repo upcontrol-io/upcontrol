@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"go.upcontrol.io/back/internal/detect/detectors"
+	detector "go.upcontrol.io/back/internal/detect/detectors"
 )
 
 // decide is pure and every branch reachable state must be pinned — including

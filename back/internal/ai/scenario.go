@@ -72,7 +72,7 @@ var ExplainIncident = Scenario{
 	// three — written when the page showed a single line of it and a fix
 	// would have been dropped on the floor. Bumping the version self-
 	// invalidates every v1 answer still in the cache.
-	Version: 2,
+	Version:       2,
 	MaxInputLines: 100,
 	MaxInputBytes: 32768,
 	MaxLineBytes:  2000,

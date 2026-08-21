@@ -1,0 +1,29 @@
+# Line endings are content here, not preference.
+#
+# Without this file a Windows checkout (core.autocrlf=true) writes CRLF into
+# every text file, and `gofmt` treats a CRLF file as unformatted — so
+# `make lint` reported the entire Go module as broken on Windows while the
+# committed bytes were clean. The same class of bug hits shell scripts (a CRLF
+# `#!/bin/sh` fails to execute inside a container) and SQL applied by goose.
+#
+# Everything text-like is normalised to LF in the working tree, on every OS.
+# The two Windows entry points keep CRLF, because that is what cmd.exe and
+# PowerShell expect from a file they execute.
+
+* text=auto eol=lf
+
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary: never touched, never diffed as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.woff  binary
+*.woff2 binary
+*.zip  binary
+*.gz   binary

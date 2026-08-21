@@ -57,7 +57,9 @@ var HTTPClient = &http.Client{Timeout: 10 * time.Second}
 // Settings screen at runtime (instance_setting), and alerts must start
 // flowing the moment it is saved — no restart. Empty resolution fails the
 // delivery with a named error, never silently.
-type TelegramChannel struct{ Token func(ctx context.Context) string }
+type TelegramChannel struct {
+	Token func(ctx context.Context) string
+}
 
 func (c *TelegramChannel) Kind() string { return "telegram" }
 

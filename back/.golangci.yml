@@ -12,6 +12,14 @@ version: "2"
 run:
   timeout: 5m
   go: "1.26"
+  # Without these the tagged files are invisible to every linter, and `unused`
+  # then reports a helper as dead because its only caller sits behind a tag.
+  # The tagged tests are a third of the suite; leaving them unlinted also
+  # leaves them unchecked.
+  build-tags:
+    - integration
+    - contract
+    - ha
 
 linters:
   default: standard

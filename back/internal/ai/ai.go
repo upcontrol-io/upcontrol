@@ -25,7 +25,7 @@ import (
 
 var ErrOverQuota = errors.New("ai: monthly quota exceeded")
 
-// ErrNotConfigured: no API key is available anywhere (env, secret file, the
+// ErrNotConfigured reports that no API key is available anywhere (env, secret file, the
 // instance_setting row the Settings screen writes). Explain is OFF, not
 // degraded — there is no fallback brain (the heuristic was removed by owner
 // decision, 2026-08-20: a canned pattern-match in the answer slot violated
