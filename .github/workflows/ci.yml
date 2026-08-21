@@ -1,6 +1,10 @@
 # CI for every push and PR. Deliberately secret-free: fork PRs run the same
-# three jobs with the same result, so a contributor's first PR is never
-# second-class.
+# jobs with the same result, so a contributor's first PR is never second-class.
+#
+# No job carries a `paths:` filter, on purpose. A required check that is path
+# filtered simply never reports on a PR that misses its paths, and branch
+# protection then waits on it forever — so every job here runs every time and
+# every one of them is safe to require.
 name: CI
 
 on:
@@ -9,21 +13,151 @@ on:
   pull_request:
 
 jobs:
-  back:
+  # The most important per-commit gate: generated artifacts must match the
+  # contracts checked in. sqlc reads a schema derived from db/postgres, and
+  # the Go API types are generated from api/openapi.yaml — a hand-edit on
+  # either side is how the two halves start disagreeing silently.
+  generate:
+    name: generate (no drift)
     runs-on: ubuntu-latest
     env:
       GOEXPERIMENT: jsonv2
+    defaults:
+      run:
+        working-directory: back
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: back/go.mod
           cache-dependency-path: back/go.sum
-      - name: Build and test
-        working-directory: back
+      - name: go mod download
+        run: go mod download
+      - name: make generate
+        run: make generate
+      - name: generated artifacts match
         run: |
-          go build ./...
-          go test ./...
+          if ! git diff --exit-code; then
+            echo "::error::stale generated artifacts; run 'make generate'"
+            exit 1
+          fi
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    defaults:
+      run:
+        working-directory: back
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: back/go.mod
+          cache-dependency-path: back/go.sum
+      - run: make lint
+
+  test:
+    name: test (unit)
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    defaults:
+      run:
+        working-directory: back
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: back/go.mod
+          cache-dependency-path: back/go.sum
+      - run: make test
+
+  build:
+    name: build (binaries)
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    defaults:
+      run:
+        working-directory: back
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: back/go.mod
+          cache-dependency-path: back/go.sum
+      - run: make build
+
+  integration:
+    name: test (integration + contract)
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    defaults:
+      run:
+        working-directory: back
+    # Without a database `make test-integration` skips EVERY integration test
+    # silently (UC_TEST_POSTGRES unset → t.Skip): a green check over zero
+    # assertions. A real Postgres service makes the skips impossible. The
+    # tagged tests are invisible to a plain `go test ./...`, which is why they
+    # need a job of their own rather than a line in the unit one.
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_DB: upcontrol
+          POSTGRES_USER: upcontrol
+          POSTGRES_PASSWORD: upcontrol
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U upcontrol"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: back/go.mod
+          cache-dependency-path: back/go.sum
+      - name: make test-integration
+        env:
+          UC_TEST_POSTGRES: >-
+            postgres://upcontrol:upcontrol@localhost:5432/upcontrol?sslmode=disable
+        run: make test-integration
+      # The DSN-based integration tests outside internal/storage (provision
+      # seeding, slug reclaim). Each package gets its OWN database: go test
+      # runs packages CONCURRENTLY and both migrate from zero — one shared
+      # fresh DB had them racing each other into 'goose_db_version does not
+      # exist' / duplicate pg_type keys. (The storage tests keep the service's
+      # default DB: they migrate with raw statements, not goose.)
+      - name: api integration tests (slug reclaim)
+        env:
+          UC_TEST_POSTGRES: >-
+            postgres://upcontrol:upcontrol@localhost:5432/upcontrol_api?sslmode=disable
+        run: |
+          docker run --rm --network host -e PGPASSWORD=upcontrol postgres:18.6 \
+            createdb -h 127.0.0.1 -U upcontrol upcontrol_api
+          go test -tags=integration ./internal/api/...
+      - name: auth integration tests (provision seeding)
+        env:
+          UC_TEST_POSTGRES: >-
+            postgres://upcontrol:upcontrol@localhost:5432/upcontrol_auth?sslmode=disable
+        run: |
+          docker run --rm --network host -e PGPASSWORD=upcontrol postgres:18.6 \
+            createdb -h 127.0.0.1 -U upcontrol upcontrol_auth
+          go test -tags=integration ./internal/account/auth/...
+      - name: ai integration tests (accountant ledger)
+        env:
+          UC_TEST_POSTGRES: >-
+            postgres://upcontrol:upcontrol@localhost:5432/upcontrol_ai?sslmode=disable
+        run: |
+          docker run --rm --network host -e PGPASSWORD=upcontrol postgres:18.6 \
+            createdb -h 127.0.0.1 -U upcontrol upcontrol_ai
+          go test -tags=integration ./internal/ai/...
+      - run: make test-contract
 
   front:
     runs-on: ubuntu-latest
