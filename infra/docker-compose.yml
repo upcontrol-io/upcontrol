@@ -161,7 +161,7 @@ services:
       # at runtime — those win over the values here.
       UC_AI_API_KEY_FILE: /run/secrets/ai_api_key
       UC_AI_BASE_URL: ${UC_AI_BASE_URL:-https://api.openai.com/v1}
-      UC_AI_MODEL: ${UC_AI_MODEL:-gpt-4o-mini}
+      UC_AI_MODEL: ${UC_AI_MODEL:-gpt-5-nano-2025-08-07}
       UC_AI_TIMEOUT: ${UC_AI_TIMEOUT:-60s}
       UC_PUBLIC_ORIGIN: ${UC_PUBLIC_ORIGIN:-http://localhost}
     depends_on:

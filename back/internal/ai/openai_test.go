@@ -147,6 +147,37 @@ func TestOpenAIClient_AdaptsToOpenAIRejectingMaxTokens(t *testing.T) {
 	}
 }
 
+// The mirror of the temperature quirk: a scenario names an effort, and a model
+// that does no reasoning refuses to be asked for one. Seen live on gpt-4o-mini
+// through api.openai.com — "Unrecognized request argument supplied:
+// reasoning_effort" — which nothing here caught, so the retry re-sent the same
+// argument and the reader got a 500 from a provider that was working perfectly.
+func TestOpenAIClient_AdaptsToModelRejectingReasoningEffort(t *testing.T) {
+	var calls int
+	var bodies []map[string]any
+	srv := adaptServer(t, "reasoning_effort",
+		"Unrecognized request argument supplied: reasoning_effort", &calls, &bodies)
+	defer srv.Close()
+
+	sc := testScenario(16384)
+	sc.ReasoningEffort = "medium"
+
+	c := newTestClient(srv)
+	if _, err := c.Complete(context.Background(), sc, Input{Lines: []string{"boom"}}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 — one refusal, one retry", calls)
+	}
+	if _, has := bodies[1]["reasoning_effort"]; has {
+		t.Fatal("the retry must drop reasoning_effort — the parameter the provider refused")
+	}
+	// Dropping one spelling must not quietly drop the rest of the scenario.
+	if bodies[1]["max_completion_tokens"] != float64(42) {
+		t.Fatalf("retry max_completion_tokens = %v, want 42", bodies[1]["max_completion_tokens"])
+	}
+}
+
 // streamAnswer is the strict-shape payload every happy-path stream carries.
 // The client only assembles bytes, so tests may split or repeat it freely.
 // Deliberately a different name from the integration suite's validAnswer —

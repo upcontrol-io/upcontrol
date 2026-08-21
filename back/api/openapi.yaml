@@ -1850,7 +1850,7 @@ paths:
                     OpenAI-compatible provider's key works.
                 model:
                   type: string
-                  description: The model name as the provider spells it, e.g. gpt-4o-mini.
+                  description: The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07.
                 baseUrl:
                   type: string
                   description: >-
