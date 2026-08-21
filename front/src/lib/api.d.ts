@@ -1404,7 +1404,7 @@ export interface paths {
                     "application/json": {
                         /** @description An OpenAI-format API key (like sk-...). Any OpenAI-compatible provider's key works. */
                         key?: string;
-                        /** @description The model name as the provider spells it, e.g. gpt-4o-mini. */
+                        /** @description The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07. */
                         model?: string;
                         /** @description The chat-completions endpoint's base, e.g. https://api.openai.com/v1 — any OpenAI-compatible proxy or gateway. Empty keeps the env-configured one. */
                         baseUrl?: string;

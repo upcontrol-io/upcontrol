@@ -155,7 +155,7 @@ func Load(service string) (Config, error) {
 
 	c.AIBaseURL = getenv("UC_AI_BASE_URL", "https://api.openai.com/v1")
 	c.AIAPIKey = getenvOrFile("UC_AI_API_KEY", &c.Warnings)
-	c.AIModel = getenv("UC_AI_MODEL", "gpt-4o-mini")
+	c.AIModel = getenv("UC_AI_MODEL", "gpt-5-nano-2025-08-07")
 	c.AITimeout = getenvDuration("UC_AI_TIMEOUT", 60*time.Second, &errs)
 	c.AILogPrompt = os.Getenv("UC_AI_LOG_PROMPT") == "1"
 	c.DetectEnabled = os.Getenv("UC_DETECT_ENABLED") != "0"

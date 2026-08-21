@@ -136,7 +136,7 @@ func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if model := strings.TrimSpace(req.Model); model != "" {
 			if len(model) > 128 || strings.ContainsAny(model, " \t\r\n") {
 				writeAPIErrMsg(w, http.StatusBadRequest, "invalid_model",
-					"The model name as the provider spells it, e.g. gpt-4o-mini.")
+					"The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07.")
 				return
 			}
 			values[aiModelSetting] = model

@@ -347,7 +347,7 @@ export function Settings() {
 					<Input
 						value={aiModelField}
 						onChange={(event) => setAiModelField(event.target.value)}
-						placeholder="Model: gpt-4o-mini"
+						placeholder="Model: gpt-5-nano-2025-08-07"
 						aria-label="Chat model"
 						autoComplete="off"
 					/>

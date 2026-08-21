@@ -224,7 +224,7 @@ func TestLoadAIDefaults(t *testing.T) {
 	if c.AIAPIKey != "" {
 		t.Errorf("AIAPIKey = %q, want empty", c.AIAPIKey)
 	}
-	if c.AIModel != "gpt-4o-mini" {
+	if c.AIModel != "gpt-5-nano-2025-08-07" {
 		t.Errorf("AIModel = %q, want default", c.AIModel)
 	}
 	if c.AITimeout != 60*time.Second {
