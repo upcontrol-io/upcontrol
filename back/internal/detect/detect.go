@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
-	"go.upcontrol.io/back/internal/detect/detectors"
+	detector "go.upcontrol.io/back/internal/detect/detectors"
 	"go.upcontrol.io/back/internal/detect/suppression"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/storage/ch"

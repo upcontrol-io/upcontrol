@@ -11,6 +11,7 @@
 // tenant session on a multi-tenant deployment would let any tenant steer
 // everyone's brain — so off a self-host the answer is 404, the same "this
 // door does not exist" the anonymous mint gives (Decision 22's shape).
+
 package api
 
 import (

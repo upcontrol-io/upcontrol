@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
+
 	sqlc "go.upcontrol.io/back/gen/pg"
 )
 

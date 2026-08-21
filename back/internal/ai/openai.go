@@ -389,13 +389,13 @@ type chatRequest struct {
 	// an uncapped call, not an error). A 400 naming either parameter
 	// teaches paramQuirks which one this gateway wants; the client-side
 	// MaxOutputBytes abort bounds the stream regardless.
-	MaxTokens           int    `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
-	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   streamOptions  `json:"stream_options"`
-	ResponseFormat  responseFormat `json:"response_format"`
-	Messages        []chatMessage  `json:"messages"`
+	MaxTokens           int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
+	Stream              bool           `json:"stream"`
+	StreamOptions       streamOptions  `json:"stream_options"`
+	ResponseFormat      responseFormat `json:"response_format"`
+	Messages            []chatMessage  `json:"messages"`
 }
 
 type streamOptions struct {

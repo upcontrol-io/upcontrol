@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -199,7 +200,7 @@ func TestOpenAIClient_NoKeyIsNotConfigured(t *testing.T) {
 	if c.Configured(context.Background()) {
 		t.Fatal("a key resolving to empty must not report configured")
 	}
-	if _, err := c.Complete(context.Background(), Scenario{Key: "explain_logs"}, Input{Lines: []string{"x"}}); err != ErrNotConfigured {
+	if _, err := c.Complete(context.Background(), Scenario{Key: "explain_logs"}, Input{Lines: []string{"x"}}); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("Complete without a key = %v, want ErrNotConfigured", err)
 	}
 	c.Settings = func(context.Context) OpenAISettings {
