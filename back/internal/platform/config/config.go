@@ -116,6 +116,16 @@ type Config struct {
 
 	// Public site
 	PublicOrigin string // https://upcontrol.io
+
+	// Google sign-in. Empty client id or secret leaves the door answering 503
+	// and saying so; the magic link is unaffected either way.
+	GoogleClientID     string
+	GoogleClientSecret string
+	// The exact redirect_uri values a code may be exchanged for. More than one
+	// because the app is served from more than one origin (the container, the
+	// dev server), and Google matches the value character for character.
+	// Defaults to PublicOrigin + /sign-in.
+	GoogleRedirectURIs []string
 }
 
 // Load reads the environment into Config. Required must all be present; missing
@@ -192,6 +202,14 @@ func Load(service string) (Config, error) {
 	c.SecretKeyHex = getenvOrFile("UC_SECRET_KEY_HEX", &c.Warnings)
 	c.PublicOrigin = getenv("UC_PUBLIC_ORIGIN", "http://localhost:5173")
 
+	c.GoogleClientID = getenv("UC_GOOGLE_CLIENT_ID", "")
+	c.GoogleClientSecret = getenvOrFile("UC_GOOGLE_CLIENT_SECRET", &c.Warnings)
+	// The default is the one origin we always know. A deployment served from a
+	// second one (the dev server on :5173 beside the container on :80) lists
+	// both, comma-separated, because Google compares the value verbatim.
+	c.GoogleRedirectURIs = splitList(getenv("UC_GOOGLE_REDIRECT_URIS",
+		strings.TrimRight(c.PublicOrigin, "/")+"/sign-in"))
+
 	// Validate required production values. In dev we allow missing DB URLs so the
 	// skeleton can boot without infrastructure (Phase 1).
 	if c.Environment == "prod" {
@@ -236,6 +254,19 @@ func getenv(k, def string) string {
 // that, its *_FILE companion (a Docker-secrets-style path whose contents are
 // the value). The file path is trimmed of surrounding whitespace; the value is
 // returned verbatim otherwise. This is how compose mounts UC_*_FILE secrets.
+// splitList reads a comma-separated setting. Empty entries are dropped rather
+// than kept as "", which would otherwise become an allowlist entry that matches
+// a caller who sent no value at all.
+func splitList(v string) []string {
+	out := []string{}
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func getenvOrFile(key string, warns *[]string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

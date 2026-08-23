@@ -1157,6 +1157,13 @@ paths:
     post:
       tags: [auth]
       summary: Sign in / up via Google OAuth code.
+      description: >
+        Exchanges a one-time authorization code for a session. The code is
+        exchanged server-side with the client secret; a token minted in the
+        browser is never accepted. redirect_uri must be one the deployment
+        published (UC_GOOGLE_REDIRECT_URIS) and must be the same value the
+        browser sent to Google. code_verifier is the PKCE verifier when the
+        page used one.
       security: []
       requestBody:
         required: true
@@ -1164,9 +1171,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [code]
+              required: [code, redirect_uri]
               properties:
                 code: { type: string }
+                redirect_uri: { type: string }
+                code_verifier: { type: string }
       responses:
         "200":
           description: Signed in; uc_session cookie set.
@@ -1177,7 +1186,25 @@ paths:
               application/json:
                 { schema: { $ref: "#/components/schemas/Account" } },
             }
+        "400":
+          description: >
+            bad_body, missing_code, or bad_redirect_uri — the redirect_uri is
+            not one this deployment published.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "503":
+          description: >
+            google_not_configured — this instance has no Google client, so the
+            magic link is the way in.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
 
   /v1/auth/magic-link:
     post:

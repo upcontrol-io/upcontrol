@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/sha256"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,6 +130,58 @@ func TestClientIP(t *testing.T) {
 	r2.RemoteAddr = "198.51.100.7:443"
 	if got := analytics.ClientIP(r2); got != "198.51.100.7" {
 		t.Fatalf("clientIP = %q, want 198.51.100.7", got)
+	}
+}
+
+// The magic-link door has the same exposure the Google one does: it needs no
+// cookie from a victim because it installs one. An attacker who mails a code to
+// their OWN address can cross-site POST the redeem and leave the reader signed
+// into the attacker's tenant. The guard runs before the pool is touched, which
+// is why a nil pool is enough to test it.
+func TestMagicLinkRefusesACrossSitePost(t *testing.T) {
+	t.Parallel()
+	h := NewMagicLink(nil, nil, true, nil, nil, slog.New(slog.DiscardHandler))
+	body := `{"email":"ada@example.com","token":"1ece76e3"}`
+
+	for _, site := range []string{"cross-site", "same-site", "none"} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/auth/magic-link", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Sec-Fetch-Site", site)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("Sec-Fetch-Site %q: code = %d, want 403", site, w.Code)
+		}
+	}
+	// A cross-site form can only send these, and text/plain is the one whose
+	// body parses as JSON.
+	for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", ""} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/auth/magic-link", strings.NewReader(body))
+		if ct != "" {
+			r.Header.Set("Content-Type", ct)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("Content-Type %q: code = %d, want 403", ct, w.Code)
+		}
+	}
+}
+
+// The other half of the same rule: the person table's email column is UNIQUE
+// and byte-exact, so one spelling has to win before anything is stored.
+func TestNormalizeEmailFoldsCaseAndSpace(t *testing.T) {
+	t.Parallel()
+	for _, tc := range [][2]string{
+		{"Ada@Example.COM", "ada@example.com"},
+		{"  ada@example.com  ", "ada@example.com"},
+		{"ADA@EXAMPLE.COM", "ada@example.com"},
+		{"ada@example.com", "ada@example.com"},
+		{"   ", ""},
+	} {
+		if got := normalizeEmail(tc[0]); got != tc[1] {
+			t.Errorf("normalizeEmail(%q) = %q, want %q", tc[0], got, tc[1])
+		}
 	}
 }
 

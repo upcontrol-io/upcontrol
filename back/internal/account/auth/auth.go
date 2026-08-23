@@ -77,11 +77,21 @@ type magicLinkReq struct {
 }
 
 func (h *MagicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if crossSitePost(r) {
+		// A redeem forged from another site would hand this browser a session
+		// in whatever account the attacker has a code for.
+		writeErr(w, http.StatusForbidden, "cross_site")
+		return
+	}
 	var req magicLinkReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_body")
 		return
 	}
+	// Normalised before anything is stored or looked up: the code is keyed by
+	// this string, so a request under one spelling and a redeem under another
+	// would never find each other.
+	req.Email = normalizeEmail(req.Email)
 	if req.Email == "" {
 		writeErr(w, http.StatusBadRequest, "missing_email")
 		return
@@ -229,6 +239,13 @@ func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 	// the request means visitor_id 0 — the events still count, unlinked.
 	h.rec.ServerEvent(ctx, "signed_in", person.ID, person.TenantID, nil)
 	h.rec.LinkPerson(ctx, person.ID, person.TenantID)
+	writeAccount(w, person)
+}
+
+// writeAccount is the body every sign-in door answers with. Shared for the same
+// reason ensureAccount is: two doors that build the account payload separately
+// are two doors that eventually describe the same account differently.
+func writeAccount(w http.ResponseWriter, person personInfo) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       uuidStr(person.PublicID),
 		"name":     person.Name,
@@ -276,6 +293,7 @@ func Provision(ctx context.Context, pool *pg.Pool, email, domain string, rec *an
 // arbitrary addresses — harmless while they are stored unsent, a mailbomb the
 // day the mailer ships.
 func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (string, error) {
+	email = normalizeEmail(email)
 	h := &MagicLink{pool: pool}
 	if cnt, err := pool.Queries().RecordMagicLinkIP(ctx, ip); err == nil && cnt > ipWindowCap {
 		return "", ErrRateLimited
@@ -302,6 +320,9 @@ func (h *MagicLink) ensurePerson(ctx context.Context, email string) (personInfo,
 }
 
 func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (personInfo, error) {
+	// Defensive: every caller normalises, and this is where it would matter
+	// if one ever forgot — the UNIQUE column below is byte-exact.
+	email = normalizeEmail(email)
 	q := h.pool.Queries()
 	existing, err := q.GetPersonByEmail(ctx, &email)
 	if err == nil {
@@ -515,6 +536,56 @@ func validateCode(rec codeRecord, submitted string, now time.Time) bool {
 }
 
 // --- helpers ---
+
+// crossSitePost reports whether this POST came from another site.
+//
+// Every OTHER write in this API is protected from cross-site forgery by
+// accident: SameSite=Lax keeps the victim's session cookie off a cross-site
+// request, so the request arrives as nobody. The sign-in doors are the
+// exception, because they need no cookie from the victim — they INSTALL one.
+// An attacker who obtains a credential for an account THEY control (a Google
+// code minted against our public client id, or a magic-link code mailed to
+// their own address) can cross-site POST it here and leave the victim holding
+// a session in the attacker's tenant, reading their monitors and typing into
+// their project from then on.
+//
+// Two checks, either of which is enough on its own:
+//
+// Sec-Fetch-Site is set by the browser, cannot be forged by the page, and says
+// plainly where the request came from. A non-browser client (the CLI, a test,
+// curl) omits it entirely and is allowed through — nothing can forge a request
+// from a program that has no ambient session to abuse.
+//
+// The Content-Type is the second lock. A cross-site HTML form can only send
+// three encodings, none of them JSON, and the text/plain one is what makes a
+// form POST parse as JSON at all. Demanding application/json forces an
+// attacker onto fetch(), which then needs a CORS preflight this server never
+// answers.
+func crossSitePost(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site", "none":
+		return true
+	}
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return !strings.EqualFold(strings.TrimSpace(ct), "application/json")
+}
+
+// normalizeEmail is the one spelling of an address this package stores or
+// looks anything up by.
+//
+// The person table's email column is UNIQUE and compared byte for byte, so
+// "Ada@example.com" and "ada@example.com" are two accounts with two tenants
+// and two sets of monitors. A phone capitalises the first letter of a text
+// field by default and Google returns the address in whatever case it holds
+// it, which is how the same person arrives spelled two ways through two doors.
+// Normalising at every entrance costs nothing and is the only place it can be
+// done once.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]any{
