@@ -278,62 +278,42 @@ func statusEmoji(status string) string {
 // malformed HTML, which surfaced as a delivery that retried forever.
 func formatTelegram(p AlertPayload, appURL string) string {
 	esc := html.EscapeString
-	var sb strings.Builder
-	sb.WriteString(statusEmoji(p.Status))
-	sb.WriteString(" <b>")
-	sb.WriteString(esc(p.Title))
-	sb.WriteString("</b>\n")
+	s := statusEmoji(p.Status) + " <b>" + esc(p.Title) + "</b>\n"
 	if p.Summary != "" {
-		sb.WriteString("\n")
-		sb.WriteString(esc(p.Summary))
-		sb.WriteString("\n")
+		s += "\n" + esc(p.Summary) + "\n"
 	}
 	// No "Monitor:" row here, unlike the email's fact table: on this surface
 	// the title already names the monitor, and a phone screen has no height
 	// to spend saying it twice.
 	if len(p.Fields) > 0 {
-		sb.WriteString("\n")
+		s += "\n"
 		for _, f := range p.Fields {
-			sb.WriteString(esc(f.Label))
-			sb.WriteString(": ")
+			v := esc(f.Value)
 			if f.Mono {
-				sb.WriteString("<code>")
-				sb.WriteString(esc(f.Value))
-				sb.WriteString("</code>")
-			} else {
-				sb.WriteString(esc(f.Value))
+				v = "<code>" + v + "</code>"
 			}
-			sb.WriteString("\n")
+			s += esc(f.Label) + ": " + v + "\n"
 		}
 	}
 	if len(p.Lines) > 0 {
-		sb.WriteString("\n<pre>")
+		lines := make([]string, len(p.Lines))
 		for i, line := range p.Lines {
-			if i > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(esc(line))
+			lines[i] = esc(line)
 		}
-		sb.WriteString("</pre>\n")
+		s += "\n<pre>" + strings.Join(lines, "\n") + "</pre>\n"
 	}
-	for _, a := range p.Actions {
-		if a.URL == "" {
-			continue
+	// The class link joins the payload's own actions so one loop writes every
+	// anchor. Copied first: an append must not scribble on the payload's slice.
+	links := append([]ActionButton(nil), p.Actions...)
+	if href, label := alertLink(p, appURL); href != "" {
+		links = append(links, ActionButton{Label: label, URL: href})
+	}
+	for _, a := range links {
+		if a.URL != "" {
+			s += "\n<a href=\"" + esc(a.URL) + "\">" + esc(a.Label) + "</a>"
 		}
-		sb.WriteString("\n<a href=\"")
-		sb.WriteString(esc(a.URL))
-		sb.WriteString("\">")
-		sb.WriteString(esc(a.Label))
-		sb.WriteString("</a>")
 	}
-	if link, label := alertLink(p, appURL); link != "" {
-		sb.WriteString("\n<a href=\"")
-		sb.WriteString(esc(link))
-		sb.WriteString("\">")
-		sb.WriteString(esc(label))
-		sb.WriteString("</a>")
-	}
-	return sb.String()
+	return s
 }
 
 // alertLink is the message's closing link, chosen by the delivery's class —
