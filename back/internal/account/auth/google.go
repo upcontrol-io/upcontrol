@@ -105,6 +105,16 @@ type googleReq struct {
 func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
+	// The door an attacker does not need a victim's cookie to walk through: it
+	// installs one. A code minted against our own public client id, for an
+	// account the attacker controls, cross-site POSTed here would leave the
+	// reader signed into somebody else's tenant. The page's `state` cannot stop
+	// that, because an attacker simply does not use the page.
+	if crossSitePost(r) {
+		writeErr(w, http.StatusForbidden, "cross_site")
+		return
+	}
+
 	if !h.Configured() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"error": map[string]any{
@@ -149,8 +159,11 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalised, or the same person signing in through the two doors lands in
+	// two accounts: Google returns the address in whatever case it holds, and
+	// the person table's email column is UNIQUE and byte-exact.
 	person, err := (&MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}).
-		ensurePerson(ctx, claims.Email)
+		ensurePerson(ctx, normalizeEmail(claims.Email))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return

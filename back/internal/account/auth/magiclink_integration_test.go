@@ -65,6 +65,8 @@ func TestDevModeFailingSendStillReturnsDevToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/auth/magic-link",
 		strings.NewReader(`{"email":"`+email+`"}`))
+	// What the page sends, and what the cross-site guard requires.
+	r.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusAccepted {

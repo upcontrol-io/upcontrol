@@ -58,8 +58,16 @@ func googleWith(t *testing.T, handler http.HandlerFunc) *Google {
 	return g
 }
 
-func postGoogle(h *Google, body string) *httptest.ResponseRecorder {
+// The body shape below is what the page sends. jsonPost sets the header that
+// goes with it: without one the cross-site guard refuses, which is its job.
+func jsonPost(body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/google", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func postGoogle(h *Google, body string) *httptest.ResponseRecorder {
+	req := jsonPost(body)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -255,5 +263,74 @@ func TestGoogleDropsBlankRedirectEntries(t *testing.T) {
 	}
 	if g.allowedRedirect("") {
 		t.Error("an empty redirect_uri must never be allowed")
+	}
+}
+
+// The guard that makes the page's `state` check something an attacker cannot
+// decline to participate in. This is the one door that needs no cookie from a
+// victim, because it installs one: a code minted against our own public client
+// id, for an account the attacker controls, would otherwise leave the reader
+// signed into somebody else's tenant.
+
+const goodBody = `{"code":"c","redirect_uri":"http://localhost/sign-in"}`
+
+func TestGoogleRefusesACrossSitePost(t *testing.T) {
+	g := googleWith(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("the token endpoint was reached by a cross-site request")
+	})
+	for _, site := range []string{"cross-site", "same-site", "none"} {
+		t.Run(site, func(t *testing.T) {
+			req := jsonPost(goodBody)
+			req.Header.Set("Sec-Fetch-Site", site)
+			rr := httptest.NewRecorder()
+			g.ServeHTTP(rr, req)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("code = %d, want 403 for Sec-Fetch-Site: %s", rr.Code, site)
+			}
+		})
+	}
+}
+
+func TestGoogleRefusesAFormEncodedPost(t *testing.T) {
+	// The shape of the attack: a cross-site HTML form can send only three
+	// encodings, and text/plain is the one whose body parses as JSON. Demanding
+	// application/json forces an attacker onto fetch(), which then needs a CORS
+	// preflight this server never answers.
+	g := googleWith(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("the token endpoint was reached by a form post")
+	})
+	for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/google", strings.NewReader(goodBody))
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		rr := httptest.NewRecorder()
+		g.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("Content-Type %q: code = %d, want 403", ct, rr.Code)
+		}
+	}
+}
+
+func TestGoogleAllowsThePageAndTheProgram(t *testing.T) {
+	// same-origin is the page itself; an absent Sec-Fetch-Site is a non-browser
+	// caller (the CLI, a test, curl), which carries no ambient session to forge.
+	// The charset parameter has to survive too, because browsers send one.
+	for _, site := range []string{"same-origin", ""} {
+		var reached bool
+		g := googleWith(t, func(w http.ResponseWriter, _ *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusBadRequest)
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/google", strings.NewReader(goodBody))
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		rr := httptest.NewRecorder()
+		g.ServeHTTP(rr, req)
+		if !reached {
+			t.Errorf("Sec-Fetch-Site %q was refused before the exchange", site)
+		}
 	}
 }
