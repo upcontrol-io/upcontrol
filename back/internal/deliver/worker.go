@@ -124,6 +124,12 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 		return
 	}
 
+	// The delivery's class travels with the payload from here on: it is queue
+	// state, not detector state, and a channel that renders needs it. The same
+	// status "down" is an outage page and a fifteen-minute follow-up, and they
+	// do not read the same.
+	payload.Class = item.Class
+
 	// Personal telegram channels (a recipient person) get Acknowledge/Resolve
 	// inline buttons; broadcast groups never do (design D5 — in a group, the
 	// presser of a button cannot be name-verified).

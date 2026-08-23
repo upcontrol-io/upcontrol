@@ -31,6 +31,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
+	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
@@ -119,17 +120,36 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 		// does not schedule one — a tenant that downgraded keeps the setting
 		// but stops getting what it bought.
 		plan, _ := q.GetTenantPlan(ctx, mon.TenantID)
+
+		// The facts the incident already holds, so the alert can name what
+		// broke instead of only that something did. Only what was measured: a
+		// field the row does not carry is omitted, never sent as an empty
+		// string for a renderer to draw as a blank row.
+		//
+		// Built once, outside the channel loop: one outage has one start time,
+		// and computing it per channel would tell email and telegram different
+		// minutes for the same incident.
+		fields := []deliver.Field{}
+		if mon.Target != "" {
+			fields = append(fields, deliver.Field{Label: "Target", Value: mon.Target, Mono: true})
+		}
+		fields = append(fields, deliver.Field{
+			Label: "Down since",
+			Value: time.Now().UTC().Format("2 Jan 2006, 15:04") + " UTC",
+		})
+		payload, _ := json.Marshal(map[string]any{
+			"title":        title,
+			"status":       "down",
+			"incident_id":  uuidStr(row.PublicID),
+			"monitor_name": mon.Name,
+			"fields":       fields,
+		})
+
 		for _, ch := range chans {
 			settings := notifysettings.Resolve(ch.Notify)
 			if !settings.WebsiteDown {
 				continue
 			}
-			payload, _ := json.Marshal(map[string]any{
-				"title":        title,
-				"status":       "down",
-				"incident_id":  uuidStr(row.PublicID),
-				"monitor_name": mon.Name,
-			})
 			_ = q.EnqueueDelivery(ctx, sqlc.EnqueueDeliveryParams{
 				TenantID:   mon.TenantID,
 				IncidentID: &row.ID,
