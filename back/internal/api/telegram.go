@@ -13,12 +13,12 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"net/http"
 	"strings"
 	"time"
 
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/channel/telegram"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -94,13 +94,16 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 	}
 
 	token := "inv_" + randomHex()
-	hash := sha256.Sum256([]byte(token))
+	// The bot's own hasher, not a local sha256: mint and redeem hashing the
+	// token independently is how every invite ever minted was unredeemable —
+	// this side hashed the full "inv_…" string, the bot hashed the tail.
+	hash := telegram.InviteTokenHash(token)
 	expires := time.Now().UTC().Add(inviteTTL)
 	var id int64
 	if err := h.pool.Raw().QueryRow(ctx,
 		`INSERT INTO telegram_invite (tenant_id, role, invited_by, token_hash, expires_at)
 		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		tenantID, req.Role, personID, hash[:], expires).Scan(&id); err != nil {
+		tenantID, req.Role, personID, hash, expires).Scan(&id); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}

@@ -300,7 +300,11 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	// One-time, race-safe: the atomic UPDATE ... WHERE redeemed_at IS NULL is
 	// the same claim-token pattern as install.go — two users racing the same
 	// link cannot both win, and a replay hits "no rows".
-	hash := sha256Sum(token)
+	//
+	// Hashed as the FULL payload, prefix included — the form the mint side
+	// stored. CutPrefix above is a format check only; hashing its remainder
+	// is the bug InviteTokenHash exists to make unrepeatable.
+	hash := InviteTokenHash(payload)
 	var tenantID int64
 	var role string
 	if err := b.pool.Raw().QueryRow(ctx,
@@ -624,6 +628,19 @@ func (b *Bot) handleResolve(ctx context.Context, cb *tgCallback, incID, personID
 func sha256Sum(s string) []byte {
 	sum := sha256.Sum256([]byte(s))
 	return sum[:]
+}
+
+// InviteTokenHash is THE hash of a Telegram invite token, exported so the
+// mint side (api.Telegram) and the redeem side (handleStart) compile against
+// one definition. They used to hash independently — mint hashed the full
+// "inv_…" string, redeem hashed the tail after CutPrefix — so no invite ever
+// minted could be redeemed, and both suites stayed green because each side
+// was only ever tested against itself.
+//
+// The input is the FULL deep-link payload, prefix included: that is the form
+// already sitting hashed in every telegram_invite row.
+func InviteTokenHash(payload string) []byte {
+	return sha256Sum(payload)
 }
 
 // parseCallback splits inline-button callback data of the form "action:id"
