@@ -212,7 +212,7 @@ type keyFound struct {
 
 func (h *Ingester) authenticate(r *http.Request, body []byte) (Tenant, keyFound, error) {
 	var kf keyFound
-	if k := r.Header.Get("X-UpControl-Key"); k != "" {
+	if k := r.Header.Get("X-Upcontrol-Key"); k != "" {
 		kf.key = strings.TrimSpace(k)
 	} else if k := r.Header.Get("Authorization"); strings.HasPrefix(k, "Bearer ") {
 		kf.key = strings.TrimSpace(strings.TrimPrefix(k, "Bearer "))

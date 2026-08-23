@@ -301,10 +301,10 @@ func (h *Install) claim(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestKey reads the project key from either header the CLI may send
-// (X-UpControl-Key first, then an Authorization bearer) — the same extraction
+// (X-Upcontrol-Key first, then an Authorization bearer) — the same extraction
 // POST /i accepts.
 func requestKey(r *http.Request) string {
-	key := r.Header.Get("X-UpControl-Key")
+	key := r.Header.Get("X-Upcontrol-Key")
 	if key == "" {
 		if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
 			key = strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
