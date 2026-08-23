@@ -19,6 +19,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		Title:       "Test title",
 		Status:      "down",
 		MonitorName: "example.com/checkout",
+		IncidentID:  "7d31b0c4-8a19-4f2e-9c3d-1b5e6f0a2d47",
 		Fields:      []Field{{Label: "Region", Value: "fra"}},
 		Class:       "page",
 	}
@@ -79,27 +80,35 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 	if vars == nil {
 		t.Fatalf("vars missing from %v", body)
 	}
+	// incident_id is what the mail's button is built from: without it the
+	// reader is sent to the dashboard to go looking for what they were just
+	// written to about.
 	for _, c := range [][2]string{
 		{"class", "page"}, {"status", "down"}, {"title", "Test title"},
 		{"to", "ops@example.com"}, {"app_url", "https://x.test/app"},
+		{"incident_id", "7d31b0c4-8a19-4f2e-9c3d-1b5e6f0a2d47"},
 	} {
 		if vars[c[0]] != c[1] {
 			t.Errorf("vars[%s] = %v, want %q", c[0], vars[c[0]], c[1])
 		}
 	}
-	// The monitor leads the fact table, then whatever the detector attached.
-	// The ORDER is the assertion: it is the whole reason Fields is a slice.
+	// The monitor leads the fact table, then whatever the detector attached,
+	// then the incident. The ORDER is the assertion: it is the whole reason
+	// Fields is a slice and not a map.
 	fields, _ := vars["fields"].([]any)
-	if len(fields) != 2 {
-		t.Fatalf("fields = %v, want 2 rows", vars["fields"])
+	want := [][3]any{
+		{"Monitor", "example.com/checkout", false},
+		{"Region", "fra", false},
+		{"Incident", "7d31b0c4-8a19-4f2e-9c3d-1b5e6f0a2d47", true},
 	}
-	first, _ := fields[0].([]any)
-	second, _ := fields[1].([]any)
-	if len(first) != 3 || first[0] != "Monitor" || first[1] != "example.com/checkout" {
-		t.Errorf("fields[0] = %v, want [Monitor example.com/checkout false]", fields[0])
+	if len(fields) != len(want) {
+		t.Fatalf("fields = %v, want %d rows", vars["fields"], len(want))
 	}
-	if len(second) != 3 || second[0] != "Region" || second[1] != "fra" {
-		t.Errorf("fields[1] = %v, want [Region fra false]", fields[1])
+	for i, w := range want {
+		got, _ := fields[i].([]any)
+		if len(got) != 3 || got[0] != w[0] || got[1] != w[1] || got[2] != w[2] {
+			t.Errorf("fields[%d] = %v, want %v", i, fields[i], w)
+		}
 	}
 }
 
