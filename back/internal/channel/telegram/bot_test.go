@@ -1,6 +1,8 @@
 package telegram
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
@@ -89,5 +91,24 @@ func TestParseMuteDuration(t *testing.T) {
 		if !tc.ok && err == nil {
 			t.Fatalf("parseMuteDuration(%q) accepted a bad input", tc.in)
 		}
+	}
+}
+
+// The incident this pins: mint (api.Telegram) hashed the full "inv_…" string
+// while redeem hashed the tail after CutPrefix, so no invite ever minted could
+// be redeemed — and both suites stayed green, because each side was only ever
+// tested against itself. The compiler now enforces one hasher (api calls
+// telegram.InviteTokenHash); this pins the FORM that hasher must keep, because
+// every telegram_invite row already stores it: sha256 of the full payload,
+// prefix included.
+func TestInviteTokenHashCoversTheFullPayload(t *testing.T) {
+	payload := "inv_cd3043718570df4147d831aa47d8cdc5"
+	want := sha256.Sum256([]byte(payload))
+	if got := InviteTokenHash(payload); !bytes.Equal(got, want[:]) {
+		t.Fatalf("InviteTokenHash(%q) = %x, want sha256 of the FULL payload %x", payload, got, want)
+	}
+	tail := sha256.Sum256([]byte("cd3043718570df4147d831aa47d8cdc5"))
+	if got := InviteTokenHash(payload); bytes.Equal(got, tail[:]) {
+		t.Fatal("InviteTokenHash hashed the tail after the prefix — the exact bug that made every invite unredeemable")
 	}
 }
