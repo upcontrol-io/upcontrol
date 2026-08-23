@@ -118,7 +118,8 @@ func (q *Queries) GetEmailChannelTarget(ctx context.Context, tenantID int64) (st
 }
 
 const getIncidentForFollowUp = `-- name: GetIncidentForFollowUp :one
-SELECT i.status, i.title, i.public_id, coalesce(m.name, '') AS monitor_name
+SELECT i.status, i.title, i.public_id, coalesce(m.name, '') AS monitor_name,
+       i.detected_at, i.resolved_at
   FROM incident i LEFT JOIN monitor m ON m.id = i.monitor_id
  WHERE i.id = $1
 `
@@ -128,10 +129,13 @@ type GetIncidentForFollowUpRow struct {
 	Title       string
 	PublicID    pgtype.UUID
 	MonitorName string
+	DetectedAt  pgtype.Timestamptz
+	ResolvedAt  pgtype.Timestamptz
 }
 
 // The follow-up's facts, read at send time: still open → "still down",
-// resolved → "recovered".
+// resolved → "recovered". The two timestamps are the recovered message's
+// duration line — measured bounds, not a number composed at enqueue time.
 func (q *Queries) GetIncidentForFollowUp(ctx context.Context, id int64) (GetIncidentForFollowUpRow, error) {
 	row := q.db.QueryRow(ctx, getIncidentForFollowUp, id)
 	var i GetIncidentForFollowUpRow
@@ -140,6 +144,8 @@ func (q *Queries) GetIncidentForFollowUp(ctx context.Context, id int64) (GetInci
 		&i.Title,
 		&i.PublicID,
 		&i.MonitorName,
+		&i.DetectedAt,
+		&i.ResolvedAt,
 	)
 	return i, err
 }

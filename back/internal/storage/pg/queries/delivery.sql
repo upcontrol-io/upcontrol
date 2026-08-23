@@ -64,7 +64,9 @@ ON CONFLICT (idem_key) DO NOTHING;
 
 -- name: GetIncidentForFollowUp :one
 -- The follow-up's facts, read at send time: still open → "still down",
--- resolved → "recovered".
-SELECT i.status, i.title, i.public_id, coalesce(m.name, '') AS monitor_name
+-- resolved → "recovered". The two timestamps are the recovered message's
+-- duration line — measured bounds, not a number composed at enqueue time.
+SELECT i.status, i.title, i.public_id, coalesce(m.name, '') AS monitor_name,
+       i.detected_at, i.resolved_at
   FROM incident i LEFT JOIN monitor m ON m.id = i.monitor_id
  WHERE i.id = $1;

@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -33,6 +35,11 @@ type AlertPayload struct {
 	MonitorName string         `json:"monitor_name"`
 	Actions     []ActionButton `json:"actions,omitempty"`
 	Fields      []Field        `json:"fields,omitempty"`
+	// Summary is the one sentence under the title, and only a measured one:
+	// the recovered follow-up carries its duration here, the error-rate page
+	// will carry its rate against the baseline. A detector with nothing
+	// measured sends nothing, and no renderer invents a line to fill the gap.
+	Summary string `json:"summary,omitempty"`
 	// Lines is machine output the detector already had in hand — the error
 	// message in full, the last response. LinesLabel names what they are; a
 	// panel with no label would be a block of text nobody can place.
@@ -85,6 +92,9 @@ var HTTPClient = &http.Client{Timeout: 10 * time.Second}
 // delivery with a named error, never silently.
 type TelegramChannel struct {
 	Token func(ctx context.Context) string
+	// AppURL is the account app's public origin plus /app — where the
+	// message's closing link sends the reader. Empty renders no link.
+	AppURL string
 }
 
 func (c *TelegramChannel) Kind() string { return "telegram" }
@@ -100,7 +110,7 @@ func (c *TelegramChannel) Send(ctx context.Context, target string, p AlertPayloa
 		return 0, fmt.Errorf("telegram: no bot token configured (Settings, or UC_TELEGRAM_BOT_TOKEN)")
 	}
 	// target is a chat ID or @channel.
-	text := formatTelegram(p)
+	text := formatTelegram(p, c.AppURL)
 	body := map[string]any{
 		"chat_id":    target,
 		"text":       text,
@@ -148,6 +158,9 @@ func (c *EmailChannel) Send(ctx context.Context, target string, p AlertPayload) 
 		// which is what the reader was written to about.
 		"app_url":     c.AppURL,
 		"incident_id": p.IncidentID,
+	}
+	if p.Summary != "" {
+		vars["summary"] = p.Summary
 	}
 	if fields := alertFields(p); len(fields) > 0 {
 		vars["fields"] = fields
@@ -240,18 +253,120 @@ func doPost(ctx context.Context, url, bearer string, body []byte) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func formatTelegram(p AlertPayload) string {
-	s := fmt.Sprintf("<b>[%s] %s</b>\n%s", p.Status, p.Title, formatEmail(p))
-	for _, a := range p.Actions {
-		s += fmt.Sprintf("\n<a href=\"%s\">%s</a>", a.URL, a.Label)
+// statusEmoji pairs a shape with the status. The words beside it always carry
+// the same fact ("stopped responding", "recovered"), so colour is never the
+// only channel — the product's rule, kept on a surface that has no CSS.
+func statusEmoji(status string) string {
+	switch status {
+	case "down":
+		return "🔴"
+	case "check":
+		return "🟠"
+	default:
+		return "🟢"
 	}
-	return s
+}
+
+// formatTelegram renders the approved alert layout in Telegram's HTML dialect:
+// emoji + bold title, the measured summary sentence, label/value facts with
+// machine output in <code>, raw lines in one <pre>, and a closing link chosen
+// by the delivery's class.
+//
+// Every dynamic string is escaped. The old renderer interpolated the title
+// raw, and a log-alert title IS an error message — one '<' in it (any generic
+// type, any JSX fragment) and the Bot API rejects the whole sendMessage as
+// malformed HTML, which surfaced as a delivery that retried forever.
+func formatTelegram(p AlertPayload, appURL string) string {
+	esc := html.EscapeString
+	var sb strings.Builder
+	sb.WriteString(statusEmoji(p.Status))
+	sb.WriteString(" <b>")
+	sb.WriteString(esc(p.Title))
+	sb.WriteString("</b>\n")
+	if p.Summary != "" {
+		sb.WriteString("\n")
+		sb.WriteString(esc(p.Summary))
+		sb.WriteString("\n")
+	}
+	// No "Monitor:" row here, unlike the email's fact table: on this surface
+	// the title already names the monitor, and a phone screen has no height
+	// to spend saying it twice.
+	if len(p.Fields) > 0 {
+		sb.WriteString("\n")
+		for _, f := range p.Fields {
+			sb.WriteString(esc(f.Label))
+			sb.WriteString(": ")
+			if f.Mono {
+				sb.WriteString("<code>")
+				sb.WriteString(esc(f.Value))
+				sb.WriteString("</code>")
+			} else {
+				sb.WriteString(esc(f.Value))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	if len(p.Lines) > 0 {
+		sb.WriteString("\n<pre>")
+		for i, line := range p.Lines {
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(esc(line))
+		}
+		sb.WriteString("</pre>\n")
+	}
+	for _, a := range p.Actions {
+		if a.URL == "" {
+			continue
+		}
+		sb.WriteString("\n<a href=\"")
+		sb.WriteString(esc(a.URL))
+		sb.WriteString("\">")
+		sb.WriteString(esc(a.Label))
+		sb.WriteString("</a>")
+	}
+	if link, label := alertLink(p, appURL); link != "" {
+		sb.WriteString("\n<a href=\"")
+		sb.WriteString(esc(link))
+		sb.WriteString("\">")
+		sb.WriteString(esc(label))
+		sb.WriteString("</a>")
+	}
+	return sb.String()
+}
+
+// alertLink is the message's closing link, chosen by the delivery's class —
+// the same routing the email template applies to its button.
+func alertLink(p AlertPayload, appURL string) (href, label string) {
+	if appURL == "" {
+		return "", ""
+	}
+	switch p.Class {
+	case "test":
+		return appURL + "/alerts", "Alert settings"
+	case "ticket":
+		return appURL, "Open this log group"
+	}
+	if p.IncidentID == "" {
+		return appURL, "Open the dashboard"
+	}
+	href = appURL + "?incident=" + url.QueryEscape(p.IncidentID)
+	// Good news closes differently: the recovered follow-up's link is the
+	// quiet "it is over, the record is kept" line, not a call to action.
+	if p.Class == "followup" && p.Status == "ok" {
+		return href, "The incident and its timeline are on the dashboard"
+	}
+	return href, "Open the incident"
 }
 
 // formatEmail is the plain-text body every channel that is not the email agent
 // sends: SMTP, and the prose half of telegram/discord/slack.
 func formatEmail(p AlertPayload) string {
 	s := p.Title + "\n"
+	if p.Summary != "" {
+		s += p.Summary + "\n"
+	}
 	if p.MonitorName != "" {
 		s += "Monitor: " + p.MonitorName + "\n"
 	}

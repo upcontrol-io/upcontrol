@@ -150,26 +150,138 @@ func TestBreakerStreakExtendsNotResets(t *testing.T) {
 	}
 }
 
-func TestFormatTelegram_CarriesTheAnswerAndTheButtons(t *testing.T) {
-	// The Telegram message IS the product on a phone (§4.7): it has to carry what
-	// broke, which monitor, the facts, and the buttons — a message that arrives
-	// without its actions makes the reader open a laptop, which is the thing the
-	// positioning is against.
+func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
+	// The Telegram message IS the product on a phone (§4.7): what broke, the
+	// facts, the raw lines, and a link into the incident — a message that
+	// arrives without its way in makes the reader open a laptop, which is the
+	// thing the positioning is against.
 	got := formatTelegram(AlertPayload{
-		Status:      "down",
-		Title:       "Checkout is down",
-		MonitorName: "example.com/checkout",
-		Fields:      []Field{{Label: "Region", Value: "fra"}},
-		Actions:     []ActionButton{{Label: "Open incident", URL: "https://upcontrol.io/i/1"}},
-	})
+		Status:     "down",
+		Title:      "Checkout is down",
+		IncidentID: "7d31b0c4",
+		Class:      "page",
+		Summary:    "Down for 4 minutes.",
+		Fields: []Field{
+			{Label: "Target", Value: "https://example.com/health", Mono: true},
+			{Label: "Down since", Value: "14:02 UTC"},
+		},
+		Lines:   []string{"HTTP/1.1 503 Service Unavailable"},
+		Actions: []ActionButton{{Label: "Runbook", URL: "https://acme.test/runbook"}},
+	}, "https://upcontrol.io/app")
 	for _, want := range []string{
-		"<b>[down] Checkout is down</b>",
-		"Monitor: example.com/checkout",
-		"Region: fra",
-		`<a href="https://upcontrol.io/i/1">Open incident</a>`,
+		"🔴 <b>Checkout is down</b>",
+		"Down for 4 minutes.",
+		"Target: <code>https://example.com/health</code>",
+		"Down since: 14:02 UTC",
+		"<pre>HTTP/1.1 503 Service Unavailable</pre>",
+		`<a href="https://acme.test/runbook">Runbook</a>`,
+		`<a href="https://upcontrol.io/app?incident=7d31b0c4">Open the incident</a>`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("telegram message missing %q:\n%s", want, got)
+		}
+	}
+	// The title names the monitor already; a "Monitor:" row would say it twice
+	// on a screen with no height to spare.
+	if strings.Contains(got, "Monitor:") {
+		t.Fatalf("telegram message repeats the monitor as a row:\n%s", got)
+	}
+}
+
+func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
+	// A log-alert title IS an error message. The old renderer interpolated it
+	// raw, and one '<' in it — any generic type, any JSX fragment — made the
+	// Bot API reject the whole sendMessage as malformed HTML: an alert that
+	// failed to deliver BECAUSE of what it was alerting about.
+	got := formatTelegram(AlertPayload{
+		Status:  "check",
+		Title:   "Error in api: Promise<Map<string, T>> rejected",
+		Summary: "escape <b>me</b>",
+		Fields:  []Field{{Label: "<i>k</i>", Value: "a && b < c", Mono: true}},
+		Lines:   []string{`<img src=x onerror="boom">`},
+		Actions: []ActionButton{{Label: "a<b>c", URL: "https://x.test/?a=1&b=2"}},
+	}, "https://upcontrol.io/app")
+	for _, banned := range []string{
+		"Promise<Map", "<i>k</i>", "<img src=x", "<b>me</b>", "a<b>c",
+	} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("unescaped %q reached the message:\n%s", banned, got)
+		}
+	}
+	for _, want := range []string{
+		"Promise&lt;Map&lt;string, T&gt;&gt;",
+		"a &amp;&amp; b &lt; c",
+		"&lt;img src=x",
+		`href="https://x.test/?a=1&amp;b=2"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("escaped form %q missing:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatTelegram_StatusIsShapePlusWords(t *testing.T) {
+	// Colour is never the only channel (the product's status rule, kept on a
+	// surface with no CSS): each status gets its emoji, and the words beside
+	// it carry the same fact.
+	for status, emoji := range map[string]string{"down": "🔴", "check": "🟠", "ok": "🟢"} {
+		got := formatTelegram(AlertPayload{Status: status, Title: "t"}, "")
+		if !strings.HasPrefix(got, emoji+" ") {
+			t.Fatalf("status %q: message does not open with %s:\n%s", status, emoji, got)
+		}
+	}
+}
+
+func TestFormatTelegram_LinkFollowsTheClass(t *testing.T) {
+	app := "https://upcontrol.io/app"
+	cases := []struct {
+		name  string
+		p     AlertPayload
+		href  string
+		label string
+	}{
+		{"page deep-links its incident",
+			AlertPayload{Class: "page", Status: "down", Title: "t", IncidentID: "abc"},
+			app + "?incident=abc", "Open the incident"},
+		{"recovered follow-up closes quietly",
+			AlertPayload{Class: "followup", Status: "ok", Title: "t", IncidentID: "abc"},
+			app + "?incident=abc", "The incident and its timeline are on the dashboard"},
+		{"still-down follow-up stays a call to action",
+			AlertPayload{Class: "followup", Status: "down", Title: "t", IncidentID: "abc"},
+			app + "?incident=abc", "Open the incident"},
+		{"a log alert has no incident to open",
+			AlertPayload{Class: "ticket", Status: "check", Title: "t"},
+			app, "Open this log group"},
+		{"a test points at alert settings",
+			AlertPayload{Class: "test", Status: "ok", Title: "t"},
+			app + "/alerts", "Alert settings"},
+	}
+	for _, tc := range cases {
+		got := formatTelegram(tc.p, app)
+		want := `<a href="` + tc.href + `">` + tc.label + `</a>`
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s: missing %q:\n%s", tc.name, want, got)
+		}
+	}
+	// No app URL configured — no link, never an <a> with an empty href.
+	if got := formatTelegram(AlertPayload{Class: "page", Status: "down", Title: "t", IncidentID: "abc"}, ""); strings.Contains(got, "<a href") {
+		t.Fatalf("link rendered with no app URL:\n%s", got)
+	}
+}
+
+func TestDownForLine_StaysHonestUnderAMinute(t *testing.T) {
+	from := time.Date(2026, 8, 23, 14, 2, 10, 0, time.UTC)
+	cases := []struct {
+		to   time.Time
+		want string
+	}{
+		{from.Add(30 * time.Second), "Down for under a minute, 14:02 to 14:02 UTC."},
+		{from.Add(90 * time.Second), "Down for 1 minute, 14:02 to 14:03 UTC."},
+		{from.Add(12 * time.Minute), "Down for 12 minutes, 14:02 to 14:14 UTC."},
+	}
+	for _, tc := range cases {
+		if got := downForLine(from, tc.to); got != tc.want {
+			t.Fatalf("downForLine = %q, want %q", got, tc.want)
 		}
 	}
 }
