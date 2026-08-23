@@ -72,8 +72,9 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 	tgToken := func(c context.Context) string {
 		return pool.InstanceValue(c, openFn, "telegram_bot_token", d.Config.TelegramBotToken)
 	}
+	appURL := strings.TrimRight(d.Config.PublicOrigin, "/") + "/app"
 	dw := deliver.NewWorker(pool, d.Logger, "ucworker")
-	dw.RegisterChannel(&deliver.TelegramChannel{Token: tgToken})
+	dw.RegisterChannel(&deliver.TelegramChannel{Token: tgToken, AppURL: appURL})
 	dw.RegisterChannel(&deliver.DiscordChannel{})
 	dw.RegisterChannel(&deliver.SlackChannel{})
 	// Alert email goes through the email agent only when UC_EMAIL_URL is set;
@@ -85,7 +86,7 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 			APIKey: d.Config.EmailAPIKey,
 			// Where the mail's button sends the reader. The agent has no idea
 			// what origin this deployment answers on, so it travels per send.
-			AppURL: strings.TrimRight(d.Config.PublicOrigin, "/") + "/app",
+			AppURL: appURL,
 		})
 	} else {
 		// SMTP resolves per send (a relay saved in Settings wins over

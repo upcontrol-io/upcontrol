@@ -159,6 +159,12 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 		if inc.Status == "ok" {
 			payload.Title = name + " recovered — it is back up"
 			payload.Status = "ok"
+			// The duration line, from the incident's own bounds — measured,
+			// not composed at enqueue time. Either bound missing = no line:
+			// a renderer never invents one to fill the gap.
+			if inc.DetectedAt.Valid && inc.ResolvedAt.Valid {
+				payload.Summary = downForLine(inc.DetectedAt.Time, inc.ResolvedAt.Time)
+			}
 		} else {
 			payload.Title = name + " is still down after 15 minutes"
 			payload.Status = "down"
@@ -245,4 +251,18 @@ func (w *Worker) Run(ctx context.Context, every time.Duration) {
 			}
 		}
 	}
+}
+
+// downForLine is the recovered follow-up's one sentence: how long, bounded by
+// when. Under a minute stays honest words, not "0 minutes".
+func downForLine(from, to time.Time) string {
+	mins := int(to.Sub(from).Minutes())
+	span := fmt.Sprintf("%s to %s UTC", from.UTC().Format("15:04"), to.UTC().Format("15:04"))
+	if mins < 1 {
+		return "Down for under a minute, " + span + "."
+	}
+	if mins == 1 {
+		return "Down for 1 minute, " + span + "."
+	}
+	return fmt.Sprintf("Down for %d minutes, %s.", mins, span)
 }
