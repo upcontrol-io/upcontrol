@@ -236,12 +236,12 @@ func TestCompletionUsageClampsTheUnknownSentinel(t *testing.T) {
 // forever. This test is the tie: change the prompt or any cap and the suite
 // fails until Version (and the pinned hash) move in the same commit.
 func TestExplainLogsRegistryPinned(t *testing.T) {
-	const pinnedHash = "18c8d0da8ddaed94be8195e28071b0543db2c2726bc028865cfeef7b089caf83"
+	const pinnedHash = "424aa621222006afc69b7fa7e0c82947be9210a7deb06318767741be045d701f"
 	if ExplainLogs.Key != "explain_logs" {
 		t.Fatalf("key = %q, want explain_logs", ExplainLogs.Key)
 	}
-	if ExplainLogs.Version != 5 {
-		t.Fatalf("version = %d, want 5 — bump the pinned hash with it", ExplainLogs.Version)
+	if ExplainLogs.Version != 6 {
+		t.Fatalf("version = %d, want 6 — bump the pinned hash with it", ExplainLogs.Version)
 	}
 	if ExplainLogs.MaxInputLines != 100 || ExplainLogs.MaxInputBytes != 32768 ||
 		ExplainLogs.MaxLineBytes != 2000 || ExplainLogs.MaxOutputTokens != 2000 ||
@@ -264,12 +264,12 @@ func TestExplainLogsRegistryPinned(t *testing.T) {
 // prompt, so editing the prompt without bumping it would serve stale cached
 // answers forever.
 func TestExplainIncidentRegistryPinned(t *testing.T) {
-	const pinnedHash = "d17094c3fb99a84ee4a880beb94805493ff73e5af836453b67030d8f465d0926"
+	const pinnedHash = "415e385865da4aed5953c3a9355f01d37b2cd008cc365e563745cca6e5b7a77a"
 	if ExplainIncident.Key != "explain_incident" {
 		t.Fatalf("key = %q, want explain_incident", ExplainIncident.Key)
 	}
-	if ExplainIncident.Version != 2 {
-		t.Fatalf("version = %d, want 2 — bump the pinned hash with it", ExplainIncident.Version)
+	if ExplainIncident.Version != 3 {
+		t.Fatalf("version = %d, want 3 — bump the pinned hash with it", ExplainIncident.Version)
 	}
 	if ExplainIncident.MaxInputLines != 100 || ExplainIncident.MaxInputBytes != 32768 ||
 		ExplainIncident.MaxLineBytes != 2000 || ExplainIncident.MaxOutputTokens != 2000 ||

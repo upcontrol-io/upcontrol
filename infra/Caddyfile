@@ -1,4 +1,4 @@
-# Edge for a self-hosted Upcontrol box: one origin for the app and the API.
+# Edge for a self-hosted UpControl box: one origin for the app and the API.
 # That is not cosmetic — the session cookie is HttpOnly and same-site, so a
 # front on a different origin looks permanently signed out.
 #

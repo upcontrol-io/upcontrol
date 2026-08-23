@@ -1,5 +1,5 @@
 #!/bin/sh
-# Upcontrol self-host installer. POSIX sh on purpose: it must run on a bare
+# UpControl self-host installer. POSIX sh on purpose: it must run on a bare
 # Debian/Alpine box before anything else is installed. Idempotent — a re-run
 # keeps existing secrets and .env answers.
 #
@@ -199,7 +199,7 @@ UC_SMTP_HOST=$UC_SMTP_HOST
 UC_SMTP_PORT=$UC_SMTP_PORT
 UC_SMTP_USERNAME=$UC_SMTP_USERNAME
 UC_SMTP_FROM=$UC_SMTP_FROM
-UC_SMTP_FROM_NAME=Upcontrol
+UC_SMTP_FROM_NAME=UpControl
 UC_TELEGRAM_BOT_USERNAME=$UC_TELEGRAM_BOT_USERNAME
 EOF
 	say ""
@@ -251,7 +251,7 @@ fi
 auth=$(grep '^UC_AUTH=' .env | cut -d= -f2-)
 
 say ""
-say "Upcontrol is up: $url"
+say "UpControl is up: $url"
 say ""
 if [ "$auth" = none ]; then
 	say "Auth is off (single-user mode): everyone who can reach the app is the"

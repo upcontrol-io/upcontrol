@@ -1,4 +1,4 @@
-# Self-hosting Upcontrol
+# Self-hosting UpControl
 
 One box, Docker Compose, five services: Postgres, ClickHouse, the API
 (`ucapi`), the worker (`ucworker`), one probe (`ucprobe`), plus the web app

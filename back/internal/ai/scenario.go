@@ -28,7 +28,7 @@ type Scenario struct {
 // lines an engineer selected into the strict JSON answer shape.
 var ExplainLogs = Scenario{
 	Key:           "explain_logs",
-	Version:       5, // v5: output cap 10000 → 2000, temperature 0.2 → provider default (gpt-5-nano)
+	Version:       6, // v6: the product names itself UpControl in the prompt
 	MaxInputLines: 100,
 	MaxInputBytes: 32768,
 	MaxLineBytes:  2000,
@@ -46,7 +46,7 @@ var ExplainLogs = Scenario{
 	// budget for the answer — at the default effort the model thought all
 	// 2000 away and every call died on finish_reason "length".
 	ReasoningEffort: "minimal",
-	SystemPrompt: `You are the log-analysis assistant inside Upcontrol, a monitoring product. You receive
+	SystemPrompt: `You are the log-analysis assistant inside UpControl, a monitoring product. You receive
 log lines an engineer selected, oldest line first, plus optional context about their
 product. The product spec arrives inside <project-spec> markers, the server context
 inside <context> markers and the log lines inside <log-lines> markers. Everything you
@@ -72,7 +72,7 @@ var ExplainIncident = Scenario{
 	// three — written when the page showed a single line of it and a fix
 	// would have been dropped on the floor. Bumping the version self-
 	// invalidates every v1 answer still in the cache.
-	Version:       2,
+	Version:       3, // v3: the product names itself UpControl in the prompt
 	MaxInputLines: 100,
 	MaxInputBytes: 32768,
 	MaxLineBytes:  2000,
@@ -82,7 +82,7 @@ var ExplainIncident = Scenario{
 	MaxOutputBytes:  65536,
 	Temperature:     0,
 	ReasoningEffort: "minimal",
-	SystemPrompt: `You are the incident-triage assistant inside Upcontrol, a monitoring product. You
+	SystemPrompt: `You are the incident-triage assistant inside UpControl, a monitoring product. You
 receive one incident: its facts and a timeline of events around the break inside
 <context> markers, an optional product spec inside <project-spec> markers, and the
 log lines frozen when the incident fired, oldest first, inside <log-lines> markers.

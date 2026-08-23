@@ -1,7 +1,7 @@
 # Contributor License Agreement
 
-Thank you for your interest in contributing to Upcontrol ("the Project"),
-maintained by the Upcontrol maintainers ("We" or "Us").
+Thank you for your interest in contributing to UpControl ("the Project"),
+maintained by the UpControl maintainers ("We" or "Us").
 
 This agreement clarifies the terms under which You contribute software,
 documentation or other material ("Contribution") to the Project. It protects

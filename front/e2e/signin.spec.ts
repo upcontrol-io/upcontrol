@@ -9,7 +9,7 @@ test("the two-step form signs you in: email, then the code", async ({ page }) =>
 	await stubSignedOut(page);
 	await page.goto("/signin");
 
-	await expect(page.getByRole("heading", { name: "Sign in to Upcontrol" })).toBeVisible();
+	await expect(page.getByRole("heading", { name: "Sign in to UpControl" })).toBeVisible();
 	await expect(page.getByText("No password. A one-time code is issued for your email.")).toBeVisible();
 
 	await page.getByLabel("Email").fill(EMAIL);

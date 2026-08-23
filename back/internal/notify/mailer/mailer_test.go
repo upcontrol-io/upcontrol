@@ -23,9 +23,9 @@ func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
 }
 
 func TestBuildMessageCarriesTheHeaders(t *testing.T) {
-	msg := string(buildMessage("no-reply@upcontrol.io", "Upcontrol", "ada@example.com", "[down] api", "body line"))
+	msg := string(buildMessage("no-reply@upcontrol.io", "UpControl", "ada@example.com", "[down] api", "body line"))
 	for _, want := range []string{
-		"From: Upcontrol <no-reply@upcontrol.io>\r\n",
+		"From: UpControl <no-reply@upcontrol.io>\r\n",
 		"To: ada@example.com\r\n",
 		"Subject: [down] api\r\n",
 		"Content-Type: text/plain; charset=utf-8\r\n\r\nbody line",

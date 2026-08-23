@@ -51,7 +51,7 @@ function buildBars(statuses: HealthStatus[], spanSec: number): { status: BarStat
 /**
  * What a project's own visitors see. Two deliberate properties: there is NO
  * sample-data fallback (an unreachable backend is said out loud and nothing
- * is invented), and the "Powered by Upcontrol" footer reads `showPoweredBy`
+ * is invented), and the "Powered by UpControl" footer reads `showPoweredBy`
  * (default true; the config screen owns the switch, and AGPL means it is
  * honestly removable).
  */
@@ -291,7 +291,7 @@ export function PublicStatus() {
 						    the line is the default, never a lock. */}
 						<span className={styles.poweredBy}>Powered by</span>
 						<a href="https://upcontrol.io" className={styles.poweredByName} target="_blank" rel="noreferrer">
-							Upcontrol
+							UpControl
 						</a>
 						<div className={styles.spacer} />
 					</footer>

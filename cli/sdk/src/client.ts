@@ -182,7 +182,7 @@ export class Client {
         headers: {
           'Content-Type': 'application/x-ndjson',
           'X-Upcontrol-Key': this.key,
-          'X-Upcontrol-Sdk': 'js/' + SDK_VERSION,
+          'X-UpControl-Sdk': 'js/' + SDK_VERSION,
         },
         body,
         signal: ctrl.signal,

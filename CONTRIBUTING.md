@@ -1,4 +1,4 @@
-# Contributing to Upcontrol
+# Contributing to UpControl
 
 Thanks for looking under the hood. Small, focused PRs land fastest; for
 anything larger than a bugfix, open an issue or a Discussion first so nobody

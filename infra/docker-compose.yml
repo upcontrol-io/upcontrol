@@ -1,4 +1,4 @@
-# Self-host compose for Upcontrol (the OSS package). One box, prod mode,
+# Self-host compose for UpControl (the OSS package). One box, prod mode,
 # pulled images by default — `docker compose -f docker-compose.yml -f
 # docker-compose.build.yml up -d --build` builds from source instead.
 #
@@ -151,7 +151,7 @@ services:
       UC_SMTP_USERNAME: ${UC_SMTP_USERNAME:-}
       UC_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       UC_SMTP_FROM: ${UC_SMTP_FROM:-}
-      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-Upcontrol}
+      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-UpControl}
       # Telegram (optional): token from @BotFather in secrets/, handle here.
       # Both empty = the app offers no Telegram destination at all.
       UC_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
@@ -206,7 +206,7 @@ services:
       UC_SMTP_USERNAME: ${UC_SMTP_USERNAME:-}
       UC_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       UC_SMTP_FROM: ${UC_SMTP_FROM:-}
-      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-Upcontrol}
+      UC_SMTP_FROM_NAME: ${UC_SMTP_FROM_NAME:-UpControl}
       UC_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
       UC_TELEGRAM_BOT_USERNAME: ${UC_TELEGRAM_BOT_USERNAME:-}
       # Detection job (error-rate incidents): on by default; 0 switches it off.

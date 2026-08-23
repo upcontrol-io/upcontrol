@@ -107,7 +107,7 @@ export function SignIn() {
 		<div className={styles.page}>
 			<main className={styles.card}>
 				<h1 className={styles.title}>
-					{redeeming ? 'Signing you in' : 'Sign in to Upcontrol'}
+					{redeeming ? 'Signing you in' : 'Sign in to UpControl'}
 				</h1>
 				<p className={styles.sub}>
 					{redeeming

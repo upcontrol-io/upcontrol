@@ -57,7 +57,7 @@ The first public release.
   encrypted): alerts and invites go live on save, no restart.
 - Alert channels: Telegram, email (own SMTP), Slack, Discord, webhook.
 - Public status page per project with measured uptime bars and an honest
-  `Powered by Upcontrol` default (removable in Settings).
+  `Powered by UpControl` default (removable in Settings).
 - Single-user mode (`UC_AUTH=none`, the package default) and magic-link
   sign-in (`UC_AUTH=magic-link`).
 - `infra/install.sh`: preflight, secrets, four questions, `--update`,

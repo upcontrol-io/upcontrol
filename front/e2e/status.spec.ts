@@ -30,7 +30,7 @@ test("the config screen owns the URL and three real switches", async ({ page }) 
 	await expect(page.getByText(/\/status\/example-com/)).toBeVisible();
 
 	// The OSS difference: "Powered by" is a real switch, default on.
-	const poweredBy = page.getByRole("switch", { name: /Powered by Upcontrol/ });
+	const poweredBy = page.getByRole("switch", { name: /Powered by UpControl/ });
 	await expect(poweredBy).toHaveAttribute("aria-checked", "true");
 	await poweredBy.click();
 	await expect(poweredBy).toHaveAttribute("aria-checked", "false");
