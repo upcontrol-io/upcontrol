@@ -139,11 +139,15 @@ func (c *EmailChannel) Kind() string { return "email" }
 // in Go that only ever reaches the deployments that already run the agent.
 func (c *EmailChannel) Send(ctx context.Context, target string, p AlertPayload) (int, error) {
 	vars := map[string]any{
-		"class":   p.Class,
-		"status":  p.Status,
-		"title":   p.Title,
-		"to":      target,
-		"app_url": c.AppURL,
+		"class":  p.Class,
+		"status": p.Status,
+		"title":  p.Title,
+		"to":     target,
+		// The two the mail's button is built from: the origin this deployment
+		// answers on, which the agent cannot know, and the incident to open,
+		// which is what the reader was written to about.
+		"app_url":     c.AppURL,
+		"incident_id": p.IncidentID,
 	}
 	if fields := alertFields(p); len(fields) > 0 {
 		vars["fields"] = fields
