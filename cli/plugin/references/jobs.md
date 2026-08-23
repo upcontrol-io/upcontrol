@@ -51,7 +51,7 @@ heartbeat can be a curl in the crontab line's tail (the endpoint accepts a
 plain POST):
 
 ```
-0 3 * * * /usr/local/bin/backup.sh && curl -fsS -X POST -H "X-Upcontrol-Key: $UPCONTROL_API_KEY" -d '{"event":"heartbeat","name":"backup"}' https://upcontrol.io/i
+0 3 * * * /usr/local/bin/backup.sh && curl -fsS -X POST -H "X-UpControl-Key: $UPCONTROL_API_KEY" -d '{"event":"heartbeat","name":"backup"}' https://upcontrol.io/i
 ```
 
 (Read the key from the environment; never paste it into the crontab literally.)

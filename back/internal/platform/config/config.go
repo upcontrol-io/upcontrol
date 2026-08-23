@@ -151,7 +151,7 @@ func Load(service string) (Config, error) {
 	c.SMTPUsername = getenv("UC_SMTP_USERNAME", "")
 	c.SMTPPassword = getenvOrFile("UC_SMTP_PASSWORD", &c.Warnings)
 	c.SMTPFrom = getenv("UC_SMTP_FROM", "")
-	c.SMTPFromName = getenv("UC_SMTP_FROM_NAME", "Upcontrol")
+	c.SMTPFromName = getenv("UC_SMTP_FROM_NAME", "UpControl")
 
 	c.AIBaseURL = getenv("UC_AI_BASE_URL", "https://api.openai.com/v1")
 	c.AIAPIKey = getenvOrFile("UC_AI_API_KEY", &c.Warnings)

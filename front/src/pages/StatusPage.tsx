@@ -11,7 +11,7 @@ import styles from './StatusPage.module.css';
 /**
  * What the owner publishes is their own product — the same list the public
  * page renders. No custom-domain modal (the instance's own UC_DOMAIN is the
- * domain story here), and "Powered by Upcontrol" is a REAL switch — default
+ * domain story here), and "Powered by UpControl" is a REAL switch — default
  * on, honestly removable (Decision 25c).
  */
 export function StatusPage() {
@@ -185,7 +185,7 @@ export function StatusPage() {
 					type="button"
 					role="switch"
 					aria-checked={showPoweredBy}
-					aria-label='Show "Powered by Upcontrol" in the footer'
+					aria-label='Show "Powered by UpControl" in the footer'
 					className={[styles.toggle, showPoweredBy && styles.toggleOn].filter(Boolean).join(' ')}
 					onClick={() => {
 						setShowPoweredBy(!showPoweredBy);
@@ -194,7 +194,7 @@ export function StatusPage() {
 				>
 					<span className={styles.toggleKnob} />
 				</button>
-				<span className={styles.toggleLabel}>Show "Powered by Upcontrol" in the footer</span>
+				<span className={styles.toggleLabel}>Show "Powered by UpControl" in the footer</span>
 			</div>
 		</div>
 	);

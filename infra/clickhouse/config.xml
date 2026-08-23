@@ -1,4 +1,4 @@
-<!-- ClickHouse server overrides for a self-hosted Upcontrol box. Loaded as a
+<!-- ClickHouse server overrides for a self-hosted UpControl box. Loaded as a
   config.d drop-in. Beyond the network settings the dev compose also sets,
   this caps memory for a 4GB machine: the server itself stays under 800M so
   the container's 1200M limit is never the thing that kills a query. -->

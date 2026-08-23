@@ -1,4 +1,4 @@
-# Upcontrol
+# UpControl
 
 Monitoring that arrives with the "why", not just "down" — uptime checks, application logs and AI incident explanations in one compose file, wired into your app by the coding agent you already use.
 
@@ -9,7 +9,7 @@ Monitoring that arrives with the "why", not just "down" — uptime checks, appli
 
 <!-- launch-asset: hero GIF — the incident card firing Explain and getting the
      triage answer. Shot list: docs/launch-assets.md -->
-![Upcontrol incident explain](docs/assets/hero.gif)
+![UpControl incident explain](docs/assets/hero.gif)
 
 Two things, and neither of them is an afternoon:
 
@@ -83,7 +83,7 @@ as a single prompt too.
 - `npx upcontrol skills` — the reference topics the agent reads
 - `npx upcontrol status` — endpoint, key source, skill freshness, one JSON line
 
-**Your code never leaves your machine.** The CLI talks only to the Upcontrol
+**Your code never leaves your machine.** The CLI talks only to the UpControl
 API, the intelligence is your own agent, and the SDK sends only what the
 reviewed log points emit — scrubbed client-side, before anything is sent.
 
@@ -125,7 +125,7 @@ exactly that.
 
 ## How it compares
 
-|  | Upcontrol | Uptime Kuma | Grafana + Prometheus + Loki |
+|  | UpControl | Uptime Kuma | Grafana + Prometheus + Loki |
 | --- | --- | --- | --- |
 | Uptime checks | yes | yes | via exporters |
 | Application logs | yes — one ingest endpoint | no | yes — Loki |
@@ -136,7 +136,7 @@ exactly that.
 
 Uptime Kuma is genuinely lighter if uptime checks are all you need. The
 Grafana stack is more powerful if you have the time to assemble and query it.
-Upcontrol's lane is the middle: logs, checks and the why of an incident in
+UpControl's lane is the middle: logs, checks and the why of an incident in
 one place, running on one box.
 
 ## What this is and is not

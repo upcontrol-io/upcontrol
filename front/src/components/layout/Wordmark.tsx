@@ -65,7 +65,7 @@ export function Wordmark({ className, size = 18 }: WordmarkProps) {
 	const wordWidth = (wordSize * VB_W) / VB_H;
 
 	return (
-		<Link to="/" className={[styles.wordmark, className].filter(Boolean).join(' ')} aria-label="Upcontrol, home">
+		<Link to="/" className={[styles.wordmark, className].filter(Boolean).join(' ')} aria-label="UpControl, home">
 			<BrandMark size={size} className={styles.mark} />
 			<svg
 				className={styles.word}

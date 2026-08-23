@@ -181,8 +181,8 @@ export class Client {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-ndjson',
-          'X-Upcontrol-Key': this.key,
-          'X-Upcontrol-Sdk': 'js/' + SDK_VERSION,
+          'X-UpControl-Key': this.key,
+          'X-UpControl-Sdk': 'js/' + SDK_VERSION,
         },
         body,
         signal: ctrl.signal,

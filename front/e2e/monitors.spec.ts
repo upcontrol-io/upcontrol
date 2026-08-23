@@ -130,7 +130,7 @@ test("the manual form accepts a bare domain — upcontrol.io and https://upcontr
 
 test("the header wears the animated brand lockup", async ({ page }) => {
 	await page.goto("/monitors");
-	await expect(page.getByRole("link", { name: "Upcontrol, home" })).toBeVisible();
+	await expect(page.getByRole("link", { name: "UpControl, home" })).toBeVisible();
 });
 
 test("delete asks first with the light inline confirm", async ({ page }) => {

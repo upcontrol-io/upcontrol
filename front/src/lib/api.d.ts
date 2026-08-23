@@ -2211,7 +2211,7 @@ export interface paths {
         };
         /**
          * What `npx upcontrol verify` polls (cli/SPEC.md §8): key-authenticated
-         *     (X-Upcontrol-Key or Bearer), answers whether install_verified has
+         *     (X-UpControl-Key or Bearer), answers whether install_verified has
          *     arrived inside the visible window, how many lines the window holds, and
          *     which message names arrived in the last 15 minutes — enough to tell
          *     "key never worked" from "points placed in code that has not run" from

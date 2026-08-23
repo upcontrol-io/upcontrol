@@ -28,8 +28,8 @@ type Config struct {
 func RenderCode(to, code, signInBase string) (subject, body string) {
 	link := fmt.Sprintf("%s/sign-in?email=%s&token=%s",
 		signInBase, url.QueryEscape(to), url.QueryEscape(code))
-	subject = "Your Upcontrol sign-in link"
-	body = fmt.Sprintf(`Sign in to Upcontrol:
+	subject = "Your UpControl sign-in link"
+	body = fmt.Sprintf(`Sign in to UpControl:
 
 %s
 

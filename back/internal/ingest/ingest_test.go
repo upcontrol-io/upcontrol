@@ -75,7 +75,7 @@ func post(t *testing.T, h *Ingester, body string, headers map[string]string) *ht
 
 func TestKeyInHeader(t *testing.T) {
 	h, sink, _ := newIngester(0, nil)
-	rr := post(t, h, `{"msg":"hi"}`, map[string]string{"X-Upcontrol-Key": "uc_live_x"})
+	rr := post(t, h, `{"msg":"hi"}`, map[string]string{"X-UpControl-Key": "uc_live_x"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
 	}
@@ -126,7 +126,7 @@ func TestNoKeyIs401(t *testing.T) {
 
 func TestBadKeyIs401(t *testing.T) {
 	h, _, _ := newIngester(0, nil)
-	rr := post(t, h, `{"msg":"hi"}`, map[string]string{"X-Upcontrol-Key": "bad"})
+	rr := post(t, h, `{"msg":"hi"}`, map[string]string{"X-UpControl-Key": "bad"})
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("code %d, want 401", rr.Code)
 	}
@@ -135,7 +135,7 @@ func TestBadKeyIs401(t *testing.T) {
 func TestNDJSONAcceptedCount(t *testing.T) {
 	h, sink, _ := newIngester(0, nil)
 	body := `{"msg":"a"}` + "\n" + `{"msg":"b"}` + "\n" + `{"msg":"c"}` + "\n"
-	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, body, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d", rr.Code)
 	}
@@ -151,7 +151,7 @@ func TestScrubWarningInReceipt(t *testing.T) {
 	h, _, _ := newIngester(0, nil)
 	// A Stripe key in the message must be scrubbed and counted.
 	body := `{"msg":"charged via sk_live_abcdefghijklmnopqrstuvwxyz"}`
-	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, body, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d", rr.Code)
 	}
@@ -166,7 +166,7 @@ func TestScrubWarningInReceipt(t *testing.T) {
 func TestIdempotencyReplayNoDoubleWrite(t *testing.T) {
 	h, sink, idem := newIngester(0, nil)
 	body := `{"msg":"once"}`
-	hdr := map[string]string{"X-Upcontrol-Key": "k"}
+	hdr := map[string]string{"X-UpControl-Key": "k"}
 	r1 := post(t, h, body, hdr)
 	r2 := post(t, h, body, hdr)
 	if r1.Code != http.StatusOK || r2.Code != http.StatusOK {
@@ -188,7 +188,7 @@ func TestIdempotencyReplayNoDoubleWrite(t *testing.T) {
 func TestOverload60ShedsDebugSamplingAdvertised(t *testing.T) {
 	h, sink, _ := newIngester(60, nil)
 	body := `{"msg":"d","level":"debug"}` + "\n" + `{"msg":"e","level":"error"}` + "\n"
-	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, body, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d", rr.Code)
 	}
@@ -207,7 +207,7 @@ func TestOverload60ShedsDebugSamplingAdvertised(t *testing.T) {
 func TestOverload75ShedsInfo(t *testing.T) {
 	h, sink, _ := newIngester(75, nil)
 	body := `{"msg":"i","level":"info"}` + "\n" + `{"msg":"e","level":"error"}` + "\n"
-	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, body, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d", rr.Code)
 	}
@@ -218,7 +218,7 @@ func TestOverload75ShedsInfo(t *testing.T) {
 
 func TestOverload100Rejects503(t *testing.T) {
 	h, sink, _ := newIngester(100, nil)
-	rr := post(t, h, `{"msg":"x"}`, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, `{"msg":"x"}`, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("code %d, want 503", rr.Code)
 	}
@@ -235,7 +235,7 @@ func TestCardinalityCapWarns(t *testing.T) {
 	h, _, _ := newIngester(0, card)
 	body := `{"msg":"a","host":"h1"}` + "\n" + `{"msg":"b","host":"h2"}` + "\n" +
 		`{"msg":"c","host":"h3"}` + "\n" + `{"msg":"d","host":"h4"}` + "\n"
-	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	rr := post(t, h, body, map[string]string{"X-UpControl-Key": "k"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code %d", rr.Code)
 	}

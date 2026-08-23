@@ -180,7 +180,7 @@ test('init prints the spec, uploads it keyed, and the key never reaches stdout',
   assert.equal(result.success, true, 'the JSON result must still be the last line');
 
   assert.equal(srv.metas.length, 1);
-  assert.equal(srv.metas[0].auth, KEY, 'upload carries the project key in X-Upcontrol-Key');
+  assert.equal(srv.metas[0].auth, KEY, 'upload carries the project key in X-UpControl-Key');
   // the child runs the same process.execPath, so its process.version is this one
   assert.deepEqual(srv.metas[0].body, {
     name: 'fixture-app',

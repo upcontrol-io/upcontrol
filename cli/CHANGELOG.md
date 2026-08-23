@@ -22,7 +22,7 @@ deploy is rolled back, a bad published version is on other people's machines).
   versions, file paths, git remotes, env values or code. It prints the exact
   spec before sending (`project spec (sent so AI log analysis knows your
   stack; nothing else is read):` … `  (skip with --no-meta)`) and PUTs it to
-  `PUT /v1/project/meta` with the project key in `X-Upcontrol-Key`.
+  `PUT /v1/project/meta` with the project key in `X-UpControl-Key`.
   The spec prints AFTER init's own summary (it is a detail of the install,
   not the headline), values are flattened to one line and capped at the 200
   runes the server accepts, and a `package.json` that says nothing about the
@@ -85,7 +85,7 @@ The first real release (0.0.1 was a name-reservation placeholder).
 - `@upcontrol/sdk/auto`: `app_started`, `unhandled_exception` (via
   `uncaughtExceptionMonitor` — observes, never alters the crash), best-effort
   flush on a draining loop. No signal handlers by design.
-- Wire: NDJSON to `POST /i`, key in `X-Upcontrol-Key`, batches 1.5 s / 64 KB,
+- Wire: NDJSON to `POST /i`, key in `X-UpControl-Key`, batches 1.5 s / 64 KB,
   8 MB in-memory ring with an explicit `upcontrol_buffer_dropped` line on
   eviction, byte-identical retries (server dedups by body hash), honors the
   receipt's sampling instruction, sends `install_verified` in the first batch.

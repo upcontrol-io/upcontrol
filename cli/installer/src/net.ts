@@ -79,7 +79,7 @@ export interface InstallStatus {
 export async function fetchInstallStatus(endpoint: string, key: string): Promise<InstallStatus> {
   try {
     const res = await request(endpoint + '/v1/install/status', {
-      headers: { 'X-Upcontrol-Key': key },
+      headers: { 'X-UpControl-Key': key },
     });
     if (!res.ok) return { ok: false, status: res.status, error: 'refused' };
     const body = parseJSON<Omit<InstallStatus, 'ok' | 'status' | 'error'>>(res.text);
@@ -107,7 +107,7 @@ export async function putProjectMeta(endpoint: string, key: string, spec: Projec
       endpoint + '/v1/project/meta',
       {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Upcontrol-Key': key },
+        headers: { 'Content-Type': 'application/json', 'X-UpControl-Key': key },
         body: JSON.stringify(spec),
       },
       META_TIMEOUT_MS,
