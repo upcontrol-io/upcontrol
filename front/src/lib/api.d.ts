@@ -103,7 +103,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign in / up via Google OAuth code. */
+        /**
+         * Sign in / up via Google OAuth code.
+         * @description Exchanges a one-time authorization code for a session. The code is exchanged server-side with the client secret; a token minted in the browser is never accepted. redirect_uri must be one the deployment published (UC_GOOGLE_REDIRECT_URIS) and must be the same value the browser sent to Google. code_verifier is the PKCE verifier when the page used one.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -115,6 +118,8 @@ export interface paths {
                 content: {
                     "application/json": {
                         code: string;
+                        redirect_uri: string;
+                        code_verifier?: string;
                     };
                 };
             };
@@ -129,7 +134,25 @@ export interface paths {
                         "application/json": components["schemas"]["Account"];
                     };
                 };
+                /** @description bad_body, missing_code, or bad_redirect_uri — the redirect_uri is not one this deployment published. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 401: components["responses"]["Unauthorized"];
+                /** @description google_not_configured — this instance has no Google client, so the magic link is the way in. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;

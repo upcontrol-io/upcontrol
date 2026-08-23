@@ -226,9 +226,16 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/auth/magic-link", auth.NewMagicLink(pgPool, sm, devMode, mail, recorder, d.Logger).WithSelfHosted(d.Config.SelfHosted))
 	mux.Handle("GET /v1/me", auth.NewMe(pgPool, sm))
 	mux.Handle("POST /v1/auth/logout", auth.NewLogout(sm))
-	// Google + Telegram OAuth are mounted (all 30 spec paths resolve) but 501
-	// until the OAuth wiring ships — honest, not a silent stub.
-	mux.Handle("POST /v1/auth/google", auth.NewNotImplemented("Google"))
+	// Google sign-in. Mounted whether or not it is configured: unconfigured it
+	// answers 503 and names itself, which is a fact the sign-in page can read
+	// to decide whether to draw the button at all. A door that is not there is
+	// better than one painted on a wall.
+	googleAuth := auth.NewGoogle(pgPool, sm, d.Config.GoogleClientID, d.Config.GoogleClientSecret,
+		d.Config.GoogleRedirectURIs, devMode, recorder, d.Logger).WithSelfHosted(d.Config.SelfHosted)
+	mux.Handle("POST /v1/auth/google", googleAuth)
+	if googleAuth.Configured() {
+		d.Logger.Info("auth: google sign-in enabled", "redirect_uris", d.Config.GoogleRedirectURIs)
+	}
 	// Telegram Mini App sign-in: server-verified initData HMAC (design D3).
 	// The bot token IS the verification key; without a bot there is nothing to
 	// verify against, and the endpoint stays a 501 rather than trusting a

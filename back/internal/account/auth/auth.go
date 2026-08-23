@@ -229,6 +229,13 @@ func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 	// the request means visitor_id 0 — the events still count, unlinked.
 	h.rec.ServerEvent(ctx, "signed_in", person.ID, person.TenantID, nil)
 	h.rec.LinkPerson(ctx, person.ID, person.TenantID)
+	writeAccount(w, person)
+}
+
+// writeAccount is the body every sign-in door answers with. Shared for the same
+// reason ensureAccount is: two doors that build the account payload separately
+// are two doors that eventually describe the same account differently.
+func writeAccount(w http.ResponseWriter, person personInfo) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       uuidStr(person.PublicID),
 		"name":     person.Name,
