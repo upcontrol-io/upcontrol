@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -82,6 +83,9 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 		dw.RegisterChannel(&deliver.EmailChannel{
 			APIURL: d.Config.EmailURL,
 			APIKey: d.Config.EmailAPIKey,
+			// Where the mail's button sends the reader. The agent has no idea
+			// what origin this deployment answers on, so it travels per send.
+			AppURL: strings.TrimRight(d.Config.PublicOrigin, "/") + "/app",
 		})
 	} else {
 		// SMTP resolves per send (a relay saved in Settings wins over

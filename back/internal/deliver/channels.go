@@ -27,12 +27,22 @@ type Channel interface {
 // for each channel to format its own message (the plan §9: telegram gets
 // buttons, email gets a subject+body, discord/slack get a webhook JSON).
 type AlertPayload struct {
-	Title       string            `json:"title"`
-	Status      string            `json:"status"` // down|check|ok
-	IncidentID  string            `json:"incident_id"`
-	MonitorName string            `json:"monitor_name"`
-	Actions     []ActionButton    `json:"actions,omitempty"`
-	Fields      map[string]string `json:"fields,omitempty"`
+	Title       string         `json:"title"`
+	Status      string         `json:"status"` // down|check|ok
+	IncidentID  string         `json:"incident_id"`
+	MonitorName string         `json:"monitor_name"`
+	Actions     []ActionButton `json:"actions,omitempty"`
+	Fields      []Field        `json:"fields,omitempty"`
+	// Lines is machine output the detector already had in hand — the error
+	// message in full, the last response. LinesLabel names what they are; a
+	// panel with no label would be a block of text nobody can place.
+	Lines      []string `json:"lines,omitempty"`
+	LinesLabel string   `json:"lines_label,omitempty"`
+	// Class is the delivery's own class (test|page|ticket|followup), copied
+	// onto the payload by the worker at send time. A channel that renders
+	// needs it: the same status "down" is an outage page and a follow-up, and
+	// they do not read the same.
+	Class string `json:"class,omitempty"`
 	// Buttons: set by the worker for PERSONAL telegram channels only — the
 	// message then carries Acknowledge/Resolve inline buttons whose callback
 	// data is "ack:<incident_id>" / "resolve:<incident_id>". A broadcast
@@ -45,6 +55,22 @@ type AlertPayload struct {
 type ActionButton struct {
 	Label string `json:"label"`
 	URL   string `json:"url,omitempty"`
+}
+
+// Field is one label/value row of an alert's fact table.
+//
+// A slice of these, not a map: Go randomizes map iteration on purpose, so the
+// same alert rendered twice listed its facts in different orders. A reader
+// cannot learn where to look on a page that reshuffles itself, and on the
+// channels that render one line per field it made two identical alerts
+// compare as different text.
+//
+// Mono asks the renderer for a monospaced value — a URL, a status code, an
+// identifier. Prose does not get it.
+type Field struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Mono  bool   `json:"mono,omitempty"`
 }
 
 // --- implementations ---
@@ -99,18 +125,59 @@ func (c *TelegramChannel) Send(ctx context.Context, target string, p AlertPayloa
 type EmailChannel struct {
 	APIURL string // service base, e.g. http://mail-agent:8080
 	APIKey string // bearer token; empty = the service runs with auth disabled
+	AppURL string // the account app's public origin, for the mail's CTA
 }
 
 func (c *EmailChannel) Kind() string { return "email" }
 
+// Send hands the agent the facts and lets it render, rather than shipping a
+// finished subject and body.
+//
+// The split follows the magic-link one (Decision 14): the agent owns the HTML
+// part, and a self-host without the agent still gets the plain-text one from
+// SMTPChannel below. Rendering here instead would mean an HTML email template
+// in Go that only ever reaches the deployments that already run the agent.
 func (c *EmailChannel) Send(ctx context.Context, target string, p AlertPayload) (int, error) {
-	body, _ := json.Marshal(map[string]any{
-		"kind":    "notification",
+	vars := map[string]any{
+		"class":   p.Class,
+		"status":  p.Status,
+		"title":   p.Title,
 		"to":      target,
-		"subject": "[" + p.Status + "] " + p.Title,
-		"text":    formatEmail(p),
+		"app_url": c.AppURL,
+	}
+	if fields := alertFields(p); len(fields) > 0 {
+		vars["fields"] = fields
+	}
+	if len(p.Lines) > 0 {
+		vars["lines"] = p.Lines
+		vars["lines_label"] = p.LinesLabel
+	}
+	if len(p.Actions) > 0 {
+		vars["actions"] = p.Actions
+	}
+	body, _ := json.Marshal(map[string]any{
+		"kind":     "notification",
+		"to":       target,
+		"template": "alert",
+		"vars":     vars,
 	})
 	return doPost(ctx, strings.TrimRight(c.APIURL, "/")+"/send", c.APIKey, body)
+}
+
+// alertFields is the mail's fact table: what the queue always knows first,
+// then whatever the detector attached, in the order it attached it.
+func alertFields(p AlertPayload) [][]any {
+	out := make([][]any, 0, len(p.Fields)+2)
+	if p.MonitorName != "" {
+		out = append(out, []any{"Monitor", p.MonitorName, false})
+	}
+	for _, f := range p.Fields {
+		out = append(out, []any{f.Label, f.Value, f.Mono})
+	}
+	if p.IncidentID != "" {
+		out = append(out, []any{"Incident", p.IncidentID, true})
+	}
+	return out
 }
 
 // DiscordChannel sends alerts via a Discord webhook URL.
@@ -177,13 +244,25 @@ func formatTelegram(p AlertPayload) string {
 	return s
 }
 
+// formatEmail is the plain-text body every channel that is not the email agent
+// sends: SMTP, and the prose half of telegram/discord/slack.
 func formatEmail(p AlertPayload) string {
 	s := p.Title + "\n"
 	if p.MonitorName != "" {
 		s += "Monitor: " + p.MonitorName + "\n"
 	}
-	for k, v := range p.Fields {
-		s += k + ": " + v + "\n"
+	for _, f := range p.Fields {
+		s += f.Label + ": " + f.Value + "\n"
+	}
+	if len(p.Lines) > 0 {
+		label := p.LinesLabel
+		if label == "" {
+			label = "Detail"
+		}
+		s += "\n" + label + ":\n"
+		for _, line := range p.Lines {
+			s += "  " + line + "\n"
+		}
 	}
 	return s
 }

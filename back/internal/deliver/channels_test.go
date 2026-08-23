@@ -19,7 +19,8 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		Title:       "Test title",
 		Status:      "down",
 		MonitorName: "example.com/checkout",
-		Fields:      map[string]string{"Region": "fra"},
+		Fields:      []Field{{Label: "Region", Value: "fra"}},
+		Class:       "page",
 	}
 
 	var mu sync.Mutex
@@ -36,7 +37,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 	defer ts.Close()
 
 	// Trailing slash on purpose: the channel must normalize to /send.
-	ch := &EmailChannel{APIURL: ts.URL + "/", APIKey: "sekret"}
+	ch := &EmailChannel{APIURL: ts.URL + "/", APIKey: "sekret", AppURL: "https://x.test/app"}
 	code, err := ch.Send(context.Background(), "ops@example.com", payload)
 	if err != nil || code != 200 {
 		t.Fatalf("Send = (%d, %v), want (200, nil)", code, err)
@@ -62,12 +63,66 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 	if body["to"] != "ops@example.com" {
 		t.Errorf("to = %v, want ops@example.com", body["to"])
 	}
-	if body["subject"] != "[down] Test title" {
-		t.Errorf("subject = %v, want [down] Test title", body["subject"])
+	// The agent renders: the wire carries facts and a template name, never a
+	// finished subject or body. A regression back to ready-made content would
+	// silently drop the HTML part from every alert and nothing else would fail.
+	if body["template"] != "alert" {
+		t.Errorf("template = %v, want alert", body["template"])
 	}
-	// A single Fields entry keeps formatEmail deterministic; equality is exact.
-	if want := formatEmail(payload); body["text"] != want {
-		t.Errorf("text = %q, want the formatEmail output %q", body["text"], want)
+	if _, ok := body["subject"]; ok {
+		t.Error("subject must not be sent: the agent owns the subject line")
+	}
+	if _, ok := body["text"]; ok {
+		t.Error("text must not be sent: the agent owns both body parts")
+	}
+	vars, _ := body["vars"].(map[string]any)
+	if vars == nil {
+		t.Fatalf("vars missing from %v", body)
+	}
+	for _, c := range [][2]string{
+		{"class", "page"}, {"status", "down"}, {"title", "Test title"},
+		{"to", "ops@example.com"}, {"app_url", "https://x.test/app"},
+	} {
+		if vars[c[0]] != c[1] {
+			t.Errorf("vars[%s] = %v, want %q", c[0], vars[c[0]], c[1])
+		}
+	}
+	// The monitor leads the fact table, then whatever the detector attached.
+	// The ORDER is the assertion: it is the whole reason Fields is a slice.
+	fields, _ := vars["fields"].([]any)
+	if len(fields) != 2 {
+		t.Fatalf("fields = %v, want 2 rows", vars["fields"])
+	}
+	first, _ := fields[0].([]any)
+	second, _ := fields[1].([]any)
+	if len(first) != 3 || first[0] != "Monitor" || first[1] != "example.com/checkout" {
+		t.Errorf("fields[0] = %v, want [Monitor example.com/checkout false]", fields[0])
+	}
+	if len(second) != 3 || second[0] != "Region" || second[1] != "fra" {
+		t.Errorf("fields[1] = %v, want [Region fra false]", fields[1])
+	}
+}
+
+// The order a map would not have kept. Go randomizes map iteration, so the
+// same alert used to list its facts differently on each render — and on the
+// channels that send one line per field, two identical alerts compared as
+// different text.
+func TestFormatEmailKeepsFieldOrder(t *testing.T) {
+	p := AlertPayload{
+		Title: "T",
+		Fields: []Field{
+			{Label: "Region", Value: "fra"},
+			{Label: "Error", Value: "503"},
+			{Label: "Attempt", Value: "3"},
+		},
+		Lines:      []string{"HTTP/1.1 503"},
+		LinesLabel: "Last response",
+	}
+	want := "T\nRegion: fra\nError: 503\nAttempt: 3\n\nLast response:\n  HTTP/1.1 503\n"
+	for i := range 20 {
+		if got := formatEmail(p); got != want {
+			t.Fatalf("render %d = %q, want %q", i, got, want)
+		}
 	}
 }
 
@@ -87,7 +142,7 @@ func TestSMTPChannelSendsSubjectAndBody(t *testing.T) {
 		Title:       "Test title",
 		Status:      "down",
 		MonitorName: "example.com/checkout",
-		Fields:      map[string]string{"Region": "fra"},
+		Fields:      []Field{{Label: "Region", Value: "fra"}},
 	}
 	rec := &recordingSender{}
 	ch := &SMTPChannel{Mailer: rec}

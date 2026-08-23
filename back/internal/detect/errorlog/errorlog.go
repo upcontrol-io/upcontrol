@@ -23,6 +23,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
+	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
@@ -196,7 +197,7 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 				if !sub.settings.ErrorLogs {
 					continue
 				}
-				s.enqueue(ctx, tenantID, sub.channelID, g.Fingerprint, "error", NewErrorTitle(g), now)
+				s.enqueue(ctx, tenantID, sub.channelID, g, "error", NewErrorTitle(g), 0, now)
 			}
 			_ = q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
 				TenantID: tenantID, Fingerprint: int64(g.Fingerprint), Kind: "error",
@@ -221,7 +222,7 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 				if !sub.settings.RepeatingErrorLogs || sub.settings.RepeatWindowMin != windowMin {
 					continue
 				}
-				s.enqueue(ctx, tenantID, sub.channelID, g.Fingerprint, "repeat", RepeatTitle(g, windowMin), now)
+				s.enqueue(ctx, tenantID, sub.channelID, g, "repeat", RepeatTitle(g, windowMin), windowMin, now)
 			}
 			_ = q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
 				TenantID: tenantID, Fingerprint: int64(g.Fingerprint), Kind: "repeat",
@@ -285,15 +286,49 @@ func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Ti
 // enqueue puts one class-`ticket` delivery on the queue — a log alert is not a
 // page. Idem-keyed per channel+fingerprint+kind+minute, so a replayed tick
 // collapses instead of double-sending.
-func (s *Scanner) enqueue(ctx context.Context, tenantID, channelID int64, fp uint64, kind, title string, now time.Time) {
-	payload, _ := json.Marshal(map[string]any{
+//
+// The group travels with the alert, not just its title: the title is truncated
+// to fit one line on a lock screen, and the reader who opens the alert wants
+// the service, the count and the message in full. Every field here is one the
+// scanner measured — windowMin is 0 for the "appeared" pass, which has no
+// window, and the row is omitted rather than sent as "0 min".
+func (s *Scanner) enqueue(ctx context.Context, tenantID, channelID int64, g Group, kind, title string, windowMin int, now time.Time) {
+	fields := []deliver.Field{}
+	if g.Service != "" {
+		fields = append(fields, deliver.Field{Label: "Service", Value: g.Service})
+	}
+	if windowMin > 0 {
+		fields = append(fields, deliver.Field{
+			Label: "Occurrences",
+			Value: fmt.Sprintf("%d in %d min", g.Count, windowMin),
+		})
+	}
+	if !g.LastTS.IsZero() {
+		fields = append(fields, deliver.Field{
+			Label: "Last seen",
+			Value: g.LastTS.UTC().Format("2 Jan 2006, 15:04") + " UTC",
+		})
+	}
+	fields = append(fields, deliver.Field{
+		Label: "Fingerprint",
+		Value: fmt.Sprintf("%x", g.Fingerprint),
+		Mono:  true,
+	})
+
+	body := map[string]any{
 		"title":  title,
 		"status": "check",
-	})
+		"fields": fields,
+	}
+	if g.Message != "" {
+		body["lines"] = []string{g.Message}
+		body["lines_label"] = "The error"
+	}
+	payload, _ := json.Marshal(body)
 	_ = s.pool.Queries().EnqueueDelivery(ctx, sqlc.EnqueueDeliveryParams{
 		TenantID:  tenantID,
 		ChannelID: channelID,
-		IdemKey:   fmt.Sprintf("errlog:%d:%d:%s:%d", channelID, fp, kind, now.Unix()/60),
+		IdemKey:   fmt.Sprintf("errlog:%d:%d:%s:%d", channelID, g.Fingerprint, kind, now.Unix()/60),
 		Class:     "ticket",
 		Payload:   payload,
 	})

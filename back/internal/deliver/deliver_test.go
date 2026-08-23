@@ -159,7 +159,7 @@ func TestFormatTelegram_CarriesTheAnswerAndTheButtons(t *testing.T) {
 		Status:      "down",
 		Title:       "Checkout is down",
 		MonitorName: "example.com/checkout",
-		Fields:      map[string]string{"Region": "fra"},
+		Fields:      []Field{{Label: "Region", Value: "fra"}},
 		Actions:     []ActionButton{{Label: "Open incident", URL: "https://upcontrol.io/i/1"}},
 	})
 	for _, want := range []string{
