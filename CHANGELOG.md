@@ -4,6 +4,81 @@ All notable changes to the self-hosted package. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org/).
 
+## [0.2.0] — 2026-08-24
+
+### Added
+- **Google sign-in**, the authorization-code half: a second door beside the
+  magic link, on the same session and the same account rules.
+- **Alert email is rendered, not concatenated.** The backend posts the facts
+  and a template name and the email agent renders both parts, the split the
+  magic-link mail already used — so an alert arrives with its summary, its
+  labelled facts and its log lines instead of four unstyled sentences. Its
+  button deep-links the incident rather than the dashboard: by the time most
+  alert mail is read the incident is resolved and no longer sits first on the
+  screen the old link opened.
+- **Telegram alerts read like the product.** A status emoji beside words that
+  carry the same fact (colour is never the only channel, on a surface with no
+  CSS), the measured summary sentence, label/value facts with machine output in
+  `<code>`, raw lines in one `<pre>`, and a closing link chosen by the
+  delivery's class — an outage deep-links its incident, a log alert opens the
+  log group, the recovered follow-up closes quietly and carries the duration
+  measured from the incident's own bounds.
+- **Detector incidents alert.** An error-rate spike notifies channels the way
+  an outage does, gated by the channel's error axis, which is off by default.
+  Such incidents open as `check`, not `down`: these detectors read the log
+  stream and never look at a monitor, so they report degradation without
+  claiming the availability verdict. The alert quotes the weekly baseline only
+  when one was measured, and says so when the project is younger than a week.
+- **Alerts open the app.** Personal Telegram alerts carry a Mini App button —
+  Open for an outage, Explain for a spike, which runs the AI read on arrival.
+  `/unmute` lifts a mute window early and releases the pages it parked,
+  `/status` names the open incidents (and says so when it could not read them),
+  and the bot registers its command list and menu button at start.
+
+### Fixed
+- **A deleted check no longer leaves an incident nobody can close.**
+  `incident.monitor_id` is `ON DELETE SET NULL`, so removing a monitor orphaned
+  its open incident and nothing could ever resolve it: a status page went on
+  announcing "Some systems are down" for a component it no longer listed. The
+  delete closes it first, with `close_reason = monitor_deleted` and a timeline
+  entry that says what ended it; a public page no longer lists the incidents of
+  deleted checks. Migration `024` closes the ones already stranded, leaving
+  detector incidents — which legitimately carry no monitor — alone.
+- **Login CSRF on both sign-in doors.** Every other write here is protected by
+  accident: `SameSite=Lax` keeps a victim's cookie off a cross-site request. The
+  sign-in doors are the exception, because they need no cookie — they install
+  one, so an attacker could cross-site POST a credential for an account they
+  control and leave the victim signed into the attacker's tenant. Two checks now
+  stand in the way, either sufficient alone: `Sec-Fetch-Site`, which a page
+  cannot forge and a non-browser caller simply omits, and a JSON content type,
+  which a cross-site form cannot produce.
+- **One address, one account.** `person.email` is unique and was compared byte
+  for byte with nothing normalised, so a phone's autocapitalisation or Google's
+  own casing could open a second account for the same person.
+- **No Telegram invite could be redeemed.** The mint stored `sha256` of the
+  whole `inv_…` string and the bot looked up `sha256` of the tail, so every
+  `/start` landed on "this invite link is no longer valid" — and both suites
+  stayed green, because each side was only ever tested against itself. One
+  hasher now serves both; invites minted before the fix redeem after it.
+- **A Telegram alert could fail to deliver because of what it was alerting
+  about.** The old renderer interpolated the title raw, and a log-alert title IS
+  an error message: one `<` in it — any generic type — and the Bot API rejected
+  the whole message as malformed HTML. Every dynamic string is escaped.
+- `X-Upcontrol-Key` keeps the spelling it was published under. A brand sweep
+  renamed the header along with the prose; nothing would have broken, but SDKs
+  already installed in other people's projects send the original, and a spec
+  advertising a different spelling for the same header is a discrepancy with no
+  upside.
+- The reporting addresses in the security and conduct documents are ones that
+  exist.
+
+### Changed
+- `formatTelegram` says the same thing in half the lines — plain concatenation
+  instead of forty `WriteString` calls, with byte-identical output pinned by the
+  layout tests.
+- The product spells itself UpControl throughout the docs, and the supported
+  agent count is a badge over a complete list.
+
 ## [0.1.1] — 2026-08-21
 
 ### Fixed
