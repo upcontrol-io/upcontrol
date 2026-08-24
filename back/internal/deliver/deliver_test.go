@@ -348,3 +348,67 @@ func TestStatusColor_IsStatusNotSeverity(t *testing.T) {
 		t.Fatal("an unknown status must read as ok, never as down")
 	}
 }
+
+// keyboardDesc flattens a keyboard to "label=target | label=target" in row
+// order. Comparing whole strings pins the buttons, their order AND everything
+// absent in one assertion — and keeps the JSON encoder out of the assertion
+// path, where it escapes "&" and tests itself rather than the URL.
+func keyboardDesc(kb [][]map[string]any) string {
+	var out []string
+	for _, row := range kb {
+		for _, btn := range row {
+			target, _ := btn["callback_data"].(string)
+			if app, ok := btn["web_app"].(map[string]string); ok {
+				target = app["url"]
+			}
+			out = append(out, btn["text"].(string)+"="+target)
+		}
+	}
+	return strings.Join(out, " | ")
+}
+
+func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
+	const app = "https://upcontrol.io/app"
+	page := AlertPayload{Buttons: true, IncidentID: "abc123"}
+	detect := AlertPayload{Buttons: true, IncidentID: "abc123", Detector: "errorrate"}
+
+	for _, tc := range []struct {
+		name    string
+		payload AlertPayload
+		appURL  string
+		want    string
+	}{
+		{
+			name:    "an outage is acknowledged, resolved, or opened",
+			payload: page,
+			appURL:  app,
+			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123 | Open=https://upcontrol.io/app?incident=abc123",
+		},
+		{
+			// No Resolve: a detector closes its own incidents, and the button
+			// would be one that cannot act.
+			name:    "a detector spike is acknowledged or explained",
+			payload: detect,
+			appURL:  app,
+			want:    "Acknowledge=ack:abc123 | Explain=https://upcontrol.io/app?incident=abc123&explain=1",
+		},
+		{
+			// Telegram accepts web_app over https only, so a local stack keeps
+			// the callbacks and the message's own text link.
+			name:    "a local stack sends callbacks only",
+			payload: page,
+			appURL:  "http://localhost/app",
+			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
+		},
+		// Nothing to act on: a broadcast group and a recovered follow-up (the
+		// worker clears Buttons), and a test alert (no incident).
+		{name: "a broadcast group gets no buttons", payload: AlertPayload{IncidentID: "abc123"}, appURL: app, want: ""},
+		{name: "a test alert gets no buttons", payload: AlertPayload{Buttons: true}, appURL: app, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keyboardDesc(telegramKeyboard(tc.payload, tc.appURL)); got != tc.want {
+				t.Errorf("keyboard =\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
+	}
+}

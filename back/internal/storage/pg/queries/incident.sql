@@ -3,9 +3,16 @@
 -- monitor_id + detector, so repeated outages of the same monitor share a
 -- fingerprint for grouping). Only one incident per monitor should be open at a
 -- time — the caller checks GetOpenIncident first.
+--
+-- status is the caller's too, and only the checks may say 'down': an
+-- availability incident is 'down', a detector reading the log stream opens
+-- 'check'. It used to be hardcoded 'down', which made the row disagree with
+-- the alert the same incident sent ('check', an orange shape and a "Spike"
+-- badge) — one fact, two surfaces, two claims. Both are 'ongoing' to the API
+-- (read_api: down OR check), so the dashboard is unchanged either way.
 INSERT INTO incident (public_id, tenant_id, project_id, monitor_id, detector,
                       fingerprint, title, status, detected_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'down', now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 RETURNING id, public_id;
 
 -- name: CloseIncident :exec

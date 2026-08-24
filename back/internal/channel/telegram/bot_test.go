@@ -46,6 +46,8 @@ func TestCommand(t *testing.T) {
 		{"/start", "start", ""},
 		{"/mute@upcontrol_bot 30m", "mute", "30m"}, // group addressing
 		{"/status", "status", ""},
+		{"/unmute", "unmute", ""},
+		{"/stop", "stop", ""},
 		{"hello", "", ""},
 		{"", "", ""},
 	} {
@@ -110,5 +112,25 @@ func TestInviteTokenHashCoversTheFullPayload(t *testing.T) {
 	tail := sha256.Sum256([]byte("cd3043718570df4147d831aa47d8cdc5"))
 	if got := InviteTokenHash(payload); bytes.Equal(got, tail[:]) {
 		t.Fatal("InviteTokenHash hashed the tail after the prefix — the exact bug that made every invite unredeemable")
+	}
+}
+
+// /status names the open incidents, but a chat message is not a list view:
+// three titles, then a count. No incidents means no line at all — the answer
+// about the checks must not grow a heading over an empty section.
+func TestIncidentsLine(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		titles []string
+		want   string
+	}{
+		{"none", nil, ""},
+		{"one", []string{"Error rate spike on shop.example"}, "\nOpen incidents: Error rate spike on shop.example"},
+		{"three", []string{"a", "b", "c"}, "\nOpen incidents: a; b; c"},
+		{"five", []string{"a", "b", "c", "d", "e"}, "\nOpen incidents: a; b; c (+2 more)"},
+	} {
+		if got := incidentsLine(tc.titles, true); got != tc.want {
+			t.Errorf("%s: incidentsLine = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

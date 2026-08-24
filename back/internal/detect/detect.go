@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
+	"go.upcontrol.io/back/internal/deliver"
 	detector "go.upcontrol.io/back/internal/detect/detectors"
 	"go.upcontrol.io/back/internal/detect/suppression"
 	"go.upcontrol.io/back/internal/incident"
@@ -31,6 +32,11 @@ import (
 // madScale converts a MAD into a standard-deviation equivalent for the
 // detector's z-score. Fixed by plan: no env knobs (D8).
 const madScale = 1.4826
+
+// scanWindow is the span windowBounds scores, named because the alert says it
+// out loud ("in the last 5 minutes") — the sentence and the query must not be
+// able to drift apart.
+const scanWindow = 5 * time.Minute
 
 // Scanner wires the pure decisions to Postgres + ClickHouse. One
 // implementation, no interface (D11): the mock would be a second product.
@@ -52,7 +58,7 @@ func New(pool *pg.Pool, chConn *ch.Conn, lc *incident.Lifecycle, log *slog.Logge
 // so the window IS the smoothing — no separate M constant.
 func windowBounds(now time.Time) (from, to time.Time) {
 	to = now.Truncate(time.Minute)
-	return to.Add(-5 * time.Minute), to
+	return to.Add(-scanWindow), to
 }
 
 // baselineBounds is the week of history the MAD baseline is computed over,
@@ -61,6 +67,22 @@ func windowBounds(now time.Time) (from, to time.Time) {
 func baselineBounds(now time.Time) (from, to time.Time) {
 	wFrom, _ := windowBounds(now)
 	return wFrom.Add(-7 * 24 * time.Hour), wFrom
+}
+
+// errorRateSummary is the alert's one measured sentence. The baseline clause
+// is the half that can lie: a project younger than a week has no history,
+// ErrorRateBaseline reports that as (0, 0), and the detector falls back to its
+// flat 10% rule. "The weekly baseline is 0.0%" would then assert a measurement
+// nobody made, so the baseline is quoted only when the detector actually had
+// one to compare against — a MAD above zero is exactly that condition.
+func errorRateSummary(errs, total uint64, median, mad float64) string {
+	rate := float64(errs) / float64(total)
+	s := fmt.Sprintf("Error and fatal lines are %.1f%% of the log stream in the last %d minutes.",
+		rate*100, int(scanWindow.Minutes()))
+	if mad > 0 {
+		s += fmt.Sprintf(" The weekly baseline is %.1f%%.", median*100)
+	}
+	return s
 }
 
 // action is what a tick must do with a project after decide().
@@ -128,16 +150,19 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 
 	// Under the total>=10 floor there is nothing to score — and no reason to
 	// pay the two baseline queries either (the detector would NoFire anyway).
+	// median and mad outlive the branch because the alert quotes them.
 	var dec detector.Decision
+	var median, mad float64
 	if total < 10 {
 		dec = detector.NoFire()
 	} else {
 		bFrom, bTo := baselineBounds(now)
-		median, mad, err := s.ch.ErrorRateBaseline(ctx, proj.TenantID, proj.ID, bFrom, bTo)
-		if err != nil {
-			return fmt.Errorf("error rate baseline: %w", err)
+		m, d, berr := s.ch.ErrorRateBaseline(ctx, proj.TenantID, proj.ID, bFrom, bTo)
+		if berr != nil {
+			return fmt.Errorf("error rate baseline: %w", berr)
 		}
-		dec = detector.ErrorRate(int(errs), int(total), median, mad, madScale)
+		median, mad = m, d
+		dec = detector.ErrorRate(int(errs), int(total), m, d, madScale)
 	}
 
 	// Suppression only matters on a fire (test-pinned order: post-deploy → maintenance
@@ -182,6 +207,15 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 			Fingerprint: fp,
 			Title:       "Error rate spike on " + proj.Domain,
 			OpenedText:  dec.Reason,
+			Summary:     errorRateSummary(errs, total, median, mad),
+			Fields: []deliver.Field{
+				{Label: "Detected", Value: now.UTC().Format("2 Jan 2006, 15:04") + " UTC"},
+				{Label: "Error lines", Value: fmt.Sprintf("%d of %d lines", errs, total)},
+				// Not "Deviation": with no baseline the detector never computes
+				// one, it fires on a flat threshold, and dec.Reason then says
+				// so. One label that is true of both rules.
+				{Label: "Why it fired", Value: dec.Reason},
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("open detect incident: %w", err)

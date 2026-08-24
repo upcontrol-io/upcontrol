@@ -50,6 +50,12 @@ type AlertPayload struct {
 	// needs it: the same status "down" is an outage page and a follow-up, and
 	// they do not read the same.
 	Class string `json:"class,omitempty"`
+	// Detector names the detector behind the incident ("errorrate"), set only
+	// for detection incidents. It is what tells a page apart from an outage
+	// page after the class is the same: telegram picks the button set by it
+	// (no Resolve — a detector closes its own incidents), and email picks the
+	// badge and the "why you got this" line by it.
+	Detector string `json:"detector,omitempty"`
 	// Buttons: set by the worker for PERSONAL telegram channels only — the
 	// message then carries Acknowledge/Resolve inline buttons whose callback
 	// data is "ack:<incident_id>" / "resolve:<incident_id>". A broadcast
@@ -116,16 +122,49 @@ func (c *TelegramChannel) Send(ctx context.Context, target string, p AlertPayloa
 		"text":       text,
 		"parse_mode": "HTML",
 	}
-	if p.Buttons && p.IncidentID != "" {
-		body["reply_markup"] = map[string]any{
-			"inline_keyboard": [][]map[string]string{
-				{{"text": "Acknowledge", "callback_data": "ack:" + p.IncidentID}},
-				{{"text": "Resolve", "callback_data": "resolve:" + p.IncidentID}},
-			},
-		}
+	if kb := telegramKeyboard(p, c.AppURL); kb != nil {
+		body["reply_markup"] = map[string]any{"inline_keyboard": kb}
 	}
 	encoded, _ := json.Marshal(body)
 	return doPost(ctx, fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token), "", encoded)
+}
+
+// telegramKeyboard is the inline keyboard under an alert, nil when the message
+// carries no actions at all — a broadcast group, a test alert, a recovered
+// follow-up (nothing left to acknowledge once it is over).
+//
+// The last button opens the incident inside Telegram's own browser. It is a
+// web_app button, which Telegram accepts ONLY over https, so a local stack
+// keeps the callbacks and falls back to the text link the message already
+// carries. A detector incident swaps it for Explain (the app runs the AI read
+// on arrival) and drops Resolve: a detector closes its own incidents, and the
+// button would be one that cannot act.
+func telegramKeyboard(p AlertPayload, appURL string) [][]map[string]any {
+	if !p.Buttons || p.IncidentID == "" {
+		return nil
+	}
+	rows := [][]map[string]any{
+		{{"text": "Acknowledge", "callback_data": "ack:" + p.IncidentID}},
+	}
+	if p.Detector == "" {
+		rows = append(rows, []map[string]any{
+			{"text": "Resolve", "callback_data": "resolve:" + p.IncidentID},
+		})
+	}
+	if strings.HasPrefix(appURL, "https://") {
+		label, query := "Open", ""
+		if p.Detector != "" {
+			label, query = "Explain", "&explain=1"
+		}
+		rows = append(rows, []map[string]any{{
+			"text": label,
+			// appURL already ends in /app — alertLink builds on the same value.
+			"web_app": map[string]string{
+				"url": appURL + "?incident=" + url.QueryEscape(p.IncidentID) + query,
+			},
+		}})
+	}
+	return rows
 }
 
 // EmailChannel sends alert emails through an external email agent,
@@ -161,6 +200,13 @@ func (c *EmailChannel) Send(ctx context.Context, target string, p AlertPayload) 
 	}
 	if p.Summary != "" {
 		vars["summary"] = p.Summary
+	}
+	// A detector page is not an outage page: it says the error rate spiked
+	// while the site kept answering. The agent needs to know which one this is
+	// or it prints "Down" over a spike and tells the reader they subscribed to
+	// website-down alerts, which is the wrong switch entirely.
+	if p.Detector != "" {
+		vars["detector"] = p.Detector
 	}
 	if fields := alertFields(p); len(fields) > 0 {
 		vars["fields"] = fields

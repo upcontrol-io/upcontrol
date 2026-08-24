@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +66,32 @@ func TestBaselineBounds(t *testing.T) {
 	}
 	if !from.Equal(wantFrom) {
 		t.Errorf("baselineBounds from = %v, want %v", from, wantFrom)
+	}
+}
+
+// The alert quotes the baseline only when there was one. A project younger
+// than a week gets (0, 0) from ErrorRateBaseline and fires on the detector's
+// flat 10% rule instead — printing "the weekly baseline is 0.0%" there would
+// assert a measurement nobody made, which is the one lie this product may not
+// tell.
+func TestErrorRateSummary_QuotesOnlyAMeasuredBaseline(t *testing.T) {
+	const window = "in the last 5 minutes"
+
+	withBaseline := errorRateSummary(30, 200, 0.012, 0.004)
+	if !strings.Contains(withBaseline, "15.0% of the log stream "+window+".") {
+		t.Errorf("measured share missing: %q", withBaseline)
+	}
+	if !strings.Contains(withBaseline, "The weekly baseline is 1.2%.") {
+		t.Errorf("a measured baseline must be quoted: %q", withBaseline)
+	}
+
+	// MAD of zero is the no-history contract, not a measured steadiness the
+	// detector scored against.
+	noBaseline := errorRateSummary(30, 200, 0, 0)
+	if strings.Contains(noBaseline, "baseline") {
+		t.Errorf("an unmeasured baseline must not be quoted: %q", noBaseline)
+	}
+	if !strings.Contains(noBaseline, "15.0% of the log stream "+window+".") {
+		t.Errorf("the measured half still stands alone: %q", noBaseline)
 	}
 }

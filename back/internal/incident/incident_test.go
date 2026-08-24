@@ -1,7 +1,11 @@
 package incident
 
 import (
+	"encoding/json"
 	"testing"
+
+	sqlc "go.upcontrol.io/back/gen/pg"
+	"go.upcontrol.io/back/internal/deliver"
 )
 
 func TestFingerprint_StableAndDistinct(t *testing.T) {
@@ -68,5 +72,59 @@ func TestUUIDStr_IsDashlessLowercaseHex(t *testing.T) {
 		if !isDigit && !isHexLetter {
 			t.Fatalf("non lowercase-hex rune %q in %q", r, s)
 		}
+	}
+}
+
+// The detection alert crosses a queue: this side writes a JSON map, the
+// delivery side reads deliver.AlertPayload by struct tag. Nothing fails when a
+// key is misspelled — the field just never arrives — so the round trip is
+// pinned here rather than discovered in somebody's inbox.
+func TestDetectAlertPayload_SurvivesTheRoundTrip(t *testing.T) {
+	p := DetectOpen{
+		Detector: "errorrate",
+		Title:    "Error rate spike on shop.example",
+		Summary:  "Error and fatal lines are 15.0% of the log stream in the last 5 minutes.",
+		Fields:   []deliver.Field{{Label: "Error lines", Value: "30 of 200 lines"}},
+	}
+	slice := []sqlc.ListIncidentSliceRow{
+		{Seq: 1, Message: "oldest"},
+		{Seq: 2, Message: "newest"},
+	}
+
+	var got deliver.AlertPayload
+	if err := json.Unmarshal(detectAlertPayload(p, "abc123", slice), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != p.Title || got.Summary != p.Summary || got.IncidentID != "abc123" {
+		t.Errorf("title/summary/id lost in transit: %+v", got)
+	}
+	// Without this the mail's badge reads "Down" and telegram offers a Resolve
+	// button the detector's own incidents refuse.
+	if got.Detector != "errorrate" {
+		t.Errorf("detector lost in transit: %+v", got)
+	}
+	// An error-rate spike is degradation, not an outage: the checks passed.
+	if got.Status != "check" {
+		t.Errorf("status = %q, want check", got.Status)
+	}
+	if len(got.Fields) != 1 || got.Fields[0].Label != "Error lines" {
+		t.Errorf("fields lost in transit: %+v", got.Fields)
+	}
+	// Oldest first in, newest out: the alert quotes the line closest to the fire.
+	if len(got.Lines) != 1 || got.Lines[0] != "newest" {
+		t.Errorf("lines = %v, want the newest line only", got.Lines)
+	}
+	if got.LinesLabel == "" {
+		t.Error("a code panel with no label is a block of text nobody can place")
+	}
+
+	// No slice, no section: a heading over nothing asserts a read that never
+	// happened.
+	var bare deliver.AlertPayload
+	if err := json.Unmarshal(detectAlertPayload(p, "abc123", nil), &bare); err != nil {
+		t.Fatal(err)
+	}
+	if len(bare.Lines) != 0 || bare.LinesLabel != "" {
+		t.Errorf("an empty slice must draw no lines section: %+v", bare)
 	}
 }
