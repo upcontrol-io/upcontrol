@@ -159,6 +159,10 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 		if inc.Status == "ok" {
 			payload.Title = name + " recovered — it is back up"
 			payload.Status = "ok"
+			// Nothing left to acknowledge or resolve once it is over: the
+			// buttons would act on a closed incident, which is noise on the
+			// one message that exists to say the reader can stand down.
+			payload.Buttons = false
 			// The duration line, from the incident's own bounds — measured,
 			// not composed at enqueue time. Either bound missing = no line:
 			// a renderer never invents one to fill the gap.

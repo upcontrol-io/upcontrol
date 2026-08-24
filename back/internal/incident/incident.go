@@ -37,6 +37,13 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
+// detectStatus is what a detection incident opens as, on the row AND in the
+// alert — the two must agree or the dashboard shows red for the incident
+// Telegram showed orange. Not "down": these detectors read the log stream and
+// never look at a monitor, so they can report degradation but have not earned
+// the availability verdict. The API counts it as ongoing either way.
+const detectStatus = "check"
+
 // CloseReason enumerates the incident close reasons (plan §5.8).
 const (
 	ReasonRecovered     = "recovered"
@@ -88,6 +95,8 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 		Detector:    "availability",
 		Fingerprint: fp,
 		Title:       title,
+		// The checks failed, so this one has earned the word.
+		Status: "down",
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("incident: open: %w", err)
@@ -109,80 +118,117 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 	// can say why a card came back without evidence.
 	_ = l.freezeSlice(ctx, row.ID, mon.TenantID, mon.ProjectID)
 
-	// Notify every connected channel (§5.8) whose settings still ask for the
-	// page — websiteDown defaults on, so a channel that never opened its
-	// settings behaves exactly as before. EnqueueDelivery dedupes on idem_key,
-	// so replaying the open is a no-op — this is the row the delivery worker
-	// (ucworker) picks up. Without it an open incident never reaches
-	// delivery_queue (block 2: EnqueueDelivery was never called).
-	if chans, cerr := q.ListChannelsByTenant(ctx, mon.TenantID); cerr == nil {
-		// The follow-up is PAID ONLY (every paid plan): the stored flag alone
-		// does not schedule one — a tenant that downgraded keeps the setting
-		// but stops getting what it bought.
-		plan, _ := q.GetTenantPlan(ctx, mon.TenantID)
-
-		// The facts the incident already holds, so the alert can name what
-		// broke instead of only that something did. Only what was measured: a
-		// field the row does not carry is omitted, never sent as an empty
-		// string for a renderer to draw as a blank row.
-		//
-		// Built once, outside the channel loop: one outage has one start time,
-		// and computing it per channel would tell email and telegram different
-		// minutes for the same incident.
-		fields := []deliver.Field{}
-		if mon.Target != "" {
-			fields = append(fields, deliver.Field{Label: "Target", Value: mon.Target, Mono: true})
-		}
-		fields = append(fields, deliver.Field{
-			Label: "Down since",
-			Value: time.Now().UTC().Format("2 Jan 2006, 15:04") + " UTC",
-		})
-		payload, _ := json.Marshal(map[string]any{
-			"title":        title,
-			"status":       "down",
-			"incident_id":  uuidStr(row.PublicID),
-			"monitor_name": mon.Name,
-			"fields":       fields,
-		})
-
-		for _, ch := range chans {
-			settings := notifysettings.Resolve(ch.Notify)
-			if !settings.WebsiteDown {
-				continue
-			}
-			_ = q.EnqueueDelivery(ctx, sqlc.EnqueueDeliveryParams{
-				TenantID:   mon.TenantID,
-				IncidentID: &row.ID,
-				ChannelID:  ch.ID,
-				IdemKey:    fmt.Sprintf("incident:%d:channel:%d:opened", row.ID, ch.ID),
-				Class:      "page",
-				Payload:    payload,
-			})
-			// The 15-minute resolve follow-up: enqueued now with next_try_at in
-			// the future, COMPOSED at send time from the incident's then-current
-			// state (deliver.Worker, class "followup") — recovered → "back up",
-			// still open → "still down". Either way, so the reader knows whether
-			// to keep running for a laptop.
-			if settings.ResolveFollowUp && plan != "" && plan != "Free" {
-				fuPayload, _ := json.Marshal(map[string]any{
-					"incident_id":  uuidStr(row.PublicID),
-					"monitor_name": mon.Name,
-				})
-				_ = q.EnqueueDeliveryAt(ctx, sqlc.EnqueueDeliveryAtParams{
-					TenantID:   mon.TenantID,
-					IncidentID: &row.ID,
-					ChannelID:  ch.ID,
-					IdemKey:    fmt.Sprintf("incident:%d:channel:%d:followup", row.ID, ch.ID),
-					Class:      "followup",
-					Payload:    fuPayload,
-					NextTryAt:  pgtype.Timestamptz{Time: time.Now().Add(notifysettings.FollowUpDelay), Valid: true},
-				})
-			}
-		}
-		_ = q.TouchIncidentNotified(ctx, row.ID)
+	// The facts the incident already holds, so the alert can name what broke
+	// instead of only that something did. Only what was measured: a field the
+	// row does not carry is omitted, never sent as an empty string for a
+	// renderer to draw as a blank row.
+	//
+	// Built once, outside the channel loop: one outage has one start time, and
+	// computing it per channel would tell email and telegram different minutes
+	// for the same incident.
+	fields := []deliver.Field{}
+	if mon.Target != "" {
+		fields = append(fields, deliver.Field{Label: "Target", Value: mon.Target, Mono: true})
 	}
+	fields = append(fields, deliver.Field{
+		Label: "Down since",
+		Value: time.Now().UTC().Format("2 Jan 2006, 15:04") + " UTC",
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"title":        title,
+		"status":       "down",
+		"incident_id":  uuidStr(row.PublicID),
+		"monitor_name": mon.Name,
+		"fields":       fields,
+	})
+	fuPayload, _ := json.Marshal(map[string]any{
+		"incident_id":  uuidStr(row.PublicID),
+		"monitor_name": mon.Name,
+	})
+
+	l.notifyChannels(ctx, mon.TenantID, notifySpec{
+		incidentID: row.ID,
+		payload:    payload,
+		wants:      func(s notifysettings.Settings) bool { return s.WebsiteDown },
+		followup:   fuPayload,
+	})
 
 	return row.ID, true, nil
+}
+
+// notifySpec is one incident's side of a notification: the message every
+// interested channel receives, and the question "is this channel interested"
+// — availability asks websiteDown, detection asks the error axis.
+type notifySpec struct {
+	incidentID int64
+	payload    []byte
+	wants      func(notifysettings.Settings) bool
+	// followup is the 15-minute resolve follow-up's payload, or nil when this
+	// kind of incident has none: a detector incident has no monitor to report
+	// back up, and GetIncidentForFollowUp would find nothing to compose from.
+	followup []byte
+}
+
+// notifyChannels enqueues one delivery per interested channel. EnqueueDelivery
+// dedupes on idem_key, so replaying an open is a no-op — these are the rows the
+// delivery worker (ucworker) picks up. Without them an open incident never
+// reaches delivery_queue.
+func (l *Lifecycle) notifyChannels(ctx context.Context, tenantID int64, n notifySpec) {
+	q := l.pool.Queries()
+	chans, err := q.ListChannelsByTenant(ctx, tenantID)
+	if err != nil {
+		return
+	}
+	// The follow-up is PAID ONLY (every paid plan): the stored flag alone does
+	// not schedule one — a tenant that downgraded keeps the setting but stops
+	// getting what it bought. Read only when a follow-up is possible at all.
+	plan := ""
+	if n.followup != nil {
+		plan, _ = q.GetTenantPlan(ctx, tenantID)
+	}
+
+	sent := 0
+	for _, ch := range chans {
+		settings := notifysettings.Resolve(ch.Notify)
+		if !n.wants(settings) {
+			continue
+		}
+		if err := q.EnqueueDelivery(ctx, sqlc.EnqueueDeliveryParams{
+			TenantID:   tenantID,
+			IncidentID: &n.incidentID,
+			ChannelID:  ch.ID,
+			IdemKey:    fmt.Sprintf("incident:%d:channel:%d:opened", n.incidentID, ch.ID),
+			Class:      "page",
+			Payload:    n.payload,
+		}); err == nil {
+			sent++
+		}
+		// The 15-minute resolve follow-up: enqueued now with next_try_at in the
+		// future, COMPOSED at send time from the incident's then-current state
+		// (deliver.Worker, class "followup") — recovered → "back up", still open
+		// → "still down". Either way, so the reader knows whether to keep
+		// running for a laptop.
+		if n.followup != nil && settings.ResolveFollowUp && plan != "" && plan != "Free" {
+			_ = q.EnqueueDeliveryAt(ctx, sqlc.EnqueueDeliveryAtParams{
+				TenantID:   tenantID,
+				IncidentID: &n.incidentID,
+				ChannelID:  ch.ID,
+				IdemKey:    fmt.Sprintf("incident:%d:channel:%d:followup", n.incidentID, ch.ID),
+				Class:      "followup",
+				Payload:    n.followup,
+				NextTryAt:  pgtype.Timestamptz{Time: time.Now().Add(notifysettings.FollowUpDelay), Valid: true},
+			})
+		}
+	}
+	// The mark says an alert was QUEUED for at least one channel — the worker
+	// sends later and may still dead-letter it, so this is not proof of
+	// delivery and MTTD read off it is a queue time. It is written only when a
+	// channel actually took one: the detect gate defaults OFF, so most detect
+	// incidents enqueue nothing, and stamping those would put a notification
+	// time on an incident nobody was told about.
+	if sent > 0 {
+		_ = q.TouchIncidentNotified(ctx, n.incidentID)
+	}
 }
 
 // Close resolves the open incident for a monitor with the given reason.
@@ -228,13 +274,23 @@ type DetectOpen struct {
 	Fingerprint int64
 	Title       string
 	OpenedText  string
+	// Summary and Fields are the alert's measured content — the caller owns
+	// them because only the detector knows what it measured. Both may be
+	// empty: a renderer draws what it is given and invents nothing.
+	Summary string
+	Fields  []deliver.Field
 }
 
-// OpenDetect opens a project-scoped incident for a detector verdict. Unlike
-// Open it enqueues NO deliveries and never touches notified_at (D4): detection
-// incidents are dashboard-visible only — the error-log scanner already alerts
-// on error spikes, and a second notification class would be a second product.
+// OpenDetect opens a project-scoped incident for a detector verdict.
 // Deduplication is by fingerprint: an already-open incident is returned as-is.
+//
+// NAMED REVERSAL of D4 (Aug 24, 2026). D4 said detection incidents were
+// dashboard-visible only and enqueued nothing. They now notify through the
+// same helper availability incidents use, gated by the channel's ERROR axis
+// (errorLogs / repeatingErrorLogs — not websiteDown), which is off by default:
+// a channel that never opened its settings keeps today's silence. There is no
+// follow-up (no monitor to report back up), and notified_at is stamped only if
+// a delivery was actually enqueued. Do not "fix this back".
 func (l *Lifecycle) OpenDetect(ctx context.Context, p DetectOpen) (incidentID int64, created bool, err error) {
 	q := l.pool.Queries()
 
@@ -258,6 +314,9 @@ func (l *Lifecycle) OpenDetect(ctx context.Context, p DetectOpen) (incidentID in
 		Detector:    p.Detector,
 		Fingerprint: p.Fingerprint,
 		Title:       p.Title,
+		// detectStatus, not "down": the row has to say what the alert says, or
+		// the dashboard shows red for the incident Telegram showed orange.
+		Status: detectStatus,
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("incident: detect open: %w", err)
@@ -274,7 +333,47 @@ func (l *Lifecycle) OpenDetect(ctx context.Context, p DetectOpen) (incidentID in
 	// Same frozen-slice reasoning as Open, best-effort for the same reasons.
 	_ = l.freezeSlice(ctx, row.ID, p.TenantID, p.ProjectID)
 
+	// One line from the slice just frozen, so the alert carries the evidence
+	// and not only the verdict. A slice that cannot be read is no slice: the
+	// alert goes out without the lines section rather than not at all.
+	slice, serr := q.ListIncidentSlice(ctx, row.ID)
+	if serr != nil {
+		slice = nil
+	}
+	l.notifyChannels(ctx, p.TenantID, notifySpec{
+		incidentID: row.ID,
+		payload:    detectAlertPayload(p, uuidStr(row.PublicID), slice),
+		wants: func(s notifysettings.Settings) bool {
+			return s.ErrorLogs || s.RepeatingErrorLogs
+		},
+	})
+
 	return row.ID, true, nil
+}
+
+// detectAlertPayload is the detection alert on the wire. Every key here must
+// match a deliver.AlertPayload json tag exactly — the two sides meet through a
+// queue, so a typo does not fail, it silently drops the field (and dropping
+// "detector" alone turns the mail's badge back into "Down" and puts a Resolve
+// button on an incident that refuses it).
+//
+// The slice arrives oldest-first, so the newest line is the LAST one; an empty
+// slice draws no lines section at all rather than a heading over nothing.
+func detectAlertPayload(p DetectOpen, publicID string, slice []sqlc.ListIncidentSliceRow) []byte {
+	alert := map[string]any{
+		"title":       p.Title,
+		"status":      detectStatus,
+		"incident_id": publicID,
+		"detector":    p.Detector,
+		"summary":     p.Summary,
+		"fields":      p.Fields,
+	}
+	if len(slice) > 0 {
+		alert["lines"] = []string{slice[len(slice)-1].Message}
+		alert["lines_label"] = "From the logs when it fired"
+	}
+	payload, _ := json.Marshal(alert)
+	return payload
 }
 
 // CloseByFingerprint resolves the open incident behind a detector key. The

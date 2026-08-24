@@ -9,18 +9,29 @@
 //     "ask for a fresh link" instead).
 //   - /start in a GROUP with an invite token: connects the group as a
 //     broadcast destination (no person, no action buttons — see D5).
-//   - /help, /id, /status, /mute: the command surface.
+//   - /help, /id, /status, /mute, /unmute, /stop: the command surface. /status
+//     answers about the checks AND the tenant's open incidents (a detector
+//     incident has no monitor, so a project with no checks can still be on
+//     fire); /unmute lifts a mute window early and un-parks the pages the
+//     worker deferred into it; /stop disconnects the chat, because a mute
+//     expires and blocking the bot should not be the only way out.
 //   - callback_query: inline button presses on alert messages (ack, resolve).
 //     Authorisation is the PERSON, not the chat: from.id must resolve to a
 //     tenant member — a forwarded message or a group member does not grant
 //     rights.
 //
+// At start the bot registers its command list and, on an https deployment, the
+// chat menu button as a door into the Mini App (see register).
+//
 // Personal alerts are actionable: the delivery worker attaches Acknowledge /
-// Resolve inline buttons to messages sent to person-bound channels (see
-// deliver.Worker); broadcast groups get the same message without buttons.
+// Resolve inline buttons to messages sent to person-bound channels, plus an
+// Open (or, for a detector incident, Explain) web_app button into the Mini App
+// (see deliver.telegramKeyboard); broadcast groups get the same message
+// without buttons.
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -33,9 +44,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
+
+// notConnected is the one refusal every command shares: the chat has no
+// channel, or the person pressing is not a member of the tenant it alerts
+// for. One sentence, one place — four handlers used to carry their own copy.
+const notConnected = "This chat is not connected to a project. Ask the owner for an invite link."
 
 // Bot is the long-polling Telegram bot.
 type Bot struct {
@@ -92,6 +110,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		return fmt.Errorf("telegram: advisory lock: %w", err)
 	}
 	b.log.Info("telegram bot started (advisory lock acquired)")
+	b.register()
 
 	const heartbeatEvery = 5 * time.Minute
 	var lastBeat time.Time
@@ -140,6 +159,37 @@ func (b *Bot) Run(ctx context.Context) error {
 			lastBeat = now
 			b.log.Info("telegram bot polling", "offset", b.offset, "updates", len(updates))
 		}
+	}
+}
+
+// register tells Telegram what this bot answers to: the command list behind
+// the "/" menu, and the chat's menu button as a door into the Mini App. Both
+// are idempotent and best-effort — a failure is logged and the poll loop
+// starts anyway, because a bot that alerts without a menu still alerts.
+func (b *Bot) register() {
+	if err := b.call("setMyCommands", map[string]any{"commands": []map[string]string{
+		{"command": "status", "description": "How your checks and incidents are doing"},
+		{"command": "mute", "description": "Silence alerts for a while (30m, 2h, 1d)"},
+		{"command": "unmute", "description": "Lift the mute early"},
+		{"command": "stop", "description": "Disconnect this chat for good"},
+		{"command": "help", "description": "What this bot does"},
+		{"command": "id", "description": "Your Telegram id, for support"},
+	}}); err != nil {
+		b.log.Warn("telegram setMyCommands failed", "err", err)
+	}
+	// web_app needs https (Telegram refuses other schemes), and an empty
+	// appURL is legal — a deployment with no public origin has no app to open.
+	if !strings.HasPrefix(b.appURL, "https://") {
+		return
+	}
+	if err := b.call("setChatMenuButton", map[string]any{"menu_button": map[string]any{
+		"type": "web_app",
+		"text": "Dashboard",
+		"web_app": map[string]string{
+			"url": b.appURL + "/app",
+		},
+	}}); err != nil {
+		b.log.Warn("telegram setChatMenuButton failed", "err", err)
 	}
 }
 
@@ -225,17 +275,34 @@ func (b *Bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
 	return result.Result, nil
 }
 
+// call is the one Bot API door: POST JSON, close the body, and report both a
+// transport failure and a refusal by the API. The status matters because a bad
+// token answers 401 and a malformed request 400 — silent successes there are
+// how a bot ends up alerting nobody with nothing in the log. Callers that
+// cannot act on it still ignore the error; register logs it.
+func (b *Bot) call(method string, body map[string]any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := b.client.Post(
+		fmt.Sprintf("https://api.telegram.org/bot%s/%s", b.token, method),
+		"application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram %s: HTTP %d", method, resp.StatusCode)
+	}
+	return nil
+}
+
 func (b *Bot) answerCallback(callbackID string, text string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", b.token)
-	body, _ := json.Marshal(map[string]string{
+	_ = b.call("answerCallbackQuery", map[string]any{
 		"callback_query_id": callbackID,
 		"text":              text,
 	})
-	resp, err := b.client.Post(url, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
 }
 
 // --- command dispatch ---
@@ -274,6 +341,10 @@ func (b *Bot) handleUpdate(ctx context.Context, u tgUpdate) {
 		b.handleStatus(ctx, u.Message)
 	case "mute":
 		b.handleMute(ctx, u.Message, rest)
+	case "unmute":
+		b.handleUnmute(ctx, u.Message)
+	case "stop":
+		b.handleStop(ctx, u.Message)
 	default:
 		// Unknown commands and plain messages: silent, as before.
 	}
@@ -413,8 +484,10 @@ func (b *Bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID
 func (b *Bot) handleHelp(msg *tgMessage) {
 	b.sendWithApp(msg.Chat.ID,
 		"What this bot does:\n"+
-			"/status — how your checks are doing right now\n"+
+			"/status — your checks and any open incidents\n"+
 			"/mute <30m|2h|1d> — silence alerts for a while\n"+
+			"/unmute — lift the mute early\n"+
+			"/stop — disconnect this chat for good\n"+
 			"/id — your Telegram id (for support)\n"+
 			"/help — this message\n\n"+
 			"Acknowledge and Resolve buttons arrive on the alerts themselves.")
@@ -426,7 +499,7 @@ func (b *Bot) handleHelp(msg *tgMessage) {
 func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
-		b.send(msg.Chat.ID, "This chat is not connected to a project. Ask the owner for an invite link.")
+		b.send(msg.Chat.ID, notConnected)
 		return
 	}
 	rows, err := b.pool.Raw().Query(ctx,
@@ -458,11 +531,15 @@ func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 			broken = append(broken, namesFrom(names)...)
 		}
 	}
+	// Incidents are their own question: a detector incident has no monitor
+	// behind it, so a project with zero checks can still be on fire — the line
+	// is appended to every answer below, including "no checks yet".
+	incidents, incidentsOK := b.openIncidentTitles(ctx, tenantID)
 	switch {
 	case up+failing+nodata == 0:
-		b.send(msg.Chat.ID, "No checks yet — nothing is being monitored.")
+		b.send(msg.Chat.ID, "No checks yet — nothing is being monitored."+incidentsLine(incidents, incidentsOK))
 	case failing == 0 && nodata == 0:
-		b.send(msg.Chat.ID, "All "+strconv.Itoa(up)+" checks are up.")
+		b.send(msg.Chat.ID, "All "+strconv.Itoa(up)+" checks are up."+incidentsLine(incidents, incidentsOK))
 	default:
 		parts := []string{strconv.Itoa(up) + " up"}
 		if failing > 0 {
@@ -471,8 +548,48 @@ func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 		if nodata > 0 {
 			parts = append(parts, strconv.Itoa(nodata)+" not yet checked")
 		}
-		b.send(msg.Chat.ID, strings.Join(parts, " · "))
+		b.send(msg.Chat.ID, strings.Join(parts, " · ")+incidentsLine(incidents, incidentsOK))
 	}
+}
+
+// openIncidentTitles reads the tenant's still-open incidents, newest first.
+// ok is false when the read failed, which is NOT the same fact as "there are
+// none" — /status says so rather than answering with the silence a healthy
+// project gets.
+func (b *Bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []string, ok bool) {
+	rows, err := b.pool.Raw().Query(ctx,
+		`SELECT title FROM incident
+		  WHERE tenant_id = $1 AND resolved_at IS NULL
+		  ORDER BY detected_at DESC`, tenantID)
+	if err == nil {
+		titles, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	}
+	if err != nil {
+		b.log.Warn("telegram: open incident read failed", "err", err, "tenant_id", tenantID)
+		return nil, false
+	}
+	return titles, true
+}
+
+// incidentsLine renders the open-incident tail of /status: nothing when there
+// are none (zero is silence), the three newest otherwise, and a count for the
+// rest — a chat message is not a list view. A read that failed says so: the
+// answer a healthy project gets may not double as the answer for "the database
+// did not respond".
+func incidentsLine(titles []string, ok bool) string {
+	if !ok {
+		return "\nCould not read the incident list."
+	}
+	if len(titles) == 0 {
+		return ""
+	}
+	shown := titles
+	extra := ""
+	if len(titles) > 3 {
+		shown = titles[:3]
+		extra = fmt.Sprintf(" (+%d more)", len(titles)-3)
+	}
+	return "\nOpen incidents: " + strings.Join(shown, "; ") + extra
 }
 
 // namesFrom trims a Postgres array literal {"a","b"} to ["a","b"]. NULL
@@ -502,7 +619,7 @@ func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 	}
 	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
-		b.send(msg.Chat.ID, "This chat is not connected to a project. Ask the owner for an invite link.")
+		b.send(msg.Chat.ID, notConnected)
 		return
 	}
 	until := time.Now().UTC().Add(d)
@@ -515,6 +632,90 @@ func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 		return
 	}
 	b.send(msg.Chat.ID, "Muted until "+until.Format("15:04 MST")+" ("+arg+") — alerts resume automatically after that.")
+}
+
+// handleUnmute lifts the mute window early. Clearing muted_until is only half
+// the job: the delivery worker DEFERS a muted channel's alerts to the mute's
+// end rather than dropping them, so anything that came due during the window
+// is parked in the future. Unmuting therefore also pulls those pages back to
+// now — otherwise "alerts flow again" would be false for exactly the alerts
+// the reader unmuted to receive. Follow-ups keep their own schedule: a
+// fifteen-minute follow-up arriving late is not worth un-parking.
+func (b *Bot) handleUnmute(ctx context.Context, msg *tgMessage) {
+	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if tenantID == 0 {
+		b.send(msg.Chat.ID, notConnected)
+		return
+	}
+	// One statement, three steps: snapshot the windows before clearing them,
+	// clear them, then release only what those windows parked.
+	//
+	// The release must be keyed on the window, not on "scheduled in the
+	// future": a send that FAILED is also sitting in the future, rescheduled a
+	// few seconds out by the retry backoff, and dragging it to now would spend
+	// its remaining attempts early — the opposite of letting the alert
+	// through. A mute defers to exactly muted_until (worker.go), so
+	// next_try_at >= the snapshotted window end is precisely the set it
+	// deferred, and nothing else.
+	var lifted int
+	if err := b.pool.Raw().QueryRow(ctx,
+		`WITH muted AS (
+		   SELECT id, muted_until FROM alert_channel
+		    WHERE tenant_id = $1 AND kind = 'telegram'
+		      AND (recipient_person_id = $2 OR target = $3)
+		      AND muted_until IS NOT NULL
+		 ), cleared AS (
+		   UPDATE alert_channel SET muted_until = NULL
+		    WHERE id IN (SELECT id FROM muted)
+		 ), released AS (
+		   UPDATE delivery_queue d SET next_try_at = now()
+		     FROM muted m
+		    WHERE d.channel_id = m.id AND d.state = 'pending'
+		      AND d.leased_by IS NULL AND d.class <> 'followup'
+		      AND d.next_try_at >= m.muted_until
+		 )
+		 SELECT count(*) FROM muted`,
+		tenantID, personID, strconv.FormatInt(msg.Chat.ID, 10)).Scan(&lifted); err != nil {
+		b.send(msg.Chat.ID, "Could not lift the mute. Try again.")
+		return
+	}
+	if lifted == 0 {
+		b.send(msg.Chat.ID, "Nothing was muted here — alerts are already arriving.")
+		return
+	}
+	b.send(msg.Chat.ID, "Unmuted — alerts flow again.")
+}
+
+// handleStop disconnects THIS chat. Without it the only ways out were a mute
+// that expires after at most seven days, the Alerts screen, or blocking the
+// bot — and "a product that refuses to stop e-mailing you is a product you
+// cannot leave" (the same rule the API's channel delete is written to).
+//
+// It removes the destination, not the person: membership, role and the
+// project are untouched, so a fresh invite link brings the chat back. Queued
+// deliveries for the channel go with it (delivery_queue cascades), which is
+// the point — leaving them to fail one by one is not stopping.
+//
+// Scoped to this chat's target alone, never to the person: someone who reads
+// alerts in two chats and stops one means that one.
+func (b *Bot) handleStop(ctx context.Context, msg *tgMessage) {
+	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if tenantID == 0 {
+		b.send(msg.Chat.ID, notConnected)
+		return
+	}
+	// No row-count branch: memberForChat only answers when a telegram channel
+	// with this chat's target exists, and that is the row being deleted. If it
+	// vanished in between, the chat is disconnected either way.
+	if _, err := b.pool.Raw().Exec(ctx,
+		`DELETE FROM alert_channel
+		  WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2`,
+		tenantID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
+		b.send(msg.Chat.ID, "Could not disconnect this chat. Try again.")
+		return
+	}
+	b.send(msg.Chat.ID, "Disconnected. No more alerts arrive here. You are still on the project — a fresh invite link from the Alerts screen brings this chat back.")
+	b.log.Info("telegram chat disconnected", "tenant_id", tenantID, "chat_id", msg.Chat.ID)
 }
 
 // parseMuteDuration accepts <n>m, <n>h, <n>d up to 7 days.
@@ -687,7 +888,6 @@ func (b *Bot) sendWithApp(chatID int64, text string) {
 }
 
 func (b *Bot) sendWithKeyboard(chatID int64, text string, replyMarkup map[string]any) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.token)
 	body := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
@@ -695,10 +895,5 @@ func (b *Bot) sendWithKeyboard(chatID int64, text string, replyMarkup map[string
 	if replyMarkup != nil {
 		body["reply_markup"] = replyMarkup
 	}
-	payload, _ := json.Marshal(body)
-	resp, err := b.client.Post(url, "application/json", strings.NewReader(string(payload)))
-	if err != nil {
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
+	_ = b.call("sendMessage", body)
 }
