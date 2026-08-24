@@ -2707,8 +2707,14 @@ func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.ShowIncidents {
 		incidents := []map[string]any{}
 		if rows, rerr := h.pool.Raw().Query(ctx,
+			// monitor_id IS NOT NULL drops the incidents of DELETED checks: the
+			// component is gone from the page, and a chronicle about a service
+			// the reader cannot see in the list explains nothing (owner
+			// decision, 2026-08-24). Detector incidents are project-scoped and
+			// already excluded by the detector filter.
 			`SELECT title, status, detected_at FROM incident
-			  WHERE tenant_id = $1 AND detector = 'availability' ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
+			  WHERE tenant_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
+			  ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
 			for rows.Next() {
 				var title, status string
 				var at time.Time

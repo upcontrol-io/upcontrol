@@ -251,8 +251,13 @@ func (l *Lifecycle) Close(ctx context.Context, monitorID int64, reason string) e
 
 	// Timeline entry: "resolved". Same rule as "opened": say what happened.
 	text := "Closed: " + reason
-	if reason == ReasonRecovered {
+	switch reason {
+	case ReasonRecovered:
 		text = "Checks are passing again"
+	case ReasonMonitorDelete:
+		// The incident is real history and stays; what ended it was the owner
+		// removing the check, not a recovery, and the timeline may not imply one.
+		text = "Monitor deleted"
 	}
 	_ = q.AddIncidentUpdate(ctx, sqlc.AddIncidentUpdateParams{
 		IncidentID: existing.ID,

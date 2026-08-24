@@ -22,6 +22,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -278,8 +279,26 @@ func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 }
 
 func (h *Monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+	ctx := r.Context()
 	pubID := parseUUID(id)
-	err := h.pool.Queries().DeleteMonitor(r.Context(), sqlc.DeleteMonitorParams{
+	// An open incident outlives the monitor it belongs to: incident.monitor_id
+	// is ON DELETE SET NULL, so the row survives with nothing left to close it,
+	// and the status page went on reporting "Some systems are down" for a check
+	// the owner had removed. Close it while the monitor id still resolves —
+	// after the DELETE there is no way back to it. Close reads no ClickHouse
+	// (only Open freezes a log slice), so a nil conn is the whole dependency.
+	if mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
+		PublicID: pubID, TenantID: tenantID,
+	}); err == nil {
+		if cerr := incident.New(h.pool, nil).Close(ctx, mon.ID, incident.ReasonMonitorDelete); cerr != nil {
+			// Deleting anyway would strand the incident in exactly the state
+			// this code exists to prevent, and nothing afterwards can find it
+			// again. A failed tidy-up fails the delete.
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	err := h.pool.Queries().DeleteMonitor(ctx, sqlc.DeleteMonitorParams{
 		PublicID: pubID, TenantID: tenantID,
 	})
 	if err != nil {

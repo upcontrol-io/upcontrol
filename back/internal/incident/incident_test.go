@@ -1,11 +1,17 @@
 package incident
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/deliver"
+	"go.upcontrol.io/back/internal/migrate"
+	"go.upcontrol.io/back/internal/storage/pg"
 )
 
 func TestFingerprint_StableAndDistinct(t *testing.T) {
@@ -126,5 +132,64 @@ func TestDetectAlertPayload_SurvivesTheRoundTrip(t *testing.T) {
 	}
 	if len(bare.Lines) != 0 || bare.LinesLabel != "" {
 		t.Errorf("an empty slice must draw no lines section: %+v", bare)
+	}
+}
+
+// The close wording lives inside Close (there is no pure helper for it), and
+// the raw reason is a storage detail the timeline must not leak: "Closed:
+// monitor_deleted" reads like an error code, and implies a recovery that never
+// happened. Pinned here against Postgres like the api package's integration
+// tests: UC_TEST_POSTGRES unset = skip.
+func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
+	dsn := os.Getenv("UC_TEST_POSTGRES")
+	if dsn == "" {
+		t.Skip("UC_TEST_POSTGRES not set; skipping close-wording test")
+	}
+	ctx := context.Background()
+	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	pool, err := pg.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	var tenantID, projectID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
+		fmt.Sprintf("closetext-%d", time.Now().UnixNano())).Scan(&tenantID); err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, '') RETURNING id`,
+		tenantID).Scan(&projectID); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	var monitorID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
+		 VALUES (gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://shop.example.com', 300)
+		 RETURNING id`, tenantID, projectID).Scan(&monitorID); err != nil {
+		t.Fatalf("monitor: %v", err)
+	}
+
+	l := New(pool, nil)
+	incidentID, created, err := l.Open(ctx, monitorID, "Checkout is down")
+	if err != nil || !created {
+		t.Fatalf("open incident: created=%v err=%v", created, err)
+	}
+	if err := l.Close(ctx, monitorID, ReasonMonitorDelete); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var kind, text string
+	if err := pool.Raw().QueryRow(ctx,
+		`SELECT kind, text FROM incident_update WHERE incident_id = $1 ORDER BY id DESC LIMIT 1`,
+		incidentID).Scan(&kind, &text); err != nil {
+		t.Fatalf("read newest update: %v", err)
+	}
+	if kind != "resolved" || text != "Monitor deleted" {
+		t.Fatalf("newest update = kind %q text %q, want resolved / \"Monitor deleted\"", kind, text)
 	}
 }
