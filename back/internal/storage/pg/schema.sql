@@ -649,3 +649,21 @@ CREATE TABLE instance_setting (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+UPDATE incident
+   SET resolved_at   = now(),
+       status        = 'ok',
+       close_reason  = 'monitor_deleted'
+ WHERE resolved_at IS NULL
+   AND monitor_id IS NULL
+   AND detector = 'availability';
+
+INSERT INTO incident_update (incident_id, kind, text)
+SELECT id, 'resolved', 'Monitor deleted'
+  FROM incident
+ WHERE close_reason = 'monitor_deleted'
+   AND detector = 'availability'
+   AND NOT EXISTS (
+         SELECT 1 FROM incident_update u
+          WHERE u.incident_id = incident.id AND u.kind = 'resolved'
+       );
+
