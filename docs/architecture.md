@@ -209,12 +209,16 @@ that only mount a panel name the panel; the panel owns the calls.
 ## Removed in wave 1
 
 Wave 1 shrank the tree without changing behaviour: every comment block was cut
-to at most two lines (final line counts per lane pending), and the following
-dead or unused code was deleted.
+to at most two lines (back/internal/api + cmd/ucapi 9321 to 8436 lines;
+ai/account/analytics/channel/deliver/notify 12193 to 11137, including
+mailer/smtp.go 88 to 40; ingest/ring/detect/incident/probe/source/storage/
+platform/rpc/migrate + cmd/ucworker + cmd/ucprobe 12382 to 11361; front/src +
+front/e2e 15646 to 13397; cli 2738 to 2622), and the following dead or unused
+code was deleted.
 
 - Unwired detectors in `internal/detect/detectors` and their tests: Absence,
-  Latency, Divergence, NewFingerprint, BurnRate, BurnRateDecision (final
-  count pending).
+  Latency, Divergence, NewFingerprint, BurnRate, BurnRateDecision (13 tests
+  deleted with them; formatPct and formatFloat stay, ErrorRate calls them).
 - SMTP helpers in `internal/notify/mailer/smtp.go`: NewSMTP, the base field,
   WithSignInBase, SendCode, SendInvite. SMTP.Send stays (dynamic.go builds
   it directly).
@@ -223,14 +227,49 @@ dead or unused code was deleted.
 - `Limiter.Distinct` in `internal/ingest/cardinality` and the assertion that
   used it.
 - Front: unused exports and barrel lines (Wordmark, hasJson, prettyJson,
-  SourceCard, seven icons, overview, invalidateAllApiData, CHANNELS_BASE)
-  (final count pending); unused exported types left over from the commercial
-  fork (Plan, Billing, Account, Project and more in `lib/types.ts`) (final
-  count pending); unused CSS-module classes, keeping only the dynamically
-  built ones (final count pending).
+  SourceCard, seven icons, overview, invalidateAllApiData, CHANNELS_BASE);
+  unused exported types left over from the commercial fork (Plan, Billing,
+  Account, Project and 15 more deleted from `lib/types.ts`, 12 more export
+  keywords dropped from types still used in their own files); 76 unused
+  CSS-module classes and the whole SourceCard.module.css, keeping only the
+  dynamically built ones.
 - CLI: the installer exports skillTargets, DEFAULT_ENDPOINT and CliMode lost
   their unused `export` keyword.
 
 ## Wave 2 candidates
 
-(filled by the finalizer from the lane candidates files)
+Recorded during the wave 1 pass, grouped by lane. Entry format:
+`path:line - what it duplicates or reimplements - what would replace it`.
+
+### Lane A (back/internal/api + back/cmd/ucapi)
+
+- back/internal/api/write_api.go:1464 and :1604 - explainLogs and explainIncident duplicate the ~24-line explain gate (explainAllow + Retry-After, fail-closed plan read, GetPlanEntitlement with Free fallback), and :1500/:1700 duplicate the ~15-line acct.Explain error mapping (ErrNotConfigured 503, ErrOverQuota 402, else logged 500) - a shared (h *WriteAPI) explainGate / explainError helper returning (ent, handled bool)
+- back/internal/api/keys.go:137 - intToStr re-implements decimal int64 formatting - strconv.FormatInt(n, 10)
+- back/internal/api/monitors.go:475 - parseUUID re-implements fixed-width lowercase-hex decoding into [16]byte - encoding/hex.Decode into a [16]byte then pgtype.UUID{Bytes, Valid: true}
+- back/internal/api/read_api.go:745 - emailLocal re-implements find-last-separator-and-slice - strings.LastIndex(email, "@")
+- back/internal/api/read_api.go:766 - toUpper re-implements single-character uppercasing (ASCII-only by design; unicode.ToUpper would also fold non-ASCII initials) - unicode.ToUpper(rune(b))
+- back/internal/api/helpers.go:16 - newUUID re-implements UUIDv4 bit-twiddling; github.com/google/uuid v1.6.0 is already in go.mod as an indirect dependency - promote it to direct and use uuid.New() (still needs the pgtype.UUID conversion)
+
+### Lane B (ai/account/analytics/channel/deliver/notify/probe-discover)
+
+- back/internal/analytics/analytics.go:161 (ClientIP) - X-Forwarded-For-first client IP extraction; internal/api/install.go:installClientIP mirrors it - drop the api mirror and use analytics.ClientIP (api already imports analytics)
+- back/internal/account/auth/auth.go:567 (newUUID) - hand-rolled RFC 4122 v4 UUID (bit-fiddling for version/variant) - github.com/google/uuid.New(), already in go.mod (indirect)
+- back/internal/probe/discover/api.go:109 (absolute) - hand-rolled relative-to-absolute URL resolution ("//", "http", path cases) - net/url ResolveReference, already used by linksFrom in the same package
+
+### Lane C (ingest/ring/detect/incident/probe/source/storage/platform/rpc/migrate + cmds)
+
+- back/internal/probe/executor/executor.go:358 - contains2/stringContains hand-roll strings.Contains - strings.Contains replaces both helpers
+- back/internal/ingest/normalize/normalize.go:91 - trimLower hand-rolls ToLower+TrimSpace to stay alloc-free - strings.ToLower(strings.TrimSpace(s)) once the alloc stops mattering
+- back/internal/ingest/decode/decode.go:552 - trimFloat's nested TrimRight chain re-implements shortest-decimal formatting - strconv.FormatFloat(f, 'f', -1, 64)
+- back/internal/ingest/decode/decode.go:565 - formatFloat marshals through encoding/json for a canonical float string - strconv.FormatFloat(f, 'f', -1, 64)
+- back/internal/detect/detectors/detectors.go:48 - formatFloat duplicated from ingest/decode.go (same name, same json.Marshal trick) - strconv.FormatFloat(f, 'f', -1, 64) in one shared place
+- back/internal/incident/incident.go:426 - newUUID hand-rolls a v4 UUID (same 10 lines also live in Lane A's api/helpers.go and Lane B's account/auth) - github.com/google/uuid, already in go.mod (indirect)
+- back/internal/storage/ch/ch.go:83 - InsertLogs/InsertEvents/InsertWebEvents/InsertChecks repeat the same ~25-line PrepareBatch/Append/Send block per row type - one generic insert[T] helper taking table, columns and an append func
+
+### Lane D (front/src + front/e2e)
+
+- front/src/pages/Settings.tsx:130 - the AI, Telegram and SMTP sections repeat the same ~30-line block (field states + busy + note + save/remove handler), different names per section - one shared instance-section hook/component
+- front/src/lib/formatTime.ts:3 - two hand-rolled minute-to-words helpers (formatMinutesAgo, formatDurationMinutes) differing only in the " ago" suffix - Intl.RelativeTimeFormat with numeric: "auto"
+- front/src/lib/statusBars.ts:18 - spanLabel/bucketTime hand-format second-spans ("7 days", "1 h") and dates (own MONTHS table) - Intl.RelativeTimeFormat / Date.toLocaleDateString
+- front/src/components/product/LiveLogsPanel.tsx:607 - countOfLines/countOfErrors hand-pluralize English nouns - Intl.PluralRules.select()
+- front/src/components/product/MonitorOnboarding.tsx:23 - watchDot() duplicated verbatim (modulo one border token) in pages/PublicStatus.tsx:33 - one shared helper next to the StatusDot primitive
