@@ -183,7 +183,7 @@ func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 				var personID pgtype.UUID
 				if rows.Scan(&id, &createdAt, &expiresAt, &personID) == nil {
 					invite := map[string]any{
-						"id":        intToStr(id),
+						"id":        strconv.FormatInt(id, 10),
 						"status":    "pending",
 						"createdAt": createdAt.UTC().Format(time.RFC3339),
 						"expiresAt": expiresAt.UTC().Format(time.RFC3339),
@@ -743,12 +743,8 @@ func incidentToAPI(row sqlc.ListIncidentsByTenantRow) map[string]any {
 }
 
 func emailLocal(email string) string {
-	if i := len(email); i > 0 {
-		for j := i - 1; j >= 0; j-- {
-			if email[j] == '@' {
-				return email[:j]
-			}
-		}
+	if i := strings.LastIndexByte(email, '@'); i >= 0 {
+		return email[:i]
 	}
 	return email
 }

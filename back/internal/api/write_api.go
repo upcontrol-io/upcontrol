@@ -1444,46 +1444,11 @@ func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 		writeAPIErr(w, http.StatusBadRequest, "missing_lines")
 		return
 	}
-	// The registry owns the caps: over-cap input is rejected, never trimmed,
-	// and the message quotes the caps so it cannot drift from them.
-	sc := ai.ExplainLogs
-	total, over := 0, len(req.Lines) > sc.MaxInputLines
-	for _, line := range req.Lines {
-		if len(line) > sc.MaxLineBytes {
-			over = true
-		}
-		total += len(line)
-	}
-	if over || total > sc.MaxInputBytes {
-		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
-			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+	if !h.explainInputOK(w, req.Lines) {
 		return
 	}
-	// The throttle stands between validation and the first read: anything
-	// validated burns a slot even on a cached or 402 answer.
-	if ok, retryAfter := h.explainAllow(tenantID); !ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
-		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
-		return
-	}
-	// Quota gate, fail closed: a failed read is a 500, never a silent 0 =
-	// "unlimited". Only NULL ai_explains means unlimited.
-	plan, perr := tenantPlan(ctx, h.pool, tenantID)
-	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	if errors.Is(eerr, pgx.ErrNoRows) {
-		// tenant.plan is free text with no FK to plan_entitlement: an unknown
-		// tier falls back to the Free row, the fail-closed answer.
-		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
-		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
-	}
-	if eerr != nil {
-		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+	ent, ok := h.explainGate(ctx, w, tenantID)
+	if !ok {
 		return
 	}
 	// The meta line is the stable half of the context: the one entry the cache
@@ -1498,21 +1463,10 @@ func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 	} else if len(meta) > 0 {
 		metaLine = projectMetaLine(meta)
 	}
-	res, err := h.acct.Explain(ctx, tenantID, sc,
+	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainLogs,
 		ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, tenantID)}, ent.AiExplains)
 	if err != nil {
-		if errors.Is(err, ai.ErrNotConfigured) {
-			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				h.aiNotConfiguredMsg())
-			return
-		}
-		if errors.Is(err, ai.ErrOverQuota) {
-			writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
-			return
-		}
-		// The underlying cause must be traceable server-side.
-		slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		h.explainError(w, err, tenantID)
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -1543,19 +1497,10 @@ func (h *WriteAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenant
 		writeAPIErr(w, http.StatusBadRequest, "bad_json")
 		return
 	}
-	sc := ai.ExplainLogs
-	total, over := 0, len(req.Lines) > sc.MaxInputLines
-	for _, line := range req.Lines {
-		if len(line) > sc.MaxLineBytes {
-			over = true
-		}
-		total += len(line)
-	}
-	if over || total > sc.MaxInputBytes {
-		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
-			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+	if !h.explainInputOK(w, req.Lines) {
 		return
 	}
+	sc := ai.ExplainLogs
 	metaLine := ""
 	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err == nil && len(meta) > 0 {
 		metaLine = projectMetaLine(meta)
@@ -1599,31 +1544,8 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	// Shared per-tenant throttle: an incident explain spends the same reads
-	// and provider money as the logs explain.
-	if ok, retryAfter := h.explainAllow(tenantID); !ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
-		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
-		return
-	}
-	// Quota gate, fail closed: a failed read is a 500, never a silent 0 =
-	// "unlimited". Only NULL ai_explains means unlimited.
-	plan, perr := tenantPlan(ctx, h.pool, tenantID)
-	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	if errors.Is(eerr, pgx.ErrNoRows) {
-		// tenant.plan is free text with no FK to plan_entitlement: an unknown
-		// tier falls back to the Free row, the fail-closed answer.
-		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
-		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
-	}
-	if eerr != nil {
-		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+	ent, ok := h.explainGate(ctx, w, tenantID)
+	if !ok {
 		return
 	}
 	// Evidence, as the card builds it. A failed read here is a logged 500
@@ -1700,17 +1622,7 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainIncident,
 		ai.Input{Lines: lines, MetaLine: metaLine, Context: inputCtx}, ent.AiExplains)
 	if err != nil {
-		if errors.Is(err, ai.ErrNotConfigured) {
-			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				h.aiNotConfiguredMsg())
-			return
-		}
-		if errors.Is(err, ai.ErrOverQuota) {
-			writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
-			return
-		}
-		slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		h.explainError(w, err, tenantID)
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -1728,6 +1640,77 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		"limit":       res.Limit,
 		"prompt":      res.Prompt,
 	})
+}
+
+// explainInputOK enforces the shared input caps; false means the
+// input_too_large response is already written.
+func (h *WriteAPI) explainInputOK(w http.ResponseWriter, lines []string) bool {
+	// The registry owns the caps: over-cap input is rejected, never trimmed,
+	// and the message quotes the caps so it cannot drift from them.
+	sc := ai.ExplainLogs
+	total, over := 0, len(lines) > sc.MaxInputLines
+	for _, line := range lines {
+		if len(line) > sc.MaxLineBytes {
+			over = true
+		}
+		total += len(line)
+	}
+	if over || total > sc.MaxInputBytes {
+		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
+			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+		return false
+	}
+	return true
+}
+
+// explainGate runs the shared throttle then the fail-closed quota read;
+// false means the 429 or 500 response is already written.
+func (h *WriteAPI) explainGate(ctx context.Context, w http.ResponseWriter,
+	tenantID int64) (sqlc.PlanEntitlement, bool) {
+	// The throttle stands between validation and the first read: anything
+	// validated burns a slot even on a cached or 402 answer.
+	if ok, retryAfter := h.explainAllow(tenantID); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
+		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
+		return sqlc.PlanEntitlement{}, false
+	}
+	// Quota gate, fail closed: a failed read is a 500, never a silent 0 =
+	// "unlimited". Only NULL ai_explains means unlimited.
+	plan, perr := tenantPlan(ctx, h.pool, tenantID)
+	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return sqlc.PlanEntitlement{}, false
+	}
+	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
+	if errors.Is(eerr, pgx.ErrNoRows) {
+		// tenant.plan is free text with no FK to plan_entitlement: an unknown
+		// tier falls back to the Free row, the fail-closed answer.
+		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
+		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
+	}
+	if eerr != nil {
+		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return sqlc.PlanEntitlement{}, false
+	}
+	return ent, true
+}
+
+// explainError maps one acct.Explain error to its response and writes it.
+func (h *WriteAPI) explainError(w http.ResponseWriter, err error, tenantID int64) {
+	if errors.Is(err, ai.ErrNotConfigured) {
+		writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
+			h.aiNotConfiguredMsg())
+		return
+	}
+	if errors.Is(err, ai.ErrOverQuota) {
+		writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
+		return
+	}
+	// The underlying cause must be traceable server-side.
+	slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
+	writeAPIErr(w, http.StatusInternalServerError, "internal")
 }
 
 // aiNotConfiguredMsg: on a self-host the Settings door accepts a key, so the

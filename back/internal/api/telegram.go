@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,7 +112,7 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 		return
 	}
 	resp := map[string]any{
-		"id":        intToStr(id),
+		"id":        strconv.FormatInt(id, 10),
 		"link":      "https://t.me/" + botUsername + "?start=" + token,
 		"expiresAt": expires.Format(time.RFC3339),
 	}
@@ -152,7 +153,7 @@ func countTelegramRecipients(ctx context.Context, pool *pg.Pool, tenantID int64)
 
 // planRecipientWall names the wall the plan owns; the client never hardcodes it.
 func planRecipientWall(max int) string {
-	return "Free allows 3 Telegram recipients; paid plans carry 10 and up. Your plan allows " + intToStr(int64(max)) + "."
+	return "Free allows 3 Telegram recipients; paid plans carry 10 and up. Your plan allows " + strconv.FormatInt(int64(max), 10) + "."
 }
 
 // roleAtLeastLogin answers whether this person may manage this tenant: notify
