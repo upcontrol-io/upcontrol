@@ -1,10 +1,5 @@
-// Package shutdown orchestrates graceful process teardown. A process owns a
-// Coordinator; components register Tasks against it. On a signal the
-// Coordinator stops accepting new work (the caller does that), then runs every
-// Task concurrently with a shared deadline. A task that does not finish before
-// the deadline is abandoned and logged — the process exits non-zero so the
-// supervisor restarts it, because the only honest answer to "did it flush?" is
-// "I don't know".
+// Package shutdown orchestrates graceful teardown: tasks run concurrently
+// under a shared deadline; a missed deadline exits non-zero.
 package shutdown
 
 import (
@@ -16,9 +11,8 @@ import (
 	"time"
 )
 
-// Task is one teardown step: a name (for logging) and a stop function. Stop
-// should be idempotent and quick relative to the deadline; the Coordinator does
-// not impose per-task timeouts, the shared deadline is the budget.
+// Task is one teardown step: a name (for logging) and a stop function; the
+// Coordinator imposes no per-task timeout, the shared deadline is the budget.
 type Task struct {
 	Name string
 	Stop func(ctx context.Context) error
@@ -47,10 +41,8 @@ func (c *Coordinator) Register(t Task) {
 	c.tasks = append(c.tasks, t)
 }
 
-// Shutdown runs every registered task concurrently, bounded by timeout. It
-// returns nil only if every task finished within the budget; otherwise it
-// returns a non-nil error listing the unfinished task names. The caller maps a
-// non-nil return to a non-zero process exit (§1.3).
+// Shutdown runs every registered task concurrently, bounded by timeout; a
+// non-nil return lists the unfinished task names and maps to a non-zero exit.
 func (c *Coordinator) Shutdown(ctx context.Context, timeout time.Duration) error {
 	c.mu.Lock()
 	tasks := make([]Task, len(c.tasks))
@@ -79,9 +71,8 @@ func (c *Coordinator) Shutdown(ctx context.Context, timeout time.Duration) error
 		}(t)
 	}
 
-	// Wait either for all tasks to finish or for the deadline. We close `done`
-	// when every task has reported, then drain any stragglers that wrote after
-	// the timeout.
+	// Wait for all tasks to finish or the deadline; `done` closes when every
+	// task reported, then drain stragglers that wrote after the timeout.
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()

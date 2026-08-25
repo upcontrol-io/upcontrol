@@ -1,7 +1,5 @@
-// Package rpc implements the connect-go ProbeService that probe nodes call to
-// Lease batches of checks and SubmitResults back (plan §5.1). The service runs
-// on ucapi (same port as the HTTP API) and authenticates each probe via the
-// shared node token.
+// Package rpc implements the connect-go ProbeService probes call to Lease
+// checks and SubmitResults; it runs on ucapi, authenticated by node token.
 package rpc
 
 import (
@@ -128,8 +126,7 @@ func (s *ProbeService) SubmitResults(
 			continue // monitor deleted or DB error
 		}
 		// A missing facts row (the very first check) is normal: the zero value
-		// is a clean initial state the detector accepts, and UpsertMonitorFacts
-		// below creates the row.
+		// is a clean initial state; UpsertMonitorFacts below creates the row.
 
 		// Run the availability detector.
 		state := availability.State{
@@ -153,9 +150,8 @@ func (s *ProbeService) SubmitResults(
 			})
 		}
 
-		// Clear lease + schedule the next check at the monitor's REAL interval
-		// (not a hardcoded 5m: a 1m monitor must be checked every minute). The
-		// same lookup yields the tenant_id needed to label the raw check row.
+		// Clear the lease and schedule the next check at the monitor's real
+		// interval; the same lookup yields the tenant_id for the check row.
 		var tenantID int64
 		intervalSec := float64(300)
 		if mi, err := s.pool.Queries().GetMonitorInterval(ctx, monitorID); err == nil {
@@ -179,7 +175,7 @@ func (s *ProbeService) SubmitResults(
 			})
 		}
 
-		// Incident lifecycle (§5.8): open on detector fire, close on recovery.
+		// Incident lifecycle: open on detector fire, close on recovery.
 		if outcome.Open && s.incidents != nil {
 			title := monitorTitle(ctx, s.pool, monitorID, res)
 			if _, _, err := s.incidents.Open(ctx, monitorID, title); err != nil {
@@ -214,8 +210,6 @@ func (s *ProbeService) ReportBlind(
 	_, _ = s.pool.Queries().ClearLeasesForNode(ctx, &nodeID)
 	return connect.NewResponse(&probev1.ReportBlindResponse{}), nil
 }
-
-// --- helpers ---
 
 func authReq[T any](req *connect.Request[T], token string) error {
 	h := req.Header().Get("Authorization")

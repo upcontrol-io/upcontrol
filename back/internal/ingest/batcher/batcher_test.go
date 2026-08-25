@@ -67,9 +67,8 @@ func TestSizeThresholdFlushesImmediately(t *testing.T) {
 	}
 }
 
-// TestGate1RowPerSecIs1PartPerSec is the §3.7 gate: feeding one row per second
-// and Ticking must produce at most one flush per second per key — i.e. ≤ elapsed
-// seconds of flushes (parts), not one flush per row.
+// One row per second with Ticks must yield at most one flush per second per
+// key: part count stays bounded, not one part per row.
 func TestGate1RowPerSecIs1PartPerSec(t *testing.T) {
 	sink := newFakeSink()
 	clk := &fakeClock{t: time.Unix(0, 0)}
@@ -117,9 +116,8 @@ func TestCloseFlushesEverything(t *testing.T) {
 	}
 }
 
-// TestMetricRowsReachTheirOwnKey: metric envelopes ride the same batcher under
-// the "metrics" key, so they land in the metrics table (the sink routes by key)
-// and never mix into a logs part.
+// Metric envelopes ride the same batcher under the "metrics" key, so they
+// never mix into a logs part (the sink routes by key).
 func TestMetricRowsReachTheirOwnKey(t *testing.T) {
 	sink := newFakeSink()
 	clk := &fakeClock{t: time.Unix(0, 0)}

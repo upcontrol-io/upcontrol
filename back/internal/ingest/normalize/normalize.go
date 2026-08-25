@@ -1,12 +1,5 @@
-// Package normalize maps a client event name to its canonical tier in the closed
-// 24-event dictionary (plan §4.3, cli/SPEC §4). The dictionary is frozen: field
-// additions are a major version. Everything outside it is T4 — an ordinary log
-// line, shown in the window/slice, never the trigger of anything.
-//
-// The reserved prefix "uc.*" belongs to upcontrol itself: client-sent events
-// with it are dropped and a `reserved_prefix` warning rides the receipt (the
-// receipt's closed code list). Classify never errors — it returns a tier and a
-// reserved flag, and the caller decides what to do.
+// Package normalize maps a client event name to its canonical tier in the frozen
+// 24-event dictionary; outside it is T4 (ordinary log line), and "uc.*" is reserved.
 package normalize
 
 // Tier is the event's place in the alerting/correlation ladder.
@@ -29,9 +22,8 @@ const (
 // ReservedPrefix is the namespace upcontrol owns; clients may not send it.
 const ReservedPrefix = "uc."
 
-// canonical is the frozen 24-name dictionary → tier. Lookup is case-insensitive
-// on the canonical snake_case form; the returned Name is always the canonical
-// spelling so a tenant who sends "Payment_Succeeded" stores "payment_succeeded".
+// canonical is the frozen 24-name dictionary → tier; lookup is lowercase,
+// the returned Name is the canonical spelling ("Payment_Succeeded" → payment_succeeded).
 var canonical = map[string]struct {
 	tier Tier
 	name string
@@ -74,13 +66,8 @@ type Event struct {
 	Tier Tier
 }
 
-// Classify maps a client event name to its tier. It never errors:
-//   - "uc." prefix → Tier5 (reserved); caller drops + warns reserved_prefix.
-//   - one of the 24 → Tier1-T3 with the canonical Name.
-//   - anything else → Tier4 (ordinary line).
-//
-// Lookup is case-insensitive and ignores leading/trailing whitespace, so a
-// tenant's "  Payment_Failed  " stores as "payment_failed".
+// Classify maps a client event name to its tier and never errors: "uc." →
+// Tier5 (reserved), one of the 24 → its tier with canonical Name, else Tier4.
 func Classify(name string) Event {
 	n := trimLower(name)
 	if n == "" {

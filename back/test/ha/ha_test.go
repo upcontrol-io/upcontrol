@@ -1,17 +1,7 @@
 //go:build ha
 
-// HA test (plan §8.6): two ucapi and two ucworker instances run simultaneously
-// against the same Postgres + ClickHouse. The test verifies invariants 5/6:
-//   - No duplicated deliveries (the delivery_queue lease is exclusive).
-//   - No seq intersections (the seq allocator leases disjoint blocks).
-//   - No double-processed nightly work (the advisory lock is exclusive).
-//
-// This is a RUN test, not a compile-time check: it boots two processes, feeds
-// them work, and asserts no duplication. Run with:
-//
-//	UC_TEST_POSTGRES=postgres://... \
-//	go test -tags=ha -timeout 120s ./test/ha/...
-
+// HA test: two ucapi and two ucworker instances run against the same Postgres
+// and ClickHouse; boots real processes, asserts no duplication. -tags=ha.
 package ha
 
 import (
@@ -31,17 +21,14 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// TestSeqNoIntersectionBetweenInstances is the §8.6 invariant: two seq
-// allocators on the same project_seq never hand out the same value.
+// Two seq allocators on the same project_seq never hand out the same value.
 func TestSeqNoIntersectionBetweenInstances(t *testing.T) {
 	dsn := startPostgres(t)
 	pool := openPool(t, dsn)
 
 	ctx := context.Background()
-	// project_seq's project_id REFERENCES project, which references tenant:
-	// on a fresh CI database neither parent exists, the INSERT used to fail
-	// its FK with the error discarded, and the allocators then found no row
-	// ("total issued = 0"). Seed the parents and SAY so when it fails.
+	// project_seq REFERENCES project, which references tenant: seed the
+	// parents on a fresh database, or the INSERT fails its FK silently.
 	if _, err := pool.Raw().Exec(ctx,
 		`INSERT INTO tenant (id, public_id, name) VALUES (1, gen_random_uuid(), 'ha-seq')
 		 ON CONFLICT DO NOTHING`); err != nil {
@@ -109,18 +96,15 @@ func TestSeqNoIntersectionBetweenInstances(t *testing.T) {
 	}
 }
 
-// TestDeliveryQueueNoDuplication verifies that two delivery workers never
-// deliver the same queue item. Both run Tick concurrently and the total number
-// of items processed should equal the number enqueued, with no duplicates.
+// TestDeliveryQueueNoDuplication verifies two delivery workers never deliver
+// the same item: both Tick concurrently, total processed equals enqueued.
 func TestDeliveryQueueNoDuplication(t *testing.T) {
 	dsn := startPostgres(t)
 	pool := openPool(t, dsn)
 	ctx := context.Background()
 
-	// Seed: one tenant + one channel + 100 queue items. The uuids are minted,
-	// not hand-typed — the literals this used to carry ('...ha-test-...') are
-	// not valid uuid syntax, so every INSERT failed with the error discarded
-	// and the test asserted nothing at all over zero rows.
+	// Seed: one tenant + one channel + 100 queue items; the uuids are minted
+	// (the literals this used to carry were not valid uuid syntax).
 	if _, err := pool.Raw().Exec(ctx,
 		`INSERT INTO tenant (id, public_id, name) VALUES (1, gen_random_uuid(), 'ha-delivery')
 		 ON CONFLICT DO NOTHING`); err != nil {
@@ -135,9 +119,8 @@ func TestDeliveryQueueNoDuplication(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		hash := sha256.Sum256([]byte{byte(i)})
-		// idem_key is TEXT: raw digest bytes are not valid UTF-8 and Postgres
-		// rejects them (SQLSTATE 22021) — hex-encode, exactly like the ingester
-		// does for its content-addressed batch keys.
+		// idem_key is TEXT: raw digest bytes are not valid UTF-8 (SQLSTATE
+		// 22021); hex-encode, exactly like the ingester does.
 		if _, err := pool.Raw().Exec(ctx,
 			`INSERT INTO delivery_queue (tenant_id, channel_id, idem_key, class, payload, next_try_at)
 			 VALUES (1, 1, $1, 'test', '{"title":"test"}', now())
@@ -184,9 +167,8 @@ func TestDeliveryQueueNoDuplication(t *testing.T) {
 	t.Logf("processed: A=%d B=%d total=%d", processedA, processedB, total)
 }
 
-// TestAdvisoryLockExclusive verifies that a second pg_advisory_lock on the same
-// key blocks until the first releases (this is what the Telegram bot relies on
-// for single-poller exclusivity).
+// TestAdvisoryLockExclusive: a second advisory lock on the same key cannot
+// be taken while the first holds it (the Telegram bot's single poller).
 func TestAdvisoryLockExclusive(t *testing.T) {
 	dsn := startPostgres(t)
 	pool := openPool(t, dsn)
@@ -229,8 +211,6 @@ func TestAdvisoryLockExclusive(t *testing.T) {
 	// Clean up.
 	_ = pool.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
 }
-
-// --- helpers (shared with the pg integration test) ---
 
 func startPostgres(t *testing.T) string {
 	t.Helper()

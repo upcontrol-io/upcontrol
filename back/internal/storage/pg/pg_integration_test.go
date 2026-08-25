@@ -1,12 +1,7 @@
 //go:build integration
 
-// Integration test for storage/pg: runs against a real Postgres whose DSN is in
-// UC_TEST_POSTGRES (with the schema applied). Exercises the key resolver
-// (active/rotating/revoked), the ingest-batch idempotency, and the seq-block
-// leaser. To run: start a Postgres, apply migrations, then:
-//
-//	UC_TEST_POSTGRES=postgres://upcontrol:secret@localhost:PORT/upcontrol?sslmode=disable \
-//	  go test -tags=integration ./internal/storage/pg/...
+// Integration test for storage/pg against a real Postgres (DSN: UC_TEST_POSTGRES);
+// key resolver, idempotency, seq leaser. Run: go test -tags=integration ./internal/storage/pg/...
 package pg
 
 import (
@@ -34,9 +29,8 @@ func startPostgres(t *testing.T) string {
 	return dsn
 }
 
-// applyMigrations runs every goose migration in db/postgres. Each test calls
-// this — the CREATE TABLE IF NOT EXISTS-equivalent is idempotent via ON CONFLICT
-// for the seed rows; a fresh DB is the operator's responsibility.
+// applyMigrations runs every goose migration in db/postgres; idempotent via
+// ON CONFLICT for the seed rows. A fresh DB is the operator's responsibility.
 func applyMigrations(t *testing.T, dsn string) {
 	t.Helper()
 	db, err := sql.Open("pgx", dsn)

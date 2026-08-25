@@ -1,20 +1,5 @@
-// Package cutoff computes the two ring boundaries from the tenant_line_ledger
-// (plan §6.1/§6.2). The ucworker process runs this every minute per project:
-//
-//	cutoff_seq = the VISIBILITY boundary — walk the ledger backward summing
-//	  `rows` until the total reaches the plan's window_lines (N). Rows below
-//	  cutoff_seq exist but are not served in search/stream. Upgrade shifts
-//	  cutoff toward retain (more visible history).
-//
-//	retain_seq = the DELETION boundary — same walk but to N × R, where R is
-//	  the plan's retain_mult (R=2 for Free: 24h visible, 48h stored; R=1 for
-//	  paid: open until the owner decides).
-//
-// The window is defined as min(N rows, T hours), whichever hits first.
-// N values: Free 25k/24h, Indie 150k/48h, Growth 3M/7d, Agency 45M/30d.
-//
-// beyond_errors counts errors between retain_seq and cutoff_seq — the plan's
-// "zero is silence" rule means this field is omitted from the response when 0.
+// Package cutoff computes the ring boundaries: cutoff_seq (visibility, N rows
+// back) and retain_seq (deletion, N × R) from the tenant_line_ledger.
 package cutoff
 
 import (
@@ -52,8 +37,7 @@ type Result struct {
 }
 
 // Recompute walks the ledger backward for one project, deriving the two
-// boundaries. Called by ucworker every minute. Idempotent — safe to run from
-// either instance (the advisory lock is held by ucworker's job loop).
+// boundaries; idempotent and safe to run from either instance.
 func Recompute(ctx context.Context, pool *pg.Pool, projectID int64, ent Entitlement) (*Result, error) {
 	q := pool.Queries()
 
@@ -108,9 +92,8 @@ func Recompute(ctx context.Context, pool *pg.Pool, projectID int64, ent Entitlem
 		retainSeq = 0
 	}
 
-	// Apply the time ceiling: the window is min(N rows, T hours). If the row-count
-	// walk reached back past WindowHours, clamp cutoff_seq to the time boundary —
-	// the more-recent (higher) of the two boundaries gives the smaller window.
+	// Time ceiling: the window is min(N rows, T hours); clamp cutoff_seq to the
+	// time boundary when the row-count walk reached back past WindowHours.
 	cutoffSeq = applyTimeCeiling(buckets, cutoffSeq, ent.WindowHours, time.Now())
 
 	return &Result{
@@ -121,9 +104,8 @@ func Recompute(ctx context.Context, pool *pg.Pool, projectID int64, ent Entitlem
 	}, nil
 }
 
-// applyTimeCeiling implements the "T hours" half of min(N rows, T hours). It is
-// pure (no DB, clock injected) so the boundary logic is unit-tested directly;
-// Recompute passes the live clock. buckets are newest-first (index 0 = newest).
+// applyTimeCeiling implements the T-hours half of min(N rows, T hours); pure
+// (clock injected) so the boundary logic is unit-tested directly.
 func applyTimeCeiling(buckets []sqlc.TenantLineLedger, rowCutoffSeq int64, windowHours int, now time.Time) int64 {
 	if windowHours <= 0 {
 		return rowCutoffSeq

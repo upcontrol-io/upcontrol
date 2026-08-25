@@ -144,8 +144,7 @@ func TestGetenvOrFileWarnsOnEveryReadFailure(t *testing.T) {
 	var warns []string
 
 	// A directory: reading it fails on both Windows (access denied) and
-	// Linux (is a directory). This is what compose mounts when the backing
-	// secret file is missing, so it is the common production shape.
+	// Linux (is a directory): the shape compose mounts for a missing secret.
 	t.Setenv("UC_TEST_FILE", t.TempDir())
 	if got := getenvOrFile("UC_TEST", &warns); got != "" {
 		t.Errorf("directory: got %q", got)

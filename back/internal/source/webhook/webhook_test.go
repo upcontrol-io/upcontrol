@@ -8,9 +8,8 @@ import (
 )
 
 func TestParseEventTimestamp_PerProvider(t *testing.T) {
-	// Stripe carries a unix `created`; GitHub/Vercel an RFC3339 string. Each
-	// must yield the event's own time, not time.Now() (a deploy correlation
-	// that uses now() misplaces the marker).
+	// Stripe carries a unix `created`; GitHub/Vercel an RFC3339 string; each
+	// must yield the event's own time, not now().
 	stripe := parseEventTimestamp("stripe", map[string]any{"created": float64(1_700_000_000)})
 	if want := time.Unix(1_700_000_000, 0).UTC(); !stripe.Equal(want) {
 		t.Fatalf("stripe: got %v, want %v", stripe, want)
@@ -69,8 +68,6 @@ func TestParseLabels_StripsLongAndNonString(t *testing.T) {
 		t.Fatalf("long/non-string labels must be dropped; got %v", got)
 	}
 }
-
-// --- the token route's pure parts (universal hooks) ---
 
 func TestDetectProvider_ByHeaders(t *testing.T) {
 	for _, tc := range []struct {

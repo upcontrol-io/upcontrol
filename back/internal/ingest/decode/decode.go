@@ -1,12 +1,5 @@
-// Package decode turns an arbitrary POST /i body into a stream of unified
-// Records. The body's form is decided by a SNIFFER, not a header (plan §4.5):
-// a misconfigured Content-Type must not lose the customer's logs. Eight forms
-// are recognized — NDJSON, JSON array, JSON object, plain text, syslog RFC 5424,
-// OTLP logs JSON, Sentry envelope, Alertmanager, Loki push — and Decode always
-// returns 2xx on sane input, carrying structured warnings rather than errors.
-//
-// Records produced here are tenant- and seq-less: those are added after
-// authentication by the ingest layer. decode only normalizes the wire form.
+// Package decode turns an arbitrary POST /i body into unified Records. The
+// form is sniffed from the bytes, not Content-Type; warnings ride the result.
 package decode
 
 import (
@@ -32,7 +25,7 @@ const (
 	FormatLoki         Format = "loki"
 )
 
-// WarningCode is one entry in the receipt's closed warning dictionary (plan §4.5).
+// WarningCode is one entry in the receipt's closed warning dictionary.
 type WarningCode string
 
 const (
@@ -47,11 +40,8 @@ type Warning struct {
 	Count int
 }
 
-// Record is the unified shape every format decodes to. Time is zero when the
-// source carried no timestamp (the caller stamps now and warns ts_absent).
-// Raw is the re-marshalled JSON object when the wire form was one of the JSON
-// forms (ndjson/array/object) — the metric sniffer re-reads it so a metric
-// line is recognised from its own fields, not from stringified attrs.
+// Record is the unified shape every format decodes to. Time zero = the source
+// carried none (caller stamps now); Raw re-marshals JSON for the metric sniffer.
 type Record struct {
 	Time    time.Time
 	Level   string
@@ -82,10 +72,8 @@ func (w *warningSet) slice() []Warning {
 	return out
 }
 
-// Result is what Decode returns: the records, the detected format (for the
-// receipt), and the warning tally. err is non-nil only on truly unparseable
-// input (none of the forms matched); the plan's "always 2xx" rule means the
-// caller treats err as a single unparseable_line warning, not a 4xx.
+// Result is what Decode returns: records, the detected format, and the
+// warning tally; a parse failure on one line is a warning, never a hard error.
 type Result struct {
 	Records  []Record
 	Format   Format
@@ -126,20 +114,16 @@ func Sniff(body []byte, contentType string) Format {
 			if _, ok := head["streams"]; ok {
 				return FormatLoki
 			}
-			// NDJSON: multi-line where the first line is a complete JSON object.
-			// We do NOT require every line to parse — a garbled line in a stream
-			// is a warning at decode time, not a reason to call the whole body a
-			// single (and unparseable) object.
+			// NDJSON: multi-line, first line a complete object. A garbled line is
+			// a warning at decode time, not a reason to reject the whole body.
 			if hasManyLines(trimmed) {
 				return FormatNDJSON
 			}
 			// Single object on one line.
 			return FormatJSONObject
 		}
-		// First line starts with '{' but does not parse. If the body is
-		// multi-line, assume the sender intended JSON-per-line (NDJSON): the
-		// malformed line becomes an unparseable_line warning at decode, the good
-		// lines are kept. A single malformed line is treated as a bad object.
+		// Unparseable first line on a multi-line body: assume NDJSON; the bad
+		// line becomes a warning and the good lines are kept.
 		if hasManyLines(trimmed) {
 			return FormatNDJSON
 		}
@@ -217,8 +201,6 @@ func normalizeLevel(r *Record, ws *warningSet) {
 	}
 }
 
-// --- shared helpers -----------------------------------------------------
-
 func firstLine(b []byte) []byte {
 	if i := bytes.IndexByte(b, '\n'); i >= 0 {
 		return bytes.TrimRight(b[:i], "\r")
@@ -268,15 +250,12 @@ func parseSyslogPri(b []byte) (pri int, ok bool) {
 	return n, true
 }
 
-// --- per-format decoders -----------------------------------------------
-
-// genericLog is the common JSON log shape: {ts,time,timestamp, level, service,
-// svc, msg, message, host, ...rest as attrs}.
+// recordsFromObject maps the common JSON log shape (ts/level/service/msg/host)
+// to a Record; the rest of the keys land in Attrs.
 func recordsFromObject(obj map[string]any) []Record {
 	r := Record{Attrs: map[string]string{}}
-	// The re-marshalled object travels on Raw so the ingest layer can recognise
-	// a metric line from its own fields (metric+value), not from the stringified
-	// attrs — labels would be mangled by toString.
+	// Raw carries the re-marshalled object so a metric line is recognised from
+	// its own fields; stringified attrs would mangle the labels.
 	r.Raw, _ = json.Marshal(obj)
 	for k, v := range obj {
 		switch k {
@@ -295,8 +274,7 @@ func recordsFromObject(obj map[string]any) []Record {
 		}
 	}
 	if r.Message == "" {
-		// A JSON object with no message is still a record; the raw line is the
-		// best text we have.
+		// No message: the raw line is the best text we have.
 		r.Message = string(r.Raw)
 	}
 	return []Record{r}
@@ -338,8 +316,8 @@ func decodeJSONObject(body []byte, ws *warningSet) []Record {
 		ws.add(WarnUnparseable)
 		return nil
 	}
-	// A JSON object whose top level is an {"event": "..."} payload is treated as
-	// a single event record (the SDK's /v1/event shape) — message is the event.
+	// A top-level {"event": "..."} payload (the SDK's /v1/event shape) is one
+	// event record; message is the event.
 	if ev, ok := obj["event"]; ok && len(obj) <= 4 {
 		r := Record{Attrs: map[string]string{}}
 		r.Message = toString(ev)
@@ -478,9 +456,8 @@ func decodeAlertmanager(body []byte) []Record {
 	return out
 }
 
-// decodeOTLP: {"resourceLogs":[{"resource":{attributes:[...]}, "scopeLogs":
-// [{"logRecords":[{"timeUnixNano":"...","severityText":"...","body":{...},
-// "attributes":[...]}]}]}]}. Best-effort; OTLP's nested shape is verbose.
+// decodeOTLP parses OTLP logs JSON (resourceLogs/scopeLogs/logRecords),
+// best-effort.
 func decodeOTLP(body []byte, ws *warningSet) []Record {
 	var doc struct {
 		ResourceLogs []struct {
@@ -523,9 +500,8 @@ func decodeOTLP(body []byte, ws *warningSet) []Record {
 	return out
 }
 
-// decodeSentry: newline-delimited; first line is a JSON envelope header, the
-// rest are items (each a JSON object, possibly with a payload). We extract the
-// "message"/"exception" from any item that looks like an event.
+// decodeSentry reads the newline-delimited envelope: a JSON header line, then
+// items; any item that looks like an event yields its message/exception.
 func decodeSentry(body []byte) []Record {
 	var out []Record
 	for _, ln := range bytes.Split(body, []byte{'\n'}) {
@@ -553,8 +529,6 @@ func decodeSentry(body []byte) []Record {
 	}
 	return out
 }
-
-// --- value coercion ----------------------------------------------------
 
 func toString(v any) string {
 	switch t := v.(type) {

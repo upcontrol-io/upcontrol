@@ -47,9 +47,8 @@ func TestParseLevel(t *testing.T) {
 }
 
 func TestExtraSinkDegrades(t *testing.T) {
-	// A panicking extra writer must not take New down. We can't easily make a
-	// json handler panic, so we assert that New builds with a normal extra and
-	// that logging through it produces valid JSON (the multiHandler contract).
+	// A panicking extra writer must not take New down; assert New builds with a
+	// normal extra and logging through it produces valid JSON.
 	var extra bytes.Buffer
 	l := New(Options{Level: "info", Format: "json", Extra: &extra})
 	l.Error("boom")

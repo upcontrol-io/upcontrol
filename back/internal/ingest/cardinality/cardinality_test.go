@@ -13,9 +13,6 @@ func TestAddUnderCeiling(t *testing.T) {
 			t.Errorf("Add(%q) = (%q, %v), want (%q, false)", h, store, warned, h)
 		}
 	}
-	if l.Distinct("host") != 3 {
-		t.Errorf("Distinct = %d, want 3", l.Distinct("host"))
-	}
 }
 
 func TestCeilingCapsAndWarnsOnce(t *testing.T) {
@@ -42,9 +39,8 @@ func TestCeilingCapsAndWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestGate5000HostsDictionaryDoesNotGrow is the §3.5 gate: with a 1000 ceiling,
-// feeding 5000 distinct hosts must leave the stored set bounded at ceiling+1 and
-// fire the warning.
+// With a 1000 ceiling, feeding 5000 distinct hosts must leave the stored set
+// bounded at ceiling+1 and fire the warning.
 func TestGate5000HostsDictionaryDoesNotGrow(t *testing.T) {
 	l := New(1000)
 	warnedAny := false

@@ -1,9 +1,5 @@
 // Command ucworker is the background driver: ring/cutoff recomputation,
-// delivery dispatch (when ucapi's inline worker is overloaded), purge jobs
-// (expired batches, stale sessions, old incidents past plan retention), and
-// the night-only ClickHouse compaction safety net. Every job takes a
-// pg_advisory_lock so two ucworker instances never duplicate work (invariant
-// 5/6). That is what lets the fleet run N replicas safely.
+// delivery dispatch, purge jobs, compaction. Advisory locks make it N-replica safe.
 package main
 
 import (
@@ -56,14 +52,10 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 	d.Health.Register("postgres", pool.Ping)
 	d.Shutdown.Register(shutdown.Task{Name: "pg-pool", Stop: func(context.Context) error { pool.Close(); return nil }})
 
-	// --- Delivery worker (queue → channels → telegram/email/discord/slack) ---
-	// Lives in ucworker, NOT ucapi: two ucapi replicas with an inline worker
-	// would duplicate deliveries. The advisory lock in each Tick's lease query
-	// ensures even two ucworker instances never double-deliver.
-	// The bot token resolves per send: a token pasted into the Settings
-	// screen (instance_setting, sealed under UC_SECRET_KEY_HEX) wins over
-	// UC_TELEGRAM_BOT_TOKEN, and alerts start flowing without a restart.
+	// Delivery worker (queue → channels). Lives in ucworker, NOT ucapi: the
+	// advisory lock in each Tick's lease query prevents double delivery.
 	var openFn func([]byte) ([]byte, error)
+
 	if d.Config.SecretKeyHex != "" {
 		if k, kerr := config.SecretKeyFromHex(d.Config.SecretKeyHex); kerr == nil {
 			openFn = k.Open
@@ -78,8 +70,7 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 	dw.RegisterChannel(&deliver.DiscordChannel{})
 	dw.RegisterChannel(&deliver.SlackChannel{})
 	// Alert email goes through the email agent only when UC_EMAIL_URL is set;
-	// without the agent, a configured SMTP relay carries the alerts directly
-	// (the self-host path — same precedence as ucapi's magic-link mailer).
+	// without it a configured SMTP relay carries the alerts (self-host path).
 	if d.Config.EmailURL != "" {
 		dw.RegisterChannel(&deliver.EmailChannel{
 			APIURL: d.Config.EmailURL,
@@ -89,12 +80,8 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 			AppURL: appURL,
 		})
 	} else {
-		// SMTP resolves per send (a relay saved in Settings wins over
-		// UC_SMTP_*): alerts start flowing the moment one is saved, no
-		// restart. An unconfigured relay errors per delivery with the fix in
-		// the message — the Telegram channel's missing-token contract. The
-		// boot refusal survives for the env half: UC_SMTP_HOST with no From
-		// is still a config error.
+		// SMTP resolves per send (a relay saved in Settings wins over UC_SMTP_*):
+		// UC_SMTP_HOST with no From is still a boot config error.
 		if d.Config.SMTPHost != "" && d.Config.SMTPFrom == "" {
 			d.Logger.Error("mailer: refusing to start", "err", "UC_SMTP_HOST set but UC_SMTP_FROM empty")
 			os.Exit(1)
@@ -119,22 +106,18 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 	}
 	go dw.Run(ctx, 2*time.Second)
 
-	// --- Cutoff recompute: every 1 minute per project ---
+	// Cutoff recompute: every 1 minute per project.
 	go runWithLock(ctx, pool, d, "cutoff", time.Minute, func(ctx context.Context) {
 		recomputeCutoff(ctx, pool, d)
 	})
 
-	// --- Purge expired ingest batches: every 5 minutes ---
+	// Purge expired ingest batches: every 5 minutes.
 	go runWithLock(ctx, pool, d, "purge-batches", 5*time.Minute, func(ctx context.Context) {
 		_ = pool.Queries().PurgeExpiredBatches(ctx)
 	})
 
-	// --- Error-log notification scanner: every 60 seconds ---
-	// The first ucworker job that reads ClickHouse (through ring.QueryBuilder
-	// aggregates — invariants 2/4). It backs the per-channel "Error logs" /
-	// "Repeating error logs" settings (docs/plans/channel-notify-settings.md).
-	// Without ClickHouse configured the job simply does not start: a scanner
-	// with nothing to scan is not an error, it is a smaller deployment.
+	// Error-log notification scanner, every 60 seconds; it backs the per-channel
+	// "Error logs" / "Repeating error logs" settings. No ClickHouse, no job.
 	jobs := "delivery+cutoff+purge"
 	if d.Config.ClickHouseAddr != "" {
 		chConn, cherr := ch.Open(ctx, ch.Options{
@@ -152,11 +135,8 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 				}
 			})
 			jobs += "+errorlog"
-			// --- Detection (error-rate incidents): every minute ---
-			// The orchestrator that wires detectors + suppression to incidents
-			// (docs/plans/detect-errorrate-v1.md). Same advisory-lock pattern as
-			// every other job, so two ucworkers never double-open. On by default
-			// with ClickHouse present; UC_DETECT_ENABLED=0 is the kill switch.
+			// Detection (error-rate incidents), every minute; same advisory-lock
+			// pattern as every other job. On by default, UC_DETECT_ENABLED=0 kills.
 			if d.Config.DetectEnabled {
 				lc := incident.New(pool, chConn)
 				det := detect.New(pool, chConn, lc, d.Logger)
@@ -172,9 +152,8 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 	return nil
 }
 
-// runWithLock acquires a named advisory lock, runs fn, then releases. If the
-// lock is held by another instance, it skips (non-blocking). This is the
-// invariant-5/6 mechanism: the advisory lock is the single-writer guarantee.
+// runWithLock acquires a named advisory lock, runs fn, then releases; if the
+// lock is held by another instance it skips (non-blocking, single-writer).
 func runWithLock(ctx context.Context, pool *pg.Pool, _ app.Deps, jobName string, every time.Duration, fn func(context.Context)) {
 	lockKey := hashJobName(jobName)
 	t := time.NewTicker(every)
@@ -184,12 +163,8 @@ func runWithLock(ctx context.Context, pool *pg.Pool, _ app.Deps, jobName string,
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Advisory locks are session-scoped: the try-lock, fn and unlock
-			// must ride ONE pooled connection. Routing the unlock through the
-			// pool let it land on a different session — the unlock answered
-			// false (ignored), the lock stayed with its idle session forever,
-			// and every later tick answered "held by another instance". All
-			// runWithLock jobs went silently dead once the pool churned.
+			// Advisory locks are session-scoped: the try-lock, fn and unlock must
+			// ride ONE pooled connection, or the unlock lands on another session.
 			conn, err := pool.Raw().Acquire(ctx)
 			if err != nil {
 				continue

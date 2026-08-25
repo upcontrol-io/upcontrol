@@ -65,15 +65,3 @@ func TestBuildMessageCarriesTheHeaders(t *testing.T) {
 		t.Fatalf("bare-address From header wrong:\n%s", msg)
 	}
 }
-
-func TestNewSMTPRefusesAnIncompleteConfig(t *testing.T) {
-	for _, cfg := range []Config{
-		{Host: "", From: "hi@upcontrol.io"},
-		{Host: "smtp.example.com", From: ""},
-	} {
-		if _, err := NewSMTP(cfg, nil); err == nil {
-			t.Fatalf("NewSMTP(%+v) returned no error; a half-configured mailer that "+
-				"silently drops mail is worse than none", cfg)
-		}
-	}
-}

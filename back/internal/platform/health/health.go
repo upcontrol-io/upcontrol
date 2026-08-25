@@ -1,8 +1,5 @@
-// Package health exposes a liveness/readiness endpoint. A process is "live" if
-// the event loop is running; "ready" if every registered dependency reports OK.
-// The checker does NOT run expensive probes on every /health hit — each check
-// caches its result with a TTL and is re-run by a background goroutine, so a
-// health hit under load is a map lookup, not a DB round trip.
+// Package health exposes a liveness/readiness endpoint; each check caches
+// its result with a TTL, so a health hit is a map lookup, not a DB round trip.
 package health
 
 import (
@@ -67,9 +64,8 @@ func (c *Checker) Register(name string, fn Check) {
 	c.checks[name] = fn
 }
 
-// Run refreshes every probe's cached result. It is the background loop the
-// process drives; each probe gets its own short timeout so one slow dependency
-// cannot starve the rest.
+// Run refreshes every probe's cached result (the background loop); each probe
+// gets its own short timeout so one slow dependency cannot starve the rest.
 func (c *Checker) Run(ctx context.Context, probeTimeout time.Duration) {
 	c.mu.RLock()
 	names := make([]string, 0, len(c.checks))
@@ -115,9 +111,8 @@ func (c *Checker) runOne(ctx context.Context, fn Check, timeout time.Duration) e
 	}
 }
 
-// Snapshot returns the current cached result. Stale entries (older than ttl)
-// count as OK to avoid flapping when the background loop is briefly delayed;
-// a genuine outage refreshes them on the next tick.
+// Snapshot returns the current cached result; stale entries (older than ttl)
+// count as OK; a genuine outage refreshes them on the next tick.
 func (c *Checker) Snapshot() Result {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

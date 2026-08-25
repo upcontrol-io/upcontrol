@@ -27,9 +27,8 @@ type MetricEnvelope struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
-// metricWire mirrors MetricLine in JSON. Value is a *float64 so an absent
-// value is distinguishable from a real 0 — "signups" with no number is not a
-// measurement, and storing 0 would be a reading nobody took.
+// metricWire mirrors MetricLine in JSON; Value is *float64 so an absent value
+// is distinguishable from a real 0 ("signups" with no number is no reading).
 type metricWire struct {
 	TS     *string           `json:"ts"`
 	Metric string            `json:"metric"`
@@ -37,13 +36,8 @@ type metricWire struct {
 	Labels map[string]string `json:"labels"`
 }
 
-// ParseMetric recognises a metric line: JSON carrying both a non-empty
-// `metric` string and a *present* numeric `value`. The bool is false when the
-// line is not a metric, which means it is a log line and travels the existing
-// path — a log line mistaken for a metric would silently empty the stream.
-//
-// `ts` is honoured when present (the customer's clock is the reading's clock);
-// zero means the caller stamps now, same contract as a log line's ts_absent.
+// ParseMetric recognises a metric line: JSON with a non-empty `metric` and a
+// *present* numeric `value`; false = a log line (strictness keeps the stream).
 func ParseMetric(raw []byte) (MetricLine, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -65,12 +59,8 @@ func ParseMetric(raw []byte) (MetricLine, bool) {
 	return m, true
 }
 
-// splitMetrics partitions decoded records into log records and serialised
-// MetricEnvelopes. A record whose Raw (set by the JSON-decoder forms) parses as
-// a metric leaves the log path — or the stream would silently empty, a reading
-// rendered as a message. Timestamps prefer the decode pass (ts normalisation
-// lives there, incl. the ts_absent warning); a metric whose own ts survived
-// only in Raw keeps that; otherwise now.
+// splitMetrics partitions records into logs and serialised MetricEnvelopes; a
+// metric record leaves the log path. Timestamp: decode pass, else own, else now.
 func (h *Ingester) splitMetrics(t Tenant, recs []decode.Record) ([]decode.Record, [][]byte) {
 	logs := make([]decode.Record, 0, len(recs))
 	var metrics [][]byte

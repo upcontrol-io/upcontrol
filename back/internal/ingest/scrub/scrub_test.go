@@ -98,8 +98,8 @@ func TestScrubMarkerShape(t *testing.T) {
 	}
 }
 
-// BenchmarkScrub targets the plan's "<=2 us per string" budget on a typical
-// line. Run with: go test -bench=. -benchmem ./internal/ingest/scrub/
+// BenchmarkScrub targets a <=2 us per string budget on a typical line.
+// Run with: go test -bench=. -benchmem ./internal/ingest/scrub/
 func BenchmarkScrub(b *testing.B) {
 	in := `2026-08-12 14:32:04 user anna@example.com charged 4242 4242 4242 4242 ` +
 		`auth=Bearer abcdef1234567890token ref sk_live_secretkey1234567890XYZ`

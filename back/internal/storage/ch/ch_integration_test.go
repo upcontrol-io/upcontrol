@@ -1,9 +1,7 @@
 //go:build integration
 
-// Integration test for storage/ch: spins up a real ClickHouse via testcontainers,
-// applies the migration, inserts log rows, and reads them back. Run with:
-//
-//	go test -tags=integration ./internal/storage/ch/...
+// Integration test for storage/ch: real ClickHouse via testcontainers, insert
+// and read back log rows. Run: go test -tags=integration ./internal/storage/ch/...
 package ch
 
 import (
@@ -36,9 +34,7 @@ func startClickHouse(t *testing.T) string {
 			"CLICKHOUSE_PASSWORD": chPass,
 		},
 		// Wait on the HTTP interface with auth: the native port accepts
-		// connections during boot before CH can answer the protocol, so a TCP wait
-		// fires too early. An authenticated SELECT 1 succeeds only once CH is
-		// actually serving.
+		// connections during boot before CH can answer the protocol.
 		WaitingFor: wait.ForHTTP("/?query=SELECT%201").WithPort("8123/tcp").
 			WithBasicAuth(chUser, chPass).
 			WithStartupTimeout(90 * time.Second),
@@ -96,8 +92,7 @@ func splitUp(s string) string {
 
 func splitStatements(s string) []string {
 	// Strip whole comment lines first: the migration's header comment contains
-	// ';' (e.g. "logs is the ring-displaced table;"), which would split
-	// mid-comment. Inline `-- …` comments on code lines are harmless to CH.
+	// ';' (e.g. "logs is the ring-displaced table;"), which would split mid-comment.
 	var keep []string
 	for _, line := range strings.Split(s, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "--") {

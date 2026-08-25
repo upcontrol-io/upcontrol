@@ -39,9 +39,8 @@ func TestStream_FiltersAppendConditions(t *testing.T) {
 }
 
 func TestStream_MultiServiceBindsEveryName(t *testing.T) {
-	// The picker is checkboxes now: two picked services are one IN over both,
-	// and the unlabelled service rides as the empty string, a value like any
-	// other — not a dropped filter.
+	// Two picked services are one IN over both, and the unlabelled service
+	// rides as the empty string, a value like any other (not a dropped filter).
 	got := New(1, 2, 3).Stream(10, nil, []string{"api", ""}, "", Range{})
 	if !contains(got.SQL, "service IN (?, ?)") {
 		t.Fatalf("two services must bind two placeholders; got:\n%s", got.SQL)
@@ -81,9 +80,8 @@ func TestServices_ListsTheWindowsServicesWithCounts(t *testing.T) {
 }
 
 func TestServices_IsNeverFilteredByService(t *testing.T) {
-	// The list is what the picker is built from. Filtering it by the service
-	// already picked would leave the picker holding one option — the reader's own
-	// choice — with no way back to the rest of the window.
+	// Filtering the list by the service already picked would leave the picker
+	// holding one option, with no way back to the rest of the window.
 	got := New(1, 2, 3).Services(0)
 	if contains(got.SQL, "service = ?") {
 		t.Fatalf("Services must not filter by service; got:\n%s", got.SQL)
@@ -99,9 +97,8 @@ func TestVolume_GroupsByMinute(t *testing.T) {
 }
 
 func TestVolume_FollowsTheFilters(t *testing.T) {
-	// The strip sits directly above the lines it describes. Left unfiltered it
-	// drew the whole window's mass over a stream narrowed to one service — a
-	// chart and a list, side by side, counting different things.
+	// The strip sits directly above the lines it describes; left unfiltered it
+	// drew the whole window's mass over a narrowed stream.
 	got := New(1, 2, 3).Volume([]string{"error"}, []string{"api"})
 	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
 		t.Fatalf("volume must honour the stream's filters; got:\n%s", got.SQL)
@@ -215,9 +212,8 @@ func assertArgsHave(t *testing.T, args []any, wants ...int64) {
 }
 
 func TestSummary_ScopedToCutoff(t *testing.T) {
-	// The cutoff is the whole point: "does this project send anything" must be
-	// answered about the VISIBLE window, or a project whose lines have all been
-	// displaced by the ring would still read as connected.
+	// "Does this project send anything" must be answered about the VISIBLE
+	// window, or a fully displaced project would still read as connected.
 	q := New(7, 11, 4242)
 	got := q.Summary()
 	for _, want := range []string{"count()", "max(ts)", "tenant_id = ?", "project_id = ?", "seq >= ?"} {
@@ -229,10 +225,8 @@ func TestSummary_ScopedToCutoff(t *testing.T) {
 }
 
 func TestBeyondErrors_CountsOnlyTheDisplacedTail(t *testing.T) {
-	// "Beyond the window" means between retain_seq and cutoff_seq: lines still
-	// stored but no longer shown (§3.3.1). A query that dropped either bound
-	// would count the visible window too and turn the quiet "zero is silence"
-	// footnote into a permanent alarm.
+	// "Beyond the window" means between retain_seq and cutoff_seq: still stored,
+	// no longer shown. Dropping either bound would count the visible window too.
 	q := New(3, 4, 900) // cutoff 900
 	got := q.BeyondErrors(100)
 	for _, want := range []string{"seq >= ?", "seq < ?", "level = 'error'"} {
@@ -244,8 +238,8 @@ func TestBeyondErrors_CountsOnlyTheDisplacedTail(t *testing.T) {
 }
 
 func TestLatestExplain_StaysInsideTheWindow(t *testing.T) {
-	// The AI read is sold as "your last N lines"; reading below the cutoff would
-	// quietly hand the model lines the plan says the account can no longer see.
+	// The AI read is sold as "your last N lines"; reading below the cutoff
+	// would hand the model lines the account can no longer see.
 	q := New(5, 6, 777)
 	got := q.LatestExplain(20)
 	if !contains(got.SQL, "seq >= ?") || !contains(got.SQL, "LIMIT 20") {
@@ -287,10 +281,8 @@ func TestRecentEvents_ScopedGroupedLimited(t *testing.T) {
 	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
 }
 
-// The incident slice's read. Two properties, and the second is the one the
-// change exists for: the failing lines have to outrank the tail, but the
-// filter must never be exclusive, or an incident with no error-level logs
-// freezes an empty slice and the card drops the pane it has today.
+// The failing lines must outrank the tail, but the filter must never be
+// exclusive, or an incident with no error-level logs freezes an empty slice.
 func TestEvidence_RanksErrorsAndWarningsAboveTheTail(t *testing.T) {
 	q := New(7, 11, 4242)
 	got := q.Evidence(12)

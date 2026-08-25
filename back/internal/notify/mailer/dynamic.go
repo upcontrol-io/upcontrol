@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// Dynamic resolves the relay per message: values pasted into the Settings
-// restart. NewSMTP's boot-time refusal cannot exist here (the relay may not
+// Dynamic resolves the relay per message: Settings values win over the UC_SMTP_* env, so mail
+// flows the moment they are saved; a missing piece is a per-send error, never a boot refusal.
 type Dynamic struct {
 	settings func(context.Context) Config
 	log      *slog.Logger

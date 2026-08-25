@@ -7,10 +7,8 @@ import (
 )
 
 func TestErrClassStr_RoundTrip(t *testing.T) {
-	// errClassStr mirrors ucprobe's mapErrClass in reverse: every enum the probe
-	// can send must map back to the executor's short string stored in
-	// checks.error_class. A gap here means a check result is stored with an empty
-	// error_class.
+	// errClassStr mirrors ucprobe's mapErrClass in reverse: every enum the
+	// probe sends must map back, or the result is stored with an empty class.
 	for _, tc := range []struct {
 		enum probev1.ErrorClass
 		want string
@@ -32,9 +30,8 @@ func TestErrClassStr_RoundTrip(t *testing.T) {
 }
 
 func TestErrClassStr_BlockedTargetSurfaces(t *testing.T) {
-	// The SSRF acceptance depends on this: a blocked check must store
-	// "blocked_target", not "" — that is what makes it distinguishable from a
-	// real outage downstream.
+	// A blocked check must store "blocked_target", not ""; that is what
+	// makes it distinguishable from a real outage downstream.
 	if got := errClassStr(probev1.ErrorClass_ERROR_CLASS_BLOCKED_TARGET); got != "blocked_target" {
 		t.Fatalf("blocked_target must surface verbatim, got %q", got)
 	}

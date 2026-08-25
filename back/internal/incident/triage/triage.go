@@ -1,11 +1,5 @@
-// Package triage builds the incident card's verdict (plan §7.6): facts computed
-// by code, a hypothesis labelled as a guess, a derived verdict, and a runnable
-// command rather than advice. The card never changes retroactively — once the
-// verdict is set at open time, it stays.
-//
-// The triage feeds the incident title ("Checkout returning 502"), the timeline
-// (deploy join, error spike, check confirmation), and the result strip
-// ("fixed" / "still-down") that the Dashboard and incident card render.
+// Package triage builds the incident card's verdict: facts computed by code,
+// a hypothesis labelled as a guess, a runnable command rather than advice.
 package triage
 
 import "fmt"
@@ -33,9 +27,8 @@ type DeployContext struct {
 	At      string // timestamp string
 }
 
-// Build constructs a Verdict from the available evidence. The plan (§7.6) is
-// explicit: facts computed by code, the guess labelled as a guess, the deploy
-// joined in exactly once.
+// Build constructs a Verdict from the available evidence: facts computed by
+// code, the guess labelled as a guess, the deploy joined in exactly once.
 func Build(monitorName string, errorClass string, statusCode int, deploy *DeployContext) Verdict {
 	v := Verdict{Status: "unknown"}
 
