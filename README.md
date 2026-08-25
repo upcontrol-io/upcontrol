@@ -165,6 +165,39 @@ infra/   docker-compose, Caddy, install.sh
 `back/api/openapi.yaml` is the contract: both sides generate from it, and a
 hand-written type on either side is how the two start disagreeing silently.
 
+## How the pieces talk
+
+Six runtime pieces, one contract, no hidden paths:
+
+```mermaid
+flowchart LR
+    Browser["Browser / status page"] --> Front["front, the web app"]
+    Front -->|"REST /v1, HttpOnly session cookie, one origin"| UCAPI["ucapi"]
+    SDK["SDK / CLI, npx upcontrol"] -->|"POST /i, NDJSON"| UCAPI
+    UCPROBE["ucprobe"] <-->|"connect-rpc: lease checks, submit results"| UCAPI
+    UCAPI -->|"tenants, monitors, incidents, deliveries"| PG[("Postgres")]
+    UCAPI -->|"logs, events, checks: ingest door + availability detector"| CH[("ClickHouse")]
+    UCWORKER["ucworker"] --> PG
+    UCWORKER -->|"log detectors, incident lifecycle, rollups"| CH
+    UCWORKER -->|"alerts"| CHANNELS["Telegram bot, SMTP email, webhooks"]
+    UCAPI -->|"Explain, only with a configured key"| AI["AI provider"]
+```
+
+| Component | What it is responsible for |
+| --- | --- |
+| front | The web app (React + Vite): the account app and the public status pages. It talks to ucapi only, on the same origin, with an HttpOnly session cookie. |
+| ucapi | The public door: the `/v1/*` API, public and hook surfaces, the schemaless ingest endpoint `POST /i`, and the ProbeService the probe fleet calls. It owns the whole ingest pipeline into ClickHouse, all auth doors, and enqueues deliveries (never processes the queue, so replicas stay safe). |
+| ucworker | The background driver: the delivery queue (Telegram, Discord, Slack, email), retention recompute, expired-batch purging, the notification scanner and the log detector orchestrator. Every job runs under a Postgres advisory lock, so N replicas never duplicate work. |
+| ucprobe | The stateless check runner: leases checks from ucapi, runs each through the SSRF-guarded HTTP executor, submits results back. It holds no database credentials and stores nothing. |
+| Postgres | The system of record: tenants, monitors, incidents, deliveries, entitlements. |
+| ClickHouse | The telemetry store: logs, events, checks; the availability detector reads it on submit, ucworker's detectors read it on their ticker. |
+| SDK / CLI | `npx upcontrol` and `@upcontrol/sdk` (MIT): the installer wires an app up, the SDK's `track()` never throws and never blocks, everything goes to `POST /i` as NDJSON. |
+| Delivery channels | Telegram bot, SMTP email, Slack, Discord, any webhook. A channel is a destination, not a rule engine. |
+| AI provider | Optional and yours: Explain works only when an OpenAI-compatible key is configured; without one it says it is off instead of guessing. |
+
+The full package map, data flows and storage writers live in
+[docs/architecture.md](docs/architecture.md).
+
 ## Development
 
 ```sh
