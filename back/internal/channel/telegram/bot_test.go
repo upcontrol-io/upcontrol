@@ -32,9 +32,8 @@ func TestParseCallback(t *testing.T) {
 	}
 }
 
-// The deep link is the whole "connect Telegram" flow, so the payload decides
-// everything: an inv_ token is the only thing that can bind a chat, and the
-// old guessable prj-N form must reach the refusal path, never the redeem one.
+// The deep link is the whole connect flow: an inv_ token is the only thing
+// that can bind a chat; the old guessable prj-N form must reach the refusal.
 func TestCommand(t *testing.T) {
 	for _, tc := range []struct {
 		text string
@@ -58,9 +57,8 @@ func TestCommand(t *testing.T) {
 	}
 }
 
-// A prj-N payload must NOT look like an invite even after trimming: it takes
-// the refusal branch in handleStart, so a stranger who knows the project id
-// subscribes nothing. This pins the exact cut handleStart performs.
+// A prj-N payload must not parse as an invite: a stranger who knows the
+// project id subscribes nothing. Pins the exact cut handleStart performs.
 func TestPrjPayloadIsNotAnInvite(t *testing.T) {
 	_, ok := strings.CutPrefix("prj-7", "inv_")
 	if ok {
@@ -68,10 +66,8 @@ func TestPrjPayloadIsNotAnInvite(t *testing.T) {
 	}
 }
 
-// The label a channel row prints on Alerts (Decision 13): name plus
-// @username when both exist; a bare @username when the name is empty; the
-// name alone when there is no username; nothing to print when neither — the
-// row then falls back to the raw target, never to an invented placeholder.
+// The label a channel row prints on Alerts: name plus @username, falling
+// back through nullableLabel, never to an invented placeholder.
 func TestInviteLabel(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -89,10 +85,8 @@ func TestInviteLabel(t *testing.T) {
 	}
 }
 
-// The label a channel row stores (bot.go): a computed label passes through,
-// an empty one becomes nil, the argument pgx writes as NULL — the read emits
-// label only when it is not NULL and the front's `label ?? target` does not
-// fall back on "", so a stored ” would print a blank destination line.
+// nullableLabel: a computed label passes through, an empty one becomes nil.
+// The read emits label only when not NULL; the front falls back on NULL only.
 func TestNullableLabel(t *testing.T) {
 	if got := nullableLabel("Kira Volkova @kira"); got != "Kira Volkova @kira" {
 		t.Errorf("nullableLabel(non-empty) = %#v, want the label unchanged", got)
@@ -130,13 +124,8 @@ func TestParseMuteDuration(t *testing.T) {
 	}
 }
 
-// The incident this pins: mint (api.Telegram) hashed the full "inv_…" string
-// while redeem hashed the tail after CutPrefix, so no invite ever minted could
-// be redeemed — and both suites stayed green, because each side was only ever
-// tested against itself. The compiler now enforces one hasher (api calls
-// telegram.InviteTokenHash); this pins the FORM that hasher must keep, because
-// every telegram_invite row already stores it: sha256 of the full payload,
-// prefix included.
+// Pins the FORM InviteTokenHash must keep: sha256 of the full payload, prefix
+// included; every telegram_invite row already stores it.
 func TestInviteTokenHashCoversTheFullPayload(t *testing.T) {
 	payload := "inv_cd3043718570df4147d831aa47d8cdc5"
 	want := sha256.Sum256([]byte(payload))
@@ -149,9 +138,8 @@ func TestInviteTokenHashCoversTheFullPayload(t *testing.T) {
 	}
 }
 
-// /status names the open incidents, but a chat message is not a list view:
-// three titles, then a count. No incidents means no line at all — the answer
-// about the checks must not grow a heading over an empty section.
+// /status names the open incidents: three titles, then a count. No incidents
+// means no line at all.
 func TestIncidentsLine(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

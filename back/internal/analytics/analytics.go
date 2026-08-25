@@ -1,11 +1,5 @@
-// Package analytics is the first-party product-analytics core (plan:
-// product-analytics): event validation, the async recorder that fans visitor
-// events into ClickHouse and visitor state into Postgres, the hand-written UA
-// parser, the embedded GeoIP resolver and the uc_vid visitor cookie.
-//
-// Privacy contract (§Decision 11): no third parties, no fingerprints, and a
-// full client IP is never stored — the raw IP is used once at enqueue time for
-// a country lookup and a truncated sha256, then discarded.
+// Package analytics: first-party analytics core (validation, recorder, UA
+// parser, GeoIP, uc_vid). No third parties; raw IP used once, never stored.
 package analytics
 
 import (
@@ -18,14 +12,14 @@ import (
 	"strings"
 )
 
-// Request-level caps (§Decision 10). The per-event caps live in validate.
+// Request-level caps; the per-event caps live in validate.
 const (
 	MaxEventsPerRequest = 20
 	MaxBodyBytes        = 64 << 10
 )
 
-// Per-event caps (§Decision 10): path ≤256, title ≤128, referrer ≤512,
-// utm fields ≤128, props ≤16 keys with key ≤64 and value ≤200.
+// Per-event caps: path ≤256, title ≤128, referrer ≤512, utm fields ≤128,
+// props ≤16 keys with key ≤64 and value ≤200.
 const (
 	maxPathLen     = 256
 	maxTitleLen    = 128
@@ -36,14 +30,12 @@ const (
 	maxPropValLen  = 200
 )
 
-// eventNameRe is the closed name grammar (§Decision 10): lowercase letters,
-// digits, underscore and dot, 1..64 chars. Anything else is dropped, so a
-// hostile client cannot smuggle arbitrary strings into the name column.
+// eventNameRe is the closed name grammar: lowercase, digits, underscore, dot,
+// 1..64 chars; anything else drops, so no arbitrary strings reach the column.
 var eventNameRe = regexp.MustCompile(`^[a-z0-9_.]{1,64}$`)
 
-// Event is one analytics event, client- or server-originated. All string
-// fields arrive untrusted: sanitize strips control characters, validate
-// enforces the caps, and the endpoint drops invalid events individually.
+// Event is one analytics event. All string fields arrive untrusted: sanitize
+// strips control characters, validate enforces the caps.
 type Event struct {
 	Name        string            `json:"name"`
 	Path        string            `json:"path"`
@@ -56,9 +48,7 @@ type Event struct {
 }
 
 // stripControl removes control characters (and DEL) from every string an
-// event carries. Control bytes in analytics strings are never meaningful and
-// make logs and downstream consumers unhappy; the values are also capped in
-// validate, so a hostile blob cannot ride through either field.
+// event carries; values are also capped in validate.
 func stripControl(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r >= 0x20 && r != 0x7f {
@@ -86,9 +76,8 @@ func (e *Event) sanitize() {
 	}
 }
 
-// validate reports whether the (already sanitized) event satisfies every cap.
-// One bad field drops the whole event — the event is the unit of trust, and a
-// truncated string is a lie about what the visitor did.
+// validate reports whether the sanitized event satisfies every cap. One bad
+// field drops the whole event: a truncated string is a lie.
 func validate(e Event) bool {
 	if !eventNameRe.MatchString(e.Name) {
 		return false
@@ -115,11 +104,8 @@ type Payload struct {
 	Events []Event `json:"events"`
 }
 
-// ParseBody decodes and validates a /public/track body. It never fails: a
-// malformed or oversized body yields zero events (the endpoint still 204s —
-// a collector that answers errors teaches clients to retry), invalid events
-// are dropped individually and counted so the loss is visible in logs, and
-// only the first MaxEventsPerRequest events survive.
+// ParseBody decodes and validates a /public/track body; it never fails: a
+// malformed body yields zero events, invalid ones drop individually.
 func ParseBody(rd io.Reader) (kept []Event, dropped int) {
 	var p Payload
 	if err := json.NewDecoder(io.LimitReader(rd, MaxBodyBytes+1)).Decode(&p); err != nil {
@@ -141,10 +127,8 @@ func ParseBody(rd io.Reader) (kept []Event, dropped int) {
 	return kept, dropped
 }
 
-// Scope is the request-scoped analytics context the public doors attach to
-// their request context before any recorder call. Token is the raw uc_vid
-// cookie ("" = anonymous); IP and UA are used exactly once, at enqueue time
-// (country lookup + parse + truncated hash), and never stored raw.
+// Scope is the request-scoped analytics context. Token is the raw uc_vid
+// (empty = anonymous); IP and UA are used once at enqueue, never stored raw.
 type Scope struct {
 	Token string
 	IP    string
@@ -153,9 +137,8 @@ type Scope struct {
 
 type scopeKey struct{}
 
-// WithScope attaches s to ctx so downstream code (auth redeem, account
-// provisioning) can fire server events with the same visitor identity the
-// originating request carried.
+// WithScope attaches s to ctx so downstream code fires server events with the
+// originating request's visitor identity.
 func WithScope(ctx context.Context, s *Scope) context.Context {
 	return context.WithValue(ctx, scopeKey{}, s)
 }
@@ -166,10 +149,8 @@ func ScopeFrom(ctx context.Context) *Scope {
 	return s
 }
 
-// ScopeFromRequest builds a Scope from the request: the uc_vid cookie, the
-// client IP (X-Forwarded-For first — Caddy sets it; same rule as
-// api.clientIPFrom, duplicated here because api imports analytics, not the
-// other way round), and the User-Agent.
+// ScopeFromRequest builds a Scope from the uc_vid cookie, the client IP
+// (X-Forwarded-For first) and the User-Agent.
 func ScopeFromRequest(r *http.Request) *Scope {
 	tok, _ := VisitorToken(r)
 	return &Scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}

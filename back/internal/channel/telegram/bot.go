@@ -1,36 +1,5 @@
-// Package telegram is the long-polling bot (plan §5.11). It runs as a
-// background goroutine under a Postgres advisory lock so two ucapi instances
-// never double-poll. The bot handles:
-//
-//   - /start inv_<token>: the one-time invite deep link from the Alerts screen
-//     (the growth loop). Burning the token links the Telegram user to a person
-//     by telegram_id — the ONLY thing that sets person.telegram_id. The old
-//     guessable /start prj-N payload no longer subscribes anything (it answers
-//     "ask for a fresh link" instead).
-//   - /start in a GROUP with an invite token: connects the group as a
-//     broadcast destination (no person attached; the chat's alerts carry
-//     Acknowledge/Resolve only — the Bot API refuses web_app buttons
-//     outside private chats, Decision 8).
-//   - /help, /id, /status, /mute, /unmute, /stop: the command surface. /status
-//     answers about the checks AND the tenant's open incidents (a detector
-//     incident has no monitor, so a project with no checks can still be on
-//     fire); /unmute lifts a mute window early and un-parks the pages the
-//     worker deferred into it; /stop disconnects the chat, because a mute
-//     expires and blocking the bot should not be the only way out.
-//   - callback_query: inline button presses on alert messages (ack, resolve).
-//     Authorisation is the PERSON, not the chat: from.id must resolve to a
-//     tenant member — a forwarded message or a group member does not grant
-//     rights.
-//
-// At start the bot registers its command list and, on an https deployment, the
-// chat menu button as a door into the Mini App (see register).
-//
-// Alerts are actionable on both destinations: the delivery worker attaches
-// Acknowledge/Resolve inline buttons to every telegram channel — a press is
-// authorised by who pressed it, never by the chat it landed in — plus an Open
-// (or, for a detector incident, Explain) web_app button into the Mini App on
-// personal channels only (see deliver.telegramKeyboard); the Bot API refuses
-// web_app buttons in groups, whose messages keep the text link instead.
+// Package telegram is the long-polling bot under a Postgres advisory lock (one
+// poller across replicas). Buttons are authorised by the person, not the chat.
 package telegram
 
 import (
@@ -55,8 +24,7 @@ import (
 )
 
 // notConnected is the one refusal every command shares: the chat has no
-// channel, or the person pressing is not a member of the tenant it alerts
-// for. One sentence, one place — four handlers used to carry their own copy.
+// channel, or the presser is not a member.
 const notConnected = "This chat is not connected to a project. Ask the owner for an invite link."
 
 // Bot is the long-polling Telegram bot.
@@ -74,9 +42,8 @@ type Bot struct {
 // is the deployment's public origin ("" hides the Open App button).
 func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *slog.Logger) *Bot {
 	return &Bot{
-		// Trimmed here, not only in the _FILE loader: a token with a trailing
-		// newline breaks EVERY request URL ("invalid control character"), which
-		// on prod looked exactly like a started-but-dead poller (audit §7).
+		// Trimmed here: a token with a trailing newline breaks every request
+		// URL and looks like a started-but-dead poller.
 		token:     strings.TrimSpace(token),
 		appURL:    strings.TrimRight(appURL, "/"),
 		pool:      pool,
@@ -86,24 +53,11 @@ func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *sl
 	}
 }
 
-// Run polls getUpdates under an advisory lock until ctx is cancelled. The
-// advisory lock (key = hash("uc-telegram-bot")) ensures only one instance polls;
-// if the lock holder crashes, the session-level lock auto-releases.
-//
-// Silent death is designed out (audit §7 / D8): the poll cycle and every
-// handler are panic-recovered (a panic used to kill the goroutine with nothing
-// in the log but "started"), failures carry the HTTP status and escalate their
-// backoff instead of retrying invisibly every 5 s, and a heartbeat line —
-// "bot polling", offset — lands every 5 minutes of quiet, so "started" can no
-// longer outlive the poller by more than one heartbeat interval.
+// Run polls getUpdates under an advisory lock until ctx is cancelled; the
+// session-level lock auto-releases if the holder crashes.
 func (b *Bot) Run(ctx context.Context) error {
-	// The advisory lock is SESSION-level: it lives on one connection. Taking
-	// it through pool.Exec borrowed whatever idle connection was next — which
-	// the pool could then close at any moment, silently releasing the lock. On
-	// prod that ended with BOTH replicas polling at once, each terminating
-	// the other's long-poll (Telegram answers 409, logged as endless not-ok;
-	// the audit's "bot started but nobody polls"). The lock therefore sits on
-	// a DEDICATED connection, acquired once and held for the loop's lifetime.
+	// The lock must sit on a DEDICATED connection: pool.Exec borrows an idle
+	// connection the pool may close, silently releasing the lock.
 	const lockKey = 0x75637467 // "uctg" — stable, unique per bot
 	lockConn, err := b.pool.Raw().Acquire(ctx)
 	if err != nil {
@@ -155,10 +109,8 @@ func (b *Bot) Run(ctx context.Context) error {
 			b.offset = u.UpdateID + 1
 		}
 
-		// The heartbeat (audit §7): every 5 minutes of quiet the poller says
-		// it is alive and names the offset it holds — an operator can tell a
-		// live bot from a dead one by reading the log, no external probe
-		// needed. The beat stops exactly when the loop stops.
+		// The heartbeat: every 5 minutes of quiet the poller says it is alive
+		// and names the offset, so a dead bot is tellable from the log.
 		if now := time.Now(); now.Sub(lastBeat) >= heartbeatEvery {
 			lastBeat = now
 			b.log.Info("telegram bot polling", "offset", b.offset, "updates", len(updates))
@@ -166,10 +118,8 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 }
 
-// register tells Telegram what this bot answers to: the command list behind
-// the "/" menu, and the chat's menu button as a door into the Mini App. Both
-// are idempotent and best-effort — a failure is logged and the poll loop
-// starts anyway, because a bot that alerts without a menu still alerts.
+// register tells Telegram the command list and the menu button; both are
+// idempotent and best-effort, a failure is logged and polling continues.
 func (b *Bot) register() {
 	if err := b.call("setMyCommands", map[string]any{"commands": []map[string]string{
 		{"command": "status", "description": "How your checks and incidents are doing"},
@@ -181,8 +131,8 @@ func (b *Bot) register() {
 	}}); err != nil {
 		b.log.Warn("telegram setMyCommands failed", "err", err)
 	}
-	// web_app needs https (Telegram refuses other schemes), and an empty
-	// appURL is legal — a deployment with no public origin has no app to open.
+	// web_app needs https (Telegram refuses other schemes); an empty appURL
+	// is legal: no public origin, no app to open.
 	if !strings.HasPrefix(b.appURL, "https://") {
 		return
 	}
@@ -197,9 +147,8 @@ func (b *Bot) register() {
 	}
 }
 
-// poll is the panic-safe getUpdates: a panic anywhere in the cycle is
-// converted into an error the loop can back off from, instead of killing the
-// goroutine (and with it the process) with nothing logged after "started".
+// poll is the panic-safe getUpdates: a panic becomes an error the loop
+// backs off from, instead of killing the goroutine.
 func (b *Bot) poll(ctx context.Context) (updates []tgUpdate, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -219,8 +168,6 @@ func (b *Bot) dispatch(ctx context.Context, u tgUpdate) {
 	}()
 	b.handleUpdate(ctx, u)
 }
-
-// --- Telegram API types ---
 
 type tgUpdate struct {
 	UpdateID      int64       `json:"update_id"`
@@ -280,11 +227,8 @@ func (b *Bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
 	return result.Result, nil
 }
 
-// call is the one Bot API door: POST JSON, close the body, and report both a
-// transport failure and a refusal by the API. The status matters because a bad
-// token answers 401 and a malformed request 400 — silent successes there are
-// how a bot ends up alerting nobody with nothing in the log. Callers that
-// cannot act on it still ignore the error; register logs it.
+// call is the one Bot API door: POST JSON and report both transport failures
+// and API refusals (a bad token answers 401, a malformed request 400).
 func (b *Bot) call(method string, body map[string]any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -309,8 +253,6 @@ func (b *Bot) answerCallback(callbackID string, text string) {
 		"text":              text,
 	})
 }
-
-// --- command dispatch ---
 
 // command splits "/mute@mybot 30m" into ("mute", "30m"). The @bot suffix is
 // how Telegram addresses a command inside a group.
@@ -351,24 +293,16 @@ func (b *Bot) handleUpdate(ctx context.Context, u tgUpdate) {
 	case "stop":
 		b.handleStop(ctx, u.Message)
 	default:
-		// Unknown commands and plain messages: silent, as before.
+		// Unknown commands and plain messages: silent.
 	}
 }
 
-// handleStart processes the `/start` deep link. The payload decides
-// everything; anything that is not a valid unredeemed invite binds NOTHING —
-// the old `prj-<id>` form used to bind a chat to a tenant on a guessable
-// number, which was the hole this rework closes.
-//
-// The redeem runs in ONE transaction (Decision 14): a person-bound link that
-// must be refused — posted in a group, or already answered by another
-// Telegram — rolls the claim back, so the link stays valid for the chat and
-// the person it was minted for. Refusals are replies in the chat, not errors.
+// handleStart processes the /start deep link: anything that is not a valid
+// unredeemed invite binds nothing. The redeem runs in one transaction.
 func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	if strings.HasPrefix(payload, "prj-") {
-		// Transitional refusal (decision 0.3): old links are already in
-		// people's chats; the honest answer names the new way instead of
-		// silently ignoring them.
+		// Old links are already in people's chats; the honest answer names
+		// the new way instead of silently ignoring them.
 		b.send(msg.Chat.ID, "That link is out of date. Ask the project owner for a fresh invite from the Alerts screen (Alerts → Invite on Telegram).")
 		return
 	}
@@ -378,13 +312,8 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		return
 	}
 
-	// One-time, race-safe: the atomic UPDATE ... WHERE redeemed_at IS NULL is
-	// the same claim-token pattern as install.go — two users racing the same
-	// link cannot both win, and a replay hits "no rows".
-	//
-	// Hashed as the FULL payload, prefix included — the form the mint side
-	// stored. CutPrefix above is a format check only; hashing its remainder
-	// is the bug InviteTokenHash exists to make unrepeatable.
+	// One-time, race-safe: the atomic UPDATE ... WHERE redeemed_at IS NULL;
+	// hashed as the FULL payload, the form the mint side stored.
 	hash := InviteTokenHash(payload)
 	tx, err := b.pool.Raw().Begin(ctx)
 	if err != nil {
@@ -407,22 +336,17 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	_ = tx.QueryRow(ctx,
 		`SELECT name FROM tenant WHERE id = $1`, tenantID).Scan(&tenantName)
 
-	// A GROUP redeem connects a broadcast destination: no person is attached.
-	// The chat's alerts still carry Acknowledge/Resolve (a press is authorised
-	// by who pressed it, resolved by memberForChat against this tenant) — only
-	// the web_app row is dropped there, because the Bot API refuses web_app
-	// buttons outside private chats (Decision 8).
+	// A GROUP redeem connects a broadcast destination: no person attached;
+	// web_app is dropped there, the Bot API refuses it outside private chats.
 	if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" || msg.Chat.ID < 0 {
-		// A person-bound link names one person, and a group is nobody's private
-		// chat: refuse, roll the claim back, keep the link valid for the chat it
-		// was minted for (Decision 14).
+		// A person-bound link names one person, and a group is nobody's
+		// private chat: refuse, roll back, keep the link valid.
 		if invitePersonID != nil {
 			b.send(msg.Chat.ID, "This link is personal. Open it in a private chat with the bot.")
 			return
 		}
-		// The channel's label is the group's own title (Decision 13): the
-		// Alerts row prints it instead of a raw chat id nobody can read. A
-		// titleless group stores NULL, so the row falls back to the target.
+		// The channel's label is the group's own title; a titleless group
+		// stores NULL, so the row falls back to the target.
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO alert_channel (public_id, tenant_id, kind, target, label)
 			 SELECT gen_random_uuid(), $1, 'telegram', $2, $3
@@ -443,18 +367,8 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		return
 	}
 
-	// Private chat. Two ways in, decided by the invite:
-	//
-	// A BOUND link (person_id set) links the Telegram account to the person it
-	// was minted for — the row that already carries their e-mail — so the two
-	// identities never fork into two person rows. This is the only other
-	// writer of person.telegram_id besides the find-or-create below.
-	//
-	// An UNBOUND link finds-or-creates the person by telegram_id (the old
-	// "tenant has exactly one member" heuristic is gone — it guessed, and a
-	// guess here hands one person's acknowledgements to another). An email
-	// member connecting their own Telegram through it arrives as a second
-	// person row; merging identities is a deliberate non-goal.
+	// A BOUND link (person_id set) links the account to that person; an
+	// UNBOUND link finds-or-creates by telegram_id. Merging is a non-goal.
 	name := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	var personID int64
 	if invitePersonID != nil {
@@ -485,9 +399,8 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 			b.send(msg.Chat.ID, "That person already has a different Telegram account linked.")
 			return
 		}
-		// The link itself: bind the account, keep the username current, fill a
-		// name only when the person has none (same freshness rule the
-		// find-or-create path applies).
+		// Bind the account, keep the username current, fill a name only when
+		// the person has none.
 		if _, err := tx.Exec(ctx,
 			`UPDATE person
 			    SET telegram_id = $1, telegram_username = $2,
@@ -498,9 +411,8 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 			return
 		}
-		// No membership INSERT: the mint resolved this person through
-		// tenant_member, so they are already a member — and a link is not a way
-		// to re-role anybody.
+		// No membership INSERT: the mint already resolved membership; a link
+		// is not a way to re-role anybody.
 	} else {
 		personID, err = b.personByTelegramID(ctx, tx, msg.From)
 		if err != nil {
@@ -508,17 +420,16 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 			return
 		}
-		// Existing members keep the role they have (ON CONFLICT DO NOTHING); a
-		// re-invite is not a way to re-role anybody.
+		// Existing members keep the role they have (ON CONFLICT DO NOTHING);
+		// a re-invite is not a way to re-role anybody.
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'active')
 			 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, personID, role); err != nil {
 			b.log.Warn("telegram: member insert failed", "err", err)
 		}
 	}
-	// The channel's label is the person's name plus @username when they have
-	// one (Decision 13) — the Alerts row prints it instead of a raw chat id;
-	// a person with neither stores NULL, so the row falls back to the target.
+	// The channel's label is the person's name plus @username; neither stores
+	// NULL, so the row falls back to the target.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, recipient_person_id, label)
 		 SELECT gen_random_uuid(), $1, 'telegram', $2, $3, $4
@@ -538,11 +449,8 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	b.log.Info("telegram chat connected", "tenant_id", tenantID, "person_id", personID)
 }
 
-// personByTelegramID finds the person whose Telegram this is, or creates one
-// (telegram-only: person's CHECK allows email OR telegram_id), inside the
-// caller's transaction. Both branches also keep telegram_username current: the
-// Alerts row prints it as the channel's label, so a person who changes their
-// handle must not keep being shown the old one.
+// personByTelegramID finds-or-creates the person by telegram_id inside the
+// caller's transaction, keeping telegram_username current.
 func (b *Bot) personByTelegramID(ctx context.Context, tx pgx.Tx, from tgUser) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
@@ -568,11 +476,8 @@ func (b *Bot) personByTelegramID(ctx context.Context, tx pgx.Tx, from tgUser) (i
 	return id, nil
 }
 
-// inviteLabel builds the label a Telegram channel row shows on Alerts
-// (Decision 13): the person's name, plus " @username" when they have one. An
-// empty name falls back to the bare "@username"; with neither, the empty
-// string — stored as NULL via nullableLabel (the row then prints the raw
-// target).
+// inviteLabel builds the label a channel row shows on Alerts: name plus
+// " @username"; neither falls back through nullableLabel.
 func inviteLabel(name, username string) string {
 	if username == "" {
 		return name
@@ -583,11 +488,8 @@ func inviteLabel(name, username string) string {
 	return name + " @" + username
 }
 
-// nullableLabel is the label as the column stores it: NULL, not ”, when
-// nothing was computed (no name and no username, a group without a title).
-// The read API emits label only when it is not NULL, and the front's
-// `label ?? target` does not fall back on "" — a stored ” would print a
-// blank destination line.
+// nullableLabel stores the label as NULL, not "", when nothing was computed:
+// the front's `label ?? target` does not fall back on an empty string.
 func nullableLabel(label string) any {
 	if label != "" {
 		return label
@@ -595,9 +497,8 @@ func nullableLabel(label string) any {
 	return nil
 }
 
-// memberForChat resolves the person pressing something in this chat AND the
-// tenant the chat belongs to, in one round trip: the presser must be a member
-// of the tenant whose alerts land here. Returns 0 when either half is missing.
+// memberForChat resolves the presser AND the chat's tenant in one round trip:
+// the presser must be a member of the tenant whose alerts land here.
 func (b *Bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, name string) {
 	err := b.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, ac.tenant_id, p.name
@@ -625,9 +526,8 @@ func (b *Bot) handleHelp(msg *tgMessage) {
 			"Acknowledge and Resolve buttons arrive on the alerts themselves.")
 }
 
-// handleStatus answers /status with one message about the tenant's checks.
-// Only a verified member of the chat's tenant gets an answer — anyone else is
-// refused without learning anything about the tenant.
+// handleStatus answers /status; only a member of the chat's tenant gets an
+// answer, anyone else learns nothing.
 func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
@@ -663,9 +563,8 @@ func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 			broken = append(broken, namesFrom(names)...)
 		}
 	}
-	// Incidents are their own question: a detector incident has no monitor
-	// behind it, so a project with zero checks can still be on fire — the line
-	// is appended to every answer below, including "no checks yet".
+	// Incidents are their own question: a detector incident has no monitor,
+	// so zero checks can still be on fire.
 	incidents, incidentsOK := b.openIncidentTitles(ctx, tenantID)
 	switch {
 	case up+failing+nodata == 0:
@@ -684,10 +583,8 @@ func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	}
 }
 
-// openIncidentTitles reads the tenant's still-open incidents, newest first.
-// ok is false when the read failed, which is NOT the same fact as "there are
-// none" — /status says so rather than answering with the silence a healthy
-// project gets.
+// openIncidentTitles reads the still-open incidents; ok=false means the read
+// failed, which /status says rather than implying "there are none".
 func (b *Bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []string, ok bool) {
 	rows, err := b.pool.Raw().Query(ctx,
 		`SELECT title FROM incident
@@ -703,11 +600,8 @@ func (b *Bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []
 	return titles, true
 }
 
-// incidentsLine renders the open-incident tail of /status: nothing when there
-// are none (zero is silence), the three newest otherwise, and a count for the
-// rest — a chat message is not a list view. A read that failed says so: the
-// answer a healthy project gets may not double as the answer for "the database
-// did not respond".
+// incidentsLine renders the open-incident tail: nothing when none, the three
+// newest otherwise. A failed read says so, never silence.
 func incidentsLine(titles []string, ok bool) string {
 	if !ok {
 		return "\nCould not read the incident list."
@@ -724,8 +618,6 @@ func incidentsLine(titles []string, ok bool) string {
 	return "\nOpen incidents: " + strings.Join(shown, "; ") + extra
 }
 
-// namesFrom trims a Postgres array literal {"a","b"} to ["a","b"]. NULL
-// aggregates arrive as an empty slice and yield nil.
 // ponytail: monitor names containing commas would split wrong — cosmetic
 // display only; switch to array_to_string server-side if that ever bites.
 func namesFrom(arr []byte) []string {
@@ -740,9 +632,8 @@ func namesFrom(arr []byte) []string {
 	return parts
 }
 
-// handleMute silences this chat's alerts for a duration (30m, 2h, 1d). The
-// window lives on alert_channel.muted_until; the delivery worker reschedules
-// anything that comes due inside it, so expiry needs no bot involvement.
+// handleMute silences this chat's alerts; the window lives on muted_until and
+// the delivery worker reschedules around it, expiry needs no bot involvement.
 func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 	d, err := parseMuteDuration(arg)
 	if err != nil {
@@ -766,29 +657,16 @@ func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 	b.send(msg.Chat.ID, "Muted until "+until.Format("15:04 MST")+" ("+arg+") — alerts resume automatically after that.")
 }
 
-// handleUnmute lifts the mute window early. Clearing muted_until is only half
-// the job: the delivery worker DEFERS a muted channel's alerts to the mute's
-// end rather than dropping them, so anything that came due during the window
-// is parked in the future. Unmuting therefore also pulls those pages back to
-// now — otherwise "alerts flow again" would be false for exactly the alerts
-// the reader unmuted to receive. Follow-ups keep their own schedule: a
-// fifteen-minute follow-up arriving late is not worth un-parking.
+// handleUnmute lifts the mute early AND un-parks what the window deferred:
+// the worker defers muted alerts to the mute's end, it does not drop them.
 func (b *Bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
-	// One statement, three steps: snapshot the windows before clearing them,
-	// clear them, then release only what those windows parked.
-	//
-	// The release must be keyed on the window, not on "scheduled in the
-	// future": a send that FAILED is also sitting in the future, rescheduled a
-	// few seconds out by the retry backoff, and dragging it to now would spend
-	// its remaining attempts early — the opposite of letting the alert
-	// through. A mute defers to exactly muted_until (worker.go), so
-	// next_try_at >= the snapshotted window end is precisely the set it
-	// deferred, and nothing else.
+	// Release keyed on the window, not on "scheduled in the future": failed
+	// sends also sit in the future on retry backoff and must not be dragged.
 	var lifted int
 	if err := b.pool.Raw().QueryRow(ctx,
 		`WITH muted AS (
@@ -818,27 +696,16 @@ func (b *Bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 	b.send(msg.Chat.ID, "Unmuted — alerts flow again.")
 }
 
-// handleStop disconnects THIS chat. Without it the only ways out were a mute
-// that expires after at most seven days, the Alerts screen, or blocking the
-// bot — and "a product that refuses to stop e-mailing you is a product you
-// cannot leave" (the same rule the API's channel delete is written to).
-//
-// It removes the destination, not the person: membership, role and the
-// project are untouched, so a fresh invite link brings the chat back. Queued
-// deliveries for the channel go with it (delivery_queue cascades), which is
-// the point — leaving them to fail one by one is not stopping.
-//
-// Scoped to this chat's target alone, never to the person: someone who reads
-// alerts in two chats and stops one means that one.
+// handleStop disconnects THIS chat: the destination goes, membership and
+// role stay. A fresh invite link brings the chat back.
 func (b *Bot) handleStop(ctx context.Context, msg *tgMessage) {
 	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
-	// No row-count branch: memberForChat only answers when a telegram channel
-	// with this chat's target exists, and that is the row being deleted. If it
-	// vanished in between, the chat is disconnected either way.
+	// No row-count branch: memberForChat only answers when this row exists;
+	// if it vanished in between, the chat is disconnected either way.
 	if _, err := b.pool.Raw().Exec(ctx,
 		`DELETE FROM alert_channel
 		  WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2`,
@@ -878,17 +745,15 @@ func parseMuteDuration(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// handleCallback processes inline button presses on alert messages. The
-// callback data format is "action:<public_id>" (the incident's uuid hex — the
-// same id the alert payload carried, so nothing extra travels in the button).
+// handleCallback processes button presses; the data is "action:<public_id>",
+// the same id the alert payload carried.
 func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 	action, pubID, ok := parseCallback(cb.Data)
 	if !ok {
 		b.answerCallback(cb.ID, "Unknown action")
 		return
 	}
-	// Authorisation is the person, not the chat: from.id must resolve to a
-	// member of the tenant this chat alerts for. A forwarded message or a
+	// Authorisation is the person, not the chat: a forwarded message or a
 	// stranger pressing a screenshot's button stops here.
 	personID, tenantID, name := b.memberForChat(ctx, cb.Message.Chat.ID, cb.From.ID)
 	if personID == 0 {
@@ -913,9 +778,8 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 	}
 }
 
-// handleAck records the second of the incident's four marks (MTTA). It is
-// idempotent: pressing the button twice does not move the timestamp. The
-// timeline names the person — "who closed it" is a fact, not @username.
+// handleAck records the incident's MTTA mark, idempotent; the timeline
+// names the person: "who closed it" is a fact.
 func (b *Bot) handleAck(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
 	_, _ = b.pool.Raw().Exec(ctx,
 		`UPDATE incident SET acked_at = now(), acked_by = $2 WHERE id = $1 AND acked_at IS NULL`,
@@ -927,10 +791,8 @@ func (b *Bot) handleAck(ctx context.Context, cb *tgCallback, incID, personID int
 	b.log.Info("incident acked via telegram", "incident_id", incID, "person_id", personID)
 }
 
-// handleResolve closes the incident through the same lifecycle the detector
-// uses, so the close reason, the timeline entry and resolved_at are written the
-// one way — a button that closed it differently would produce incidents that
-// look closed on one screen and open on another.
+// handleResolve closes through the same lifecycle the detector uses, so the
+// close reason and resolved_at are written the one way.
 func (b *Bot) handleResolve(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
 	var monitorID *int64
 	if err := b.pool.Raw().QueryRow(ctx,
@@ -953,33 +815,21 @@ func (b *Bot) handleResolve(ctx context.Context, cb *tgCallback, incID, personID
 	b.log.Info("incident resolved via telegram", "incident_id", incID, "person_id", personID)
 }
 
-// --- helpers ---
-
-// sha256Sum mirrors the storage convention of every one-time token here
-// (magic-link codes, claim tokens, install tokens all store sha256, never the
-// raw value).
+// sha256Sum mirrors the storage convention of every one-time token here:
+// sha256 is stored, never the raw value.
 func sha256Sum(s string) []byte {
 	sum := sha256.Sum256([]byte(s))
 	return sum[:]
 }
 
-// InviteTokenHash is THE hash of a Telegram invite token, exported so the
-// mint side (api.Telegram) and the redeem side (handleStart) compile against
-// one definition. They used to hash independently — mint hashed the full
-// "inv_…" string, redeem hashed the tail after CutPrefix — so no invite ever
-// minted could be redeemed, and both suites stayed green because each side
-// was only ever tested against itself.
-//
-// The input is the FULL deep-link payload, prefix included: that is the form
-// already sitting hashed in every telegram_invite row.
+// InviteTokenHash is THE hash of an invite token, shared by the mint and
+// redeem sides; the input is the FULL deep-link payload, prefix included.
 func InviteTokenHash(payload string) []byte {
 	return sha256Sum(payload)
 }
 
-// parseCallback splits inline-button callback data of the form "action:id"
-// (e.g. "ack:<public_id>"). ok is false for anything malformed, which the
-// caller answers as "Unknown action" — so a crafted payload never reaches the
-// incident mutation code.
+// parseCallback splits "action:id"; ok=false for anything malformed, answered
+// as "Unknown action" so crafted payloads never reach the mutation code.
 func parseCallback(data string) (action, id string, ok bool) {
 	parts := strings.SplitN(data, ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

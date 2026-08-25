@@ -2,20 +2,16 @@ package analytics
 
 import "strings"
 
-// UA is the parsed User-Agent taxonomy (§Decision 10): a hand-written
-// classifier, no dependency. Device is desktop|mobile|tablet|bot; OS and
-// Browser are lowercase family names or "" when unknown. Bot classification
-// feeds is_bot on the visitor row; bot events are stored but excluded from
-// dashboard metrics at query time (§Decision 9).
+// UA is the parsed User-Agent taxonomy, hand-written, no dependency. Device is
+// desktop|mobile|tablet|bot; OS and Browser lowercase or "".
 type UA struct {
 	Device  string
 	OS      string
 	Browser string
 }
 
-// botSubstrings are the honest automated-visitor markers. Anything matching
-// is device=bot regardless of the rest of the string — a HeadlessChrome
-// claiming to be Chrome is still not a visitor.
+// botSubstrings are the automated-visitor markers; a match is device=bot
+// regardless of the rest of the string.
 var botSubstrings = []string{"bot", "crawl", "spider", "slurp", "headless", "lighthouse", "monitoring"}
 
 func ParseUA(ua string) UA {
@@ -62,8 +58,8 @@ func osOf(s string) string {
 
 func browserOf(s string) string {
 	switch {
-	// Edge first: its UA contains both "edg/" and "chrome". Firefox for iOS
-	// ("fxios") likewise claims Safari; Chrome claims Safari for everything.
+	// Edge first: its UA contains "edg/" and "chrome". Firefox for iOS claims
+	// Safari; Chrome claims Safari for everything.
 	case strings.Contains(s, "edg/"), strings.Contains(s, "edge/"), strings.Contains(s, "edga/"), strings.Contains(s, "edgios/"):
 		return "edge"
 	case strings.Contains(s, "firefox"), strings.Contains(s, "fxios"):

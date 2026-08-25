@@ -8,12 +8,7 @@ import (
 )
 
 // Dynamic resolves the relay per message: values pasted into the Settings
-// screen (instance_setting, sealed under UC_SECRET_KEY_HEX) win over the
-// UC_SMTP_* env config, so email starts flowing the moment they save — no
 // restart. NewSMTP's boot-time refusal cannot exist here (the relay may not
-// exist yet); the equivalent honesty is a per-send error naming the missing
-// piece, plus Configured() so the magic-link door keeps its "no mailer;
-// sign-in code" log line while there is no relay at all.
 type Dynamic struct {
 	settings func(context.Context) Config
 	log      *slog.Logger

@@ -117,8 +117,7 @@ func TestAgentSendInvitePostsTheAgentContract(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json", ctype)
 	}
 	// The exact body the agent's /send validates and renders invite from:
-	// `to` rides the envelope, the template owns the link, so no address is
-	// rendered into the vars twice.
+	// `to` rides the envelope, so no address is rendered twice.
 	if body["kind"] != "transactional" {
 		t.Errorf("kind = %v, want transactional", body["kind"])
 	}

@@ -1,8 +1,5 @@
-// Package session manages httpOnly session cookies backed by the Postgres
-// session table. The cookie value is a random token; the table stores only
-// sha256(token) so a DB leak cannot impersonate sessions. On every /v1/* request
-// the middleware reads the cookie, hashes it, looks up the session, and rejects
-// expired or missing sessions with 401.
+// Package session manages httpOnly cookies backed by the Postgres session
+// table; only sha256(token) is stored, so a DB leak cannot impersonate.
 package session
 
 import (
@@ -32,8 +29,8 @@ type Manager struct {
 	ttl  time.Duration
 	log  *slog.Logger
 
-	// Single-user mode (public-first-split, Decision 16): when set, every
-	// request carries this identity and the cookie is never consulted.
+	// Single-user mode: when set, every request carries this identity and the
+	// cookie is never consulted.
 	fixedPersonID int64
 	fixedTenantID int64
 }
@@ -68,10 +65,8 @@ func (m *Manager) LookupSession(ctx context.Context, rawToken string) (sqlc.Sess
 	hash := sha256.Sum256([]byte(rawToken))
 	s, err := m.pool.Queries().GetSessionByToken(ctx, hash[:])
 	if err != nil {
-		// The one refusal in the system that used to write nothing, and the one
-		// the client turns into a redirect to /sign-in. Never log the token or
-		// its hash — a log that can be replayed into a session is a second
-		// credential store.
+		// Never log the token or its hash: a log that can be replayed into a
+		// session is a second credential store.
 		m.log.Info("session: refused", "reason", "no valid session for token")
 		return sqlc.Session{}, ErrNoSession
 	}
@@ -86,8 +81,7 @@ func (m *Manager) Delete(ctx context.Context, rawToken string) error {
 }
 
 // WithFixedIdentity puts the Manager in single-user mode: FromRequest answers
-// with this identity as a synthetic session on every request, cookie or not.
-// Chainable, boot-time only — never call it after the mux is serving.
+// with this identity on every request. Boot-time only.
 func (m *Manager) WithFixedIdentity(personID, tenantID int64) *Manager {
 	m.fixedPersonID, m.fixedTenantID = personID, tenantID
 	return m
@@ -107,9 +101,8 @@ func (m *Manager) FromRequest(ctx context.Context, r *http.Request) (sqlc.Sessio
 	return m.LookupSession(ctx, c.Value)
 }
 
-// SetCookie writes the session cookie on an http.ResponseWriter. secure=false
-// in dev so the cookie survives the HTTP dev server (Caddy on :80 with
-// auto_https off); prod passes secure=true so it never crosses plain HTTP.
+// SetCookie writes the session cookie; secure=false in dev (HTTP server),
+// true in prod so it never crosses plain HTTP.
 func SetCookie(w http.ResponseWriter, token string, ttl time.Duration, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name: CookieName, Value: token, Path: "/",

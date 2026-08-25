@@ -1,13 +1,7 @@
 //go:build integration
 
-// Audit §9 (design D9): a sign-in account is born WITH a way to be told. The
-// watch door has always seeded an email channel on the address it was given;
-// the sign-in door provisioned the same tenant with zero channels, so the
-// first incident of a new account notified nobody. This pins the symmetry and
-// the idempotency: a second sign-in (an existing person) must not seed a
-// duplicate.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/account/auth/...
+// A sign-in account is born WITH the email channel seeded; a second sign-in
+// seeds no duplicate. Run: go test -tags=integration ./internal/account/auth/...
 package auth
 
 import (
@@ -71,10 +65,8 @@ func TestProvisionSeedsEmailChannelOnce(t *testing.T) {
 	}
 }
 
-// Single-user mode's acceptance check, pinned after the cold-install rehearsal
-// caught /v1/me 401ing under UC_AUTH=none: the synthetic session has no token
-// hash, so the token-joined GetMe can never answer for it — Me must key the
-// aggregate off the identity instead, and the owner lands on 'Self-hosted'.
+// Single-user mode: the synthetic session has no token hash, so the
+// token-joined GetMe can never answer for it; Me keys off the identity.
 func TestMe_FixedIdentityAnswersWithoutCookie(t *testing.T) {
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {

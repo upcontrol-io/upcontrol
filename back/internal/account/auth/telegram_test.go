@@ -12,9 +12,8 @@ import (
 	"time"
 )
 
-// buildInitData constructs a signed initData string the way Telegram does, so
-// the tests verify against the real algorithm rather than a copy of our own
-// code (a self-referential test would pass even with a wrong key derivation).
+// buildInitData signs initData the way Telegram does, so the tests verify
+// against the real algorithm, not a copy of our own code.
 func buildInitData(botToken string, tgUserID int64, authAge time.Duration) string {
 	user := `{"id":` + strconv.FormatInt(tgUserID, 10) + `,"first_name":"Mira"}`
 	vals := url.Values{
