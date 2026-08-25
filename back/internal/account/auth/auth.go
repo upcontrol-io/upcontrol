@@ -36,11 +36,14 @@ const (
 	ipBlockWindow = 5 * time.Minute
 )
 
-// Mailer sends a magic-link code to an address. The real implementation ships
-// with the email daemon (block 7); until then it is nil and prod log-in waits
-// for that wiring (dev mode returns the code in the response, so e2e works).
+// Mailer sends the two mails that carry a sign-in credential: the magic-link
+// code the sign-in door issues, and the project invitation (§3.2). The real
+// implementation ships with the email daemon (block 7); until then it is nil
+// and prod log-in waits for that wiring (dev mode returns the code in the
+// response, so e2e works).
 type Mailer interface {
 	SendCode(ctx context.Context, email, code string) error
+	SendInvite(ctx context.Context, to, code, project, invitedBy string) error
 }
 
 // MagicLink handles the request/redeem magic-link flow.
@@ -228,6 +231,11 @@ func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Ownership is proven here and only here: the code was verified above, so
+	// every pending invite for this person activates and each such tenant gets
+	// the e-mail channel (Decision 18). ensureAccount must never grow this —
+	// the request path runs it without any proof the caller owns the address.
+	h.activateInvites(ctx, person.ID, email)
 	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -401,6 +409,44 @@ func (h *MagicLink) tenantForPerson(ctx context.Context, personID int64) (int64,
 		`SELECT tenant_id FROM tenant_member WHERE person_id = $1 ORDER BY tenant_id LIMIT 1`,
 		personID).Scan(&tenantID)
 	return tenantID, err
+}
+
+// activateInvites is the proof-of-ownership half of an invitation (Decision
+// 18): every pending membership of personID turns active, and each such tenant
+// gets the person's e-mail alert channel — the same channel ensureAccount
+// seeds a new account with, so an invitee becomes as reachable as a signup.
+// Called only from the two redeem doors, right after ensurePerson: the request
+// path proves nothing about the caller, and a pending membership a bare
+// request could activate would be an invite with no accept step.
+//
+// Errors are swallowed the way ensureAccount's seeds are: the sign-in itself
+// already proved the identity, and a failure here must not refuse it. But the
+// retry is free only while a row is still pending: a committed UPDATE whose
+// channel INSERT then fails leaves nothing to retry on the next sign-in, so
+// that channel is recovered by hand — createChannel, which accepts an active
+// member's address.
+func (h *MagicLink) activateInvites(ctx context.Context, personID int64, email string) {
+	// Defensive, same reason as in ensureAccount: the NOT EXISTS below
+	// compares target byte for byte, so the one spelling is the normalised one.
+	email = NormalizeEmail(email)
+	rows, err := h.pool.Raw().Query(ctx,
+		`UPDATE tenant_member SET status = 'active' WHERE person_id = $1 AND status = 'pending' RETURNING tenant_id`,
+		personID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tenantID int64
+		if err := rows.Scan(&tenantID); err != nil {
+			return
+		}
+		_, _ = h.pool.Raw().Exec(ctx,
+			`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
+			 SELECT gen_random_uuid(), $1, 'email', $2
+			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
+			tenantID, email)
+	}
 }
 
 // Me handles GET /v1/me.

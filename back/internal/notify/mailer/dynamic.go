@@ -46,6 +46,16 @@ func (d *Dynamic) SendCode(ctx context.Context, to, code string) error {
 	return nil
 }
 
+// SendInvite delivers one project invitation; the code is never logged either.
+func (d *Dynamic) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
+	subject, body := RenderInvite(to, code, d.base, project, invitedBy)
+	if err := d.Send(ctx, to, subject, body); err != nil {
+		return err
+	}
+	d.log.Info("mailer: invite sent", "to", to)
+	return nil
+}
+
 // Send resolves the relay and delivers one message through it.
 func (d *Dynamic) Send(ctx context.Context, to, subject, text string) error {
 	cfg := d.settings(ctx)

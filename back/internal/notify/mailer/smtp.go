@@ -49,8 +49,19 @@ func (s *SMTP) SendCode(ctx context.Context, to, code string) error {
 	return nil
 }
 
-// Send delivers one plain-text message through the relay. SendCode rides it;
-// the alert channel (deliver.SMTPChannel) calls it directly.
+// SendInvite delivers one project invitation. It carries the same sign-in
+// code, so it is never logged either.
+func (s *SMTP) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
+	subject, body := RenderInvite(to, code, s.base, project, invitedBy)
+	if err := s.Send(ctx, to, subject, body); err != nil {
+		return err
+	}
+	s.log.Info("mailer: invite sent", "to", to)
+	return nil
+}
+
+// Send delivers one plain-text message through the relay. SendCode and
+// SendInvite ride it; the alert channel (deliver.SMTPChannel) calls it directly.
 func (s *SMTP) Send(_ context.Context, to, subject, text string) error {
 	msg := buildMessage(s.cfg.From, s.cfg.FromName, to, subject, text)
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)

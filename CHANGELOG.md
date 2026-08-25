@@ -4,6 +4,37 @@ All notable changes to the self-hosted package. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org/).
 
+## [0.4.0] — 2026-08-26
+
+### Added
+- **The invitation mail, on every transport.** Inviting a teammate now
+  sends the invitation through the same mailer the sign-in door uses — the
+  email agent, own SMTP, or the dynamic relay — and the mail is sent before
+  the membership commits: a send failure rolls the whole write back and
+  answers 503, so "The invite was not sent. Nobody was added." is the truth.
+  The mail names the project and the person who invited them, and carries
+  the one-time sign-in link; its text part is byte-identical on every
+  transport, pinned from both sides (Go and the agent's template).
+- **Resend.** A pending row carries a Resend button: the same invitation
+  mail again, with nothing to insert and nothing to roll back. A resend
+  inside the cooldown answers 429 — no second mail can go out while a link
+  is still fresh, and a button that said "Sent!" without sending would be
+  the lie this screen refuses elsewhere.
+- **Signing in accepts the invitation and seeds the e-mail channel.** The
+  invitation is a magic link: redeeming it marks the membership `active` and
+  writes the invitee's address as an Email channel in the same breath — the
+  Telegram redeem's symmetry, on the e-mail side. An accepted invitation
+  leaves nobody a member whose address cannot be alerted, and no second
+  "add a channel" step between the invite and the alerts.
+
+### Changed
+- **A pending person cannot be an e-mail destination.** The picker on Alerts
+  offers only people who have signed in, and the server answers a pending
+  address with the same refusal as an unknown one: no channel, and no test
+  mail, can reach an inbox the person has not proven theirs yet.
+- **A resend inside the cooldown answers 429** rather than 202, for the
+  reason above: an empty success would show "Sent!" while nothing went out.
+
 ## [0.3.0] — 2026-08-26
 
 ### Added

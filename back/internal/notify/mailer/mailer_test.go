@@ -22,6 +22,32 @@ func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
 	}
 }
 
+func TestRenderInvitePinsTheDecision15Bytes(t *testing.T) {
+	subject, body := RenderInvite("kira@example.com", "1ece76e3", "https://upcontrol.io", "acme.io", "Ada")
+	// The subject is a sentence the invitee reads in their inbox list, so it
+	// carries no trailing period.
+	wantSubject := "Ada invited you to acme.io on UpControl"
+	if subject != wantSubject {
+		t.Fatalf("subject = %q, want %q", subject, wantSubject)
+	}
+	// The text part is byte-pinned (plan Decision 15): the email agent renders
+	// the same bytes in TypeScript, so equality here is the whole contract.
+	want := `Ada invited you to acme.io on UpControl.
+
+Accept the invitation and sign in:
+
+https://upcontrol.io/sign-in?email=kira%40example.com&token=1ece76e3
+
+Or type this code on the sign-in page: 1ece76e3
+
+The link works once and expires shortly. If you were not expecting this, ignore
+this message: nobody can sign in without it.
+`
+	if body != want {
+		t.Fatalf("body drifted from Decision 15\nwant:\n%s\ngot:\n%s", want, body)
+	}
+}
+
 func TestBuildMessageCarriesTheHeaders(t *testing.T) {
 	msg := string(buildMessage("no-reply@upcontrol.io", "UpControl", "ada@example.com", "[down] api", "body line"))
 	for _, want := range []string{

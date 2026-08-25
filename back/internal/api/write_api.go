@@ -143,9 +143,15 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/v1/deliveries/") && r.Method == http.MethodGet:
 		h.getDelivery(w, r, tenantID)
 
-	// Recipients
+	// Recipients. The invite carries the caller's person id: the mail names
+	// the inviter (Decision 15), and the session is where it comes from.
 	case r.URL.Path == "/v1/recipients" && r.Method == http.MethodPost:
-		h.createRecipient(w, r, tenantID)
+		h.createRecipient(w, r, tenantID, s.PersonID)
+	// Resend (Decision 17) is matched before the patch/delete arms and by
+	// its suffix, not pathLast: the id sits one segment above /resend, and
+	// those arms would otherwise read "resend" as the person id.
+	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && strings.HasSuffix(r.URL.Path, "/resend") && r.Method == http.MethodPost:
+		h.resendInvite(w, r, tenantID, s.PersonID)
 	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && r.Method == http.MethodPatch:
 		h.patchRecipient(w, r, tenantID)
 	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && r.Method == http.MethodDelete:
@@ -221,12 +227,16 @@ func (h *WriteAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 	// stranger's address, press Send test, and we deliver to somebody who never
 	// asked us for anything. The screen offers a dropdown of exactly these
 	// people; this is the same rule where it cannot be bypassed by posting.
+	// Active members only (Decision 19): a pending person has not signed in
+	// yet, so their address is unproven — it answers the same refusal as a
+	// stranger's, which is also what makes "no test mail can reach them" true.
 	if req.Kind == "email" {
 		var known bool
 		_ = h.pool.Raw().QueryRow(r.Context(),
 			`SELECT EXISTS (
 			   SELECT 1 FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-			    WHERE tm.tenant_id = $1 AND lower(p.email) = lower($2))`,
+			    WHERE tm.tenant_id = $1 AND lower(p.email) = lower($2)
+			      AND tm.status = 'active')`,
 			tenantID, req.Target).Scan(&known)
 		if !known {
 			writeAPIErr(w, http.StatusBadRequest, "unknown_recipient")
@@ -436,7 +446,14 @@ func (h *WriteAPI) getDelivery(w http.ResponseWriter, r *http.Request, tenantID 
 
 // --- Recipients ---
 
-func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// createRecipient invites one address to the tenant (Decision 16): person and
+// pending membership go in inside a transaction, the sign-in door's own code
+// is minted, the invitation mail is sent, and only then does the transaction
+// commit — a send failure rolls the whole write back and answers 503, so the
+// front's "The invite was not sent. Nobody was added." is the truth. An
+// address that is already an active member short-circuits: nothing is minted,
+// nothing is sent, the row answers the status it already has.
+func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
 	var req struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
@@ -454,24 +471,203 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 	if req.Role == "" {
 		req.Role = "notify"
 	}
+	ctx := r.Context()
+	tx, err := h.pool.Raw().Begin(ctx)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Find or create person by email.
 	var personID int64
-	err := h.pool.Raw().QueryRow(r.Context(),
-		`SELECT id FROM person WHERE email = $1`, req.Email).Scan(&personID)
-	if err != nil {
-		_ = h.pool.Raw().QueryRow(r.Context(),
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM person WHERE email = $1`, req.Email).Scan(&personID); err != nil {
+		_ = tx.QueryRow(ctx,
 			`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
 			req.Email, auth.NameFromEmail(req.Email)).Scan(&personID)
 	}
-	_, _ = h.pool.Raw().Exec(r.Context(),
+	_, _ = tx.Exec(ctx,
 		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'pending')
 		 ON CONFLICT DO NOTHING`, tenantID, personID, req.Role)
-	writeAPIJSON(w, http.StatusCreated, map[string]any{
+	// Read the status inside the same transaction: the invitee who already
+	// signed in needs no mail and no code — a second invitation to somebody
+	// who accepted would be noise dressed as work.
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM tenant_member WHERE tenant_id = $1 AND person_id = $2`,
+		tenantID, personID).Scan(&status); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	body := map[string]any{
 		"id":     strconv.FormatInt(personID, 10),
 		"email":  req.Email,
 		"role":   req.Role,
-		"status": "pending",
-	})
+		"status": status,
+	}
+	if status == "active" {
+		if err := tx.Commit(ctx); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		writeAPIJSON(w, http.StatusCreated, body)
+		return
+	}
+	// The sign-in code is the sign-in door's own, minted on the POOL, not this
+	// transaction: IssueLoginCode manages its own writes (the shared per-IP
+	// window and the magic_link_code row) on tables this transaction never
+	// touches, so the two never contend. Its fate follows the mail's, not the
+	// membership's — a rollback leaves a stored-but-unsent code, exactly what
+	// the watch door already leaves behind routinely.
+	code, err := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r))
+	switch {
+	case errors.Is(err, auth.ErrRateLimited):
+		// The caller's IP is past the shared magic-link window: no mail, no
+		// membership — the rollback makes "nobody was added" true here too.
+		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	case errors.Is(err, auth.ErrCodeCooldown):
+		// A code went out to this address moments ago and is still live: the
+		// invitation is already in their inbox, so the invite lands (Resend
+		// covers a lost one) and no second mail is sent.
+		if err := tx.Commit(ctx); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		writeAPIJSON(w, http.StatusCreated, body)
+		return
+	case err != nil:
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Decision 15's mail vars: `project` names the tenant's first project by
+	// its domain, falling back to the tenant's own name when the domain is
+	// empty (a tenant whose checks have not named a project yet still gets a
+	// subject that says which workspace is calling); `invited_by` is the
+	// inviter's person.name, or their e-mail when the name is empty.
+	var project, invitedBy string
+	_ = tx.QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
+		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
+		  WHERE t.id = $1
+		  ORDER BY p.id LIMIT 1`, tenantID).Scan(&project)
+	_ = tx.QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
+		inviterID).Scan(&invitedBy)
+	// A mailer whose relay arrives at runtime (Settings-set SMTP) reports
+	// emptiness through the optional Configured interface — the ai.Configured
+	// idiom — and an empty one takes the same path as no mailer at all. The
+	// same check the magic-link door makes.
+	mail := h.mailer
+	if c, ok := mail.(interface{ Configured(context.Context) bool }); ok && !c.Configured(ctx) {
+		mail = nil
+	}
+	if mail == nil {
+		// Decision 16: the ONE deliberate exception to "never log the code" —
+		// with no mailer configured, the operator's log is the only way in
+		// (the same one the magic-link door makes). The HTTP response still
+		// never carries it outside dev mode.
+		slog.Warn("invite: no mailer; sign-in code", "email", req.Email, "code", code)
+	} else if err := mail.SendInvite(ctx, req.Email, code, project, invitedBy); err != nil {
+		// The mail did not leave: the invite rolls back with it. Half of an
+		// invitation — a member row nobody was told about — is the state the
+		// 503 exists to prevent.
+		writeAPIErr(w, http.StatusServiceUnavailable, "email_unavailable")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Dev-only relaxation (Decision 16), the same one POST /v1/auth/magic-link
+	// makes: the code rides the response so e2e can accept an invitation with
+	// no inbox. Never in prod.
+	if h.devMode {
+		body["dev_token"] = code
+	}
+	writeAPIJSON(w, http.StatusCreated, body)
+}
+
+// resendInvite is Decision 17: the invitation mail, again, for a membership
+// that is already pending. No insert anywhere — person, membership and role
+// all exist, so there is nothing to roll back and no transaction: a failed
+// send leaves exactly the state it found. The mint-and-send half is
+// createRecipient's (Decision 16), error for error, with the writes left out.
+func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
+	ctx := r.Context()
+	// The id is one segment up from /resend; pathLast alone would read
+	// "resend". Resolution is the patch/delete arms' own: public id or row id,
+	// tenant-scoped.
+	personID := h.personRowID(ctx, tenantID, pathLast(strings.TrimSuffix(r.URL.Path, "/resend")))
+	if personID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "no_such_person")
+		return
+	}
+	// Only a pending membership is a resend target. An active member accepted
+	// their invitation — a second one is noise — and anything else (no row,
+	// another tenant's) is not this caller's business. Both answer the same
+	// 404, the same code the patch and delete arms use for it.
+	var email, status string
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT p.email, tm.status FROM person p JOIN tenant_member tm ON tm.person_id = p.id
+		  WHERE p.id = $1 AND tm.tenant_id = $2`, personID, tenantID).Scan(&email, &status); err != nil || status != "pending" {
+		writeAPIErr(w, http.StatusNotFound, "no_such_person")
+		return
+	}
+	// createRecipient's mint-and-send sequence, on the pool: IssueLoginCode
+	// owns its tables (the per-IP window, the code row), and with no
+	// transaction around it there is nothing for those writes to contend with.
+	code, err := auth.IssueLoginCode(ctx, h.pool, email, analytics.ClientIP(r))
+	switch {
+	case errors.Is(err, auth.ErrRateLimited):
+		// The caller's IP is past the shared magic-link window: no mail, and
+		// unlike the invite there is no rollback to make true — nothing moved.
+		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	case errors.Is(err, auth.ErrCodeCooldown):
+		// Decision 17: a resend inside the cooldown answers 429, because a 202
+		// here would show "Sent!" while no second mail can go out — the front's
+		// "A link went out moments ago" line exists for exactly this answer.
+		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	case err != nil:
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Decision 15's mail vars, resolved by the same queries the invite uses.
+	var project, invitedBy string
+	_ = h.pool.Raw().QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
+		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
+		  WHERE t.id = $1
+		  ORDER BY p.id LIMIT 1`, tenantID).Scan(&project)
+	_ = h.pool.Raw().QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
+		inviterID).Scan(&invitedBy)
+	// The same optional-Configured check the magic-link door and the invite
+	// make: a runtime-empty relay takes the no-mailer path.
+	mail := h.mailer
+	if c, ok := mail.(interface{ Configured(context.Context) bool }); ok && !c.Configured(ctx) {
+		mail = nil
+	}
+	if mail == nil {
+		// Decision 16's deliberate exception, the same one: with no mailer the
+		// operator's log is the only inbox this code will ever reach.
+		slog.Warn("invite: no mailer; sign-in code", "email", email, "code", code)
+	} else if err := mail.SendInvite(ctx, email, code, project, invitedBy); err != nil {
+		writeAPIErr(w, http.StatusServiceUnavailable, "email_unavailable")
+		return
+	}
+	// 202 and an empty body: the row does not change (still pending), so the
+	// answer is a fact about the mail, not a row to re-read. Dev mode adds the
+	// code to the body, the same relaxation the invite makes — outside the
+	// contract, and only on paths that minted (the cooldown branch minted
+	// nothing and answered already).
+	if h.devMode {
+		writeAPIJSON(w, http.StatusAccepted, map[string]any{"dev_token": code})
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // personRowID is channelRowID for People: GET /v1/recipients hands out the

@@ -58,24 +58,58 @@ func (a *Agent) WithSignInBase(base string) *Agent { a.base = base; return a }
 // the service but is never logged, the same rule SMTP follows: a log line
 // carrying it is a second place to steal a session from.
 func (a *Agent) SendCode(ctx context.Context, to, code string) error {
-	body, err := json.Marshal(sendRequest{
+	if err := a.post(ctx, to, sendRequest{
 		Kind:     "transactional",
 		Template: "magic-link",
 		To:       to,
 		Vars:     map[string]string{"code": code, "sign_in_base": a.base},
-	})
+	}); err != nil {
+		return err
+	}
+	a.log.Info("mailer: code queued via email agent", "to", to)
+	return nil
+}
+
+// SendInvite queues one project invitation. The same code the sign-in door
+// mints rides it, so it crosses the wire but is never logged, and the code is
+// the only credential in either mail: `to` stays in the envelope, and the
+// agent builds the link from `sign_in_base` plus `code` the way renderInvite
+// expects (email/src/templates.ts).
+func (a *Agent) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
+	if err := a.post(ctx, to, sendRequest{
+		Kind:     "transactional",
+		Template: "invite",
+		To:       to,
+		Vars: map[string]string{
+			"code":         code,
+			"sign_in_base": a.base,
+			"project":      project,
+			"invited_by":   invitedBy,
+		},
+	}); err != nil {
+		return err
+	}
+	a.log.Info("mailer: invite queued via email agent", "to", to)
+	return nil
+}
+
+// post delivers one request to the agent's /send and turns the HTTP outcome
+// into an error. Both message types ride it; only the template and the vars
+// differ, and the success log names the message, so it stays with the callers.
+func (a *Agent) post(ctx context.Context, to string, req sendRequest) error {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("mailer: encode email-agent request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url+"/send", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url+"/send", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("mailer: build email-agent request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 	if a.key != "" {
-		req.Header.Set("Authorization", "Bearer "+a.key)
+		httpReq.Header.Set("Authorization", "Bearer "+a.key)
 	}
-	res, err := a.client.Do(req)
+	res, err := a.client.Do(httpReq)
 	if err != nil {
 		a.log.Warn("mailer: email-agent send failed", "to", to, "err", err)
 		return fmt.Errorf("mailer: email-agent request failed: %w", err)
@@ -88,6 +122,5 @@ func (a *Agent) SendCode(ctx context.Context, to, code string) error {
 		a.log.Warn("mailer: email-agent send failed", "to", to, "status", res.StatusCode)
 		return fmt.Errorf("mailer: email-agent %d: %s", res.StatusCode, snippet)
 	}
-	a.log.Info("mailer: code queued via email agent", "to", to)
 	return nil
 }

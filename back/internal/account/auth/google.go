@@ -162,12 +162,17 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Normalised, or the same person signing in through the two doors lands in
 	// two accounts: Google returns the address in whatever case it holds, and
 	// the person table's email column is UNIQUE and byte-exact.
-	person, err := (&MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}).
-		ensurePerson(ctx, NormalizeEmail(claims.Email))
+	email := NormalizeEmail(claims.Email)
+	door := &MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}
+	person, err := door.ensurePerson(ctx, email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Google verified the address, which is the same proof a magic-link redeem
+	// carries: pending invites activate and their e-mail channels seed here
+	// (Decision 18) — same call, same place in the flow, never the request path.
+	door.activateInvites(ctx, person.ID, email)
 	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")

@@ -78,6 +78,74 @@ func TestAgentSendCodePostsTheAgentContract(t *testing.T) {
 	}
 }
 
+func TestAgentSendInvitePostsTheAgentContract(t *testing.T) {
+	var (
+		method string
+		path   string
+		ctype  string
+		body   map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, ctype = r.Method, r.URL.Path, r.Header.Get("Content-Type")
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Errorf("body is not a JSON object: %v", err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	a, err := NewAgent(srv.URL, "sekret", nil)
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	if err := a.WithSignInBase("https://upcontrol.io").
+		SendInvite(context.Background(), "kira@example.com", "1ece76e3", "acme.io", "Ada"); err != nil {
+		t.Fatalf("SendInvite: %v", err)
+	}
+
+	if method != http.MethodPost {
+		t.Errorf("method = %q, want POST", method)
+	}
+	if path != "/send" {
+		t.Errorf("path = %q, want /send", path)
+	}
+	if ctype != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ctype)
+	}
+	// The exact body the agent's /send validates and renders invite from:
+	// `to` rides the envelope, the template owns the link, so no address is
+	// rendered into the vars twice.
+	if body["kind"] != "transactional" {
+		t.Errorf("kind = %v, want transactional", body["kind"])
+	}
+	if body["template"] != "invite" {
+		t.Errorf("template = %v, want invite", body["template"])
+	}
+	if body["to"] != "kira@example.com" {
+		t.Errorf("to = %v, want kira@example.com", body["to"])
+	}
+	vars, ok := body["vars"].(map[string]any)
+	if !ok {
+		t.Fatalf("vars = %v, want an object", body["vars"])
+	}
+	if vars["code"] != "1ece76e3" {
+		t.Errorf("vars.code = %v, want 1ece76e3", vars["code"])
+	}
+	if vars["sign_in_base"] != "https://upcontrol.io" {
+		t.Errorf("vars.sign_in_base = %v, want https://upcontrol.io", vars["sign_in_base"])
+	}
+	if vars["project"] != "acme.io" {
+		t.Errorf("vars.project = %v, want acme.io", vars["project"])
+	}
+	if vars["invited_by"] != "Ada" {
+		t.Errorf("vars.invited_by = %v, want Ada", vars["invited_by"])
+	}
+}
+
 func TestAgentBearerHeaderFollowsTheKey(t *testing.T) {
 	cases := []struct {
 		name string

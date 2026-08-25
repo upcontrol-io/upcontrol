@@ -1783,6 +1783,48 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/recipients/{id}/resend:
+    post:
+      tags: [alerts]
+      summary: >-
+        Mail the invitation again (Decision 17). Only a pending membership is
+        a target; nothing is inserted, so a failed send leaves the state it
+        found.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: >-
+            Accepted, empty body — the mail left.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: >-
+            no_such_person — the id is not a pending member of this tenant.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
+        "429":
+          description: >-
+            rate_limited — a live code is still inside the address's cooldown
+            window, or the caller's IP is past the shared magic-link window.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
+        "503":
+          description: email_unavailable — the invitation mail did not leave.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
+
   /v1/incidents:
     get:
       tags: [incidents]
