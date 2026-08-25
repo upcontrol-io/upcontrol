@@ -44,7 +44,7 @@ test("the public page renders the banner, the bars and the footer", async ({ pag
 	await expect(page.getByRole("heading", { name: "All systems operational" })).toBeVisible();
 	await expect(page.getByText(`${DOMAIN} status`)).toBeVisible();
 	await expect(page.getByText("No incidents recorded.", { exact: false })).toBeVisible();
-	// Default on: the footer links back (Decision 25c).
+	// Default on: the footer links back.
 	await expect(page.getByText("Powered by")).toBeVisible();
 });
 

@@ -90,9 +90,8 @@
   align-items: center;
 }
 
-/* With the publish column the row gains a leading cell. Declared on the parent
-   so head and body cannot drift apart: they are two grids that have to line up,
-   and the only thing keeping them in step is that both read this one number. */
+/* Declared on the parent so head and body cannot drift apart: two grids
+   kept in step only by both reading this one number. */
 .tablePublish .tableHead,
 .tablePublish .tableRow {
   grid-template-columns: 44px 90px minmax(0, 1fr) 70px 70px 32px;
@@ -115,10 +114,8 @@
   padding: 0;
 }
 
-/* The 32px box is a table-grid column width, not a control choice, so it
-   cannot grow on a narrow screen without breaking the row's alignment with
-   the head — `uc-tap-inline` on the button (MonitorList.tsx) opts it out of
-   global.css's box-growing floor and into its hit-area-only overlay instead. */
+/* The 32px box is a column width, not a control choice: uc-tap-inline opts
+   the button out of the box-growing floor into its hit-area-only overlay. */
 
 /* Same 16px box as every other checkbox in /app (see StatusPageConfig's own),
    because this row is the status page's component list now. */
@@ -294,10 +291,8 @@
   color: var(--text-muted);
 }
 
-/* Four columns need 230px of fixed rails; on a phone that leaves ~50px for the
-   URL. Stack instead: identity on top, "type · status · interval" underneath —
-   and drop the column headings, which no longer describe the layout.
-   Placed after the base rules so it wins on equal specificity. */
+/* Phone: stack identity over "type · status · interval" and drop the headings;
+   placed after the base rules so it wins on equal specificity. */
 @media (max-width: 560px) {
   .tableHead {
     display: none;
@@ -358,50 +353,6 @@
   color: var(--text-muted);
 }
 
-.typeGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--space-3);
-}
-
-.typeCard {
-  text-align: left;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: transparent;
-  padding: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  transition: background-color var(--duration-hover) var(--ease);
-}
-
-.typeCard:hover {
-  background: var(--bg-hover);
-}
-
-.typeCardActive {
-  border-color: var(--text-primary);
-}
-
-.typeCardHead {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.typeCardName {
-  font-size: var(--text-caption);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.typeCardDesc {
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  color: var(--text-muted);
-}
-
 .detail {
   display: flex;
   flex-direction: column;
@@ -422,9 +373,8 @@
   color: var(--text-muted);
 }
 
-/* Under the interval picker: where the plan's floor is, in words. The buttons
-   past it are not greyed out — they open the upgrade modal — so this line is
-   what tells the reader before they press. */
+/* Where the plan's floor is, in words: the buttons past it are not greyed
+   out, they open the upgrade modal. */
 .fieldHint {
   font-size: var(--text-xs);
   color: var(--text-faint);
@@ -447,12 +397,6 @@
   .fieldInput {
     height: var(--tap-min);
   }
-}
-
-.heartbeatNote {
-  font-size: var(--text-sm);
-  line-height: 1.55;
-  color: var(--text-body);
 }
 
 .intervalPicker {
@@ -483,9 +427,8 @@
     color var(--duration-hover) var(--ease);
 }
 
-/* Height only, same reasoning as global.css's own note on this exact kind of
-   segmented pill: widening it would break the group's shape, so only the row
-   grows. Local because this page is never wrapped in `.uc-app`. */
+/* Height only: widening would break the group's shape. Local because this
+   page is never wrapped in .uc-app. */
 @media (max-width: 700px) {
   .intervalButton {
     min-height: var(--tap-min);

@@ -16,7 +16,7 @@ const DOT: Record<string, string> = {
 	nodata: 'var(--nodata)',
 };
 
-// The integration guides live on the hosted docs (Decision 25d): this app
+// The integration guides live on the hosted docs: this app
 // ships no docs site of its own.
 function hookDocs(kind: string): string {
 	return kind === 'deployhooks'
@@ -24,17 +24,8 @@ function hookDocs(kind: string): string {
 		: `https://upcontrol.io/docs/integrations/${kind}`;
 }
 
-/**
- * Where the signals come from. The installer card and the project-key
- * section live on Settings — this screen is the connections and their hook
- * URLs.
- *
- * Hook laws (do not soften): looking creates nothing — opening a panel
- * fetches the URL onto a hidden draft row; COPYING is what creates the card,
- * and the first event arriving is what turns the dot green. The URL is the
- * credential: no HMAC, no self-test button — the receipt under the URL is
- * our half of the loop.
- */
+/** Where the signals come from: the connections and their hook URLs. Hook law
+ *  (do not soften): looking creates nothing, copying creates the card. */
 export function Sources() {
 	const {
 		data: liveSourcesData,
@@ -56,9 +47,8 @@ export function Sources() {
 	/** The card asking "remove this?" — one at a time, never a native confirm. */
 	const [disconnecting, setDisconnecting] = useState<string | null>(null);
 	const [hookFor, setHookFor] = useState<string | null>(null);
-	// A draft's token arrives through the connect response; a promoted
-	// connection carries it on its listed row. The screen never invents an
-	// address.
+	// A draft's token arrives through the connect response; the screen never
+	// invents an address.
 	const [freshTokens, setFreshTokens] = useState<Record<string, string>>({});
 
 	async function refetchSources() {
@@ -79,9 +69,8 @@ export function Sources() {
 			});
 	}
 
-	// Looking creates nothing: opening the panel fetches the connection's URL
-	// onto a hidden draft row. Copying re-calls this with `activate`, which is
-	// what promotes the draft into the visible "waiting…" connection.
+	// Looking creates nothing; copying re-calls this with `activate`, which
+	// promotes the hidden draft into the visible connection.
 	function ensureHook(kind: string, activate = false) {
 		setSourceError(null);
 		void sourcesWrite
@@ -101,9 +90,8 @@ export function Sources() {
 	function disconnectSource(id: string) {
 		setDisconnecting(null);
 		setSourceError(null);
-		// Removing the connection kills its token, so the open instruction panel
-		// (if it is this source's) folds away instead of standing there with its
-		// URL just deleted out from under it.
+		// Removing the connection kills its token, so its instruction panel (if
+		// open) folds away with it..
 		const kind = sources.find((source) => source.id === id)?.kind;
 		if (kind) {
 			setHookFor((open) => (open === kind ? null : open));
@@ -127,9 +115,7 @@ export function Sources() {
 	const hookToken = hookSource?.hookToken ?? (hookFor ? freshTokens[hookFor] : undefined);
 	const hookAddress = hookToken ? `${window.location.origin}/hooks/${hookToken}` : null;
 
-	// One header, declared once and rendered by all three branches — the whole
-	// point of the shared component is that a screen does not restate its own
-	// title three times.
+	// One header, declared once and rendered by all three branches..
 	const header = (
 		<PageHeader
 			title="Sources"
@@ -146,9 +132,8 @@ export function Sources() {
 		);
 	}
 
-	// Settled with nothing. An empty grid here reads as "nothing is connected",
-	// which is the sentence that sends someone to re-run an installer they
-	// have already run.
+	// Settled with nothing: an empty grid reads as "nothing is connected" and
+	// sends someone to re-run an installer they already ran..
 	if (sourcesFailed) {
 		return (
 			<div className={styles.wrap}>
@@ -165,9 +150,8 @@ export function Sources() {
 			<div className={styles.grid}>
 				{sources.map((source) => {
 					const isPaused = paused[source.id] ?? source.paused;
-					// The two derived sources are facts about what has arrived — there
-					// is no connection to pause, and a button that answered 400 would
-					// be a control that does nothing.
+					// The derived sources have no connection to pause; a button that
+					// answered 400 would be a control that does nothing..
 					const derived = source.id === 'src_checks' || source.id === 'src_logs';
 					const now = sourceNow({ ...source, paused: isPaused }, incidentOpen);
 					return (
@@ -225,9 +209,8 @@ export function Sources() {
 								<span className={styles.connectTime}>{source.setupTime}</span>
 							</Link>
 						) : (
-							// The tile opens the panel and fetches its URL; no card appears
-							// from looking — the first event on the hook is what creates
-							// the visible connection (the server hides the draft row).
+							// The tile fetches its URL; the first event on the hook creates
+							// the visible connection, not the looking.
 							<button
 								key={source.key}
 								type="button"
@@ -250,9 +233,8 @@ export function Sources() {
 				{hookFor && (
 					<div className={styles.hookPanel}>
 						<div className={styles.hookHead}>
-							{/* Dot + word, never color alone. "Live" is the honest word:
-							    the URL works from the moment it is on screen, while the
-							    connection card appears once something arrives. */}
+							{/* Dot + word, never color alone: "Live" is honest, the URL works
+							    the moment it is on screen. */}
 							<StatusDot status="ok" label="Live" className={styles.hookStatus} />
 							<Tooltip content="How to add it" interactiveChild className={styles.hookInfoSlot}>
 								<a
@@ -284,8 +266,7 @@ export function Sources() {
 								}}
 							/>
 						)}
-						{/* The receipt: what the last event was, or that none arrived yet.
-						    The provider's own "send test webhook" button is the tester —
+						{/* The receipt: what the last event was, or that none arrived yet;
 						    we never POST to ourselves. */}
 						{hookAddress && (
 							<span className={styles.hookReceipt}>

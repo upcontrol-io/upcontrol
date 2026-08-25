@@ -1,18 +1,7 @@
 import { useEffect, useRef } from 'react';
 
-/**
- * Reveal on approach — direct port of the arm() mechanism from
- * docs/design_handoff_upcontrol/screens/06-landing.dc.html (also used by 07-pricing).
- *
- * Elements opt in with `data-reveal` (fade + rise) or `data-grow` (scaleY from 0),
- * staggered via `data-reveal-delay` (ms). Hidden state is applied by JS, so without
- * JS everything is simply visible; reduced-motion skips the whole mechanism.
- *
- * Call the hook once per page; re-arms after every render so elements that mount
- * later (e.g. a section appearing after a state change) are picked up too.
- * Armed-state lives in a WeakSet tied to the observer instance (not a DOM attribute),
- * so a StrictMode remount re-arms cleanly instead of leaving elements hidden forever.
- */
+/** Hidden state is applied by JS, so without JS everything stays visible; the
+ *  armed WeakSet (not a DOM attribute) lets a StrictMode remount re-arm. */
 export function useRevealOnScroll(): void {
   const ioRef = useRef<IntersectionObserver | null>(null);
   const armedRef = useRef<WeakSet<Element> | null>(null);

@@ -10,10 +10,8 @@ import styles from './PublicStatus.module.css';
 
 type BarStatus = 'ok' | 'check' | 'down' | 'nodata';
 
-// The overall banner, derived from what the response already carries: an
-// ongoing incident in the history, and/or a component whose CURRENT bucket is
-// not ok. Both signals are kept because they cover each other's blind spots.
-// This banner may never say "operational" during the owner's own downtime.
+// The overall banner, from an ongoing incident and/or a component whose
+// current bucket is not ok; it may never say "operational" during downtime.
 type BannerState = 'ok' | 'check' | 'down';
 
 const BANNER_COPY: Record<BannerState, string> = {
@@ -48,13 +46,8 @@ function buildBars(statuses: HealthStatus[], spanSec: number): { status: BarStat
 	}));
 }
 
-/**
- * What a project's own visitors see. Two deliberate properties: there is NO
- * sample-data fallback (an unreachable backend is said out loud and nothing
- * is invented), and the "Powered by UpControl" footer reads `showPoweredBy`
- * (default true; the config screen owns the switch, and AGPL means it is
- * honestly removable).
- */
+/** What a project's visitors see. No sample-data fallback (an unreachable
+ *  backend is said out loud), and the footer switch is honest and removable. */
 export function PublicStatus() {
 	const { project: projectSlug } = useParams();
 	const {
@@ -91,9 +84,8 @@ export function PublicStatus() {
 			<div className={styles.page}>
 				<StatusHeader host={projectSlug ?? 'status'} />
 				<main className={styles.main}>
-					{/* Settled-offline is its own fact: this page is the one place a
-					    refusal and an outage must look different, and a self-host has
-					    no sample page to stand in — saying so is the honest render. */}
+					{/* Settled-offline is its own fact: a refusal and an outage must
+					    look different here, and there is no sample page to stand in. */}
 					{failed && (
 						<Callout tone="note" title="Backend not reachable">
 							This status page is temporarily unreachable. What should be here cannot be shown right now.
@@ -139,9 +131,8 @@ export function PublicStatus() {
 			<StatusHeader host={host} />
 
 			<main className={styles.main}>
-				{/* Fires when a live answer is on screen and a later background
-				    refetch failed — the rows stay as the last live answer, and the
-				    next successful poll clears the banner on its own. */}
+				{/* Fires when a live answer is on screen and a later refetch failed;
+				    the next successful poll clears it on its own. */}
 				{degraded && (
 					<Callout tone="note" title="Connection lost">
 						What you see below is the last known state, not a live page.
@@ -218,9 +209,8 @@ export function PublicStatus() {
 					</div>
 				</section>
 
-				{/* Owner metrics. Absent when the owner switched the section off,
-				    and absent when nothing has been measured yet — an empty grid
-				    under a heading would say the request costs nothing. */}
+				{/* Owner metrics: absent when switched off or nothing measured yet
+				    (an empty grid would say the request costs nothing). */}
 				{network.length > 0 && (
 					<section className={styles.network} data-reveal="">
 						<div className={styles.sectionHead}>
@@ -248,9 +238,8 @@ export function PublicStatus() {
 					</section>
 				)}
 
-				{/* Switched off means gone, not "empty": rendering the heading with
-				    "No incidents recorded" under it publishes exactly the claim the
-				    owner declined to make. */}
+				{/* Switched off means gone: "No incidents recorded" under a heading
+				    publishes the claim the owner declined to make. */}
 				{page.showIncidents !== false && (
 					<section id="history" className={styles.history} data-reveal="">
 						<h2 className={styles.sectionTitle}>Incident history</h2>
@@ -286,9 +275,8 @@ export function PublicStatus() {
 
 				{poweredBy && (
 					<footer className={styles.footer}>
-						{/* Default on, honestly removable (public-first-split, Decision
-						    25c): the switch lives on the config screen, and AGPL means
-						    the line is the default, never a lock. */}
+						{/* Default on, honestly removable: AGPL means the line is a
+						    default, never a lock; the switch is on the config screen. */}
 						<span className={styles.poweredBy}>Powered by</span>
 						<a href="https://upcontrol.io" className={styles.poweredByName} target="_blank" rel="noreferrer">
 							UpControl

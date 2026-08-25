@@ -28,59 +28,31 @@ import { LogMessage } from "./LogMessage";
 import { LogTimeline, type LogRange } from "./LogTimeline";
 import styles from "./LiveLogsPanel.module.css";
 
-/**
- * The live half of the logs surface: the account's own ring window, straight
- * from `/v1/logs`.
- *
- * Deliberately smaller than `LogsPanel`, which it replaces on a live account.
- * That panel is built on the mock's shape — three named containers, per-container
- * small multiples, nodata ranges, six time windows — and none of those exist in
- * the backend yet: `/v1/logs` returns a flat list of the last lines inside the
- * cutoff, plus per-minute volume. Rendering the mock's tiles over live lines
- * would be inventing figures, and rendering the mock's *lines* on a live account
- * (which is what happened before this component) is worse: a fabricated stream
- * that reads exactly like the customer's own. So this shows what the window
- * actually holds and nothing more; the two converge when the backend serves
- * per-service aggregates.
- *
- * What the *server* holds is still a line count and not a time range
- * (backend-from-new-plan.md §0.3) — one request brings back the whole ring. The
- * range picked on the timeline is therefore a lens over what already arrived,
- * applied here, and never a second question put to the API. That distinction is
- * why narrowing the range cannot fail, cannot spend a read, and cannot empty the
- * strip: the bars keep describing the ring while the stream describes the slice.
- */
-// The stream's three buckets. `info` is the server's name for "neither an
-// error nor a warning" — debug rides in it — so the three always partition
-// the window and any combination is a real question.
+/** The live half of the logs surface: the ring window straight from
+ *  /v1/logs, and nothing the backend does not serve. */
+
+// The timeline range is a lens over what already arrived, never a second API
+// question.
 const LEVEL_OPTIONS = [
 	{ value: "error", label: "Errors" },
 	{ value: "warn", label: "Warnings" },
 	{ value: "info", label: "Info & debug" },
 ];
 
-/**
- * The server's three input caps, mirrored from `back/internal/ai/scenario.go`
- * (`ExplainLogs`). Three, not one: a JSON log line runs to hundreds of bytes,
- * so an ordinary selection reaches the byte caps long before it reaches a
- * hundred lines. Mirroring only the line count offered a read the server was
- * certain to refuse, and the refusal read as a failure rather than as a limit.
- */
+/** The server's three input caps, mirrored from scenario.go (ExplainLogs):
+ *  a JSON line runs to hundreds of bytes, so bytes bind before line count. */
 const EXPLAIN_MAX_LINES = 100;
 const EXPLAIN_MAX_LINE_BYTES = 2000;
 const EXPLAIN_MAX_TOTAL_BYTES = 32768;
 
 /** The bytes the server counts: UTF-8, not UTF-16 code units. */
-/** Roughly this many columns is what a strip has room for, so asking for a
- *  width near the span divided by it keeps the request close to what will be
- *  drawn. The server snaps whatever arrives to a width it can answer, so this
- *  is an opening bid rather than a demand. */
+
+/** Roughly how many columns a strip has room for; the server snaps the ask
+ *  to a width it can answer, so this is an opening bid. */
 const DETAIL_COLUMNS = 120;
 
-/** How fine a histogram to ask for over the range the reader picked, or 0 for
- *  none. Nothing is asked for above an hour: below a minute is the only place
- *  the per-minute strip has run out of answers, and a wider range would just be
- *  the same minutes rebuilt at cost. */
+/** How fine a histogram to ask for over the picked range, or 0 for none;
+ *  below a minute is the only place the per-minute strip has no answer. */
 function detailWidthFor(range: { from: number; to: number } | null): number {
 	if (!range) return 0;
 	const seconds = (range.to - range.from) / 1000;
@@ -90,21 +62,13 @@ function detailWidthFor(range: { from: number; to: number } | null): number {
 
 const wireBytes = (text: string) => new TextEncoder().encode(text).length;
 
-/**
- * The exact string sent for one line, and the string the caps are counted on.
- * The raw server ts (ISO, identical for every reader — NOT a locale-rendered
- * clock) and the service ride along: without them the model cannot correlate
- * a burst by time or tell services apart, which is the whole point of
- * Explain. Cache identity stays intact — same selection, same bytes.
- */
+/** The exact string sent per line, and what the caps count: raw server ts
+ *  (ISO, not locale-rendered) and service, so the cache identity holds. */
 const wireLine = (line: { ts: string; service?: string; level: string; message: string }) =>
 	`${line.ts} ${line.service ?? "app"} ${line.level} ${line.message}`;
 
-/**
- * The cap this selection breaks, phrased for the chip beside the count, or
- * null when the read is inside all three. Pure: the same arithmetic the
- * handler runs, on the same bytes, before any money is spent.
- */
+/** The cap this selection breaks, or null when inside all three; the same
+ *  arithmetic the handler runs, before any money is spent. */
 function selectionOverCap(lines: readonly string[]): string | null {
 	if (lines.length > EXPLAIN_MAX_LINES) return `max ${EXPLAIN_MAX_LINES} lines`;
 	let total = 0;
@@ -117,16 +81,8 @@ function selectionOverCap(lines: readonly string[]): string | null {
 	return null;
 }
 
-/**
- * The visible errors narrowed to what the server will actually read, for the
- * no-selection button. A selection past the caps is refused (the reader chose
- * those lines); the timeline's errors cannot be refused, only trimmed —
- * keeping the newest lines, which is what "the latest errors" means to the
- * reader holding the button. A single line past the per-line cap is skipped,
- * not fatal: one oversized line must not make the rest unreadable. The input
- * is the server's newest-first order; the result is the oldest-first order
- * the wire sends.
- */
+/** The visible errors trimmed to what the server will read: newest lines
+ *  kept, an oversized line skipped rather than fatal, output oldest-first. */
 function errorsUnderCaps(newestFirst: readonly string[]): string[] {
 	const kept: string[] = [];
 	let total = 0;
@@ -142,10 +98,8 @@ function errorsUnderCaps(newestFirst: readonly string[]): string[] {
 }
 
 export function LiveLogsPanel() {
-	// Both filters are the server's (`?service=`, `?level=`), so they apply
-	// before the stream limit: filtering the capped lines already on the client
-	// would show a fraction of what the window holds and call it the window.
-	// An empty set is "everything" — the pickers have no way to select nothing.
+	// Both filters are the server's, so they apply before the stream limit;
+	// an empty set means everything (the pickers cannot select nothing).
 	const [pickedServices, setPickedServices] = useState<ReadonlySet<string>>(
 		new Set(),
 	);
@@ -161,42 +115,25 @@ export function LiveLogsPanel() {
 	// The no-selection Explain button's own read (see its useApiData below);
 	// defined beside cacheKey because the range-change effect invalidates both.
 	const errorsKey = `errors:${[...pickedServices].sort().join(",")}`;
-	// The timeline's committed range, `null` for the whole window. It arrives on
-	// pointer-up rather than per frame, so a drag across the strip re-renders the
-	// chart and not this panel's several hundred rows.
+	// The committed range arrives on pointer-up, not per frame, so a drag
+	// re-renders the chart and not this panel's several hundred rows.
 	const [range, setRange] = useState<LogRange | null>(null);
 	const { data, loading, failed } = useApiData(cacheKey, () =>
 		logsApi([...pickedServices], [...pickedLevels], range, detailWidthFor(range)),
 	);
-	// The last settled answer, held across cache-key changes. Picking a service
-	// asks a different question (a different key), and until it answers `data`
-	// is undefined — rendering the skeleton there collapsed the whole panel for
-	// every filter click and took the open picker menu down with it. The
-	// narrowing swaps in when it arrives; the previous answer holds the layout
-	// until then, exactly what the hook itself does for a same-key refetch.
+	// The last settled answer, held across cache-key changes: until a new key
+	// answers, data is undefined and the previous answer holds the layout.
 	const lastAnswerRef = useRef<typeof data>(undefined);
 	if (data !== undefined) lastAnswerRef.current = data;
 	const answer = data ?? lastAnswerRef.current;
 	const lines = answer?.lines ?? [];
 
-	// A range picked over one set of bars means nothing over another: narrowing to
-	// a service re-reads a different window, and carrying the old bounds across
-	// would silently hide lines the reader just asked to see.
+	// A range picked over one set of bars means nothing over another: carrying
+	// old bounds across a narrowing would hide lines the reader asked to see..
 	useEffect(() => setRange(null), [cacheKey]);
 
-	/**
-	 * A ranged read is a real request, and the range is deliberately NOT part of
-	 * the cache key.
-	 *
-	 * Keying by it would cost twice. A key that has not settled reads as
-	 * `loading`, so every pan would blank the whole panel — including the strip
-	 * the pan was performed on. And the module cache in `useApiData` has a TTL but
-	 * no eviction, so one entry per range the reader ever visited, a thousand
-	 * lines in each, would pile up for the life of the tab.
-	 *
-	 * Re-reading the SAME key keeps the current lines on screen until the answer
-	 * lands, which is exactly what the hook already does after a write.
-	 */
+	// A ranged read is real, but the range is NOT part of the cache key: keying
+	// by it would blank the panel per pan and pile up unevicted entries.
 	const [awaiting, setAwaiting] = useState(false);
 	const lastRead = useRef<string | null>(null);
 	const readSig = `${cacheKey}|${range ? `${range.from}:${range.to}` : "all"}`;
@@ -215,16 +152,8 @@ export function LiveLogsPanel() {
 	// not "a request is in flight"), so the answer's arrival is the only signal.
 	useEffect(() => setAwaiting(false), [data]);
 
-	// The server bounds the read now, so this filter is a no-op on a settled
-	// answer. It earns its place in the gap: between the pan and its answer the
-	// previous, wider response is still on screen, and showing lines from outside
-	// the range the reader just drew is the panel contradicting its own header.
-	//
-	// Reversed at the end: the wire is newest-first (the cap means "the latest
-	// N"), but the pane reads like a terminal — time runs downward and the
-	// newest line is the last one, where tailing a log has always put it. The
-	// DOM order matches the visual order on purpose, so a screen reader walks
-	// the same chronology the eye does.
+	// In the gap between a pan and its answer this hides lines outside the
+	// drawn range; the reversal keeps the pane terminal-ordered (newest last).
 	const visible = useMemo(() => {
 		const inRange = range
 			? lines.filter((line) => {
@@ -236,13 +165,8 @@ export function LiveLogsPanel() {
 	}, [lines, range]);
 	const showWholeWindow = useCallback(() => setRange(null), []);
 
-	// The stream opens at its tail — the newest line — and stays pinned there
-	// across re-reads, the way a terminal follows its own output. Pinned is a
-	// fact about where the reader is, not a mode: scrolling up to read history
-	// releases the pin (a refresh must not yank the page out from under a
-	// reader mid-line), and returning to the bottom re-arms it. A ref, not
-	// state: scroll position changes on every frame of a swipe and none of
-	// those frames is a reason to re-render the panel.
+	// The stream opens at its tail and stays pinned across re-reads; scrolling
+	// up releases the pin, returning to the bottom re-arms it. A ref, not state.
 	const streamRef = useRef<HTMLPreElement>(null);
 	const pinnedRef = useRef(true);
 
@@ -260,20 +184,13 @@ export function LiveLogsPanel() {
 		el.scrollTop = el.scrollHeight;
 	}, [visible]);
 
-	// The overview ruler: where the window's warnings and errors sit, as marks
-	// beside the scrollbar (owner decision, Aug 18, 2026). Positions are
-	// MEASURED from the laid-out rows, not derived from indices — messages
-	// wrap, so row heights are unequal and an index-proportional mark drifts
-	// exactly on the long lines that matter. Info lines get no mark, and a
-	// window that fits without scrolling gets no ruler: it would restate what
-	// is already fully on screen.
+	// The overview ruler: positions are MEASURED from laid-out rows (messages
+	// wrap, heights differ); a window that fits gets no ruler.
 	const [rulerMarks, setRulerMarks] = useState<
 		{ top: number; height: number; level: string }[]
 	>([]);
-	// The native scrollbar's gutter width. A DOM overlay paints OVER the native
-	// scrollbar and no z-index reaches it, so the ruler gets its own lane just
-	// inside the gutter instead of covering the thumb. Zero on overlay
-	// scrollbars (macOS), where hugging the edge is the right place anyway.
+	// The native gutter width: no z-index reaches the native thumb, so the
+	// ruler takes its own lane just inside it (zero on overlay scrollbars).
 	const [rulerGutter, setRulerGutter] = useState(0);
 	const measureRuler = useCallback(() => {
 		const el = streamRef.current;
@@ -304,20 +221,11 @@ export function LiveLogsPanel() {
 		observer.observe(el);
 		return () => observer.disconnect();
 	}, [measureRuler, streamMounted]);
-	// Lines the read's own bounds hold before the stream limit. The contract has
-	// carried this field for exactly the sentence below and the panel never
-	// printed it.
+	// Lines the read's own bounds hold before the stream limit..
 	const total = answer?.total ?? 0;
 
-	/**
-	 * The head's count, and it always leads with the number of rows actually on
-	 * screen. "last 200 lines in your window" was a fixed string dressed as a
-	 * measurement: 200 was the server's stream cap, so it said the same thing for
-	 * a window holding two hundred lines and one holding twenty thousand.
-	 *
-	 * `total` is counted over the same bounds and filters the lines were read
-	 * with, so the two numbers always describe one question.
-	 */
+	// The head's count leads with the rows actually on screen; `total` counts
+	// the same bounds and filters, so the two numbers describe one question.
 	function headCount(): string {
 		if (range) {
 			if (visible.length === 0) return "nothing in this range";
@@ -334,10 +242,8 @@ export function LiveLogsPanel() {
 			: `showing ${countOfLines(lines.length)} ${scope}`;
 	}
 
-	// The picker outlives the read it came from. Picking a service starts a new
-	// request, and until it answers `data` is undefined — so a picker built
-	// straight off the response would vanish at the exact moment it was used, and
-	// take the way back to the rest of the window with it.
+	// The picker outlives the read it came from: until a new key answers, data
+	// is undefined and a response-built picker would vanish while in use..
 	const [services, setServices] = useState<
 		{ name: string; lines: number }[]
 	>([]);
@@ -350,11 +256,8 @@ export function LiveLogsPanel() {
 	const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 	const [explaining, setExplaining] = useState(false);
 	const [explanation, setExplanation] = useState<ExplainResult | null>(null);
-	// Kept, not just counted (the old LogsPanel's invariant): the context copy
-	// pastes the answer beside the lines it was READ from, so the wire bytes
-	// are snapshotted at explain time. `wire` below is a live memo — unticking
-	// a row after the read would shrink it, and the paste would compose an
-	// answer with evidence it never saw.
+	// Kept, not just counted: the context copy pastes the answer beside the
+	// lines it was READ from, so the wire bytes are snapshotted at read time..
 	const [explainedLines, setExplainedLines] = useState<readonly string[]>([]);
 	const [explainError, setExplainError] = useState<string | null>(null);
 	// The answer renders under the button that asked for it, which on a phone is
@@ -376,39 +279,21 @@ export function LiveLogsPanel() {
 		[visible, selected],
 	);
 	// The wire line carries the server's own ts and service (canonical bytes,
-	// the same for every reader) in the oldest-first order
-	// `picked` already holds: these bytes are the cache identity server-side,
-	// so a locale-rendered timestamp must not ride along (it would bust the
-	// cache for every reader whose formatTime differs). Built once, because
-	// the caps below have to be counted on exactly what is sent.
+	// the cache identity server-side), oldest-first; built once, counted once..
 	const wire = useMemo(() => picked.map(wireLine), [picked]);
-	// Past any of the server's caps the read is a guaranteed 400 — the button
-	// says so instead of sending money on a refusal. The count stays honest
-	// beside it.
+	// Past any cap the read is a guaranteed 400: the button says so instead of
+	// sending money on a refusal..
 	const overCap = selectionOverCap(wire);
 
-	// The errors behind the no-selection button: its own question, so its own
-	// cache entry. The rule is "what the timeline shows" (owner decision,
-	// Aug 18, 2026 — this replaced a last-hour rule, whose intersection with a
-	// committed range on a PAST period was empty, so the button vanished
-	// exactly where a reader zoomed into trouble): the committed range when
-	// one is drawn, the server's own window when not, level=error either way.
-	// The service filter is part of the key (one service's errors are a
-	// different question); like the main read, the range is NOT part of the
-	// key (one cache entry per drawn range would pile up for the life of the
-	// tab) — the readSig effect below invalidates this key instead, and
-	// useApiData refetches through the latest fetcher closure, which carries
-	// the current range. The server narrows `lines` to the range — the panel
-	// does not re-check timestamps on the answer.
+	// The errors behind the no-selection button, keyed by service filter only:
+	// the committed range when drawn, else the server's window.
 	const {
 		data: errorsData,
 		loading: errorsLoading,
 		failed: errorsFailed,
 	} = useApiData(errorsKey, () => logsApi([...pickedServices], ["error"], range));
-	// The count in the button is what will be sent (the caps trim from the
-	// newest end), never the server's total. While the read is pending or has
-	// failed the button is simply not there: a secondary affordance earns no
-	// skeleton and no error state of its own.
+	// The count is what will be sent (caps trim from the newest end); pending
+	// or failed, the button is simply not there..
 	const errorsWire = useMemo(() => {
 		if (errorsLoading || errorsFailed || !errorsData) return [];
 		return errorsUnderCaps(errorsData.lines.map(wireLine));
@@ -423,24 +308,16 @@ export function LiveLogsPanel() {
 		void explainLogs(linesToSend)
 			.then((res) => {
 				setExplanation(res);
-				// The read is metered (audit §11): the sidebar's quota is the plan's
-				// own count, so it only moves when the plan is re-read. Without this
-				// the first Explain left "2/5" standing until a reload — the server
-				// had already counted the use.
+				// The read is metered: without re-reading the plan the sidebar's quota
+				// count stays stale until a reload, though the server counted the use..
 				invalidateApiData("plan");
 			})
 			.catch((err: unknown) => {
-				// F12-first: the panel surfaces the server's message, but the
-				// console must carry the full failure too — err.message alone
-				// hides the HTTP status and any attached response body.
+				// F12-first: err.message alone hides the HTTP status and any
+				// attached response body, so the console carries the full failure..
 				console.error("explain failed", err);
-				// No upgrade wall in this app (Decision 8): a refusal, were one
-				// ever to fire, reads like any other — in the server's words.
-				// The server writes its refusals for this panel (the
-				// throttle's "Too many Explain requests", a 400's caps) and
-				// fetchJSON carries them in err.message; show them. Its two
-				// machine-generated shapes — the "HTTP n" no-body fallback and
-				// the browser's transport text — keep the designed line.
+				// No upgrade wall here: show the server's own refusal words from
+				// err.message; the machine-generated shapes keep the designed line..
 				const message = err instanceof Error ? err.message : "";
 				const fromServer = message !== "" && !message.startsWith("HTTP ");
 				setExplainError(
@@ -450,16 +327,12 @@ export function LiveLogsPanel() {
 			.finally(() => setExplaining(false));
 	}
 
-	// One head for all three states, because the pickers belong to the panel and
-	// not to any one answer: a reader who narrows to a combination that is
-	// loading, or whose read then fails, must still be able to get back.
+	// One head for all three states: the pickers belong to the panel, so a
+	// loading or failed narrow still leaves the reader a way back..
 	const head = (extra?: ReactNode) => (
 		<div className={styles.head}>
-			{/* No heading of its own. This panel used to restate "Logs" as an <h2>
-			    because the page around it had no <h1> at all; now that the page
-			    carries one, a second heading with the same word is a duplicate for
-			    the eye and for a screen reader alike. The <section aria-label="Logs">
-			    below still names the region. */}
+			{/* No heading of its own: the page carries the <h1>, and a second
+			    heading with the same word is a duplicate for eye and reader. */}
 			{extra}
 			<div className={styles.filter}>
 				{/* Nothing to pick between is not a picker (a control that cannot
@@ -470,9 +343,8 @@ export function LiveLogsPanel() {
 						allLabel="All services"
 						className={styles.filterControl}
 						options={services.map((entry) => ({
-							// A line that carried no label is a real row in the stream,
-							// where it prints as "—"; it has to be pickable too. Its
-							// value is the empty string, a real name on the wire.
+							// An unlabelled line is a real row (prints as "—"); its value
+							// is the empty string, a real name on the wire.
 							value: entry.name,
 							label: entry.name || "unlabelled",
 							note: String(entry.lines),
@@ -481,9 +353,8 @@ export function LiveLogsPanel() {
 						onChange={setPickedServices}
 					/>
 				)}
-				{/* The level picker can always act once anything has arrived: even
-				    a window with no errors answers "errors only" honestly, with the
-				    filtered-empty state and its way back. */}
+				{/* The level picker can always act once anything has arrived: even a
+				    window with no errors answers "errors only" honestly. */}
 				{services.length > 0 && (
 					<MultiSelect
 						label="Levels"
@@ -498,9 +369,8 @@ export function LiveLogsPanel() {
 		</div>
 	);
 
-	// Three states, and they look different: a failed read is a load error (never
-	// "No log lines yet" — that says the app sent nothing, when really nobody
-	// asked), a pending read is a skeleton, and live-and-empty is the real state.
+	// Three states, all different: failed reads a load error (never "No log
+	// lines yet", which says the app sent nothing), pending a skeleton..
 	if (failed) {
 		return (
 			<section className={styles.panel} aria-label="Logs">
@@ -513,10 +383,8 @@ export function LiveLogsPanel() {
 			</section>
 		);
 	}
-	// The skeleton is for the panel's FIRST answer only. A narrowed question is
-	// also "loading" under its own key, but the previous answer is still in
-	// hand — swapping it for a skeleton collapses the panel's height on every
-	// filter click and unmounts the picker menu the reader is holding open.
+	// The skeleton is for the FIRST answer only: a narrowed question still has
+	// the previous answer in hand, and a skeleton would collapse the panel..
 	if (loading && !answer) {
 		return (
 			<section className={styles.panel} aria-label="Logs">
@@ -532,11 +400,8 @@ export function LiveLogsPanel() {
 				<span className={styles.count}>{headCount()}</span>,
 			)}
 
-			{/* The volume strip /v1/logs has always returned and this panel dropped.
-			    Drawn only when there is volume to draw — an empty window shows its
-			    empty state below, not an empty chart. It keeps describing the whole
-			    ring while a range is picked: the strip is the map, and a map that
-			    shrinks to the territory you already chose cannot get you back. */}
+			{/* The volume strip, drawn only when there is volume: an empty window
+			    shows its empty state, not an empty chart. */}
 			<LogTimeline
 				buckets={answer?.volume ?? []}
 				detail={answer?.detail}
@@ -544,15 +409,12 @@ export function LiveLogsPanel() {
 			/>
 
 			{range && visible.length === 0 && awaiting ? (
-				// The pan has been sent and not yet answered. Anything else here is a
-				// claim about the range that is not known to be true yet — and "no
-				// lines" is the one claim a monitoring panel must never guess at.
+				// The pan is sent and unanswered: "no lines" is the one claim a
+				// monitoring panel must never guess at..
 				<SkeletonPanel rows={3} label="Loading the picked range" />
 			) : range && visible.length === 0 ? (
-				// Distinct from both the filter-empty and the never-installed states:
-				// the collector is working and the window is carrying lines, just none
-				// between the two points the reader dragged. Saying "no log lines yet"
-				// here would send somebody with a working install off to wire it again.
+				// Distinct from filter-empty and never-installed: the window carries
+				// lines, just none between the two dragged points..
 				<EmptyState
 					framed={false}
 					title="No lines in this range"
@@ -564,9 +426,8 @@ export function LiveLogsPanel() {
 					}
 				/>
 			) : lines.length === 0 && filtered ? (
-				// The reader's own filters emptied this, not their install. Same rule
-				// as failed-vs-empty: sending someone with a working collector off to
-				// wire it up again is the panel answering a question nobody asked.
+				// The reader's own filters emptied this, not their install; same
+				// rule as failed-vs-empty..
 				<EmptyState
 					framed={false}
 					title="No lines match your filters"
@@ -661,9 +522,8 @@ export function LiveLogsPanel() {
 				</div>
 			)}
 
-			{/* The trigger sits under the stream, beside the lines it will read —
-			    the reader picks rows at the bottom of the pane, and a button in
-			    the head is off-screen at exactly that moment. */}
+			{/* The trigger sits under the stream, beside the lines it will read:
+			    the reader picks rows at the bottom, where a head button is off-screen. */}
 			{picked.length > 0 ? (
 				<div className={styles.selectBar}>
 					<span className={styles.selectCount}>
@@ -691,10 +551,8 @@ export function LiveLogsPanel() {
 					</div>
 				</div>
 			) : (
-				// Nothing picked: the same bar, one button. The timeline's visible
-				// errors answer the question a reader without a selection still has
-				// — "what broke?" — through the same read. No errors in view, no
-				// button: a control that cannot act gets no render.
+				// Nothing picked: the timeline's visible errors answer "what broke?"
+				// through the same read; no errors in view, no button..
 				errorsWire.length > 0 && (
 					<div className={styles.selectBar}>
 						<div className={styles.selectActions}>
@@ -704,9 +562,8 @@ export function LiveLogsPanel() {
 								onClick={() => explain(errorsWire)}
 								disabled={explaining}
 							>
-								{/* "last N" only when the timeline shows its live tail; a
-								    committed range is a slice of the past, where "last"
-								    would claim a recency the lines do not have. */}
+								{/* "last N" only when the timeline shows its live tail; a committed
+								    range is a slice of the past, where "last" claims a recency it lacks. */}
 								{explaining
 									? "Reading…"
 									: range
@@ -721,10 +578,8 @@ export function LiveLogsPanel() {
 			{(explaining || explanation || explainError) && (
 				<div ref={readRef} className={styles.read}>
 					{explaining ? (
-						// The reading mark — the kit's 2c corner-chase, centred where the answer
-						// will land. The one named exception to "never a spinner" (owner decision,
-						// Aug 18, 2026): this is the brand mark reading, not a generic spinner,
-						// and it is scoped to this single state.
+						// The reading mark, centred where the answer will land: the one
+						// exception to "never a spinner", scoped to this state..
 						<div
 							className={styles.readChase}
 							role="status"

@@ -5,7 +5,7 @@ import { CloseIcon } from '@/icons';
 import { useDismissible } from '@/lib/useDismissible';
 import styles from './Modal.module.css';
 
-export interface ModalProps {
+interface ModalProps {
   open: boolean;
   onClose: () => void;
   title: string;
@@ -13,7 +13,8 @@ export interface ModalProps {
   width?: number;
 }
 
-/** Reserved for destructive confirmations and the global Upgrade modal (brief §2.1) — not general-purpose chrome. */
+/** Reserved for destructive confirmations and the Upgrade modal, not
+ *  general-purpose chrome. */
 export function Modal({ open, onClose, title, children, width = 480 }: ModalProps) {
   useDismissible(open, onClose);
 

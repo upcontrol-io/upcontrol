@@ -9,10 +9,8 @@
   padding: var(--space-6);
 }
 
-/* Taller-than-viewport content (Upgrade's two stacked plan cards on a phone)
-   scrolls inside the panel, per 10-account.dc.html. Deliberately not on the
-   overlay: the overlay is the dismiss target, and a drag on its scrollbar
-   would land as a click and close the modal. */
+/* Tall content scrolls inside the panel, never the overlay: the overlay is
+   the dismiss target, and a scrollbar drag there would land as a click. */
 .panel {
   width: 100%;
   max-height: 100%;

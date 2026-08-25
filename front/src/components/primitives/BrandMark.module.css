@@ -1,29 +1,9 @@
-/* The kit's half-turn ("180 deg sweep + double pulse"), with the design's own
-   keyframes from docs/handoff/HANDOFF.md §3 (ucSpin180 / ucBeat, renamed into
-   this module): one 3.4s cycle — the brackets hold (0-12%), sweep half a
-   circle and land at 55%, and the signal answers the rest with a double beat
-   in scale (1.35) while they hold.
-
-   The loop has no seam by construction: the bracket drawing is 2-fold
-   symmetric, so the 180° pose IS the 0° pose — the wrap's 180→0 value jump
-   lands on identical pixels. The signal starts and ends the cycle at scale 1,
-   so the always-visible part wraps clean too.
-
-   Both groups transform about their own centre (transform-box: fill-box):
-   they are centred on (8,8), and the SVG default origin is the viewport
-   corner.
-
-   Reduced motion: the global kill (global.css) runs each animation once at
-   0.01ms and the element falls back to base styles — the base IS the
-   assembled resting mark (brackets untransformed, signal at scale 1), which
-   is the contract the kit's README names ("motion off, mark stays
-   assembled"). Nothing here bases at opacity: 0, so nothing can freeze
-   half-drawn. */
+/* The kit's half-turn: brackets sweep half a circle, the signal answers with
+   a double beat. Seamless by construction (2-fold symmetry; 180 deg IS 0 deg). */
 
 .mark {
-  /* The brackets' corners sweep past the 16-unit viewBox mid-turn; clipping
-     them is the cut-corners problem the kit's safe-viewbox family exists to
-     avoid. */
+  /* The brackets' corners sweep past the viewBox mid-turn; clipping them is
+     the cut-corners problem the safe-viewbox family exists to avoid. */
   overflow: visible;
 }
 
@@ -74,10 +54,8 @@
   animation: uc-brand-beat 3.4s ease-in-out infinite;
 }
 
-/* The kit's 2c corner-chase: each corner takes its quarter turn about the
-   MARK centre, 90ms behind the one before it — a chase, not a spin. The
-   drawing is 4-fold symmetric across a quarter turn, so every corner lands
-   on the next corner's resting pose and the loop has no seam. */
+/* The corner-chase: each corner turns 90ms behind the one before it, a
+   chase not a spin; 4-fold symmetry makes the loop seamless. */
 @keyframes uc-brand-quarter {
   0%, 14% { transform: rotate(0deg); }
   48%, 100% { transform: rotate(90deg); }

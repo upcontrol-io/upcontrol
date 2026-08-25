@@ -18,7 +18,7 @@
   text-align: right;
 }
 
-/* Absolute time reads primary, relative reads faint — time always ships both (brief §5). */
+/* Absolute time reads primary, relative reads faint: time always ships both. */
 .timeAbs {
   font-family: var(--font-mono);
   font-size: var(--text-caption);
@@ -54,10 +54,8 @@
   line-height: 1.55;
   color: var(--text-primary);
   padding-top: 2px;
-  /* Entries are built server-side as the monitor's own target spliced into a
-     sentence ("mon.Target + ' stopped responding'"), so the text can carry one
-     unbroken URL — without this the grid track it sits in forces the whole
-     timeline row wider than a 375px card. */
+  /* The text can carry one unbroken URL spliced into a sentence; without
+     this the grid track forces the timeline row wider than a 375px card. */
   overflow-wrap: anywhere;
 }
 
@@ -66,10 +64,8 @@
   color: var(--text-body);
 }
 
-/* On a phone the 78px time rail would leave the event text ~90px wide. Stack the
-   timestamp on its own line instead — the glyph rail stays as the anchor.
-   Must come after the base rules: a media query adds no specificity, so an
-   earlier block would lose every property the base rules also declare. */
+/* Phone: stack the timestamp on its own line. Must come after the base
+   rules: a media query adds no specificity over them. */
 @media (max-width: 560px) {
   .row {
     grid-template-columns: 22px minmax(0, 1fr);

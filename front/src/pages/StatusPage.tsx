@@ -8,12 +8,8 @@ import { invalidateApiData, useApiData } from '@/lib/useApiData';
 import { monitors as monitorsApi, statusPage as statusPageApi } from '@/lib/client';
 import styles from './StatusPage.module.css';
 
-/**
- * What the owner publishes is their own product — the same list the public
- * page renders. No custom-domain modal (the instance's own UC_DOMAIN is the
- * domain story here), and "Powered by UpControl" is a REAL switch — default
- * on, honestly removable (Decision 25c).
- */
+/** What the owner publishes: the same list the public page renders; the
+ *  "Powered by" switch is real, default on, honestly removable. */
 export function StatusPage() {
 	const { data: page, live, loading, failed } = useApiData('statusPage', () => statusPageApi.get());
 	const { data: monitorRows, live: monitorsLive } = useApiData('monitors', () => monitorsApi.list());
@@ -73,9 +69,8 @@ export function StatusPage() {
 		);
 	}
 
-	// Settled with nothing. Every switch below writes to the server on change,
-	// so a screen rendered from guesses would let someone unpublish a component
-	// against a page whose real settings nobody has read.
+	// Settled with nothing: every switch writes on change, so a screen from
+	// guesses could unpublish against unread settings..
 	if (failed || !page) {
 		return (
 			<div className={styles.wrap}>

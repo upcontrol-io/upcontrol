@@ -35,15 +35,8 @@
   height: var(--control-md);
 }
 
-/* An icon button has no label to widen it, so it used to square its whole box
-   off to 44×44 on the phone — which made it the biggest thing in every row it
-   sat in: the header's theme toggle towered over the 32px Dashboard pill, the
-   Explain card's close button over its own 12px label. Grow the hit area
-   instead of the box (the same answer as the switch and the log chevron): the
-   chip keeps its control size and a transparent 44×44 overlay is what the
-   finger hits. The `uc-tap-inline` class on the component escapes global.css's
-   `.uc-app` height floor; this rule carries the same overlay to icon buttons
-   outside `.uc-app` (docs toolbars), where that floor never applied. */
+/* Grow the hit area, not the box: a transparent 44x44 overlay keeps the chip
+   at control size. Covers icon buttons outside .uc-app too. */
 @media (max-width: 700px) {
   .button::after {
     content: '';

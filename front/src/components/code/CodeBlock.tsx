@@ -8,11 +8,8 @@ export interface CodeBlockProps {
   showLineNumbers?: boolean;
   highlightLines?: number[];
   className?: string;
-  /**
-   * Rendered inside a container that already draws the frame and carries its own
-   * copy button — CodeTabs, where the language picker and Copy share one header
-   * bar above the code (02-copy-and-code.dc.html).
-   */
+  /** Rendered inside a container that already draws the frame and carries its
+   *  own copy button (CodeTabs' shared header bar). */
   embedded?: boolean;
 }
 
@@ -23,8 +20,7 @@ interface Grammar {
 }
 
 // Muted, grammar-aware highlighting: comments faint, strings recede, keywords
-// weighted, the key and endpoint marked as the two things that matter.
-// Port of the highlight() logic in 02-copy-and-code.dc.html — achromatic on purpose.
+// weighted; achromatic on purpose: saturated color is reserved for status.
 const GRAMMARS: Record<string, Grammar> = {
   cURL: { comment: /#.*/, string: /"[^"]*"|'[^']*'/, kw: /\b(curl|export|if|then|fi|echo|set)\b/ },
   JavaScript: { comment: /\/\/.*/, string: /"[^"]*"|'[^']*'|`[^`]*`/, kw: /\b(export|async|function|await|try|catch|const|let|return|method|new)\b/ },
@@ -78,7 +74,7 @@ function highlightLine(line: string, grammar: Grammar): ReactNode[] {
   return out;
 }
 
-/** Achromatic grammar highlighting — never a rainbow; saturated color is reserved for status (brief §2.2). */
+/** Achromatic grammar highlighting: saturated color is reserved for status. */
 export function CodeBlock({
   code,
   language,

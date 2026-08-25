@@ -1,18 +1,8 @@
 import { Skeleton } from './Skeleton';
 import styles from './SkeletonPanel.module.css';
 
-/**
- * What an /app panel shows while its first read is still on the wire.
- *
- * The alternative was what /app used to do: render `mockData` immediately and
- * swap it for the account's own data when the response landed — so every reload
- * flashed somebody else's monitors, sources and incident for a few hundred
- * milliseconds. Mock is the fallback for an *unreachable* backend (the shell
- * says so in a Callout); it is not a placeholder for an answer that is simply
- * still coming. A skeleton claims nothing, which is the whole point.
- *
- * No spinner, by the design brief: page-level loading is skeletons only.
- */
+/** What a panel shows while its first read is on the wire: a skeleton claims
+ *  nothing, where mock data would flash somebody else's account. */
 export function SkeletonPanel({
   rows = 3,
   label = 'Loading',

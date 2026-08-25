@@ -12,18 +12,8 @@ export interface PageHeaderProps {
   back?: { to: string; label: string };
 }
 
-/**
- * The one header grammar the shell screens share. Before it, eight screens wore
- * four different shapes: most had an `<h1>`, Logs had none and hid its title as
- * small bold text inside the panel chrome, Monitors wedged its description into
- * the action row, Sources had a title and nothing else. Worse, the three screens
- * with loading and failed branches repeated their own `<h1>` in each one, so the
- * heading was declared eleven times across seven files.
- *
- * The action sits on the title's line while it fits and drops below it on a
- * phone, which is why this is a wrapping flex row rather than a grid: a long
- * title and a long button label should reflow, not collide.
- */
+/** The one header grammar the shell screens share. The action sits on the
+ *  title's line while it fits: a wrapping flex row so long titles reflow. */
 export function PageHeader({ title, description, action, back }: PageHeaderProps) {
   return (
     <header className={styles.header}>

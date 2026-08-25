@@ -13,11 +13,8 @@ function statusText(status: Monitor['status']): string {
 	return 'no data yet';
 }
 
-/**
- * One check's facts, a rename, and the delete. The contract has no per-monitor
- * GET, so the row comes out of the same list every reader shares — the module
- * poller keeps it fresh.
- */
+/** One check's facts, a rename, and the delete; no per-monitor GET exists, so
+ *  the row comes from the shared list the poller keeps fresh. */
 export function MonitorDetail() {
 	const { id } = useParams<{ id: string }>();
 	const navigate = useNavigate();

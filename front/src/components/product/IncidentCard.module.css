@@ -1,6 +1,5 @@
-/* Incident view per 05-dashboard.dc.html — the card is the only red-accented
-   surface on the page: red border, header on --down-bg, everything else stays
-   achromatic so the accent keeps its meaning. */
+/* The card is the only red-accented surface on the page: red border, header
+   on --down-bg, everything else achromatic so the accent keeps its meaning. */
 .card {
   /* Every pane inside the card shares this gutter; the phone tier tightens it
      in one place at the bottom of this file. */
@@ -12,7 +11,7 @@
 }
 
 /* A closed incident keeps the layout and drops the alarm: red is reserved for
-   what is wrong *now*, or it stops meaning anything (design-brief §2.4). */
+   what is wrong *now*, or it stops meaning anything. */
 .cardClosed {
   border-color: var(--line-strong);
 }
@@ -63,10 +62,8 @@
   flex: 1;
 }
 
-/* The pager's three buttons are `IconButton`, so the bespoke `.pagerButton`
-   rule that used to live here is gone: it was a hand-copy of the primitive's
-   own styling at 28px instead of --control-sm, and it carried no tap overlay,
-   which put it under the touch floor on a phone. */
+/* The pager's three buttons are IconButton, which brings the tap overlay a
+   bespoke rule here never carried. */
 
 /* ChevronIcon points down (it is the disclosure glyph), so a quarter turn each
    way makes the pair read as back and forward. */
@@ -101,9 +98,8 @@
   font-weight: 600;
   line-height: 1.25;
   color: var(--text-primary);
-  /* The title is often the monitor's own target spliced into a sentence
-     ("mon.Target + ' stopped responding'" server-side), so it can arrive as one
-     unbroken URL — without this it forces the header wider than a 375px card. */
+  /* The title can arrive as one unbroken URL spliced into a sentence;
+     without this it forces the header wider than a 375px card. */
   overflow-wrap: anywhere;
 }
 
@@ -119,12 +115,8 @@
 .body {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  /* One height budget for both panes. A timeline row is 49px (the time column
-     is the tallest content at 33px, plus 16px of padding), so this is ten of
-     them. It lives here rather than in each pane because the two are grid
-     siblings and stretch to the same height anyway: two independent numbers
-     leave whichever pane is shorter padded with dead space, which is what the
-     log slice's own 190px did next to an uncapped timeline. */
+  /* One height budget for both panes: grid siblings stretch to the same
+     height, so per-pane caps would pad the shorter one with dead space. */
   --pane-max: 490px;
 }
 
@@ -236,16 +228,13 @@
   /* useScrollIntoView brings this panel up when it appears; the margins are what
      stop it landing under the sticky header or behind the floating tab bar. */
   scroll-margin-top: calc(var(--header-h) + var(--space-3));
-  /* The bar itself is inset by the home-indicator too (BottomTabBar `.bar`),
-     so the clearance counts it — without it the panel is short by the inset on
-     a real iPhone. */
+  /* The bar is inset by the home-indicator too, so the clearance counts it
+     or the panel is short by the inset on a real iPhone. */
   scroll-margin-bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px) + var(--space-3));
 }
 
-/* The verdict line, the fact list, the fix note, the command block and the copy
-   row all lived here. They went with the derived prose they styled: the panel
-   is the model's answer now, rendered by ExplainAnswer, which brings its own
-   type scale and its own copy pair. */
+/* The panel is the model's answer, rendered by ExplainAnswer with its own
+   type scale and copy pair. */
 
 .triageBody {
   display: flex;
@@ -261,10 +250,8 @@
 }
 
 
-/* The one wall a card state may carry (upgrade-cta-pass.md): a muted fact plus
-   the same 30px bordered button Plan's factButton and the stream's windowEdge
-   use — a fact with a door, never a banner. Inside triage it is the quiet
-   footer; as .expiryRow it closes the card after the result strip. */
+/* The one wall a card state may carry: a muted fact with a door, never a
+   banner; the quiet footer inside triage, the closer as .expiryRow. */
 .wallRow {
   display: flex;
   flex-wrap: wrap;

@@ -1,6 +1,5 @@
-/* The AI triage answer. Blocks stack with air between them; every block is a
-   label (uppercase, weighted) and its content — the same grammar the incident
-   card's triage uses, so the two surfaces read as one product. */
+/* The AI triage answer: blocks of label + content, the same grammar the
+   incident card's triage uses. */
 
 .answer {
   display: flex;
@@ -96,9 +95,8 @@
   overflow-wrap: anywhere;
 }
 
-/* A runnable command is the product's own copy grammar: one line is a
-   CopyField, more is a CodeBlock — never a bare <code> the reader must
-   select by hand. */
+/* Copy grammar: one line is a CopyField, more is a CodeBlock, never a bare
+   <code> the reader must select by hand. */
 .commandField {
   max-width: 100%;
 }
@@ -107,10 +105,8 @@
   margin: 0;
 }
 
-/* The copy pair under the answer — same row shape the incident card's triage
-   copy uses, so the two answers carry the same affordance in the same place.
-   The pair has hierarchy: the answer alone is the primary action, the heavy
-   context variant rests as its quiet sibling. */
+/* The copy pair under the answer: same row shape as the incident card's
+   triage copy, with the answer alone as the primary action. */
 .actions {
   display: flex;
   flex-wrap: wrap;

@@ -8,9 +8,7 @@
   align-items: center;
   text-align: center;
   gap: var(--space-2);
-  /* The box fills its container and the *text* keeps the measure. It used to be
-     `max-width: 360px` on the box itself, which inside a full-width panel left a
-     narrow card stranded against the left edge with empty space beside it. */
+  /* The box fills its container and the text keeps the measure. */
   width: 100%;
 }
 

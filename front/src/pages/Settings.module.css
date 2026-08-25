@@ -6,11 +6,8 @@
 }
 
 
-/* A card, not a hairline. This screen runs past 1800px on a phone and used to
-   be six sections separated by a 1px rule, every heading the same size — so
-   finding "Email relay" meant reading the whole page. The surface is the one
-   the Status page's URL card and the Sources tiles already use, so nothing new
-   is invented here, it is just applied where the wall was. */
+/* A card, not a hairline: sections a phone scrolls past need a surface, and
+   this is the one the Status URL card already uses. */
 .section {
   display: flex;
   flex-direction: column;
@@ -47,10 +44,8 @@
   flex: 1;
 }
 
-/* The Telegram block puts token, username and Save on this row; at 390px that
-   left each control near 100px wide and the inputs unusable. Stacks below the
-   narrow breakpoint, the way the Email relay block under it already does. The
-   project-name form wears the same class and is better stacked here too. */
+/* Token, username and Save stack below the narrow breakpoint: at 390px the
+   one-row layout left each control near 100px wide. */
 @media (max-width: 560px) {
   .nameRow {
     flex-direction: column;

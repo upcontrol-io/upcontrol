@@ -7,13 +7,8 @@ import styles from './BottomTabBar.module.css';
 
 const TAB_ICONS = [PulseIcon, ErrorIcon, TerminalIcon, SendIcon];
 
-/**
- * Phone-width primary navigation for the self-host app — replaces the
- * sidebar below 700px (the commercial app's rationale applies unchanged:
- * navigation belongs under the thumb, not a horizontal scroll a header
- * competes with). Sources, Status and Settings live one tap away, behind
- * More.
- */
+/** Phone-width primary navigation: below 700px the sidebar is replaced,
+ *  navigation under the thumb; the rest lives one tap away, behind More. */
 export function BottomTabBar() {
 	const [moreOpen, setMoreOpen] = useState(false);
 	const { pathname } = useLocation();

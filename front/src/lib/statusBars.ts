@@ -1,24 +1,12 @@
-/**
- * How to read a strip of measured uptime buckets.
- *
- * The backend sends `bars` (oldest first) and `barSpanSec` — a day once there is
- * more than a day of history, otherwise the check's own interval, so a brand-new
- * account fills a strip within the hour instead of showing six empty days for a
- * week. Everything a strip says about *time* is derived from that one number, so
- * a row of five-minute buckets can never be labelled "7 days ago".
- *
- * Shared because two surfaces draw the same strips: the public status page and
- * the Dashboard, which shows one line per check exactly as the status page does.
- * Two copies of this arithmetic is how the two would start disagreeing about
- * what the same bar means.
- */
+/** Everything a strip says about time derives from `barSpanSec`; shared by the
+ *  status page and the Dashboard so both read the same bars the same way. */
 import type { HealthStatus } from './types';
 
 export const DAY_SEC = 86400;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** Status as a word, because colour never carries a state alone (brief §1). */
+/** Status as a word: colour never carries a state alone. */
 const BAR_WORD: Record<HealthStatus, string> = {
   ok: 'up',
   check: 'degraded',

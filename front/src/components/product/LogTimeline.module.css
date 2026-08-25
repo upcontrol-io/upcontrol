@@ -54,9 +54,8 @@
   flex: none;
 }
 
-/* Errors keep --down at full strength while the bulk is damped — the token
-   file's own rule for a stacked histogram: at equal saturation the mass floods
-   the strip and the red stops meaning anything. */
+/* Errors keep --down at full strength while the bulk is damped: at equal
+   saturation the mass floods the strip and the red stops meaning anything. */
 .dotError,
 .barError {
   background: var(--down);
@@ -142,11 +141,8 @@
   cursor: grabbing;
 }
 
-/* The product's single focus ring (global.css) fires on `:focus-visible`, and
-   Chrome grants that to a tabindex'd div on a plain mouse click — so dragging
-   the strip drew a 2px ring around the whole chart. Suppressed here and put
-   back on `.ringed`, which only Tab and the arrow keys set: the keyboard
-   indicator is unchanged, the false positive is gone. */
+/* Chrome grants :focus-visible to a tabindex'd div on a mouse click, so
+   dragging drew a ring; `.ringed` restores it for Tab and arrows only. */
 .body:focus-visible {
   outline: none;
 }
@@ -223,30 +219,23 @@
 }
 
 @media (max-width: 700px) {
-  /* No height/width rules for the chips here on purpose: global.css's
-     `.uc-app` floor already raises every button's min-height to --tap-min
-     below 700, and it deliberately leaves width alone — the same decision it
-     documents for the segmented pills. A local 44px min-width turned the zoom
-     pair into squares and pushed the whole row into three ragged lines. */
+  /* No height/width for the chips: the .uc-app floor raises height and
+     deliberately leaves width alone; a local min-width made squares. */
   .controls {
     flex-wrap: wrap;
     row-gap: var(--space-2);
   }
 
-  /* The readout and the counts share the first line and wrap as text; base
-     `overflow: hidden` exists to keep the desktop head on one line and would
-     clip the last count here without an ellipsis to say so. */
+  /* The readout and counts wrap as text; base overflow: hidden would clip
+     the last count here without an ellipsis to say so. */
   .counts {
     flex-wrap: wrap;
     row-gap: var(--space-1);
     overflow: visible;
   }
 
-  /* The chips take their own full line. Left-aligned: `margin-left: auto`
-     right-aligns a wrapped row, which reads as a layout accident on a phone.
-     Scrollable past the edge rather than wrapped into a second ragged row;
-     the vertical padding is headroom for the focus ring, which the scroll
-     container would otherwise clip. */
+  /* The chips take their own full line, left-aligned and scrollable past
+     the edge; the vertical padding is headroom the scroll would clip. */
   .actions {
     width: 100%;
     margin-left: 0;

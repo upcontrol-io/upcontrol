@@ -21,7 +21,7 @@ const ICONS: Record<TimelineEventKind, ReactNode> = {
   people: <ReachIcon />,
 };
 
-/** Distinct icon shape per event type — never color-coded (brief §2.4). */
+/** Distinct icon shape per event type, never color-coded. */
 export function TimelineEvent({ entry }: { entry: TimelineEntry }) {
   return (
     <div className={styles.row}>

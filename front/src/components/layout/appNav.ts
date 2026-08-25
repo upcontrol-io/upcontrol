@@ -3,15 +3,8 @@ export interface AppNavItem {
 	label: string;
 }
 
-/**
- * The moment-to-moment surface: what is being watched, what broke, the raw
- * stream, who hears about it. Mirrors the commercial app's "Project" group
- * in spirit (docs/rules/app.md) — this instance has exactly one project, so
- * there is no Workspace group underneath it, only Settings pinned below.
- */
-/** The sidebar's own label for the group. The phone's tab bar and More sheet
- *  do not render these — a five-cell bar has no room for a section heading,
- *  and the sheet's two items need no explaining. */
+/** The moment-to-moment surface: what is watched, what broke, the stream, who
+ *  hears about it. The labels below render in the sidebar only. */
 export const PRIMARY_NAV_LABEL = 'Watch';
 export const SECONDARY_NAV_LABEL = 'Publish';
 

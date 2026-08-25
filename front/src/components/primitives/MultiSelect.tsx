@@ -4,10 +4,7 @@ import { ChevronIcon } from '@/icons';
 import { Checkbox } from './Checkbox';
 import styles from './MultiSelect.module.css';
 
-/**
- * Mirrors BOTTOM_BAR_MAX_WIDTH in lib/useDrawer.ts and the `max-width: 700px`
- * block below: the tier where this control stops being a dropdown.
- */
+/** The tier where this control stops being a dropdown (mirrors useDrawer). */
 const PHONE = '(max-width: 700px)';
 
 function usePhone(): boolean {
@@ -24,22 +21,18 @@ function usePhone(): boolean {
   return phone;
 }
 
-export interface MultiSelectOption {
+interface MultiSelectOption {
   value: string;
   label: string;
   /** Muted figure at the row's trailing edge (e.g. a line count). */
   note?: string;
 }
 
-export interface MultiSelectProps {
+interface MultiSelectProps {
   /** The control's name, spoken inline before the trigger. */
   label: string;
-  /**
-   * What an empty selection means ("All services") — the first row of the
-   * menu and the trigger's summary when nothing is picked. An empty set IS
-   * the unfiltered state: there is no way to select nothing, because a
-   * control that can only show nothing is a bug report waiting to be filed.
-   */
+  /** What an empty selection means ("All services"): the first menu row and
+   *  the trigger's summary; an empty set IS the unfiltered state. */
   allLabel: string;
   options: MultiSelectOption[];
   selected: ReadonlySet<string>;
@@ -48,19 +41,8 @@ export interface MultiSelectProps {
   className?: string;
 }
 
-/**
- * A checkbox dropdown for picking a subset of a small closed set. The menu
- * stays open across toggles — picking three services is one visit, not three.
- *
- * On a phone it is a bottom sheet instead, and that is not a flourish. As a
- * dropdown it was unusable below 700px: anchored `right: 0` to its trigger, a
- * 200px menu started at x = -11 on a 390px screen, and the logs panel's own
- * `overflow: hidden` (there for its rounded corners) clipped what was left, so
- * `elementFromPoint` over a row returned the page behind it. The menu rendered
- * and could not be tapped. A portalled sheet leaves the clipping ancestor
- * entirely and lands under the thumb, which is the same answer MoreSheet gives
- * for the same question.
- */
+/** Checkbox dropdown for a small closed set; the menu stays open across
+ *  toggles. On a phone: a portalled bottom sheet (a dropdown was untappable). */
 export function MultiSelect({
   label,
   allLabel,
@@ -85,9 +67,8 @@ export function MultiSelect({
         triggerRef.current?.focus();
       }
     }
-    // The sheet is portalled to the body, so it is NOT inside rootRef and this
-    // listener would read every tap on it as a tap outside. Its own scrim is
-    // what dismisses it; Escape stays either way.
+    // The sheet is portalled outside rootRef, so this listener would read
+    // every tap on it as outside; its own scrim dismisses it.
     if (!phone) document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
     return () => {

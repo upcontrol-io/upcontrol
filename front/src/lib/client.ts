@@ -1,20 +1,8 @@
-/**
- * API client — the single fetch layer between the front and the backend.
- * The shapes match the OpenAPI spec (src/lib/api.d.ts, generated) 1:1.
- *
- * Everything the self-hosted app serves is here, one function per endpoint —
- * no calls to surfaces this server does not mount.
- * In dev the Vite proxy forwards /v1/* and /public/* to the
- * Caddy edge; in production Caddy reverse-proxies directly.
- */
+/** API client: one function per endpoint, shapes 1:1 with the generated api.d.ts. */
 
 const BASE = ""; // relative — Vite proxy or Caddy handles the host
 
-/**
- * True when the failure was "there is no backend" rather than "the backend
- * said no". fetch rejects with a TypeError only when the request never got an
- * answer; anything else is a real refusal and has to reach the reader.
- */
+/** True when the request never got an answer (fetch TypeError), not a refusal. */
 export function isOffline(err: unknown): boolean {
 	return err instanceof TypeError;
 }
@@ -26,16 +14,14 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 		...init,
 	});
 	if (resp.status === 401) {
-		// The session is gone. With UC_AUTH=none this never fires — every
-		// request carries the boot identity. One spelling: /signin.
+		// Session is gone: hard-redirect to /signin unless already there.
 		if (!window.location.pathname.startsWith("/signin")) {
 			window.location.assign("/signin");
 		}
 		throw new Error("unauthorized");
 	}
 	if (!resp.ok) {
-		// No paid wall in OSS: a 402/429 renders as the server's own words,
-		// like any other refusal (public-first-split, Decision 8).
+		// A 402/429 renders as the server's own message, like any other refusal.
 		const body = await resp
 			.json()
 			.catch(() => ({ error: { message: resp.statusText } }));
@@ -45,13 +31,10 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 	return resp.json();
 }
 
-// --- types from the generated OpenAPI spec (api.d.ts) ---
 import type { components } from "./api";
 
-// Re-export for convenience.
 export type { components };
 
-// --- auth ---
 export const auth = {
 	magicLink: (email: string, token?: string) =>
 		fetchJSON("/v1/auth/magic-link", {
@@ -61,15 +44,9 @@ export const auth = {
 	logout: () => fetchJSON("/v1/auth/logout", { method: "POST" }),
 };
 
-// --- account ---
 export const me = () =>
 	fetchJSON<components["schemas"]["MeResponse"]>("/v1/me");
 
-// --- dashboard ---
-export const overview = () =>
-	fetchJSON<components["schemas"]["OverviewResponse"]>("/v1/overview");
-
-// --- monitors ---
 export const monitors = {
 	list: () => fetchJSON<components["schemas"]["Monitor"][]>("/v1/monitors"),
 	create: (data: components["schemas"]["MonitorCreate"]) =>
@@ -85,7 +62,6 @@ export const monitors = {
 	delete: (id: string) => fetchJSON(`/v1/monitors/${id}`, { method: "DELETE" }),
 };
 
-// --- sources + keys ---
 export const sources = () =>
 	fetchJSON<components["schemas"]["SourcesResponse"]>("/v1/sources");
 export const keys = () =>
@@ -97,19 +73,17 @@ export const rotateKey = () =>
 		"/v1/keys/rotate",
 		{ method: "POST" },
 	);
-// One-time install token for the Settings screen's command. The response
-// carries the ready command; the KEY never travels here — the CLI redeems
-// the token server-side and writes .env itself.
+// One-time install token: the key never travels here; the CLI redeems the
+// token server-side and writes .env itself.
 export const installToken = () =>
 	fetchJSON<{ token: string; command: string; expiresAt: string }>(
 		"/v1/install/token",
 		{ method: "POST" },
 	);
 
-// --- sources (connect / pause / disconnect) ---
 export const sourcesWrite = {
-	// `activate` promotes the hidden draft into the visible card — it is the
-	// copy button speaking, while a plain connect only fetches the hook URL.
+	// `activate` promotes the hidden draft into the visible card; a plain
+	// connect only fetches the hook URL.
 	connect: (kind: string, activate = false) =>
 		fetchJSON<components["schemas"]["Source"]>(`/v1/sources/${kind}/connect`, {
 			method: "POST",
@@ -124,12 +98,10 @@ export const sourcesWrite = {
 	delete: (id: string) => fetchJSON(`/v1/sources/${id}`, { method: "DELETE" }),
 };
 
-// --- alerts ---
 export const channels = () =>
 	fetchJSON<components["schemas"]["ChannelsResponse"]>("/v1/channels");
 
-// A channel is a destination and nothing else: one field to add, one test
-// per row, no per-monitor rule matrix.
+// A channel is a destination: one field to add, one test per row.
 export const channelsWrite = {
 	create: (kind: string, target: string) =>
 		fetchJSON<components["schemas"]["AlertChannel"]>("/v1/channels", {
@@ -137,8 +109,8 @@ export const channelsWrite = {
 			body: JSON.stringify({ kind, target }),
 		}),
 	delete: (id: string) => fetchJSON(`/v1/channels/${id}`, { method: "DELETE" }),
-	// Queues a REAL delivery and answers with its queue id — never a claim
-	// that anything was sent. The outcome comes from `delivery(id)` below.
+	// Queues a real delivery and answers with its queue id; the outcome comes
+	// from delivery(id) below.
 	test: (id: string) =>
 		fetchJSON<components["schemas"]["DeliveryStatusResponse"]>(
 			`/v1/channels/${id}/test`,
@@ -146,7 +118,6 @@ export const channelsWrite = {
 		),
 };
 
-// --- deliveries (the outcome half of Send test) ---
 /** One queue row's truth: `sent` only when the pipeline says so, `dead` with
  *  the reason it died, anything else = the outcome is not known yet. */
 export const delivery = (id: string) =>
@@ -154,21 +125,13 @@ export const delivery = (id: string) =>
 		`/v1/deliveries/${id}`,
 	);
 
-// --- incidents ---
 export const incidents = () =>
 	fetchJSON<{ items: components["schemas"]["Incident"][] }>("/v1/incidents");
 export const incident = (id: string) =>
 	fetchJSON<components["schemas"]["Incident"]>(`/v1/incidents/${id}`);
 
-// --- logs (the live ring window) ---
-/**
- * The window, optionally narrowed to a set of services and level buckets, and
- * optionally bounded to the range picked on the timeline. Every narrowing is
- * the server's: they apply before the stream limit, so the lines and the
- * `total` beside them keep describing the same question. The filter params
- * repeat (`?service=api&service=web`) — a service may legitimately be the
- * empty string (the unlabelled service), which a joined form could not carry.
- */
+/** Filters apply server-side before the stream limit, so lines and `total` stay
+ *  consistent; `service` repeats because a service may be the empty string. */
 export const logs = (
 	services?: readonly string[],
 	levels?: readonly string[],
@@ -181,9 +144,8 @@ export const logs = (
 	if (range) {
 		params.set("from", new Date(range.from).toISOString());
 		params.set("to", new Date(range.to).toISOString());
-		// Only ever sent with a range: detail describes a stretch the reader
-		// picked, and the server refuses it without both bounds. What comes back
-		// may be coarser than this asks — the answer carries the width it used.
+		// Sent only with a range; the answer may be coarser and carries the
+		// width the server actually used.
 		if (bucketSeconds && bucketSeconds > 0) {
 			params.set("bucketSeconds", String(bucketSeconds));
 		}
@@ -197,24 +159,19 @@ export const logs = (
 /** The triage shape behind Explain: problem as fact, cause as a graded guess. */
 export type ExplainResult = components["schemas"]["ExplainResponse"];
 
-/** The AI read of a set of log lines. With no API key configured anywhere
- *  the server answers 503 ai_not_configured. Render its message rather than
- *  a local string: on a self-host it names Settings, the door that takes a
- *  key, and on a hosted instance it does not, because that door is not the
- *  caller's to open. */
+/** The AI read of log lines. With no key configured the server answers
+ *  503 ai_not_configured; render its message, which names the right door. */
 export const explainLogs = (lines: string[]) =>
 	fetchJSON<ExplainResult>("/v1/logs/explain", {
 		method: "POST",
 		body: JSON.stringify({ lines }),
 	});
 
-// --- instance settings (self-host only doors) ---
-// Write-only by design: the values are sealed server-side and never travel
-// back out. Presence is read through explainPreview's `model` (the AI key)
-// and the channels screen's telegram surface (the bot).
+// Write-only by design: values are sealed server-side. Presence is read
+// through explainPreview's `model` and the channels screen's telegram surface.
 export const instance = {
-	// Each field optional: send what the operator filled, the server stores
-	// only that — a model change never demands re-pasting the key.
+	// Each field optional: the server stores only what is sent, so a model
+	// change never demands re-pasting the key.
 	putAI: (values: { key?: string; model?: string; baseUrl?: string }) =>
 		fetchJSON<undefined>("/v1/instance/ai", {
 			method: "PUT",
@@ -236,23 +193,15 @@ export const instance = {
 	deleteSMTP: () => fetchJSON<undefined>("/v1/instance/smtp", { method: "DELETE" }),
 };
 
-/**
- * The AI read of one incident. The server assembles the evidence itself
- * (incident facts, timeline, frozen log slice) from what it already has, so
- * the request carries only the id; `severity`/`area` are set only by this
- * scenario (null from the log-selection explain).
- */
+/** The AI read of one incident. The server assembles the evidence itself, so
+ *  only the id travels; only this call sets `severity`/`area`. */
 export const explainIncident = (id: string) =>
 	fetchJSON<ExplainResult>(`/v1/incidents/${id}/explain`, {
 		method: "POST",
 	});
 
-/**
- * The exact prompt an Explain with these lines would send — composed, not
- * executed: no model is consulted and no quota is spent. Settings reads the
- * wired brain's identity (`model`) from it, which is the one place the
- * contract names the brain.
- */
+/** The exact prompt Explain would send, composed but never executed; Settings
+ *  reads the wired model's identity from the response. */
 export const explainPreview = (lines: string[]) =>
 	fetchJSON<components["schemas"]["ExplainPreviewResponse"]>(
 		"/v1/logs/explain/preview",
@@ -262,12 +211,11 @@ export const explainPreview = (lines: string[]) =>
 		},
 	);
 
-// --- status page ---
 export const statusPage = {
 	get: () =>
 		fetchJSON<components["schemas"]["StatusPageResponse"]>("/v1/status-page"),
-	// Only the owner's decisions are sent: the components and their uptime are
-	// measured server-side and would be ignored anyway.
+	// Only the owner's decisions are sent: components and uptime are measured
+	// server-side.
 	put: (data: components["schemas"]["StatusPageUpdate"]) =>
 		fetchJSON<components["schemas"]["StatusPageResponse"]>("/v1/status-page", {
 			method: "PUT",
@@ -275,10 +223,8 @@ export const statusPage = {
 		}),
 };
 
-// --- public ---
-/** The public discovery check — the onboarding's scan. Nothing is created:
- *  the server probes the host (depth zero, its own request cap) and answers
- *  with pick-list groups; monitors exist only once Start watching posts them. */
+/** Nothing is created: the server probes the host and answers with pick-list
+ *  groups; monitors exist only once Start watching posts them. */
 export const publicCheck = (host: string) =>
 	fetchJSON<components["schemas"]["CheckResponse"]>("/public/check", {
 		method: "POST",

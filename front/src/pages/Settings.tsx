@@ -17,14 +17,8 @@ import styles from './Settings.module.css';
 /** How long a rotated key keeps working, so a deployed app can catch up. */
 const ROTATE_OVERLAP = '24 hours';
 
-/**
- * The instance's few real knobs. Project name is the status page's title —
- * the one name with a write mechanism behind it (/v1/project supports only
- * DELETE; there is no rename endpoint, so no second name field exists here).
- * The ingest key arrives through the install-token flow because the raw key
- * is unrecoverable: GET /v1/keys returns the prefix only, and the full key is
- * shown exactly once by rotate.
- */
+/** The instance's few real knobs. Project name is the status page's title (the
+ *  only name with a write behind it); the ingest key arrives via install token. */
 export function Settings() {
 	const { data: page, live: pageLive, loading: pageLoading, failed: pageFailed } = useApiData(
 		'statusPage',
@@ -149,9 +143,8 @@ export function Settings() {
 			invalidateApiData('aiBrain');
 			setAiNote({ text: 'Saved. Explain answers with these settings from the next question on.', failed: false });
 		} catch (err) {
-			// The server's own refusal (invalid_key, invalid_model,
-			// invalid_base_url, secret_key_missing) names the fix; anything
-			// else is the generic transport line.
+			// The server's own refusal names the fix; anything else is the
+			// generic transport line.
 			setAiNote({
 				text: err instanceof Error && err.message !== 'unauthorized' ? err.message : 'Could not save. Try again.',
 				failed: true,
@@ -506,15 +499,8 @@ export function Settings() {
 					empty fields keep their current value. Everything is stored encrypted and never shown again.
 				</span>
 				{smtpNote && <span className={smtpNote.failed ? styles.tokenError : styles.hint}>{smtpNote.text}</span>}
-				{/* Unconditional, where the AI block's twin above hides itself behind
-				    `aiModel != null`. The difference is not an oversight and is not
-				    worth "fixing" into symmetry: AI can read its own state (the
-				    preview endpoint answers with the wired model, so a remove control
-				    with nothing to remove can be left out), and SMTP cannot — it is
-				    write-only, no GET exists, and the only honest options are to
-				    offer the control always or never. Always: DELETE on nothing is a
-				    204 no-op, while hiding it would strand anyone whose relay came
-				    from a UI save they no longer remember making. */}
+				{/* Unconditional, unlike the AI block above (which reads its state):
+				    SMTP is write-only, so a DELETE-on-nothing no-op is the honest option. */}
 				<div className={styles.rotateRow}>
 					{smtpRemoveAsking ? (
 						<>

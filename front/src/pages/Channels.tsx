@@ -16,12 +16,8 @@ function writeError(err: unknown, fallback: string): string {
 	return fromServer ? message : fallback;
 }
 
-/**
- * A channel is a destination and nothing else: one field to add, a Send test
- * per row, an inline-confirm delete. No per-channel rule matrix. A kind the
- * server does not offer gets no tile — a control that cannot act must not
- * exist.
- */
+/** A channel is a destination: one field to add, a Send test per row, an
+ *  inline-confirm delete; a kind the server does not offer gets no tile. */
 export function Channels() {
 	const { loading, failed, data } = useApiData('channels', () => channelsApi());
 	const response = data as ChannelsResponse | undefined;

@@ -5,12 +5,8 @@ import { validEmail } from '@/lib/validEmail';
 import { auth, me } from '@/lib/client';
 import styles from './SignIn.module.css';
 
-/**
- * Redeems in flight, keyed by the credentials — MODULE level on purpose: a
- * code is one-time and StrictMode mounts twice in dev, so the second effect
- * run must join the first request instead of spending the code again. Same
- * shape, same reason as the in-flight map in lib/useApiData.ts.
- */
+/** Redeems in flight, keyed by credentials: a code is one-time and StrictMode
+ *  mounts twice, so the second run must join the first request. */
 const redeems = new Map<string, Promise<unknown>>();
 function redeemOnce(email: string, token: string): Promise<unknown> {
 	const key = `${email}:${token}`;
@@ -21,13 +17,8 @@ function redeemOnce(email: string, token: string): Promise<unknown> {
 	return request;
 }
 
-/**
- * Two-step sign-in for a self-host: email, then the code. With SMTP the code
- * arrives by mail (and the emailed link form /signin?email=...&token=...
- * redeems on arrival); without SMTP the operator reads it from the ucapi log.
- * With UC_AUTH=none this screen is never needed: /v1/me answers for everyone,
- * and the effect below forwards straight into the app.
- */
+/** Two-step sign-in: email, then the code (by mail with SMTP, from the ucapi
+ *  log without). With UC_AUTH=none this screen is never needed. */
 export function SignIn() {
 	const navigate = useNavigate();
 	const [params] = useSearchParams();

@@ -1,6 +1,6 @@
 import type { SVGProps } from 'react';
 
-/** Shared inline SVG icon set (design-brief §Assets — no icon font, no icon library). */
+/** Shared inline SVG icon set: no icon font, no icon library. */
 type IconProps = SVGProps<SVGSVGElement>;
 
 function base(children: React.ReactNode, props: IconProps, viewBox = '0 0 32 32') {
@@ -127,40 +127,11 @@ export function CloseIcon(props: IconProps) {
   );
 }
 
-/* --- Mobile bottom tab bar (BottomTabBar) --------------------------------- */
-
-export function HomeIcon(props: IconProps) {
-  return base(
-    <path
-      d="M5 14L16 5L27 14M8 12V26H24V12"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-  );
-}
-
 /** Activity polyline — the product's pulse identity (HealthLine, PulseLine). */
 export function PulseIcon(props: IconProps) {
   return base(
     <path
       d="M3 17H9L13 8L19 25L23 17H29"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-  );
-}
-
-/** Alerts tab — the one section that is about being told something. */
-export function BellIcon(props: IconProps) {
-  return base(
-    <path
-      d="M8 13a8 8 0 1 1 16 0c0 6 2 8 2 8H6s2-2 2-8M13 26a3 3 0 0 0 6 0"
       stroke="currentColor"
       strokeWidth={2}
       strokeLinecap="round"
@@ -181,10 +152,6 @@ export function MoreIcon(props: IconProps) {
   );
 }
 
-/* --- Source & channel pictograms (docs/icons, Untitled UI line set) -------
-   These replaced the three-letter chips on source cards and channel rows
-   (user decision, Aug 14, 2026): "DEP" or "ML" had to be decoded, a rocket
-   or an envelope does not. All are 24-grid, stroke 2, achromatic. */
 
 /** Site checks — the probe watching a URL from outside. */
 export function GlobeIcon(props: IconProps) {
@@ -276,21 +243,6 @@ export function PuzzleIcon(props: IconProps) {
   );
 }
 
-/** Email channel — an envelope. */
-export function MailIcon(props: IconProps) {
-  return base(
-    <path
-      d="M2 7L10.1649 12.7154C10.8261 13.1783 11.1567 13.4097 11.5163 13.4993C11.8339 13.5785 12.1661 13.5785 12.4837 13.4993C12.8433 13.4097 13.1739 13.1783 13.8351 12.7154L22 7M6.8 20H17.2C18.8802 20 19.7202 20 20.362 19.673C20.9265 19.3854 21.3854 18.9265 21.673 18.362C22 17.7202 22 16.8802 22 15.2V8.8C22 7.11984 22 6.27976 21.673 5.63803C21.3854 5.07354 20.9265 4.6146 20.362 4.32698C19.7202 4 18.8802 4 17.2 4H6.8C5.11984 4 4.27976 4 3.63803 4.32698C3.07354 4.6146 2.6146 5.07354 2.32698 5.63803C2 6.27976 2 7.11984 2 8.8V15.2C2 16.8802 2 17.7202 2.32698 18.362C2.6146 18.9265 3.07354 19.3854 3.63803 19.673C4.27976 20 5.11984 20 6.8 20Z"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-    '0 0 24 24',
-  );
-}
-
 /** Telegram channel — the paper plane its own logo is. */
 export function SendIcon(props: IconProps) {
   return base(
@@ -300,69 +252,6 @@ export function SendIcon(props: IconProps) {
       strokeWidth={2}
       strokeLinecap="round"
       strokeLinejoin="round"
-    />,
-    props,
-    '0 0 24 24',
-  );
-}
-
-/** Discord channel — chat bubbles; no brand marks in the set, and the brief
-    keeps other companies' logos out of our achromatic UI anyway. */
-export function MessageChatIcon(props: IconProps) {
-  return base(
-    <path
-      d="M6.09436 11.2288C6.03221 10.8282 5.99996 10.4179 5.99996 10C5.99996 5.58172 9.60525 2 14.0526 2C18.4999 2 22.1052 5.58172 22.1052 10C22.1052 10.9981 21.9213 11.9535 21.5852 12.8345C21.5154 13.0175 21.4804 13.109 21.4646 13.1804C21.4489 13.2512 21.4428 13.301 21.4411 13.3735C21.4394 13.4466 21.4493 13.5272 21.4692 13.6883L21.8717 16.9585C21.9153 17.3125 21.9371 17.4895 21.8782 17.6182C21.8266 17.731 21.735 17.8205 21.6211 17.8695C21.4911 17.9254 21.3146 17.8995 20.9617 17.8478L17.7765 17.3809C17.6101 17.3565 17.527 17.3443 17.4512 17.3448C17.3763 17.3452 17.3245 17.3507 17.2511 17.3661C17.177 17.3817 17.0823 17.4172 16.893 17.4881C16.0097 17.819 15.0524 18 14.0526 18C13.6344 18 13.2237 17.9683 12.8227 17.9073M7.63158 22C10.5965 22 13 19.5376 13 16.5C13 13.4624 10.5965 11 7.63158 11C4.66668 11 2.26316 13.4624 2.26316 16.5C2.26316 17.1106 2.36028 17.6979 2.53955 18.2467C2.61533 18.4787 2.65322 18.5947 2.66566 18.6739C2.67864 18.7567 2.68091 18.8031 2.67608 18.8867C2.67145 18.9668 2.65141 19.0573 2.61134 19.2383L2 22L4.9948 21.591C5.15827 21.5687 5.24 21.5575 5.31137 21.558C5.38652 21.5585 5.42641 21.5626 5.50011 21.5773C5.5701 21.5912 5.67416 21.6279 5.88227 21.7014C6.43059 21.8949 7.01911 22 7.63158 22Z"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-    '0 0 24 24',
-  );
-}
-
-/** Slack channel — the hash every Slack channel name starts with. */
-export function HashIcon(props: IconProps) {
-  return base(
-    <path
-      d="M9.49999 3L6.49999 21M17.5 3L14.5 21M20.5 8H3.5M19.5 16H2.5"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-    '0 0 24 24',
-  );
-}
-
-/** Webhook channel — the bolt the whole automation world uses for "fires on an event". */
-export function ZapIcon(props: IconProps) {
-  return base(
-    <path
-      d="M13 2L4.09344 12.6879C3.74463 13.1064 3.57023 13.3157 3.56756 13.4925C3.56524 13.6461 3.63372 13.7923 3.75324 13.8889C3.89073 14 4.16316 14 4.70802 14H12L11 22L19.9065 11.3121C20.2553 10.8936 20.4297 10.6843 20.4324 10.5075C20.4347 10.3539 20.3663 10.2077 20.2467 10.1111C20.1092 10 19.8368 10 19.292 10H12L13 2Z"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />,
-    props,
-    '0 0 24 24',
-  );
-}
-
-/** The one full-color icon in the set: Google's brand mark for auth buttons
-    (brief's achromatic rule covers our UI, not another company's logo). */
-/** The real OpenAI blossom (docs/icons/openai.svg, 24×24), labelling Codex in
-    the hero's agent row. fill is currentColor — the source ships black, which
-    would vanish on the night hero, so the caller sets a light color. The other
-    agent logos there are raster tiles under src/assets/agents/. */
-export function OpenAIIcon(props: IconProps) {
-  return base(
-    <path
-      fill="currentColor"
-      d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
     />,
     props,
     '0 0 24 24',
