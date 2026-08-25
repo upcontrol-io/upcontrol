@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 const REVERT_DELAY_MS = 2000;
 
-/** Shared "copy, flash a checkmark for 2s, revert" behavior for every copy button in the product. */
+/** Shared "copy, flash a checkmark for 2s, revert" for every copy button. */
 export function useCopyToClipboard(): [copied: boolean, copy: (text: string) => void] {
   const [copied, setCopied] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);

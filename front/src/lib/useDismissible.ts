@@ -1,12 +1,7 @@
 import { useEffect, useRef } from 'react';
 
-/**
- * The two things every dismissible overlay in the product owes the user:
- * Escape closes it, and the page behind it stops scrolling while it is up.
- *
- * Shared by `Modal` and `useDrawer` — they had drifted to different fidelity
- * (the drawer locked scroll, the modal didn't) writing this by hand twice.
- */
+/** Escape closes the overlay and the page behind it stops scrolling: what
+ *  every dismissible surface owes the user. */
 export function useDismissible(active: boolean, onDismiss: () => void) {
   // Held in a ref so an inline `onClose={() => …}` can't re-run the effect and
   // thrash the body style on every render of the host.

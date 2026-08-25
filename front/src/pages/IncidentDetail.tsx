@@ -23,11 +23,8 @@ function incidentContext(inc: Incident): string {
 	].join('\n');
 }
 
-/**
- * One incident, whole: timeline, log slice, Explain. No ack/resolve — the
- * contract has no such mechanism (the engine opens and closes incidents from
- * measurements), and a button without an engine is a lie with a hover state.
- */
+/** One incident, whole: timeline, log slice, Explain. No ack/resolve;
+ *  the engine opens and closes incidents; a button without one is a lie. */
 export function IncidentDetail() {
 	const { id } = useParams<{ id: string }>();
 	const { loading, failed, data } = useApiData(`incident:${id}`, () => incidentApi(id!));
@@ -61,11 +58,8 @@ export function IncidentDetail() {
 						setTriage((cur) => (cur === pending ? { loading: false, answer: res } : cur));
 					})
 					.catch((err: unknown) => {
-						// The server's own words (a throttle's message, a cap) render
-						// as the note; its machine-generated shapes (the "HTTP n"
-						// fallback, transport text) carry nothing a reader can act
-						// on, so those leave the panel empty rather than print a
-						// sentence this page invented to fill it.
+						// Only the server's own words render as the note; the
+						// machine-generated shapes leave the panel empty, not invented.
 						const message = err instanceof Error ? err.message : '';
 						const fromServer = message !== '' && !message.startsWith('HTTP ') && message !== 'unauthorized';
 						setTriage((cur) =>

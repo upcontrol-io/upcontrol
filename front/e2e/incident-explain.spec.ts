@@ -1,11 +1,8 @@
 import { test, expect, type Page } from "@playwright/test";
 import { serveIncident, stubApi } from "./fixtures/api";
 
-// Explain's three promises (no paid wall in this app, Decision 8): the card
-// shows the
-// MODEL'S read whole and nothing derived, the severity badge is the model's
-// word and never the page's, and a read that never answers prints nothing
-// rather than a sentence this page invented.
+// Explain's promises: the card shows the MODEL'S read whole and nothing
+// derived; a read that never answers prints nothing invented.
 
 const ONGOING_INCIDENT = {
 	id: "inc_1",

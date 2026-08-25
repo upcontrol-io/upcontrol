@@ -3,7 +3,7 @@ import { EmptyState } from './EmptyState';
 import { StatusDot } from './StatusDot';
 import styles from './LoadError.module.css';
 
-export interface LoadErrorProps {
+interface LoadErrorProps {
   /** What could not be read, in the reader's words: "your checks", "your alert channels". */
   what: string;
   /** Re-runs the read. Wire it to `invalidateApiData(<the same keys the screen reads>)`. */
@@ -12,17 +12,8 @@ export interface LoadErrorProps {
   framed?: boolean;
 }
 
-/**
- * A read that settled without an answer. Deliberately NOT an `EmptyState` on its
- * own: an empty state says "you have none", and saying that on the strength of a
- * failed request tells a customer with three checks that they have none. The two
- * shapes have to be distinguishable at a glance, so this one carries a `down`
- * dot, `role="alert"`, and the one action that can change the outcome.
- *
- * It composes EmptyState rather than re-drawing the box: the padding, the
- * measure and the `framed` rule are already decided there, and a second copy of
- * them is how the two drift apart.
- */
+/** A read that settled without an answer, never an EmptyState: "you have
+ *  none" on the strength of a failed request is a lie. Composes EmptyState. */
 export function LoadError({ what, onRetry, framed = true }: LoadErrorProps) {
   return (
     <div role="alert" className={styles.wrap}>

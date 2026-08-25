@@ -1,6 +1,5 @@
-/* The live window. Deliberately plain next to LogsPanel: no container tabs, no
-   small multiples, no window pills — those describe data the backend does not
-   serve yet, and an empty tile is worse than no tile. */
+/* The live window: deliberately plain, no tiles for data the backend does
+   not serve (an empty tile is worse than no tile). */
 .panel {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -41,19 +40,6 @@
   font-size: var(--text-xs);
 }
 
-.cta {
-  display: inline-flex;
-  align-items: center;
-  height: 34px;
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-sm);
-  background: var(--text-primary);
-  color: var(--bg-page);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  text-decoration: none;
-}
-
 /* Sunken like CodeBlock's terminal body: the stream reads as a console recessed
    into the card, not as plain text sitting on the card's own surface. */
 /* Wraps the stream so the overview ruler can sit over the scrollbar's track
@@ -73,12 +59,8 @@
   line-height: 20px;
 }
 
-/* The overview ruler: warn/amber and error/red marks at each line's measured
-   position in the scroll content — a map of where the trouble is, in its own
-   lane just inside the scrollbar's gutter (the inline `right` carries the
-   measured gutter width: an overlay would paint over the native thumb and no
-   z-index reaches it). pointer-events stays off; info lines get no mark on
-   purpose. */
+/* The overview ruler: warn/error marks at each line's measured position, in
+   its own lane inside the scrollbar's gutter. pointer-events stays off. */
 .ruler {
   position: absolute;
   top: 0;
@@ -104,9 +86,8 @@
   background: var(--check);
 }
 
-/* Same column rhythm as the mock stream: time, source, level, message — the
-   message column starts at one x down the whole pane, so a long service name
-   never shifts the text the eye is scanning. */
+/* Time, source, level, message: the message column starts at one x down the
+   whole pane, so a long service name never shifts the scanned text. */
 .row {
   display: grid;
   grid-template-columns: 66px 84px 52px minmax(0, 1fr);
@@ -135,11 +116,8 @@
 }
 
 @media (max-width: 700px) {
-  /* The head's one-line layout assumed a desktop's width: on a phone the count
-     sentence got squeezed into a one-word-per-line column and the pickers ran
-     off the right edge. The collapse is explicit — title and count share the
-     first line (the count wraps as a sentence), the two pickers take a full
-     line below and split it between them. */
+  /* Phone collapse: title and count share the first line, the two pickers
+     take a full line below and split it. */
   .head {
     flex-wrap: wrap;
     row-gap: var(--space-2);
@@ -193,13 +171,8 @@
   background: var(--bg-hover);
 }
 
-/* The selection's own row, under the stream: the count of picked lines and the
-   actions on them. The head keeps describing the window, not the selection.
-   flex-wrap: the count carries the server's cap sentence ("one line is too
-   long to read") right beside the Explain button, the same long-text-next-
-   to-a-button shape as Settings.module.css's .rotateRow. Without wrap it
-   pushes the button toward the edge of a narrow phone instead of dropping
-   to its own line. */
+/* The selection's own row: the count (with the server's cap sentence) beside
+   the Explain button; flex-wrap drops the button to its own line on a phone. */
 .selectBar {
   display: flex;
   flex-wrap: wrap;
@@ -228,12 +201,8 @@
   gap: var(--space-2);
 }
 
-/* The one filled-color control in this panel, on purpose (owner decision): AI
-   Explain is a feature to be used, not just available, so it reads as a CTA
-   rather than another achromatic secondary action. Reuses --accent rather than
-   a new hue — the app's other named exception (code syntax, LogMessage) — so
-   the page still carries a single accent, not two. --inverse flips per theme
-   the same way Button's primary variant does, so contrast holds both ways. */
+/* The panel's one filled-color control: Explain reads as a CTA, reusing
+   --accent so the page still carries a single accent. */
 .explainButton {
   height: 28px;
   padding: 0 var(--space-3);
@@ -281,17 +250,8 @@
   color: var(--text-primary);
 }
 
-/* Dark's --bg-sunken carries enough weight to read as a recessed console
-   against --bg-raised. The same tokens in light are close enough in value AND
-   both warm-toned that the identical treatment reads as a dirty stain across
-   the whole head+stream area rather than a deliberate recess. Reaching for yet
-   another gray step doesn't fix that — it's the same trick with a smaller
-   number. Tinting with --accent instead does two things a gray step can't: it
-   reads as an intentional colour choice rather than a value error, and it ties
-   the panel to the Explain button below, which is the one other place this
-   page spends its single accent. Kept to a whisper (4-10% mix into the card's
-   own --bg-raised) so it stays a tint, not a colour block — the same restraint
-   the aurora rule already applies to this token elsewhere in the app. */
+/* In light the sunken tokens read as a stain, not a recess; a whisper of
+   --accent ties the recess to the Explain button instead. */
 :global(html[data-theme='light']) .head {
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
 }

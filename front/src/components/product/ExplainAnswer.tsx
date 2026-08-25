@@ -13,23 +13,16 @@ export interface ExplainAnswerProps {
 	className?: string;
 }
 
-/**
- * One scanner for every literal a triage answer quotes back, in priority
- * order: backtick spans first (their fences are unambiguous), then quoted
- * spans, then the token shapes. Alternation order is the priority — the
- * engine takes the earliest-listed alternative at each position, and
- * matchAll resumes past a whole match, so a fenced span chips as one literal
- * instead of being re-scanned for its parts.
- */
+/** Alternation order is the priority: backtick spans, then quoted spans,
+ *  then token shapes; matchAll resumes past a whole match. */
 const PROSE_LITERAL = new RegExp(
 	[
 		'`[^`\\n]{1,60}`',
 		'"[^"\\n]{1,58}"',
 		"'[^'\\n]{1,58}'",
 		'\\b\\d{2}:\\d{2}(?::\\d{2})?\\b',
-		// Trailing guard is (?!\\w), not \\b: \\b after '%' never holds (both
-		// sides non-word), yet "85%" is a literal the answer must chip. For the
-		// letter units the two are the same assertion.
+		// Trailing guard is (?!\\w), not \\b: \\b after '%' never holds, yet "85%"
+		// is a literal the answer must chip.
 		'\\b\\d+(?:\\.\\d+)?(?:ms|s|m|h|%)(?!\\w)',
 		'\\b\\d{3,}\\b',
 		'\\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\\b',
@@ -38,15 +31,8 @@ const PROSE_LITERAL = new RegExp(
 	'g',
 );
 
-/**
- * Prose with its literals chipped: matched spans render as mono inline code,
- * everything between them stays verbatim plain text (the paragraphs are
- * white-space: pre-wrap — nothing is trimmed, ever). Deliberately
- * conservative: "5 steps" is not a unit, an apostrophe never opens a span,
- * and a quote whose neighbours break the boundary guards is left plain
- * rather than guessed at. The clipboard builders below are NOT this — what a
- * person pastes stays plain text.
- */
+/** Prose with literals chipped into mono inline code; deliberately
+ *  conservative ("5 steps" is not a unit). Pasted text stays plain. */
 function renderProse(text: string): ReactNode[] {
 	const parts: ReactNode[] = [];
 	let cursor = 0;
@@ -58,10 +44,8 @@ function renderProse(text: string): ReactNode[] {
 		if (literal.startsWith('`')) {
 			chip = literal.slice(1, -1);
 		} else if (literal.startsWith('"') || literal.startsWith("'")) {
-			// A quote is a literal only at word boundaries: opened at string
-			// start or after breathing space, closed at the end or before
-			// punctuation. This is what keeps "checkout's" from ever opening
-			// a span.
+			// A quote is a literal only at word boundaries: opened at string start
+			// or after breathing space; this keeps "checkout's" from opening a span.
 			const before = start > 0 ? text[start - 1] : '';
 			const after = text[start + literal.length] ?? '';
 			if ((before === '' || /[\s(]/.test(before)) && (after === '' || /[\s),.;:]/.test(after))) {
@@ -95,11 +79,8 @@ function confidenceTone(confidence: string): BadgeTone {
 	return (CONFIDENCE_TONES as Record<string, BadgeTone | undefined>)[confidence] ?? 'neutral';
 }
 
-/**
- * The answer as plain text, for a ticket or a chat. The grade rides in the
- * text ("medium confidence"), not just the badge above it — plain text has no
- * colours, so the guess stays labelled wherever it is pasted.
- */
+/** The answer as plain text: the grade rides in the text ("medium
+ *  confidence"), so the guess stays labelled wherever it is pasted. */
 function explainAnswerText(result: ExplainResult): string {
 	const lines = [
 		result.problem,
@@ -117,28 +98,14 @@ function explainAnswerText(result: ExplainResult): string {
 	return lines.join('\n');
 }
 
-/**
- * The same answer plus the wire bytes the model read, for pasting into
- * another model. The [Context]/[Explanation] boundary is the point: the
- * receiving model must see where the observed lines end and the inferred
- * answer begins.
- */
+/** Answer plus the wire bytes, for another model: the [Context]/[Explanation]
+ *  boundary marks where observation ends and inference begins. */
 function explainWithContext(result: ExplainResult, lines: readonly string[]): string {
 	return `[Context]:\n${lines.join('\n')}\n\n[Explanation]:\n${explainAnswerText(result)}`;
 }
 
-/**
- * The one renderer for an AI explain answer — the logs panel and the incident
- * card ask the same question, so the answer reads the same everywhere.
- *
- * Triage law (CLAUDE.md): the problem states what the lines show as fact, the
- * cause is labelled a guess with its grade in text (Badge is a shape, the
- * grade rides inside it — never colour alone), the fix is a suggestion, and
- * every investigate step carries a runnable command in the copy grammar the
- * rest of the product already uses (CopyField for one line, CodeBlock for
- * more). The footer is a sentence, not a bar: explain quota is a count beside
- * the answer, not a track to fill.
- */
+/** The one renderer for an AI explain answer: fact, graded guess, suggestion,
+ *  runnable commands. Never colour alone; quota is a count, not a track. */
 export function ExplainAnswer({ result, lines, className }: ExplainAnswerProps) {
 	const steps = result.investigate ?? [];
 	return (
@@ -192,14 +159,8 @@ export function ExplainAnswer({ result, lines, className }: ExplainAnswerProps) 
 					</ol>
 				</div>
 			)}
-			{/* What a person forwards — to a ticket, a chat, or another model that
-			    has to check the evidence. Same pair, same labels as the incident
-			    card's triage row, through the same CopyButton: every copy
-			    affordance in the product goes through that one component. The
-			    pair has hierarchy: the answer alone is the primary action, the
-			    context variant steps back until hovered. The context variant
-			    renders only when the caller had the wire bytes — it is the heavy
-			    one, and most of the time the answer alone is the message. */}
+			{/* The forwarding pair, same labels as the incident card's triage row;
+			    the context variant renders only when the caller had the wire bytes. */}
 			<div className={styles.actions}>
 				<Tooltip
 					content="The answer on its own — the problem, the labelled guess and the steps, for a ticket or a chat."

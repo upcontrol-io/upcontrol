@@ -32,21 +32,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (meta) meta.content = theme === 'light' ? '#f2f2ef' : '#16181b';
   }, [theme]);
 
-  // Switching the theme repaints every surface at once, and doing that in a
-  // single frame is the harshest transition in the product. A View Transition
-  // crossfades the two states instead.
-  //
-  // The DOM write has to happen INSIDE the callback. `setTheme` alone only
-  // schedules a render; the `data-theme` attribute is written by the passive
-  // effect above, which runs after the transition has already captured its
-  // "before" and "after" frames — so the crossfade would blend two identical
-  // pictures and the real change would still snap. Writing the attribute
-  // imperatively here is what the snapshot sees; the effect then re-writes the
-  // same value (idempotent) and still owns localStorage and the meta colour.
-  //
-  // The reduced-motion gate is not belt-and-braces: global.css's kill rule
-  // cannot select ::view-transition-* pseudo-elements, so nothing else would
-  // stop it. (There is a CSS belt in global.css too, for any later caller.)
+  // Write the attribute inside the callback: from the effect alone the
+  // transition snapshots identical frames and the real change still snaps.
   const toggleTheme = useCallback(() => {
     const next: Theme = theme === 'dark' ? 'light' : 'dark';
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;

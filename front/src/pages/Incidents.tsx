@@ -8,11 +8,8 @@ import { invalidateApiData, useApiData } from '@/lib/useApiData';
 import { incidents as incidentsApi } from '@/lib/client';
 import styles from './Incidents.module.css';
 
-/**
- * The incident history: the latest 20, newest first — NO pagination, because
- * the contract has no parameters (public-first-split). A row opens the full
- * card with its timeline, log slice and Explain.
- */
+/** The incident history: latest 20, newest first (the contract has no
+ *  pagination); a row opens the full card with timeline, slice, Explain. */
 export function Incidents() {
 	const { loading, failed, data } = useApiData('incidents', () => incidentsApi());
 	const items = (data as { items: Incident[] } | undefined)?.items ?? [];
@@ -31,12 +28,8 @@ export function Incidents() {
 				description="Every time a check failed, with the timeline and the log slice around it."
 			/>
 			{items.length === 0 ? (
-				// Live and empty is its own fact, and on this screen it is the good
-				// one — so it gets the same room a populated list would have, not a
-				// grey sentence in the corner of an empty page. The title keeps the
-				// exact wording incidents.spec.ts pins. The body says only what is
-				// true: no incident has been recorded. It does NOT say nothing has
-				// gone down, which would be a claim about checks this page never read.
+				// Live and empty is the good fact here, with a populated list's room;
+				// the body never claims nothing went down, only nothing recorded.
 				<EmptyState
 					icon={<ErrorIcon width={22} height={22} />}
 					title="No incidents recorded."

@@ -1,6 +1,5 @@
-/* Quieter than a nav item on purpose: it is a reading, not a destination the
-   eye should be drawn to. The whole card is the link to Settings, so there is
-   no second control inside it. */
+/* Quieter than a nav item: a reading, not a destination; the whole card is
+   the link to Settings. */
 .card {
   display: flex;
   flex-direction: column;

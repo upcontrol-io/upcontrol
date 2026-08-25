@@ -5,12 +5,8 @@
   background: var(--bg-base);
 }
 
-/* Pinned, and its own scroll context. As an ordinary grid column it travelled
-   with the page, so on a long screen (Settings runs 1871px) the whole nav and
-   the Settings link left the viewport — navigation you have to scroll back up
-   to reach. The commercial shell solves it the same way (AccountShell.module
-   .css), offsetting `top` by its header; this shell has no header row above
-   the grid, so the offset is zero. */
+/* Pinned with its own scroll context: an ordinary grid column would travel
+   with the page and leave the nav behind on long screens. */
 .sidebar {
   position: sticky;
   top: 0;
@@ -83,9 +79,8 @@
   background: var(--bg-hover);
 }
 
-/* The current-item marker is a straight green bar (user decision — the one
-   named exception to the achromatic rule). A pseudo-element is not clipped
-   by the radius, so the edge stays square top to bottom. */
+/* The current-item marker: a pseudo-element, not clipped by the radius, so
+   the bar stays square top to bottom. */
 .navItemActive::before {
   content: "";
   position: absolute;
@@ -127,16 +122,11 @@
   min-width: 0;
 }
 
-/* Below 700px the sidebar sheds its nav (the fixed BottomTabBar takes over
-   navigation, thumb's reach beats a drawer) and becomes a slim sticky header:
-   brand and theme toggle only, the same pair the commercial app's header
-   keeps pinned. */
+/* Below 700px the sidebar sheds its nav (the fixed BottomTabBar takes over)
+   and becomes a slim sticky header: brand and theme toggle only. */
 @media (max-width: 700px) {
-  /* Two rows, and the second one takes the slack. Without the explicit track
-     list both rows are `auto`, `align-content` resolves to `normal`, and a grid
-     carrying `min-height: 100dvh` hands the leftover height to BOTH of them —
-     so on any page shorter than the screen a 57px header measured 246.7px and
-     ate a quarter of the phone. */
+  /* The second row takes the slack: with both tracks `auto`, the 100dvh grid
+     hands leftover height to both rows and the header eats the screen. */
   .shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;

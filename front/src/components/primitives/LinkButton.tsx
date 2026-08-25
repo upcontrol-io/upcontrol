@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import buttonStyles from './Button.module.css';
 import type { ButtonSize, ButtonVariant } from './Button';
 
-export interface LinkButtonProps {
+interface LinkButtonProps {
   variant?: ButtonVariant;
   size?: ButtonSize;
   iconLeft?: ReactNode;
@@ -14,7 +14,7 @@ export interface LinkButtonProps {
   children: ReactNode;
 }
 
-/** Same visual language as Button, for internal (`to`) or external (`href`) navigation — buttons never navigate, links do. */
+/** Button's visual language for links: buttons never navigate, links do. */
 export function LinkButton({ variant = 'secondary', size = 'md', iconLeft, iconRight, to, href, className, children }: LinkButtonProps) {
   const classes = [buttonStyles.button, buttonStyles[variant], buttonStyles[size], className].filter(Boolean).join(' ');
   const content = (

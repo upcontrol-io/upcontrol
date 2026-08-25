@@ -1,9 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { DEV_TOKEN, EMAIL, stubApi, stubSignedOut } from "./fixtures/api";
 
-// Two auth modes, two promises: signed out, the two-step form (email → code)
-// signs you in; and when /v1/me already answers — the UC_AUTH=none posture —
-// /signin is not a place, just a door that forwards into the app.
+// Two auth modes: signed out, the two-step form signs you in; signed in
+// (UC_AUTH=none), /signin just forwards into the app.
 
 test("the two-step form signs you in: email, then the code", async ({ page }) => {
 	await stubSignedOut(page);

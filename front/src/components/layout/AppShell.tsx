@@ -14,25 +14,11 @@ import { WiringCard } from './WiringCard';
 import { Wordmark } from './Wordmark';
 import styles from './AppShell.module.css';
 
-/** The self-host app frame: the animated brand lockup (mark + bitmap word,
- *  typewriter on hover — the same header every surface of the product
- *  wears), a grouped nav, content. Prefix matching on NavLink is wanted here —
- *  /monitors/{id} keeps Monitors current.
- *
- *  Two groups above (the moment-to-moment feed, then configuration) and
- *  Settings pinned below a spacer — the commercial app's "Project" group
- *  plus a settings door, minus the Workspace group this single-project
- *  instance has no use for (docs/rules/app.md).
- *
- *  `uc-app` scopes global.css's phone touch-target floor (44px on every
- *  button/[role=button] below 700px) to this tree, the same way the
- *  commercial app's AccountShell does — without it every hand-styled
- *  control in this app ships its desktop size to the phone (rehearsal-driven
- *  mobile pass, 2026-08-20). */
-/** One run of nav links under its own label. The two groups used to be told
- *  apart by a 20px gap and nothing else, which reads as a stray space rather
- *  than as a boundary. A word costs less than the bordered group cards the
- *  commercial sidebar wears, and four items do not need that much chrome. */
+/** The self-host app frame: brand lockup, grouped nav, content. Prefix
+ *  matching on NavLink is wanted: /monitors/{id} keeps Monitors current. */
+
+/** One run of nav links under its own label, so a group boundary reads as a
+ *  boundary, not a stray gap. */
 function NavGroup({ label, items }: { label: string; items: AppNavItem[] }) {
 	return (
 		<div className={styles.navGroup}>
@@ -54,7 +40,7 @@ function NavGroup({ label, items }: { label: string; items: AppNavItem[] }) {
 
 export function AppShell() {
 	return (
-		<div className={[styles.shell, 'uc-app'].join(' ')}>
+		<div className={[styles.shell, 'uc-app'].join(' ')}> {/* scopes global.css's phone touch floor */}
 			<aside className={styles.sidebar}>
 				<div className={styles.brandRow}>
 					<Wordmark className={styles.wordmark} size={16} />

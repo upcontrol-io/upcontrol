@@ -1,7 +1,5 @@
-/* Same rationale as the commercial app's bar: floats clear of the edges so
-   glass has content to show through, rather than sitting flush across the
-   bottom with page background under three of its four sides.
-   Only rendered ≤700px — AppShell's sidebar owns the rest. */
+/* Floats clear of the edges so glass has content to show through; only
+   rendered below 700px, where AppShell's sidebar hands over. */
 .bar {
   display: none;
   position: fixed;
@@ -18,9 +16,8 @@
   }
 }
 
-/* The lozenge behind the current tab: one element that slides, five cells
-   wide here (PRIMARY_NAV's four plus More) — `--tab-index` is all the
-   component supplies. */
+/* The lozenge behind the current tab: one sliding element; --tab-index is
+   all the component supplies. */
 .indicator {
   position: absolute;
   z-index: -1;

@@ -35,8 +35,7 @@ test("creating a check round-trips through the API and the re-read", async ({ pa
 });
 
 // The /public/check answer the onboarding consumes: one live-probe row plus
-// two sitemap pages, two of the three recommended — mirrors the web
-// version's discovery shape exactly.
+// two sitemap pages, two of three recommended.
 const CHECK = {
 	groups: [
 		{

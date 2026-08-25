@@ -3,7 +3,7 @@ import { Button } from './Button';
 import { Input } from './Input';
 import styles from './ConfirmPanel.module.css';
 
-export interface ConfirmPanelProps {
+interface ConfirmPanelProps {
   explanation: string;
   /** If set, the user must type this exact phrase; otherwise a 4-digit PIN is required. */
   typedConfirmation?: string;
@@ -12,7 +12,7 @@ export interface ConfirmPanelProps {
   onCancel: () => void;
 }
 
-/** Inline double-confirmation for destructive actions — never a native confirm() (brief §5). */
+/** Inline double-confirmation for destructive actions, never confirm(). */
 export function ConfirmPanel({ explanation, typedConfirmation, confirmLabel, onConfirm, onCancel }: ConfirmPanelProps) {
   const [value, setValue] = useState('');
   const ready = typedConfirmation ? value === typedConfirmation : value.length === 4;

@@ -13,7 +13,7 @@ export interface CopyButtonProps {
   onCopied?: () => void;
 }
 
-/** Copy → Copied! for 2s → revert. Every copy affordance in the product goes through this one component. */
+/** Copy -> Copied! for 2s -> revert; every copy affordance goes through this. */
 export function CopyButton({ text, size = 'sm', className, label = 'Copy', onCopied }: CopyButtonProps) {
   const [copied, copy] = useCopyToClipboard();
 

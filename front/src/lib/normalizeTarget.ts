@@ -1,9 +1,5 @@
-/**
- * "upcontrol.io", "https://upcontrol.io/" and "UPCONTROL.IO" all mean the same address:
- * a missing scheme gets https://, a single trailing slash goes. How the
- * address was typed may not be the reason a check fails to create — the
- * probe needs a URL, the human typed a name.
- */
+/** A bare domain gets https:// and loses its trailing slash: the probe needs
+ *  a URL; the human typed a name. */
 export function normalizeTarget(raw: string): string {
 	let value = raw.trim();
 	if (!value) return value;
@@ -11,10 +7,7 @@ export function normalizeTarget(raw: string): string {
 	return value.replace(/\/$/, '');
 }
 
-/**
- * The discovery door wants a bare host: whatever spelling arrived — scheme,
- * path, trailing slash — collapses to the hostname.
- */
+/** Collapses any spelling of an address to the hostname the discovery door wants. */
 export function normalizeHost(raw: string): string {
 	return raw
 		.trim()

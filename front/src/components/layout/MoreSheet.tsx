@@ -9,12 +9,8 @@ interface MoreSheetProps {
 	onClose: () => void;
 }
 
-/**
- * The bottom sheet behind the phone tab bar's More cell — the sections with
- * no cell of their own: Sources, Status, Settings. A sheet rather than
- * `Modal` because Modal is a centered confirmation panel; this is
- * navigation, anchored to the thumb like the bar that opened it.
- */
+/** The bottom sheet behind the phone tab bar's More cell: the sections with
+ *  no cell of their own; a sheet, not Modal, because this is navigation. */
 export function MoreSheet({ open, onClose }: MoreSheetProps) {
 	useDismissible(open, onClose);
 

@@ -1,8 +1,8 @@
 import styles from './StatusDot.module.css';
 
-export type Status = 'ok' | 'check' | 'down' | 'nodata' | 'paused';
+type Status = 'ok' | 'check' | 'down' | 'nodata' | 'paused';
 
-export interface StatusDotProps {
+interface StatusDotProps {
   status: Status;
   label?: string;
   className?: string;
@@ -16,7 +16,8 @@ const DEFAULT_LABEL: Record<Status, string> = {
   paused: 'Paused',
 };
 
-/** Status is never color alone (brief §5): dot shape differs per state, and a label always accompanies it. */
+/** Status is never color alone: dot shape differs per state, and a label
+ *  always accompanies it. */
 export function StatusDot({ status, label, className }: StatusDotProps) {
   const text = label ?? DEFAULT_LABEL[status];
   return (

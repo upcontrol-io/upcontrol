@@ -8,9 +8,9 @@ export interface ActionBarItem {
   variant: ButtonVariant;
   onFire: () => void;
   icon?: ReactNode;
-  /** Says what the button actually does before it is pressed — never a native title (brief §2.1). */
+  /** Says what the button does before it is pressed, never a native title. */
   tooltip?: string;
-  /** Danger actions always double-confirm with a PIN before firing (brief §5 / §2.4). */
+  /** Danger actions always double-confirm with a PIN before firing. */
   confirmExplanation?: string;
 }
 

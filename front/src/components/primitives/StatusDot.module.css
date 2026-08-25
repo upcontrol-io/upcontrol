@@ -25,7 +25,8 @@
   background: var(--down);
 }
 
-/* nodata is never a solid color alone — hatched fill + border makes it distinct in shape, not just hue. */
+/* nodata is never color alone: hatched fill + border make it distinct in
+   shape, not just hue. */
 .nodata {
   border: 1px solid var(--nodata);
   background: repeating-linear-gradient(135deg, var(--nodata) 0 1px, transparent 1px 3px);

@@ -11,9 +11,8 @@ export interface WordmarkProps {
 
 type Px = [x: number, y: number];
 
-// The kit's own 5-wide bitmap alphabet, local pixels per letter, copied
-// verbatim. Cap-height letters (U, C, t, l) run y:0-6; x-height letters
-// (o, n, r) run y:2-6; p keeps the x-height top but descends to y:8.
+// The kit's 5-wide bitmap alphabet. Cap-height letters run y:0-6, x-height
+// y:2-6; p keeps the x-height top but descends to y:8.
 const GLYPHS: Record<string, Px[]> = {
 	U: [[0,0],[0,1],[0,2],[0,3],[0,4],[0,5],[4,0],[4,1],[4,2],[4,3],[4,4],[4,5],[1,6],[2,6],[3,6]],
 	p: [[0,2],[0,3],[0,4],[0,5],[0,6],[0,7],[0,8],[1,2],[2,2],[3,2],[4,3],[4,4],[1,5],[2,5],[3,5]],
@@ -42,20 +41,9 @@ const VB_Y = -1;
 const VB_W = 48;
 const VB_H = 11;
 
-/**
- * Mark + name, the way every header in the product shows the brand. Both
- * halves are the kit's own pixel language: the mark is BrandMark's 16x16
- * grid, the word is its 5-wide bitmap alphabet, so the lockup reads as one
- * drawn object rather than an icon beside a web-font label.
- *
- * The word plays the kit's 3a Typewriter on hover only: at rest every letter
- * is visible; hovering restarts the reveal on the kit's own 0.117s-per-letter
- * step grid behind a travelling var(--ok) caret, which parks and blinks once
- * the word is complete. Un-hovering removes every animation, so the word is
- * instantly whole again — this is a decoration on the resting logotype, not
- * a loading state. The mechanics (letters, carets) live in
- * Wordmark.module.css.
- */
+/** Mark + name, the header's brand lockup. The word plays the kit's Typewriter
+ *  on hover only (mechanics in Wordmark.module.css), never at rest. */
+
 // One step up from the mark's own size — the word reads a size larger than
 // the icon beside it, which is the visual balance every header carries.
 const WORD_SIZE_STEP = 2;

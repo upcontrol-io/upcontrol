@@ -11,13 +11,8 @@ export interface CopyFieldProps {
   onCopied?: () => void;
 }
 
-/**
- * A read-only value in a field with its copy control inside the right edge
- * (user decision, Aug 14, 2026). One grammar for every copyable thing — a
- * webhook URL, an install command, a public status address: a bordered button
- * next to a bordered field read as two fields, and a blob with one big Copy
- * under it made the reader copy directions along with the command.
- */
+/** A read-only value in a field with the copy control inside its right edge:
+ *  one grammar for every copyable thing, button inside the field. */
 export function CopyField({ text, display, className, onCopied }: CopyFieldProps) {
   return (
     <div className={[styles.field, className].filter(Boolean).join(' ')}>
