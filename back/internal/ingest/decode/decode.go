@@ -535,7 +535,7 @@ func toString(v any) string {
 	case string:
 		return t
 	case float64:
-		return trimFloat(t)
+		return formatFloat(t)
 	case bool:
 		if t {
 			return "true"
@@ -547,17 +547,6 @@ func toString(v any) string {
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
-}
-
-func trimFloat(f float64) string {
-	s := strings.TrimRight(strings.TrimRight(
-		strings.TrimPrefix(
-			strings.TrimRight(
-				strings.TrimRight(formatFloat(f), "0"), "."), ""), " "), " ")
-	if s == "" || s == "-" {
-		return "0"
-	}
-	return s
 }
 
 // formatFloat avoids pulling strconv into the hot path; json.Marshal of a

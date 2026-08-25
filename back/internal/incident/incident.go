@@ -4,13 +4,13 @@ package incident
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -424,11 +424,7 @@ func fingerprint(monitorID int64, detector string) uint64 {
 
 // newUUID generates a v4 UUID for the incident's public_id.
 func newUUID() pgtype.UUID {
-	var u [16]byte
-	_, _ = rand.Read(u[:])
-	u[6] = (u[6] & 0x0f) | 0x40
-	u[8] = (u[8] & 0x3f) | 0x80
-	return pgtype.UUID{Bytes: u, Valid: true}
+	return pgtype.UUID{Bytes: uuid.New(), Valid: true}
 }
 
 // uuidStr renders a pgtype.UUID as lowercase hex without dashes (matches the
