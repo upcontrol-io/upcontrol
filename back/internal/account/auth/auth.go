@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -565,11 +566,7 @@ func NameFromEmail(email string) string {
 }
 
 func newUUID() pgtype.UUID {
-	var u [16]byte
-	_, _ = rand.Read(u[:])
-	u[6] = (u[6] & 0x0f) | 0x40
-	u[8] = (u[8] & 0x3f) | 0x80
-	return pgtype.UUID{Bytes: u, Valid: true}
+	return pgtype.UUID{Bytes: uuid.New(), Valid: true}
 }
 
 func uuidStr(u pgtype.UUID) string {
