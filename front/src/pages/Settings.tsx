@@ -17,6 +17,29 @@ import styles from './Settings.module.css';
 /** How long a rotated key keeps working, so a deployed app can catch up. */
 const ROTATE_OVERLAP = '24 hours';
 
+function useSectionAction() {
+	const [busy, setBusy] = useState(false);
+	const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null);
+	async function run(fn: () => Promise<string>, fallback: string, useServerMessage = true) {
+		if (busy) return;
+		setBusy(true);
+		setNote(null);
+		try {
+			setNote({ text: await fn(), failed: false });
+		} catch (err) {
+			// The server's own refusal names the fix; anything else is the
+			// generic transport line.
+			setNote({
+				text: useServerMessage && err instanceof Error && err.message !== 'unauthorized' ? err.message : fallback,
+				failed: true,
+			});
+		} finally {
+			setBusy(false);
+		}
+	}
+	return { busy, note, run };
+}
+
 /** The instance's few real knobs. Project name is the status page's title (the
  *  only name with a write behind it); the ingest key arrives via install token. */
 export function Settings() {
@@ -48,20 +71,17 @@ export function Settings() {
 	const [aiKey, setAiKey] = useState('');
 	const [aiModelField, setAiModelField] = useState('');
 	const [aiBaseURL, setAiBaseURL] = useState('');
-	const [aiBusy, setAiBusy] = useState(false);
-	const [aiNote, setAiNote] = useState<{ text: string; failed: boolean } | null>(null);
+	const ai = useSectionAction();
 	const [aiRemoveAsking, setAiRemoveAsking] = useState(false);
 	const [tgToken, setTgToken] = useState('');
 	const [tgUsername, setTgUsername] = useState('');
-	const [tgBusy, setTgBusy] = useState(false);
-	const [tgNote, setTgNote] = useState<{ text: string; failed: boolean } | null>(null);
+	const tg = useSectionAction();
 	const [smtpHost, setSmtpHost] = useState('');
 	const [smtpPort, setSmtpPort] = useState('');
 	const [smtpUsername, setSmtpUsername] = useState('');
 	const [smtpPassword, setSmtpPassword] = useState('');
 	const [smtpFrom, setSmtpFrom] = useState('');
-	const [smtpBusy, setSmtpBusy] = useState(false);
-	const [smtpNote, setSmtpNote] = useState<{ text: string; failed: boolean } | null>(null);
+	const smtp = useSectionAction();
 	const [smtpRemoveAsking, setSmtpRemoveAsking] = useState(false);
 
 	useEffect(() => {
@@ -132,70 +152,47 @@ export function Settings() {
 		if (aiKey.trim()) values.key = aiKey.trim();
 		if (aiModelField.trim()) values.model = aiModelField.trim();
 		if (aiBaseURL.trim()) values.baseUrl = aiBaseURL.trim();
-		if (aiBusy || Object.keys(values).length === 0) return;
-		setAiBusy(true);
-		setAiNote(null);
-		try {
-			await instance.putAI(values);
-			setAiKey('');
-			setAiModelField('');
-			setAiBaseURL('');
-			invalidateApiData('aiBrain');
-			setAiNote({ text: 'Saved. Explain answers with these settings from the next question on.', failed: false });
-		} catch (err) {
-			// The server's own refusal names the fix; anything else is the
-			// generic transport line.
-			setAiNote({
-				text: err instanceof Error && err.message !== 'unauthorized' ? err.message : 'Could not save. Try again.',
-				failed: true,
-			});
-		} finally {
-			setAiBusy(false);
-		}
+		if (Object.keys(values).length === 0) return;
+		await ai.run(
+			async () => {
+				await instance.putAI(values);
+				setAiKey('');
+				setAiModelField('');
+				setAiBaseURL('');
+				invalidateApiData('aiBrain');
+				return 'Saved. Explain answers with these settings from the next question on.';
+			},
+			'Could not save. Try again.',
+		);
 	}
 
 	async function removeAI() {
-		if (aiBusy) return;
-		setAiBusy(true);
-		setAiNote(null);
-		try {
-			await instance.deleteAI();
-			invalidateApiData('aiBrain');
-			setAiNote({
-				text: 'Removed. If the server env still carries AI settings, Explain keeps using those; otherwise Explain is off.',
-				failed: false,
-			});
-		} catch {
-			setAiNote({ text: 'Could not remove the settings. Try again.', failed: true });
-		} finally {
-			setAiBusy(false);
-			setAiRemoveAsking(false);
-		}
+		await ai.run(
+			async () => {
+				await instance.deleteAI();
+				invalidateApiData('aiBrain');
+				return 'Removed. If the server env still carries AI settings, Explain keeps using those; otherwise Explain is off.';
+			},
+			'Could not remove the settings. Try again.',
+			false,
+		);
+		setAiRemoveAsking(false);
 	}
 
 	async function saveTelegramBot() {
 		const token = tgToken.trim();
 		const username = tgUsername.trim();
-		if (!token || !username || tgBusy) return;
-		setTgBusy(true);
-		setTgNote(null);
-		try {
-			await instance.putTelegramBot(token, username);
-			setTgToken('');
-			setTgUsername('');
-			invalidateApiData('channels');
-			setTgNote({
-				text: 'Saved. Alerts and invites work now; the bot starts polling within a minute, and Mini App sign-in joins after the next restart.',
-				failed: false,
-			});
-		} catch (err) {
-			setTgNote({
-				text: err instanceof Error && err.message !== 'unauthorized' ? err.message : 'Could not save the bot. Try again.',
-				failed: true,
-			});
-		} finally {
-			setTgBusy(false);
-		}
+		if (!token || !username) return;
+		await tg.run(
+			async () => {
+				await instance.putTelegramBot(token, username);
+				setTgToken('');
+				setTgUsername('');
+				invalidateApiData('channels');
+				return 'Saved. Alerts and invites work now; the bot starts polling within a minute, and Mini App sign-in joins after the next restart.';
+			},
+			'Could not save the bot. Try again.',
+		);
 	}
 
 	async function saveSMTP() {
@@ -205,43 +202,31 @@ export function Settings() {
 		if (smtpUsername.trim()) values.username = smtpUsername.trim();
 		if (smtpPassword.trim()) values.password = smtpPassword.trim();
 		if (smtpFrom.trim()) values.from = smtpFrom.trim();
-		if (smtpBusy || Object.keys(values).length === 0) return;
-		setSmtpBusy(true);
-		setSmtpNote(null);
-		try {
-			await instance.putSMTP(values);
-			setSmtpHost('');
-			setSmtpPort('');
-			setSmtpUsername('');
-			setSmtpPassword('');
-			setSmtpFrom('');
-			setSmtpNote({ text: 'Saved. Sign-in mail and email alerts use this relay from the next send on.', failed: false });
-		} catch (err) {
-			setSmtpNote({
-				text: err instanceof Error && err.message !== 'unauthorized' ? err.message : 'Could not save. Try again.',
-				failed: true,
-			});
-		} finally {
-			setSmtpBusy(false);
-		}
+		if (Object.keys(values).length === 0) return;
+		await smtp.run(
+			async () => {
+				await instance.putSMTP(values);
+				setSmtpHost('');
+				setSmtpPort('');
+				setSmtpUsername('');
+				setSmtpPassword('');
+				setSmtpFrom('');
+				return 'Saved. Sign-in mail and email alerts use this relay from the next send on.';
+			},
+			'Could not save. Try again.',
+		);
 	}
 
 	async function removeSMTP() {
-		if (smtpBusy) return;
-		setSmtpBusy(true);
-		setSmtpNote(null);
-		try {
-			await instance.deleteSMTP();
-			setSmtpNote({
-				text: 'Removed. If the server env still carries SMTP settings, mail keeps using those; otherwise sign-in codes land in the ucapi log.',
-				failed: false,
-			});
-		} catch {
-			setSmtpNote({ text: 'Could not remove the settings. Try again.', failed: true });
-		} finally {
-			setSmtpBusy(false);
-			setSmtpRemoveAsking(false);
-		}
+		await smtp.run(
+			async () => {
+				await instance.deleteSMTP();
+				return 'Removed. If the server env still carries SMTP settings, mail keeps using those; otherwise sign-in codes land in the ucapi log.';
+			},
+			'Could not remove the settings. Try again.',
+			false,
+		);
+		setSmtpRemoveAsking(false);
 	}
 
 	return (
@@ -354,9 +339,9 @@ export function Settings() {
 					<Button
 						type="submit"
 						variant="secondary"
-						disabled={aiBusy || (!aiKey.trim() && !aiModelField.trim() && !aiBaseURL.trim())}
+						disabled={ai.busy || (!aiKey.trim() && !aiModelField.trim() && !aiBaseURL.trim())}
 					>
-						{aiBusy ? 'Saving…' : 'Save AI settings'}
+						{ai.busy ? 'Saving…' : 'Save AI settings'}
 					</Button>
 				</form>
 				<span className={styles.hint}>
@@ -365,15 +350,15 @@ export function Settings() {
 					you are changing — empty fields keep their current value. Everything is stored encrypted and
 					never shown again.
 				</span>
-				{aiNote && (
-					<span className={aiNote.failed ? styles.tokenError : styles.hint}>{aiNote.text}</span>
+				{ai.note && (
+					<span className={ai.note.failed ? styles.tokenError : styles.hint}>{ai.note.text}</span>
 				)}
 				{aiModel != null && (
 					<div className={styles.rotateRow}>
 						{aiRemoveAsking ? (
 							<>
 								<span className={styles.hint}>Remove the AI settings saved here?</span>
-								<Button variant="danger" size="sm" disabled={aiBusy} onClick={() => void removeAI()}>
+								<Button variant="danger" size="sm" disabled={ai.busy} onClick={() => void removeAI()}>
 									Remove
 								</Button>
 								<Button variant="ghost" size="sm" onClick={() => setAiRemoveAsking(false)}>
@@ -423,15 +408,15 @@ export function Settings() {
 						aria-label="Telegram bot username"
 						autoComplete="off"
 					/>
-					<Button type="submit" variant="secondary" disabled={!tgToken.trim() || !tgUsername.trim() || tgBusy}>
-						{tgBusy ? 'Saving…' : 'Save bot'}
+					<Button type="submit" variant="secondary" disabled={!tgToken.trim() || !tgUsername.trim() || tg.busy}>
+						{tg.busy ? 'Saving…' : 'Save bot'}
 					</Button>
 				</form>
 				<span className={styles.hint}>
 					The token exactly as @BotFather printed it, and the bot's username (without @) — it makes the{' '}
 					<code>t.me</code> links. Both are stored encrypted and never shown again.
 				</span>
-				{tgNote && <span className={tgNote.failed ? styles.tokenError : styles.hint}>{tgNote.text}</span>}
+				{tg.note && <span className={tg.note.failed ? styles.tokenError : styles.hint}>{tg.note.text}</span>}
 			</section>
 
 			<section className={styles.section}>
@@ -487,25 +472,25 @@ export function Settings() {
 						type="submit"
 						variant="secondary"
 						disabled={
-							smtpBusy ||
+							smtp.busy ||
 							(!smtpHost.trim() && !smtpPort.trim() && !smtpUsername.trim() && !smtpPassword.trim() && !smtpFrom.trim())
 						}
 					>
-						{smtpBusy ? 'Saving…' : 'Save email relay'}
+						{smtp.busy ? 'Saving…' : 'Save email relay'}
 					</Button>
 				</form>
 				<span className={styles.hint}>
 					Any relay works (Mailgun, SES, Postmark, your own Postfix). Fill only what you are changing —
 					empty fields keep their current value. Everything is stored encrypted and never shown again.
 				</span>
-				{smtpNote && <span className={smtpNote.failed ? styles.tokenError : styles.hint}>{smtpNote.text}</span>}
+				{smtp.note && <span className={smtp.note.failed ? styles.tokenError : styles.hint}>{smtp.note.text}</span>}
 				{/* Unconditional, unlike the AI block above (which reads its state):
 				    SMTP is write-only, so a DELETE-on-nothing no-op is the honest option. */}
 				<div className={styles.rotateRow}>
 					{smtpRemoveAsking ? (
 						<>
 							<span className={styles.hint}>Remove the email relay saved here?</span>
-							<Button variant="danger" size="sm" disabled={smtpBusy} onClick={() => void removeSMTP()}>
+							<Button variant="danger" size="sm" disabled={smtp.busy} onClick={() => void removeSMTP()}>
 								Remove
 							</Button>
 							<Button variant="ghost" size="sm" onClick={() => setSmtpRemoveAsking(false)}>
