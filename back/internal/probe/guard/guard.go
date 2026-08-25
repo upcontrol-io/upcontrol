@@ -1,20 +1,5 @@
-// Package guard is the SSRF frontier (plan §5.2, §6.1). Before a probe connects
-// to any IP, the guard checks it against the blocked ranges. The check runs
-// AFTER DNS resolution (so the IP is known, defeating DNS rebinding) and on
-// EVERY redirect (so a redirect to an internal address is caught).
-//
-// Blocked ranges:
-//   - RFC 1918 private (10/8, 172.16/12, 192.168/16)
-//   - Loopback (127/8, ::1)
-//   - Link-local incl. cloud metadata (169.254/16, fe80::/10)
-//   - Unspecified (0.0.0.0, ::)
-//   - CGNAT (100.64/10)
-//   - ULA (fc00::/7)
-//   - IPv4-mapped IPv6 (::ffff:0.0.0.0/96) to prevent bypassing via IPv6
-//
-// A blocked target returns ErrBlockedTarget, which the executor maps to
-// ERROR_CLASS_BLOCKED_TARGET in the probe result. This is the one error class
-// that cannot be confused with a real outage: the check was refused by us.
+// Package guard is the SSRF frontier: every IP is checked against blocked
+// ranges after DNS and on every redirect; blocked means refused, not an outage.
 package guard
 
 import (
@@ -29,7 +14,7 @@ import (
 var ErrBlockedTarget = errors.New("guard: target is in a blocked range")
 
 // allowedPorts are the only ports a probe may connect to without explicit user
-// configuration. The plan (§6.1): only 80, 443, and user-explicitly-allowed.
+// configuration: 80, 443, and the scheme default.
 var allowedPorts = map[string]bool{"": true, "80": true, "443": true}
 
 // blockedNets is the list of IP ranges a probe may never reach. It is computed
@@ -48,10 +33,8 @@ func init() {
 		"::1/128",        // IPv6 loopback
 		"fc00::/7",       // Unique Local Addresses
 		"fe80::/10",      // IPv6 link-local
-		// ::ffff:0.0.0.0/96 is intentionally NOT listed — it covers ALL IPv4
-		// addresses because Go stores them as IPv4-mapped IPv6. The stdlib
-		// checks (IsLoopback, IsLinkLocalUnicast, IsPrivate) already handle
-		// IPv4-mapped bypass of private ranges via To4().
+		// ::ffff:0.0.0.0/96 is intentionally NOT listed: Go stores IPv4 as
+		// IPv4-mapped IPv6, and the stdlib checks handle it via To4().
 	} {
 		_, n, _ := net.ParseCIDR(cidr)
 		blockedNets = append(blockedNets, n)
@@ -75,9 +58,8 @@ func CheckIP(ip net.IP) error {
 	return nil
 }
 
-// CheckResolvedIPs checks ALL IPs returned by a DNS lookup. If ANY is blocked,
-// the target is rejected — a domain that resolves to both a public and a
-// private IP is treated as blocked (it could rotate to the private one).
+// CheckResolvedIPs checks ALL IPs from a lookup; if ANY is blocked the target
+// is rejected (a public+private domain could rotate to the private one).
 func CheckResolvedIPs(ips []net.IP) error {
 	for _, ip := range ips {
 		if err := CheckIP(ip); err != nil {
@@ -87,9 +69,8 @@ func CheckResolvedIPs(ips []net.IP) error {
 	return nil
 }
 
-// CheckURL validates that a URL's scheme is http/https and its port is allowed.
-// It does NOT resolve DNS (the caller resolves, then calls CheckIP/CheckResolvedIPs).
-// The scheme/port check runs before DNS to reject obviously bad targets early.
+// CheckURL validates scheme (http/https) and port; it does NOT resolve DNS.
+// The scheme/port check runs before DNS to reject bad targets early.
 func CheckURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -113,8 +94,8 @@ func CheckURL(rawURL string) error {
 	return nil
 }
 
-// AllowedRedirectURL checks a redirect target the same way CheckURL does. Called
-// on every hop of a redirect chain (the plan: ≤5 redirects, each re-checked).
+// AllowedRedirectURL checks a redirect target the same way CheckURL does,
+// on every hop of a redirect chain.
 func AllowedRedirectURL(rawURL string) error {
 	return CheckURL(rawURL)
 }

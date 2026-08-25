@@ -34,8 +34,8 @@ type sendRequest struct {
 	Vars     map[string]string `json:"vars"`
 }
 
-// NewAgent refuses an empty URL the way NewSMTP refuses a half config: a
-// mailer pointed at nothing must fail at boot, not on the first message.
+// NewAgent refuses an empty URL: a mailer pointed at nothing must fail at
+// boot, not on the first message.
 func NewAgent(url, key string, log *slog.Logger) (*Agent, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, errors.New("mailer: UC_EMAIL_URL is empty")

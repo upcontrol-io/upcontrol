@@ -2,8 +2,8 @@ package normalize
 
 import "testing"
 
-// TestDictionarySize pins the frozen dictionary at exactly 24 events. Adding or
-// removing a name is a major version (plan §4.3); this test makes that explicit.
+// TestDictionarySize pins the frozen dictionary at exactly 24 events; adding
+// or removing a name is a major version, and this test makes that explicit.
 func TestDictionarySize(t *testing.T) {
 	if got := len(canonical); got != 24 {
 		t.Fatalf("canonical dictionary has %d events, want exactly 24", got)

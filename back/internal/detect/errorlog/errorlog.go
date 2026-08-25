@@ -1,17 +1,5 @@
-// Package errorlog is the notification scanner behind the "Error logs" and
-// "Repeating error logs" channel settings (docs/plans/channel-notify-settings.md).
-// Every 60 seconds (a ucworker job, behind an advisory lock) it aggregates the
-// recent error lines by fingerprint — aggregates, never raw rows (invariant 2),
-// through ring.QueryBuilder (invariant 4) — and enqueues class `ticket`
-// deliveries for the channels that subscribed:
-//
-//   - errorLogs: "an error APPEARED", never "a line arrived" — a fingerprint
-//     alerts at most once per NewErrorCooldown, whatever its line count;
-//   - repeatingErrorLogs: the same fingerprint counted ≥ RepeatThreshold times
-//     inside the channel's window, re-firing no sooner than one window later.
-//
-// error_alert_state (Postgres) is the scanner's memory of what it already
-// alerted; without it a persisting error would page again on every tick.
+// Package errorlog scans aggregated error fingerprints for the "Error logs"
+// and "Repeating error logs" channels; error_alert_state is what it already alerted.
 package errorlog
 
 import (
@@ -36,9 +24,8 @@ const (
 	// RepeatThreshold is how many lines inside the window make an error
 	// "repeating".
 	RepeatThreshold = 2
-	// Lookback is how far behind now() the "appeared" check reaches — wide
-	// enough to overlap two 60s ticks, narrow enough that an error from this
-	// morning is not "new".
+	// Lookback is how far behind now() the "appeared" check reaches: wide
+	// enough to overlap two 60s ticks, narrow enough for "new" to mean new.
 	Lookback = 2 * time.Minute
 	// maxTitle keeps a log message from becoming a page-long subject line.
 	maxTitle = 120
@@ -54,9 +41,8 @@ type Group struct {
 	LastTS      time.Time
 }
 
-// ShouldFireNew decides the errorLogs category: activity inside the lookback,
-// and the fingerprint not alerted within the cooldown. lastAlerted is nil when
-// the fingerprint never alerted.
+// ShouldFireNew decides the errorLogs category: activity inside the lookback
+// and the fingerprint not alerted within the cooldown (nil = never alerted).
 func ShouldFireNew(g Group, lastAlerted *time.Time, now time.Time) bool {
 	if now.Sub(g.LastTS) > Lookback {
 		return false // old noise, not something that just appeared
@@ -64,10 +50,8 @@ func ShouldFireNew(g Group, lastAlerted *time.Time, now time.Time) bool {
 	return lastAlerted == nil || now.Sub(*lastAlerted) >= NewErrorCooldown
 }
 
-// ShouldFireRepeat decides the repeatingErrorLogs category: the count crossed
-// the threshold inside the channel's window, and the last repeat alert is at
-// least one window old — so a steadily-repeating error pages once per window,
-// not once per tick.
+// ShouldFireRepeat decides the repeatingErrorLogs category: count crossed
+// the threshold inside the window and the last alert is one window old or more.
 func ShouldFireRepeat(g Group, lastAlerted *time.Time, window time.Duration, now time.Time) bool {
 	if g.Count < RepeatThreshold {
 		return false
@@ -121,9 +105,8 @@ type subscription struct {
 	settings  notifysettings.Settings
 }
 
-// Tick runs one scan pass over every tenant that has at least one subscribed
-// channel. Tenants without subscriptions cost nothing — not even a ClickHouse
-// query.
+// Tick runs one scan pass over every tenant with at least one subscribed
+// channel; tenants without subscriptions cost nothing, not even a query.
 func (s *Scanner) Tick(ctx context.Context) error {
 	q := s.pool.Queries()
 	rows, err := q.ListErrorSubscribedChannels(ctx)
@@ -149,9 +132,8 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 	now := time.Now()
 	q := s.pool.Queries()
 
-	// What this tenant's channels actually asked for: the distinct repeat
-	// windows (each gets its own aggregate query, so a channel's count is
-	// measured inside ITS window) and whether anyone wants the "appeared" pass.
+	// What this tenant's channels asked for: the distinct repeat windows (each
+	// gets its own aggregate query) and whether anyone wants the "appeared" pass.
 	windows := map[int]bool{}
 	needNew := false
 	for _, sub := range subs {
@@ -206,8 +188,7 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 	}
 
 	// The "repeating" pass: one query per distinct window among this tenant's
-	// channels (usually one), so each channel's count is measured inside its
-	// own window.
+	// channels, so each channel's count is measured inside its own window.
 	for windowMin := range windows {
 		window := time.Duration(windowMin) * time.Minute
 		groups, gerr := s.errorGroups(ctx, tenantID, now.Add(-window))
@@ -233,8 +214,7 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 }
 
 // errorGroups aggregates error lines by fingerprint across every project of
-// the tenant, each behind its own ring cutoff (invariant 4: a displaced line
-// must not page anybody).
+// the tenant, each behind its own ring cutoff (a displaced line must not page).
 func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Time) ([]Group, error) {
 	projRows, err := s.pool.Raw().Query(ctx, `SELECT id FROM project WHERE tenant_id = $1`, tenantID)
 	if err != nil {
@@ -283,15 +263,8 @@ func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Ti
 	return groups, nil
 }
 
-// enqueue puts one class-`ticket` delivery on the queue — a log alert is not a
-// page. Idem-keyed per channel+fingerprint+kind+minute, so a replayed tick
-// collapses instead of double-sending.
-//
-// The group travels with the alert, not just its title: the title is truncated
-// to fit one line on a lock screen, and the reader who opens the alert wants
-// the service, the count and the message in full. Every field here is one the
-// scanner measured — windowMin is 0 for the "appeared" pass, which has no
-// window, and the row is omitted rather than sent as "0 min".
+// enqueue puts one class-`ticket` delivery on the queue (a log alert is not
+// a page), idem-keyed per channel+fingerprint+kind+minute so a replay collapses.
 func (s *Scanner) enqueue(ctx context.Context, tenantID, channelID int64, g Group, kind, title string, windowMin int, now time.Time) {
 	fields := []deliver.Field{}
 	if g.Service != "" {

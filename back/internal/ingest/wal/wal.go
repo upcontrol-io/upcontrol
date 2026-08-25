@@ -1,18 +1,5 @@
-// Package wal is the ingest write-ahead log. Every batch is appended here and
-// fsync'd BEFORE the HTTP receipt is sent to the client (plan §4.3: ack happens
-// after WAL fsync, not after the ClickHouse insert). If the process dies after
-// the ack but before the CH write, recovery replays the WAL past the last
-// checkpoint — no confirmed row is lost. That is the §3.1 gate.
-//
-// Record framing is [len:4 BE][data:len][crc32:4 BE]. A torn write at the tail
-// (the process died mid-record, so the last record's CRC will not match or its
-// bytes are short) is detected on replay and truncated: a record that was never
-// fsync'd was never ack'd, so dropping it is correct.
-//
-// Group fsync: Append writes (no fsync) and returns the offset; the caller
-// appends a whole batch then Sync()s once, then acks. One fsync per batch, not
-// per row. Checkpoint(offset) records how far the ClickHouse consumer has
-// durably processed; Replay starts there.
+// Package wal is the ingest write-ahead log: batches are appended and fsync'd
+// before the receipt is sent, and recovery replays past the last checkpoint.
 package wal
 
 import (
@@ -34,9 +21,8 @@ const (
 	hdrOverhead        = lenSize + crcSize
 )
 
-// WAL is an append-only, fsync-on-Sync write-ahead log. It is safe for concurrent
-// Append calls (serialized by a mutex); the consumer (Replay/Checkpoint) runs on
-// the recovery path or a single goroutine.
+// WAL is an append-only, fsync-on-Sync write-ahead log; Append is serialized
+// by a mutex, the consumer (Replay/Checkpoint) runs on one goroutine.
 type WAL struct {
 	mu       sync.Mutex
 	path     string
@@ -46,17 +32,14 @@ type WAL struct {
 	syncedTo int64 // byte offset known to be fsync'd (end of last Sync)
 }
 
-// Open creates or opens the WAL at path. The checkpoint lives beside it at
-// path + ".cp". An existing checkpoint is read so CheckpointOffset() reports the
-// last durable consumer position before any Replay.
+// Open creates or opens the WAL at path with its checkpoint at path + ".cp";
+// an existing checkpoint is read so CheckpointOffset reports the durable position.
 func Open(path string) (*WAL, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	// No O_APPEND: Append seeks to the end itself, and one WAL file has exactly
-	// one owning process, so the flag buys nothing here — while on Windows it
-	// opens the handle for FILE_APPEND_DATA instead of FILE_WRITE_DATA, and
-	// Truncate then fails with "Access is denied".
+	// No O_APPEND: one WAL file has one owning process. On Windows the flag
+	// opens FILE_APPEND_DATA and Truncate then fails with "Access is denied".
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
@@ -69,9 +52,8 @@ func Open(path string) (*WAL, error) {
 	return w, nil
 }
 
-// Append writes the framed record (no fsync) and returns its start offset plus
-// the on-disk length (hdrOverhead + len(data)). The caller Sync()s to make it
-// durable, then acks.
+// Append writes the framed record (no fsync) and returns its offset and
+// on-disk length; the caller Sync()s to make it durable, then acks.
 func (w *WAL) Append(data []byte) (offset, length int64, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -105,9 +87,8 @@ func (w *WAL) Sync() (int64, error) {
 	return off, nil
 }
 
-// Checkpoint records that the consumer has durably processed through offset, so
-// the next recovery replays only records after it. The checkpoint is itself
-// fsync'd — a checkpoint ahead of the actual CH write would lose data on crash.
+// Checkpoint records the consumer's durable position; the checkpoint itself
+// is fsync'd, since one ahead of the actual CH write would lose data on crash.
 func (w *WAL) Checkpoint(offset int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -117,8 +98,7 @@ func (w *WAL) Checkpoint(offset int64) error {
 		if err != nil {
 			return err
 		}
-		// Retained, or every Checkpoint call opens a handle nothing closes:
-		// the branch below and Close both read w.cp.
+		// Retained, or every Checkpoint call opens a handle nothing closes.
 		w.cp = f
 		cp = f
 	} else {
@@ -146,10 +126,8 @@ func (w *WAL) CheckpointOffset() int64 {
 	return w.cpOffset()
 }
 
-// Replay yields framed records starting at fromOffset (typically the checkpoint).
-// It stops cleanly at the first torn record (short read or CRC mismatch) and
-// reports the byte offset up to which records are valid, so the caller can
-// Truncate the torn tail. fn returns err to stop early.
+// Replay yields framed records from fromOffset, stopping cleanly at the first
+// torn record and reporting the valid offset so the caller can Truncate.
 func (w *WAL) Replay(fromOffset int64, fn func(offset int64, data []byte) error) (validTo int64, err error) {
 	w.mu.Lock()
 	f := w.f
@@ -225,8 +203,6 @@ func (w *WAL) Close() error {
 	return err
 }
 
-// --- checkpoint persistence --------------------------------------------
-
 func (w *WAL) loadCheckpoint() error {
 	f, err := os.Open(w.cpPath)
 	if err != nil {
@@ -263,6 +239,5 @@ func (w *WAL) cpOffset() int64 {
 }
 
 func (w *WAL) setCpOffset(_ int64) {
-	// loadCheckpoint reads directly from disk on demand via cpOffset(); nothing
-	// to cache. Kept for symmetry and a future in-memory cache.
+	// loadCheckpoint reads from disk on demand via cpOffset(); nothing to cache.
 }

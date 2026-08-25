@@ -1,11 +1,5 @@
-// Package logging builds the process's *slog.Logger. Production writes JSON to
-// stdout; dev writes text. A MultiHandler fans records to a second sink (the
-// process's own ingest loop, in production) and degrades silently if that sink
-// errors — a logger that takes the process down is worse than a dropped line.
-//
-// Invariant 8 (no secret in a log) is enforced structurally, not here: the
-// ingest scrubber strips secrets before they reach this sink, and .golangci.yml
-// forbids slog from `any`. This package only chooses handlers and level.
+// Package logging builds the process's *slog.Logger: JSON to stdout in prod,
+// text in dev; a MultiHandler fans to a second sink and degrades silently.
 package logging
 
 import (
@@ -20,9 +14,8 @@ import (
 type Options struct {
 	Level  string // debug|info|warn|error
 	Format string // json|text
-	// Extra is an optional second writer (e.g. the ingest pipe). Writes to it
-	// are best-effort: a panicking handler is recovered and dropped for that
-	// record. Nil disables it.
+	// Extra is an optional second writer; writes are best-effort, a panicking
+	// handler is recovered and dropped for that record. Nil disables it.
 	Extra io.Writer
 }
 

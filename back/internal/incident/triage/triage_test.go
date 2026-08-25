@@ -41,8 +41,8 @@ func TestBuild_CheckFailureIsAlwaysAFact(t *testing.T) {
 
 func TestBuild_DeployBecomesHypothesisWithRunnableCommand(t *testing.T) {
 	v := Build("Api", "status", 502, &DeployContext{Hash: "abc1234", Message: "bump deps", At: "now"})
-	// The deploy is a fact (joined once), AND the prime-suspect hypothesis is
-	// labelled as a guess with a runnable command — not advice (plan §7.6).
+	// The deploy is a fact (joined once), AND the prime-suspect hypothesis
+	// is labelled as a guess with a runnable command, not advice.
 	kinds := map[string]bool{}
 	for _, f := range v.Facts {
 		kinds[f.Kind] = true

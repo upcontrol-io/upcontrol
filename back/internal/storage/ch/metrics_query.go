@@ -5,10 +5,8 @@ import (
 	"time"
 )
 
-// MetricStat is one metric's tile inputs: the latest reading, its normal
-// range over the trailing 7 days (p10–p90 of the same hour-of-day, so "usual"
-// means what it says), how much history backs that range, and a spark of
-// recent values.
+// MetricStat is one metric's tile inputs: latest reading, its normal range
+// over the trailing 7 days (p10–p90 of the same hour-of-day), and a spark.
 type MetricStat struct {
 	Name   string
 	Latest float64
@@ -18,9 +16,8 @@ type MetricStat struct {
 	Spark  []float64
 }
 
-// metricTileUnits names the metrics the Dashboard's product tiles know. A
-// metric with no entry here is real data with no home on screen — it is read
-// but not shown, never invented into a tile the design does not carry.
+// metricTileUnits names the metrics the Dashboard's product tiles know; a
+// metric with no entry is read but never invented into a tile.
 var metricTileUnits = map[string]string{
 	"signups":             "",
 	"checkout_latency_ms": "ms",
@@ -35,13 +32,8 @@ var metricTileUnits = map[string]string{
 // builder. Read-only by convention: callers must not mutate.
 func MetricTileUnits() map[string]string { return metricTileUnits }
 
-// MetricSummary reads the tenant's metrics for the tiles: the latest value of
-// every named metric with ≥ 7 days of history (the minimum for a p10–p90 that
-// means anything), plus its range over the trailing 7 days and a 12-point
-// spark of recent hourly means.
-//
-// Bounded and read at overview time: this must not scan more than the 7 days
-// the range needs.
+// MetricSummary reads the tenant's metrics for the tiles: latest value of
+// every named metric with 7+ days of history, its range, and a 12-point spark.
 func (c *Conn) MetricSummary(ctx context.Context, tenantID int64) ([]MetricStat, error) {
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
@@ -85,10 +77,8 @@ func (c *Conn) MetricSummary(ctx context.Context, tenantID int64) ([]MetricStat,
 	var out []MetricStat
 	for rows.Next() {
 		var s MetricStat
-		// ch-go is the native driver, not database/sql: custom Scanner types
-		// are not supported, and a LEFT JOIN miss in ClickHouse yields the
-		// column's default (an empty array), not NULL — so an empty spark scans
-		// as an empty slice and needs no special handling.
+		// ch-go is the native driver: a LEFT JOIN miss yields the column's
+		// default (an empty array), not NULL, so an empty spark needs no handling.
 		if err := rows.Scan(&s.Name, &s.Latest, &s.Days, &s.P10, &s.P90, &s.Spark); err != nil {
 			return nil, err
 		}

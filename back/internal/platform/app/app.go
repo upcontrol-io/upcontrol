@@ -1,12 +1,5 @@
-// Package app is the shared process bootstrap used by all three binaries
-// (ucapi, ucworker, ucprobe). It loads config, builds the logger, health checker
-// and shutdown coordinator, installs the SIGINT/SIGTERM handler, calls the
-// binary's Setup, runs a background health-probe loop, waits for a signal, then
-// tears everything down within config.ShutdownTimeout.
-//
-// Exit codes: 0 clean shutdown; 1 shutdown exceeded the budget (§1.3); 2 config
-// or setup failure. The distinction matters to a supervisor: 1 means "it may
-// not have flushed, restart carefully", 2 means "it never started".
+// Package app is the shared process bootstrap: load config, build logger,
+// health and shutdown, install signal handlers, run Setup, tear down in budget.
 package app
 
 import (
@@ -26,9 +19,7 @@ import (
 	"go.upcontrol.io/back/internal/platform/shutdown"
 )
 
-// Deps is everything Setup needs to wire the binary's components. Setup reads
-// from these rather than constructing its own so that tests can substitute fakes
-// at one seam.
+// Deps is everything Setup needs; tests substitute fakes at this one seam.
 type Deps struct {
 	Config   config.Config
 	Logger   *slog.Logger
@@ -36,15 +27,13 @@ type Deps struct {
 	Shutdown *shutdown.Coordinator
 }
 
-// Setup wires a binary's components: opens pools, registers health checks and
-// shutdown tasks, starts background loops. The returned run function, if
-// non-nil, is the blocking call Run waits on (e.g. http.Server.Serve). Setup
-// must not block — long-running work belongs in a goroutine it starts, with its
-// cancellation registered as a shutdown Task.
+// Setup wires a binary's components and may return a blocking run function
+// (e.g. Serve); it must not block, long work goes in a registered goroutine.
 type Setup func(ctx context.Context, d Deps) (run func() error, err error)
 
 // Run is the process entrypoint. name is the binary name for logs.
 func Run(name string, setup Setup) int {
+	// Exit codes: 0 clean, 1 shutdown exceeded the budget, 2 never started.
 	cfg, err := config.Load(name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: config: %v\n", name, err)
@@ -52,9 +41,8 @@ func Run(name string, setup Setup) int {
 	}
 	log := logging.New(logging.Options{Level: cfg.LogLevel, Format: cfg.LogFormat})
 	log = log.With("svc", name)
-	// Config warnings were collected before this logger existed (secret files
-	// that cannot be read, etc.); replay them so they land in the process's
-	// real format — a JSON shipper in prod must be able to index them.
+	// Config warnings were collected before this logger existed; replay them
+	// so a JSON shipper in prod can index them.
 	for _, w := range cfg.Warnings {
 		log.Warn("config: " + w)
 	}
@@ -123,10 +111,8 @@ func runHealthProbes(ctx context.Context, h *health.Checker, every, probeTimeout
 	}
 }
 
-// ServeHTTP is a Setup helper for the common case: serve an http.Server, register
-// its graceful Stop as a shutdown task, and return the blocking Serve call. It is
-// shared by ucapi (the full API) and the skeleton ucprobe/ucworker (which serve
-// only /health in Phase 1).
+// ServeHTTP is a Setup helper: serve an http.Server, register its graceful
+// Stop as a shutdown task, return the blocking Serve call.
 func ServeHTTP(addr string, handler http.Handler, d Deps) (func() error, error) {
 	srv := &http.Server{
 		Addr:              addr,

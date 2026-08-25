@@ -1,12 +1,5 @@
-// Package ch is the ClickHouse storage layer. It is the ONLY writer of the logs
-// and events tables (invariant 4: every query goes through ring.QueryBuilder for
-// reads; every write comes through here). The batcher (ingest/batcher) calls
-// Inserter.Flush with decoded, scrubbed, seq'd rows; this package turns them into
-// a native-protocol batch INSERT.
-//
-// The connection holds no business logic: it is a thin, pooled client over
-// clickhouse-go/v2. Probe nodes (ucprobe) MUST NOT import this package
-// (invariant 1, enforced by depguard).
+// Package ch is the ClickHouse storage layer and the ONLY writer of the logs
+// and events tables; ucprobe must not import it (depguard-enforced).
 package ch
 
 import (
@@ -69,9 +62,8 @@ func (c *Conn) Ping(ctx context.Context) error { return c.db.Ping(ctx) }
 // Close releases the pool.
 func (c *Conn) Close() error { return c.db.Close() }
 
-// LogRow is one row of the logs table. TenantID/ProjectID/Seq are added by the
-// ingest layer after authentication and seq allocation; the rest comes from the
-// decoder (with cardinality capping already applied to Host/Service/Source).
+// LogRow is one row of the logs table; TenantID/ProjectID/Seq are added by the
+// ingest layer, the rest comes from the decoder (cardinality already applied).
 type LogRow struct {
 	TenantID    uint64
 	ProjectID   uint64
@@ -108,8 +100,7 @@ func (c *Conn) InsertLogs(ctx context.Context, rows []LogRow) error {
 	return batch.Send()
 }
 
-// EventRow is one row of the events table (never displaced by the ring — the
-// absence detector lives on events).
+// EventRow is one row of the events table (never displaced by the ring).
 type EventRow struct {
 	TenantID    uint64
 	ProjectID   uint64
@@ -138,11 +129,8 @@ func (c *Conn) InsertEvents(ctx context.Context, rows []EventRow) error {
 	return batch.Send()
 }
 
-// WebEventRow is one row of the web_events table (product analytics). The
-// recorder (internal/analytics) is the only writer. VisitorID is the Postgres
-// web_visitor id (0 = anonymous: no uc_vid cookie); PersonID/TenantID are 0
-// unless a live session stamped them. Country is an ISO code (” = unknown);
-// IPHash is sha256(client IP) truncated to 8 bytes — a full IP is never stored.
+// WebEventRow is one row of web_events; analytics is the only writer. IPHash
+// is sha256(client IP) truncated to 8 bytes; a full IP is never stored.
 type WebEventRow struct {
 	TS          time.Time
 	VisitorID   uint64
@@ -186,9 +174,8 @@ func (c *Conn) InsertWebEvents(ctx context.Context, rows []WebEventRow) error {
 	return batch.Send()
 }
 
-// CheckRow is one row of the checks table. It feeds the availability
-// detector's history and the public status page. Written by the probe service
-// once per SubmitResults batch.
+// CheckRow is one row of the checks table: the availability detector's history
+// and the public status page; written once per SubmitResults batch.
 type CheckRow struct {
 	TenantID   uint64
 	MonitorID  uint64
@@ -227,7 +214,6 @@ func (c *Conn) InsertChecks(ctx context.Context, rows []CheckRow) error {
 	return batch.Send()
 }
 
-// Raw exposes the underlying driver for callers (ring.QueryBuilder, migrations)
-// that need to run arbitrary SQL. Invariant 4 keeps logs reads behind
-// ring.QueryBuilder; this is the seam.
+// Raw exposes the underlying driver for callers that need arbitrary SQL; logs
+// reads stay behind ring.QueryBuilder; this is the seam.
 func (c *Conn) Raw() driver.Conn { return c.db }

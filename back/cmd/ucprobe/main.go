@@ -1,7 +1,5 @@
-// Command ucprobe is the regional probe node. It holds no database secrets
-// (invariant 1, enforced by depguard). Its sole job is to poll ucapi for a
-// batch of checks via connect-go, execute each check through the SSRF-guarded
-// executor, and SubmitResults back.
+// Command ucprobe is the regional probe node: no DB secrets (depguard
+// enforced); it polls ucapi for checks and runs them through the SSRF guard.
 package main
 
 import (

@@ -1,8 +1,5 @@
-// api_key resolver — turns a presented client key into a tenant+project for the
-// POST /i ingest handler. The key format is `uc_live_<prefix><secret>`: the
-// prefix is the first KeyPrefixLen chars after "uc_live_" (stored in the
-// api_key.prefix column, indexed), the rest is the secret. We look up by prefix,
-// then verify sha256(full key) == secret_hash, then check the key's state.
+// api_key resolver: turns a presented client key into a tenant+project for
+// POST /i: lookup by prefix, verify sha256(full key), check the key's state.
 
 package pg
 
@@ -22,8 +19,7 @@ import (
 const KeyScheme = "uc_live_"
 
 // KeyPrefixLen is the number of chars after the scheme used as the lookup
-// prefix. The remainder is the secret. Short enough to display, long enough to
-// avoid accidental collisions across a tenant's keys.
+// prefix; the remainder is the secret.
 const KeyPrefixLen = 12
 
 // ErrInvalidKey is the 401 sentinel. It carries no detail to the client.
@@ -35,8 +31,7 @@ type KeyResolver struct {
 	now  func() time.Time
 }
 
-// NewKeyResolver builds a resolver. now is overridable for tests (rotation
-// window expiry); nil uses the real clock.
+// NewKeyResolver builds a resolver; now is overridable for tests, nil = clock.
 func NewKeyResolver(p *Pool, now func() time.Time) *KeyResolver {
 	if now == nil {
 		now = time.Now
@@ -73,9 +68,8 @@ func (r *KeyResolver) Resolve(ctx context.Context, fullKey string) (ingest.Tenan
 	return ingest.Tenant{TenantID: row.TenantID, ProjectID: row.ProjectID}, nil
 }
 
-// extractPrefix returns the lookup prefix from a full key, validating the scheme
-// and minimum length. The key must be `uc_live_<prefix><secret>` with a non-empty
-// secret after the prefix.
+// extractPrefix returns the lookup prefix from a full key: `uc_live_<prefix>
+// <secret>`, validating scheme and minimum length.
 func extractPrefix(fullKey string) (string, bool) {
 	if !strings.HasPrefix(fullKey, KeyScheme) {
 		return "", false

@@ -1,8 +1,5 @@
-// Package pg is the Postgres storage layer: the api_key resolver (ingest auth),
-// the seq-block leaser adapter for ring/seq, and the ingest-batch idempotency
-// store. It wraps a pgxpool and the sqlc-generated Queries. Every query is
-// tenant-scoped by construction (the key's tenant_id), and invariant 3 holds at
-// the SQL level.
+// Package pg is the Postgres storage layer: the api_key resolver, the
+// seq-block leaser adapter for ring/seq, and the ingest-batch idempotency store.
 package pg
 
 import (

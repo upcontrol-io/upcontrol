@@ -1,14 +1,5 @@
-// Package detect is the orchestrator that turns the pure detection core
-// (detectors + suppression) into incidents (docs/plans/detect-errorrate-v1.md).
-// Every ucworker tick it walks the projects, reads the ClickHouse rollups
-// through the storage layer (invariants 2/4: aggregates only, never raw logs),
-// asks the ErrorRate detector for a Decision, runs suppression on a fire, and
-// opens or closes a fingerprint-keyed incident accordingly.
-//
-// v1 wires ErrorRate only (D3). The thresholds live in the detector code; this
-// package owns the plumbing — windows, baselines, the decision-to-action map,
-// and the per-project error isolation (one project's ClickHouse hiccup must
-// not stop the next project's scan).
+// Package detect turns the pure detection core (detectors + suppression) into
+// incidents; per-project errors are isolated so one cannot blind the rest.
 package detect
 
 import (
@@ -30,16 +21,15 @@ import (
 )
 
 // madScale converts a MAD into a standard-deviation equivalent for the
-// detector's z-score. Fixed by plan: no env knobs (D8).
+// detector's z-score; fixed, no env knobs.
 const madScale = 1.4826
 
-// scanWindow is the span windowBounds scores, named because the alert says it
-// out loud ("in the last 5 minutes") — the sentence and the query must not be
-// able to drift apart.
+// scanWindow is the span windowBounds scores; the alert says it out loud
+// ("in the last 5 minutes"), so the sentence and the query must not drift.
 const scanWindow = 5 * time.Minute
 
-// Scanner wires the pure decisions to Postgres + ClickHouse. One
-// implementation, no interface (D11): the mock would be a second product.
+// Scanner wires the pure decisions to Postgres + ClickHouse; one
+// implementation, no interface (the mock would be a second product).
 type Scanner struct {
 	pool *pg.Pool
 	ch   *ch.Conn
@@ -47,34 +37,26 @@ type Scanner struct {
 	log  *slog.Logger
 }
 
-// New builds a Scanner.
 func New(pool *pg.Pool, chConn *ch.Conn, lc *incident.Lifecycle, log *slog.Logger) *Scanner {
 	return &Scanner{pool: pool, ch: chConn, inc: lc, log: log}
 }
 
-// windowBounds is the current window the ErrorRate detector scores: the last
-// five completed minutes ([to-5m, to), to = now truncated to the minute).
-// Recovery uses the same window (D7): five clean minutes close the incident,
-// so the window IS the smoothing — no separate M constant.
+// windowBounds is the window the ErrorRate detector scores: [to-5m, to) with
+// to = now truncated to the minute. Recovery uses the same window.
 func windowBounds(now time.Time) (from, to time.Time) {
 	to = now.Truncate(time.Minute)
 	return to.Add(-scanWindow), to
 }
 
 // baselineBounds is the week of history the MAD baseline is computed over,
-// ending exactly where the current window begins — no overlap, so the spike
-// being scored never inflates its own baseline.
+// ending where the current window begins so the spike never inflates it.
 func baselineBounds(now time.Time) (from, to time.Time) {
 	wFrom, _ := windowBounds(now)
 	return wFrom.Add(-7 * 24 * time.Hour), wFrom
 }
 
-// errorRateSummary is the alert's one measured sentence. The baseline clause
-// is the half that can lie: a project younger than a week has no history,
-// ErrorRateBaseline reports that as (0, 0), and the detector falls back to its
-// flat 10% rule. "The weekly baseline is 0.0%" would then assert a measurement
-// nobody made, so the baseline is quoted only when the detector actually had
-// one to compare against — a MAD above zero is exactly that condition.
+// errorRateSummary is the alert's one measured sentence; the baseline is
+// quoted only when the detector had one (a MAD above zero is that condition).
 func errorRateSummary(errs, total uint64, median, mad float64) string {
 	rate := float64(errs) / float64(total)
 	s := fmt.Sprintf("Error and fatal lines are %.1f%% of the log stream in the last %d minutes.",
@@ -94,10 +76,8 @@ const (
 	actClose               // no fire while an incident is open — recover it
 )
 
-// decide maps (Decision, suppression, openness) to the act. Pure: every
-// combination is unit-tested, including the ones the live loop cannot produce
-// (an unsuppressed fire with an incident already open — dedup makes that
-// unreachable in Tick, but decide must not care).
+// decide maps (Decision, suppression, openness) to the act; pure, so every
+// combination is unit-tested, including ones the live loop cannot produce.
 func decide(dec detector.Decision, suppressed, hasOpen bool) action {
 	if dec.Fire && !suppressed {
 		return actOpen
@@ -108,10 +88,8 @@ func decide(dec detector.Decision, suppressed, hasOpen bool) action {
 	return actNone
 }
 
-// Tick runs one pass over every project. The project list itself failing is a
-// tick-level error (returned); any per-project failure is logged and the loop
-// CONTINUES — detection is best-effort per project, and one broken project
-// must not blind the rest.
+// Tick runs one pass over every project; a per-project failure is logged and
+// the loop continues; one broken project must not blind the rest.
 func (s *Scanner) Tick(ctx context.Context) error {
 	projects, err := s.pool.Queries().ListProjectsForDetect(ctx)
 	if err != nil {
@@ -126,8 +104,7 @@ func (s *Scanner) Tick(ctx context.Context) error {
 }
 
 // scanProject runs the detect loop for one project: window → decision →
-// suppression → act. The fingerprint is stable per (project, detector), so
-// open, cooldown and recovery all key the same incident.
+// suppression → act; the fingerprint is stable per (project, detector).
 func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDetectRow, now time.Time) error {
 	q := s.pool.Queries()
 	fp := incident.KeyFingerprint(fmt.Sprintf("project:%d:errorrate", proj.ID))
@@ -148,9 +125,8 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		return fmt.Errorf("open incident lookup: %w", err)
 	}
 
-	// Under the total>=10 floor there is nothing to score — and no reason to
-	// pay the two baseline queries either (the detector would NoFire anyway).
-	// median and mad outlive the branch because the alert quotes them.
+	// Under the total>=10 floor there is nothing to score and no reason to pay
+	// the two baseline queries; median and mad outlive the branch (the alert quotes them).
 	var dec detector.Decision
 	var median, mad float64
 	if total < 10 {
@@ -165,8 +141,8 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		dec = detector.ErrorRate(int(errs), int(total), m, d, madScale)
 	}
 
-	// Suppression only matters on a fire (test-pinned order: post-deploy → maintenance
-	// → dedup → cooldown). A suppressed fire is logged, never extended.
+	// Suppression only matters on a fire (pinned order: post-deploy →
+	// maintenance → dedup → cooldown); a suppressed fire is logged, never extended.
 	suppressed := false
 	if dec.Fire {
 		var lastFire time.Time
@@ -211,18 +187,16 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 			Fields: []deliver.Field{
 				{Label: "Detected", Value: now.UTC().Format("2 Jan 2006, 15:04") + " UTC"},
 				{Label: "Error lines", Value: fmt.Sprintf("%d of %d lines", errs, total)},
-				// Not "Deviation": with no baseline the detector never computes
-				// one, it fires on a flat threshold, and dec.Reason then says
-				// so. One label that is true of both rules.
+				// With no baseline the detector fires on a flat threshold and
+				// dec.Reason says so; one label true of both rules.
 				{Label: "Why it fired", Value: dec.Reason},
 			},
 		})
 		if err != nil {
 			return fmt.Errorf("open detect incident: %w", err)
 		}
-		// D6: the cooldown starts only when an incident actually opened. A
-		// suppressed fire never reaches this line, so it cannot extend the
-		// cooldown it is being suppressed by.
+		// The cooldown starts only when an incident actually opened; a
+		// suppressed fire never reaches here, so it extends no cooldown.
 		if created {
 			if err := q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
 				TenantID:    proj.TenantID,

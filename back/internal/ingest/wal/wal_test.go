@@ -58,9 +58,8 @@ func TestCheckpointSkipsConsumed(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = off1
-	// The handle has to be retained, or each call leaks one: Close only ever
-	// closes w.cp. On Linux the leak is invisible (an open file still unlinks);
-	// on Windows it surfaces as a TempDir cleanup that cannot remove the file.
+	// The handle must be retained, or each call leaks one: Close only ever
+	// closes w.cp; on Windows the leak surfaces as TempDir cleanup failing.
 	if w.cp == nil {
 		t.Error("Checkpoint left w.cp nil — the .cp handle is leaked, one per call")
 	}
@@ -75,20 +74,16 @@ func TestCheckpointSkipsConsumed(t *testing.T) {
 	}
 }
 
-// TestTornTailRecoveredAndTruncated is the §3.1 gate: a confirmed batch survives
-// a crash that tears the in-flight record's tail. We append three fsync'd
-// records (confirmed), then simulate a torn 4th by writing a header+data with a
-// BAD crc and closing without fsync. Recovery must yield the three confirmed
-// records and truncate the bad tail.
+// A confirmed batch survives a crash that tears the in-flight record's tail:
+// three fsync'd records recover, the bad-CRC fourth is truncated away.
 func TestTornTailRecoveredAndTruncated(t *testing.T) {
 	w, path := newWAL(t)
 	for _, p := range []string{"r1", "r2", "r3"} {
 		w.Append([]byte(p))
 	}
 	endConfirmed, _ := w.Sync()
-	// Simulate a torn tail: write a plausible-looking header + data but a wrong
-	// CRC, directly to the file, WITHOUT fsync (as if the process died mid-write).
-	// We close first, then append the garbage, then reopen.
+	// Simulate a torn tail: plausible header + data but a wrong CRC, written
+	// directly to the file WITHOUT fsync, as if the process died mid-write.
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
