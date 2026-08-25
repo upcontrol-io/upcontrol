@@ -130,11 +130,15 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 	// do not read the same.
 	payload.Class = item.Class
 
-	// Personal telegram channels (a recipient person) get Acknowledge/Resolve
-	// inline buttons; broadcast groups never do (design D5 — in a group, the
-	// presser of a button cannot be name-verified).
+	// Every telegram channel gets the action buttons: a press is authorised
+	// by WHO pressed it (the bot resolves from.id to a member of the chat's
+	// tenant), not by the chat the message landed in. A broadcast group (no
+	// recipient person) additionally marks the payload as group: the Bot API
+	// refuses web_app buttons outside private chats (Decision 8), so the
+	// keyboard drops its Open/Explain row and keeps the text link.
 	if channelKind == "telegram" {
-		payload.Buttons = ch.RecipientPersonID != nil
+		payload.Buttons = true
+		payload.Group = ch.RecipientPersonID == nil
 	}
 
 	// A resolve follow-up (docs/plans/channel-notify-settings.md) is composed

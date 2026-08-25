@@ -319,7 +319,6 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// notify-role members get 403 — inviting people is a settings act (§7.4).
 	tginv := api.NewTelegram(pgPool, sm, tgUsername)
 	mux.Handle("POST /v1/telegram/invites", tginv)
-	mux.Handle("PATCH /v1/telegram/invites/{id}", tginv)
 	mux.Handle("DELETE /v1/telegram/invites/{id}", tginv)
 	mux.Handle("POST /v1/sources/{kind}/connect", wa)
 	mux.Handle("DELETE /v1/sources/{id}", wa)

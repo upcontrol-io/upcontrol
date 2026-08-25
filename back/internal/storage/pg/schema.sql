@@ -667,3 +667,14 @@ SELECT id, 'resolved', 'Monitor deleted'
           WHERE u.incident_id = incident.id AND u.kind = 'resolved'
        );
 
+ALTER TABLE person ADD COLUMN telegram_username text;
+ALTER TABLE alert_channel ADD COLUMN label text;
+ALTER TABLE telegram_invite ADD COLUMN person_id bigint REFERENCES person(id) ON DELETE CASCADE;
+
+UPDATE alert_channel ac
+   SET label = p.name
+  FROM person p
+ WHERE ac.recipient_person_id = p.id
+   AND ac.kind = 'telegram'
+   AND p.name <> '';
+

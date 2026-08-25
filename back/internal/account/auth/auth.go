@@ -91,7 +91,7 @@ func (h *MagicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Normalised before anything is stored or looked up: the code is keyed by
 	// this string, so a request under one spelling and a redeem under another
 	// would never find each other.
-	req.Email = normalizeEmail(req.Email)
+	req.Email = NormalizeEmail(req.Email)
 	if req.Email == "" {
 		writeErr(w, http.StatusBadRequest, "missing_email")
 		return
@@ -293,7 +293,7 @@ func Provision(ctx context.Context, pool *pg.Pool, email, domain string, rec *an
 // arbitrary addresses — harmless while they are stored unsent, a mailbomb the
 // day the mailer ships.
 func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (string, error) {
-	email = normalizeEmail(email)
+	email = NormalizeEmail(email)
 	h := &MagicLink{pool: pool}
 	if cnt, err := pool.Queries().RecordMagicLinkIP(ctx, ip); err == nil && cnt > ipWindowCap {
 		return "", ErrRateLimited
@@ -322,7 +322,7 @@ func (h *MagicLink) ensurePerson(ctx context.Context, email string) (personInfo,
 func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (personInfo, error) {
 	// Defensive: every caller normalises, and this is where it would matter
 	// if one ever forgot — the UNIQUE column below is byte-exact.
-	email = normalizeEmail(email)
+	email = NormalizeEmail(email)
 	q := h.pool.Queries()
 	existing, err := q.GetPersonByEmail(ctx, &email)
 	if err == nil {
@@ -335,7 +335,7 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	}
 	pubID := newUUID()
 	p, err := q.CreatePerson(ctx, sqlc.CreatePersonParams{
-		PublicID: pubID, Email: &email, Name: nameFromEmail(email),
+		PublicID: pubID, Email: &email, Name: NameFromEmail(email),
 	})
 	if err != nil {
 		return personInfo{}, err
@@ -351,7 +351,7 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	}
 	_ = h.pool.Raw().QueryRow(ctx,
 		`INSERT INTO tenant (public_id, name, plan) VALUES ($1, $2, $3) RETURNING id`,
-		tenantPubID, nameFromEmail(email)+"'s workspace", plan).Scan(&tenantID)
+		tenantPubID, NameFromEmail(email)+"'s workspace", plan).Scan(&tenantID)
 	_ = q.EnsureTenantMember(ctx, sqlc.EnsureTenantMemberParams{
 		TenantID: tenantID, PersonID: p.ID,
 	})
@@ -573,7 +573,7 @@ func crossSitePost(r *http.Request) bool {
 	return !strings.EqualFold(strings.TrimSpace(ct), "application/json")
 }
 
-// normalizeEmail is the one spelling of an address this package stores or
+// NormalizeEmail is the one spelling of an address this package stores or
 // looks anything up by.
 //
 // The person table's email column is UNIQUE and compared byte for byte, so
@@ -583,7 +583,7 @@ func crossSitePost(r *http.Request) bool {
 // it, which is how the same person arrives spelled two ways through two doors.
 // Normalising at every entrance costs nothing and is the only place it can be
 // done once.
-func normalizeEmail(email string) string {
+func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
@@ -621,7 +621,11 @@ func initials(name, email string) string {
 	return "U"
 }
 
-func nameFromEmail(email string) string {
+// NameFromEmail names a new account from the local part of its address:
+// "ada@example.com" becomes "ada". An address with no usable local part
+// comes back unchanged rather than empty, or the person row is created
+// nameless.
+func NameFromEmail(email string) string {
 	if i := strings.IndexByte(email, '@'); i > 0 {
 		return email[:i]
 	}

@@ -1,13 +1,15 @@
 // Telegram invite endpoints (openspec telegram-bot-auth-and-recipients, D2/D9).
 //
-//   POST   /v1/telegram/invites     — mint a one-time inv_<token> link (login+)
-//   PATCH  /v1/telegram/invites/{id} — change the role an invite will grant
+//   POST   /v1/telegram/invites      — mint a one-time inv_<token> link (login+)
 //   DELETE /v1/telegram/invites/{id} — burn an unredeemed invite
 //
-// The token is the credential: stored as sha256, shown in the POST response
-// exactly once (the key rule — never in a log, never retrievable). The plan
-// axis telegram_recipients gates minting; the wall is the same 402
-// error.upgrade every other paid feature answers with.
+// The invite carries no role (Decision 10): the row is written 'notify' — a
+// Telegram invitee has no e-mail, and an Admin must have one — so there is
+// nothing to choose at mint and no PATCH to change it afterwards. The token is
+// the credential: stored as sha256, shown in the POST response exactly once
+// (the key rule — never in a log, never retrievable). The plan axis
+// telegram_recipients gates minting; the wall is the same 402 error.upgrade
+// every other paid feature answers with.
 
 package api
 
@@ -53,8 +55,6 @@ func (h *Telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/telegram/invites" && r.Method == http.MethodPost:
 		h.createInvite(w, r, s.TenantID, s.PersonID)
-	case strings.HasPrefix(r.URL.Path, "/v1/telegram/invites/") && r.Method == http.MethodPatch:
-		h.patchInvite(w, r, s.TenantID)
 	case strings.HasPrefix(r.URL.Path, "/v1/telegram/invites/") && r.Method == http.MethodDelete:
 		h.deleteInvite(w, r, s.TenantID)
 	default:
@@ -64,17 +64,13 @@ func (h *Telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID, personID int64) {
 	ctx := r.Context()
+	// The body is optional (the Alerts screen sends {}, Task 1.8's bound
+	// invite sends a personId): a POST with no body at all mints an unbound
+	// invite, and decodeStrict would read absence as bad_body.
 	var req struct {
-		Role string `json:"role"`
+		PersonID string `json:"personId"`
 	}
-	if !decodeStrict(w, r, &req) {
-		return
-	}
-	if req.Role == "" {
-		req.Role = "notify" // least privilege, chosen by default at invite
-	}
-	if req.Role != "notify" && req.Role != "login" {
-		writeAPIErr(w, http.StatusBadRequest, "bad_role")
+	if r.ContentLength != 0 && !decodeStrict(w, r, &req) {
 		return
 	}
 	botUsername := h.botUsername(ctx)
@@ -100,39 +96,47 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 	hash := telegram.InviteTokenHash(token)
 	expires := time.Now().UTC().Add(inviteTTL)
 	var id int64
+	var personRowID any // nil for the unbound invite, the person row id when bound
+	// A personId in the body binds the link to one teammate's row (§3.3a): the
+	// redeem then links THAT person's Telegram instead of creating a second
+	// person by telegram_id. Resolved through tenant_member, so a public id
+	// from another tenant answers 404 exactly like a nonexistent one, and an
+	// already-linked person is a 409 — there is nothing to mint for them.
+	if req.PersonID != "" {
+		var linked *int64
+		if err := h.pool.Raw().QueryRow(ctx,
+			`SELECT p.id, p.telegram_id FROM person p
+			  JOIN tenant_member tm ON tm.person_id = p.id
+			 WHERE p.public_id = $1 AND tm.tenant_id = $2`,
+			parseUUID(req.PersonID), tenantID).Scan(&personRowID, &linked); err != nil {
+			writeAPIErr(w, http.StatusNotFound, "no_such_person")
+			return
+		}
+		if linked != nil {
+			writeAPIErr(w, http.StatusConflict, "already_linked")
+			return
+		}
+	}
+	// 'notify' as a literal (Decision 10): the invite grants no role choice —
+	// a Telegram invitee has no e-mail, and an Admin must have one.
 	if err := h.pool.Raw().QueryRow(ctx,
-		`INSERT INTO telegram_invite (tenant_id, role, invited_by, token_hash, expires_at)
-		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		tenantID, req.Role, personID, hash, expires).Scan(&id); err != nil {
+		`INSERT INTO telegram_invite (tenant_id, role, invited_by, token_hash, expires_at, person_id)
+		 VALUES ($1, 'notify', $2, $3, $4, $5) RETURNING id`,
+		tenantID, personID, hash, expires, personRowID).Scan(&id); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeAPIJSON(w, http.StatusCreated, map[string]any{
+	resp := map[string]any{
 		"id":        intToStr(id),
-		"role":      req.Role,
 		"link":      "https://t.me/" + botUsername + "?start=" + token,
 		"expiresAt": expires.Format(time.RFC3339),
-	})
-}
-
-func (h *Telegram) patchInvite(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	var req struct {
-		Role string `json:"role"`
 	}
-	if !decodeStrict(w, r, &req) || (req.Role != "notify" && req.Role != "login") {
-		writeAPIErr(w, http.StatusBadRequest, "bad_role")
-		return
+	// The echo lets the caller tie the link to the row it was minted for; the
+	// list emission is the person's public id, so the same string round-trips.
+	if req.PersonID != "" {
+		resp["personId"] = req.PersonID
 	}
-	id := parseID(pathLast(r.URL.Path))
-	var role string
-	if err := h.pool.Raw().QueryRow(r.Context(),
-		`UPDATE telegram_invite SET role = $1
-		  WHERE id = $2 AND tenant_id = $3 AND redeemed_at IS NULL AND expires_at > now()
-		 RETURNING role`, req.Role, id, tenantID).Scan(&role); err != nil {
-		writeAPIErr(w, http.StatusNotFound, "no_such_invite")
-		return
-	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{"id": pathLast(r.URL.Path), "role": role, "status": "pending"})
+	writeAPIJSON(w, http.StatusCreated, resp)
 }
 
 func (h *Telegram) deleteInvite(w http.ResponseWriter, r *http.Request, tenantID int64) {

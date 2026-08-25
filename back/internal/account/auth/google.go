@@ -163,7 +163,7 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// two accounts: Google returns the address in whatever case it holds, and
 	// the person table's email column is UNIQUE and byte-exact.
 	person, err := (&MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}).
-		ensurePerson(ctx, normalizeEmail(claims.Email))
+		ensurePerson(ctx, NormalizeEmail(claims.Email))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return

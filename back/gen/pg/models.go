@@ -45,6 +45,7 @@ type AlertChannel struct {
 	Notify            []byte
 	RecipientPersonID *int64
 	MutedUntil        pgtype.Timestamptz
+	Label             *string
 }
 
 type ApiKey struct {
@@ -224,14 +225,15 @@ type MonitorSchedule struct {
 }
 
 type Person struct {
-	ID              int64
-	PublicID        pgtype.UUID
-	Email           *string
-	EmailVerifiedAt pgtype.Timestamptz
-	TelegramID      *int64
-	GoogleSub       *string
-	Name            string
-	CreatedAt       pgtype.Timestamptz
+	ID               int64
+	PublicID         pgtype.UUID
+	Email            *string
+	EmailVerifiedAt  pgtype.Timestamptz
+	TelegramID       *int64
+	GoogleSub        *string
+	Name             string
+	CreatedAt        pgtype.Timestamptz
+	TelegramUsername *string
 }
 
 type PlanEntitlement struct {
@@ -322,6 +324,7 @@ type TelegramInvite struct {
 	CreatedAt  pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
 	RedeemedAt pgtype.Timestamptz
+	PersonID   *int64
 }
 
 type Tenant struct {

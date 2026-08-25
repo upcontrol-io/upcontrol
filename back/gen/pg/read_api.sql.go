@@ -132,18 +132,22 @@ func (q *Queries) GetTenantPlan(ctx context.Context, id int64) (string, error) {
 }
 
 const listChannelsByTenant = `-- name: ListChannelsByTenant :many
-SELECT id, public_id, kind, target, notify, breaker_open_until, created_at
+SELECT id, public_id, kind, target, notify, breaker_open_until, created_at,
+       muted_until, label, recipient_person_id
   FROM alert_channel WHERE tenant_id = $1 ORDER BY created_at
 `
 
 type ListChannelsByTenantRow struct {
-	ID               int64
-	PublicID         pgtype.UUID
-	Kind             string
-	Target           string
-	Notify           []byte
-	BreakerOpenUntil pgtype.Timestamptz
-	CreatedAt        pgtype.Timestamptz
+	ID                int64
+	PublicID          pgtype.UUID
+	Kind              string
+	Target            string
+	Notify            []byte
+	BreakerOpenUntil  pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	MutedUntil        pgtype.Timestamptz
+	Label             *string
+	RecipientPersonID *int64
 }
 
 func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]ListChannelsByTenantRow, error) {
@@ -163,6 +167,9 @@ func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]L
 			&i.Notify,
 			&i.BreakerOpenUntil,
 			&i.CreatedAt,
+			&i.MutedUntil,
+			&i.Label,
+			&i.RecipientPersonID,
 		); err != nil {
 			return nil, err
 		}
@@ -260,7 +267,7 @@ func (q *Queries) ListKeyUsage(ctx context.Context, tenantID int64) ([]ListKeyUs
 }
 
 const listRecipientsByTenant = `-- name: ListRecipientsByTenant :many
-SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id
+SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
   FROM tenant_member tm
   JOIN person p ON p.id = tm.person_id
  WHERE tm.tenant_id = $1
@@ -268,13 +275,14 @@ SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id
 `
 
 type ListRecipientsByTenantRow struct {
-	Role       string
-	Status     string
-	ID         int64
-	PublicID   pgtype.UUID
-	Email      *string
-	Name       string
-	TelegramID *int64
+	Role             string
+	Status           string
+	ID               int64
+	PublicID         pgtype.UUID
+	Email            *string
+	Name             string
+	TelegramID       *int64
+	TelegramUsername *string
 }
 
 func (q *Queries) ListRecipientsByTenant(ctx context.Context, tenantID int64) ([]ListRecipientsByTenantRow, error) {
@@ -294,6 +302,7 @@ func (q *Queries) ListRecipientsByTenant(ctx context.Context, tenantID int64) ([
 			&i.Email,
 			&i.Name,
 			&i.TelegramID,
+			&i.TelegramUsername,
 		); err != nil {
 			return nil, err
 		}

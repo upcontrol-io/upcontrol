@@ -179,8 +179,8 @@ func TestNormalizeEmailFoldsCaseAndSpace(t *testing.T) {
 		{"ada@example.com", "ada@example.com"},
 		{"   ", ""},
 	} {
-		if got := normalizeEmail(tc[0]); got != tc[1] {
-			t.Errorf("normalizeEmail(%q) = %q, want %q", tc[0], got, tc[1])
+		if got := NormalizeEmail(tc[0]); got != tc[1] {
+			t.Errorf("NormalizeEmail(%q) = %q, want %q", tc[0], got, tc[1])
 		}
 	}
 }
@@ -216,8 +216,8 @@ func TestNameFromEmail(t *testing.T) {
 		{"@example.com", "@example.com"},
 	}
 	for _, c := range cases {
-		if got := nameFromEmail(c.in); got != c.want {
-			t.Fatalf("nameFromEmail(%q) = %q, want %q", c.in, got, c.want)
+		if got := NameFromEmail(c.in); got != c.want {
+			t.Fatalf("NameFromEmail(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

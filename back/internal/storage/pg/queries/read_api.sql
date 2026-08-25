@@ -14,14 +14,15 @@ SELECT cutoff_seq, retain_seq, window_hours, beyond_errors, computed_at
   FROM project_window WHERE project_id = $1;
 
 -- name: ListChannelsByTenant :many
-SELECT id, public_id, kind, target, notify, breaker_open_until, created_at
+SELECT id, public_id, kind, target, notify, breaker_open_until, created_at,
+       muted_until, label, recipient_person_id
   FROM alert_channel WHERE tenant_id = $1 ORDER BY created_at;
 
 -- name: GetTenantPlan :one
 SELECT plan FROM tenant WHERE id = $1;
 
 -- name: ListRecipientsByTenant :many
-SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id
+SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
   FROM tenant_member tm
   JOIN person p ON p.id = tm.person_id
  WHERE tm.tenant_id = $1

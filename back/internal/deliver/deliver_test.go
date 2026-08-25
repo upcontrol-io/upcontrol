@@ -286,13 +286,13 @@ func TestDownForLine_StaysHonestUnderAMinute(t *testing.T) {
 	}
 }
 
-// The broadcast invariant (openspec telegram-broadcast): a PERSONAL channel's
-// alert carries Acknowledge/Resolve inline buttons whose callback_data is the
-// incident's public id; a broadcast group's carries none — in a group the
-// presser of a button cannot be name-verified, so the button must not exist.
-// Captured at the HTTP boundary: whatever crosses the wire to Telegram is
-// what the worker actually sends.
-func TestTelegramButtonsPersonalYesBroadcastNo(t *testing.T) {
+// The button invariant (Decision 8): an alert's inline buttons carry the
+// actions everywhere — a press is authorised by WHO pressed it (the bot
+// resolves from.id to a member of the chat's tenant), not by the chat — while
+// the web_app row is personal-only, because the Bot API refuses web_app
+// buttons outside private chats. Captured at the HTTP boundary: whatever
+// crosses the wire to Telegram is what the worker actually sends.
+func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
 	restore := HTTPClient
@@ -309,14 +309,17 @@ func TestTelegramButtonsPersonalYesBroadcastNo(t *testing.T) {
 	ch := &TelegramChannel{Token: func(context.Context) string { return "t" }}
 	payload := AlertPayload{Title: "down", Status: "down", IncidentID: "abc123"}
 
-	// Personal (the worker set Buttons from recipient_person_id).
+	// Personal (the worker sets Buttons for every telegram channel).
 	personal := payload
 	personal.Buttons = true
 	if _, err := ch.Send(context.Background(), "42", personal); err != nil {
 		t.Fatal(err)
 	}
-	// Broadcast group: Buttons false.
-	if _, err := ch.Send(context.Background(), "-100", payload); err != nil {
+	// Broadcast group: Buttons and Group both set.
+	group := payload
+	group.Buttons = true
+	group.Group = true
+	if _, err := ch.Send(context.Background(), "-100", group); err != nil {
 		t.Fatal(err)
 	}
 
@@ -328,8 +331,13 @@ func TestTelegramButtonsPersonalYesBroadcastNo(t *testing.T) {
 	if !present || merr != nil || !strings.Contains(string(markupJSON), "\"callback_data\":\"ack:abc123\"") {
 		t.Fatalf("personal alert missing ack button: %v", bodies[0]["reply_markup"])
 	}
-	if _, ok := bodies[1]["reply_markup"]; ok {
-		t.Fatalf("broadcast alert must carry no buttons: %v", bodies[1]["reply_markup"])
+	groupMarkup, groupPresent := bodies[1]["reply_markup"]
+	groupJSON, gerr := json.Marshal(groupMarkup)
+	if !groupPresent || gerr != nil || !strings.Contains(string(groupJSON), "\"callback_data\":\"ack:abc123\"") {
+		t.Fatalf("group alert missing ack button: %v", bodies[1]["reply_markup"])
+	}
+	if strings.Contains(string(groupJSON), "web_app") {
+		t.Fatalf("group alert must carry no web_app button: %v", bodies[1]["reply_markup"])
 	}
 }
 
@@ -371,6 +379,8 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 	const app = "https://upcontrol.io/app"
 	page := AlertPayload{Buttons: true, IncidentID: "abc123"}
 	detect := AlertPayload{Buttons: true, IncidentID: "abc123", Detector: "errorrate"}
+	groupPage := AlertPayload{Buttons: true, Group: true, IncidentID: "abc123"}
+	groupDetect := AlertPayload{Buttons: true, Group: true, IncidentID: "abc123", Detector: "errorrate"}
 
 	for _, tc := range []struct {
 		name    string
@@ -400,9 +410,28 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 			appURL:  "http://localhost/app",
 			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
 		},
-		// Nothing to act on: a broadcast group and a recovered follow-up (the
-		// worker clears Buttons), and a test alert (no incident).
-		{name: "a broadcast group gets no buttons", payload: AlertPayload{IncidentID: "abc123"}, appURL: app, want: ""},
+		{
+			// A group keeps Acknowledge/Resolve (a press is authorised by who
+			// pressed it) but drops the web_app row: the Bot API refuses
+			// web_app buttons outside private chats (Decision 8), and the
+			// message already carries the same link as text.
+			name:    "a group page is acknowledged or resolved",
+			payload: groupPage,
+			appURL:  app,
+			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
+		},
+		{
+			// Same rule as the private detector case (no Resolve — a detector
+			// closes its own incidents) minus the Explain web_app button a
+			// group cannot carry.
+			name:    "a group detector spike is acknowledged only",
+			payload: groupDetect,
+			appURL:  app,
+			want:    "Acknowledge=ack:abc123",
+		},
+		// Nothing to act on: a payload without the buttons flag and a recovered
+		// follow-up (the worker clears Buttons), and a test alert (no incident).
+		{name: "a message without the buttons flag gets no keyboard", payload: AlertPayload{IncidentID: "abc123"}, appURL: app, want: ""},
 		{name: "a test alert gets no buttons", payload: AlertPayload{Buttons: true}, appURL: app, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

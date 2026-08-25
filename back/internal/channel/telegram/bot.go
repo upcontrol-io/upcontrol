@@ -8,7 +8,9 @@
 //     guessable /start prj-N payload no longer subscribes anything (it answers
 //     "ask for a fresh link" instead).
 //   - /start in a GROUP with an invite token: connects the group as a
-//     broadcast destination (no person, no action buttons — see D5).
+//     broadcast destination (no person attached; the chat's alerts carry
+//     Acknowledge/Resolve only — the Bot API refuses web_app buttons
+//     outside private chats, Decision 8).
 //   - /help, /id, /status, /mute, /unmute, /stop: the command surface. /status
 //     answers about the checks AND the tenant's open incidents (a detector
 //     incident has no monitor, so a project with no checks can still be on
@@ -23,11 +25,12 @@
 // At start the bot registers its command list and, on an https deployment, the
 // chat menu button as a door into the Mini App (see register).
 //
-// Personal alerts are actionable: the delivery worker attaches Acknowledge /
-// Resolve inline buttons to messages sent to person-bound channels, plus an
-// Open (or, for a detector incident, Explain) web_app button into the Mini App
-// (see deliver.telegramKeyboard); broadcast groups get the same message
-// without buttons.
+// Alerts are actionable on both destinations: the delivery worker attaches
+// Acknowledge/Resolve inline buttons to every telegram channel — a press is
+// authorised by who pressed it, never by the chat it landed in — plus an Open
+// (or, for a detector incident, Explain) web_app button into the Mini App on
+// personal channels only (see deliver.telegramKeyboard); the Bot API refuses
+// web_app buttons in groups, whose messages keep the text link instead.
 package telegram
 
 import (
@@ -36,6 +39,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -245,8 +249,9 @@ type tgUser struct {
 }
 
 type tgChat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"` // private | group | supergroup | channel
+	ID    int64  `json:"id"`
+	Type  string `json:"type"` // private | group | supergroup | channel
+	Title string `json:"title"`
 }
 
 func (b *Bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
@@ -354,6 +359,11 @@ func (b *Bot) handleUpdate(ctx context.Context, u tgUpdate) {
 // everything; anything that is not a valid unredeemed invite binds NOTHING —
 // the old `prj-<id>` form used to bind a chat to a tenant on a guessable
 // number, which was the hole this rework closes.
+//
+// The redeem runs in ONE transaction (Decision 14): a person-bound link that
+// must be refused — posted in a group, or already answered by another
+// Telegram — rolls the claim back, so the link stays valid for the chat and
+// the person it was minted for. Refusals are replies in the chat, not errors.
 func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	if strings.HasPrefix(payload, "prj-") {
 		// Transitional refusal (decision 0.3): old links are already in
@@ -376,63 +386,151 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	// stored. CutPrefix above is a format check only; hashing its remainder
 	// is the bug InviteTokenHash exists to make unrepeatable.
 	hash := InviteTokenHash(payload)
+	tx, err := b.pool.Raw().Begin(ctx)
+	if err != nil {
+		b.log.Warn("telegram: invite redeem could not open a transaction", "err", err)
+		b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 	var tenantID int64
 	var role string
-	if err := b.pool.Raw().QueryRow(ctx,
+	var invitePersonID *int64 // the person row a bound link was minted for
+	if err := tx.QueryRow(ctx,
 		`UPDATE telegram_invite SET redeemed_at = now()
 		  WHERE token_hash = $1 AND redeemed_at IS NULL AND expires_at > now()
-		 RETURNING tenant_id, role`, hash).Scan(&tenantID, &role); err != nil {
+		 RETURNING tenant_id, role, person_id`, hash).Scan(&tenantID, &role, &invitePersonID); err != nil {
 		b.send(msg.Chat.ID, "This invite link is no longer valid. Ask the project owner for a fresh one from the Alerts screen.")
 		return
 	}
 	var tenantName string
-	_ = b.pool.Raw().QueryRow(ctx,
+	_ = tx.QueryRow(ctx,
 		`SELECT name FROM tenant WHERE id = $1`, tenantID).Scan(&tenantName)
 
-	// A GROUP redeem connects a broadcast destination (D5): no person, no
-	// inline buttons — in a group, from.id proves nothing about the tenant.
+	// A GROUP redeem connects a broadcast destination: no person is attached.
+	// The chat's alerts still carry Acknowledge/Resolve (a press is authorised
+	// by who pressed it, resolved by memberForChat against this tenant) — only
+	// the web_app row is dropped there, because the Bot API refuses web_app
+	// buttons outside private chats (Decision 8).
 	if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" || msg.Chat.ID < 0 {
-		if _, err := b.pool.Raw().Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
-			 SELECT gen_random_uuid(), $1, 'telegram', $2
+		// A person-bound link names one person, and a group is nobody's private
+		// chat: refuse, roll the claim back, keep the link valid for the chat it
+		// was minted for (Decision 14).
+		if invitePersonID != nil {
+			b.send(msg.Chat.ID, "This link is personal. Open it in a private chat with the bot.")
+			return
+		}
+		// The channel's label is the group's own title (Decision 13): the
+		// Alerts row prints it instead of a raw chat id nobody can read. A
+		// titleless group stores NULL, so the row falls back to the target.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO alert_channel (public_id, tenant_id, kind, target, label)
+			 SELECT gen_random_uuid(), $1, 'telegram', $2, $3
 			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel
 			                    WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2)`,
-			tenantID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
+			tenantID, strconv.FormatInt(msg.Chat.ID, 10), nullableLabel(msg.Chat.Title)); err != nil {
 			b.log.Warn("telegram: could not add group channel", "err", err)
 			b.send(msg.Chat.ID, "Something went wrong connecting this group. Try the link again.")
 			return
 		}
-		b.send(msg.Chat.ID, "This group now receives incident alerts for "+tenantName+". Messages here carry no buttons — actions stay in personal chats.")
+		if err := tx.Commit(ctx); err != nil {
+			b.log.Warn("telegram: group connect commit failed", "err", err)
+			b.send(msg.Chat.ID, "Something went wrong connecting this group. Try the link again.")
+			return
+		}
+		b.send(msg.Chat.ID, "This group now receives incident alerts for "+tenantName+". Anyone on the project can press the buttons; anyone else is told they are not connected.")
 		b.log.Info("telegram group connected", "tenant_id", tenantID, "chat_id", msg.Chat.ID)
 		return
 	}
 
-	// Private chat: find-or-create the person by telegram_id. This is the only
-	// writer of person.telegram_id (the old "tenant has exactly one member"
-	// heuristic is gone — it guessed, and a guess here hands one person's
-	// acknowledgements to another). An email member connecting their own
-	// Telegram arrives as a second person row; merging identities is a
-	// deliberate non-goal.
-	personID, err := b.personByTelegramID(ctx, msg.From)
-	if err != nil {
-		b.log.Warn("telegram: person link failed", "err", err)
+	// Private chat. Two ways in, decided by the invite:
+	//
+	// A BOUND link (person_id set) links the Telegram account to the person it
+	// was minted for — the row that already carries their e-mail — so the two
+	// identities never fork into two person rows. This is the only other
+	// writer of person.telegram_id besides the find-or-create below.
+	//
+	// An UNBOUND link finds-or-creates the person by telegram_id (the old
+	// "tenant has exactly one member" heuristic is gone — it guessed, and a
+	// guess here hands one person's acknowledgements to another). An email
+	// member connecting their own Telegram through it arrives as a second
+	// person row; merging identities is a deliberate non-goal.
+	name := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
+	var personID int64
+	if invitePersonID != nil {
+		personID = *invitePersonID
+		// Refusal one: this Telegram account is already somebody else's —
+		// linking it here would hand this person the other's presses and pages.
+		var otherID int64
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM person WHERE telegram_id = $1 AND id <> $2`,
+			msg.From.ID, personID).Scan(&otherID); err == nil {
+			b.send(msg.Chat.ID, "This Telegram account already belongs to someone else on the project.")
+			return
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			b.log.Warn("telegram: bound person telegram read failed", "err", err)
+			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+			return
+		}
+		// Refusal two: the bound person already has a DIFFERENT Telegram — a
+		// second link would silently move their alerts to whoever redeems it.
+		var boundTG *int64
+		if err := tx.QueryRow(ctx,
+			`SELECT telegram_id FROM person WHERE id = $1`, personID).Scan(&boundTG); err != nil {
+			b.log.Warn("telegram: bound person read failed", "err", err)
+			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+			return
+		}
+		if boundTG != nil && *boundTG != msg.From.ID {
+			b.send(msg.Chat.ID, "That person already has a different Telegram account linked.")
+			return
+		}
+		// The link itself: bind the account, keep the username current, fill a
+		// name only when the person has none (same freshness rule the
+		// find-or-create path applies).
+		if _, err := tx.Exec(ctx,
+			`UPDATE person
+			    SET telegram_id = $1, telegram_username = $2,
+			        name = CASE WHEN name = '' THEN $3 ELSE name END
+			  WHERE id = $4`,
+			msg.From.ID, msg.From.Username, name, personID); err != nil {
+			b.log.Warn("telegram: person link failed", "err", err)
+			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+			return
+		}
+		// No membership INSERT: the mint resolved this person through
+		// tenant_member, so they are already a member — and a link is not a way
+		// to re-role anybody.
+	} else {
+		personID, err = b.personByTelegramID(ctx, tx, msg.From)
+		if err != nil {
+			b.log.Warn("telegram: person link failed", "err", err)
+			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+			return
+		}
+		// Existing members keep the role they have (ON CONFLICT DO NOTHING); a
+		// re-invite is not a way to re-role anybody.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'active')
+			 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, personID, role); err != nil {
+			b.log.Warn("telegram: member insert failed", "err", err)
+		}
+	}
+	// The channel's label is the person's name plus @username when they have
+	// one (Decision 13) — the Alerts row prints it instead of a raw chat id;
+	// a person with neither stores NULL, so the row falls back to the target.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, recipient_person_id, label)
+		 SELECT gen_random_uuid(), $1, 'telegram', $2, $3, $4
+		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel
+		                    WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2)`,
+		tenantID, strconv.FormatInt(msg.Chat.ID, 10), personID, nullableLabel(inviteLabel(name, msg.From.Username))); err != nil {
+		b.log.Warn("telegram: could not add channel", "err", err)
 		b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 		return
 	}
-	// Existing members keep the role they have (ON CONFLICT DO NOTHING); a
-	// re-invite is not a way to re-role anybody.
-	if _, err := b.pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'active')
-		 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, personID, role); err != nil {
-		b.log.Warn("telegram: member insert failed", "err", err)
-	}
-	if _, err := b.pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, recipient_person_id)
-		 SELECT gen_random_uuid(), $1, 'telegram', $2, $3
-		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel
-		                    WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2)`,
-		tenantID, strconv.FormatInt(msg.Chat.ID, 10), personID); err != nil {
-		b.log.Warn("telegram: could not add channel", "err", err)
+	if err := tx.Commit(ctx); err != nil {
+		b.log.Warn("telegram: chat connect commit failed", "err", err)
 		b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 		return
 	}
@@ -441,26 +539,60 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 }
 
 // personByTelegramID finds the person whose Telegram this is, or creates one
-// (telegram-only: person's CHECK allows email OR telegram_id).
-func (b *Bot) personByTelegramID(ctx context.Context, from tgUser) (int64, error) {
+// (telegram-only: person's CHECK allows email OR telegram_id), inside the
+// caller's transaction. Both branches also keep telegram_username current: the
+// Alerts row prints it as the channel's label, so a person who changes their
+// handle must not keep being shown the old one.
+func (b *Bot) personByTelegramID(ctx context.Context, tx pgx.Tx, from tgUser) (int64, error) {
 	var id int64
-	err := b.pool.Raw().QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT id FROM person WHERE telegram_id = $1`, from.ID).Scan(&id)
+	name := strings.TrimSpace(from.FirstName + " " + from.LastName)
 	if err == nil {
-		// Keep the display name fresh — the timeline names this person.
-		name := strings.TrimSpace(from.FirstName + " " + from.LastName)
-		if name != "" {
-			_, _ = b.pool.Raw().Exec(ctx, `UPDATE person SET name = $1 WHERE id = $2 AND name = ''`, name, id)
-		}
+		// Keep the display name fresh (the timeline names this person); an
+		// existing name is never overwritten by a possibly-sparser one.
+		_, _ = tx.Exec(ctx,
+			`UPDATE person
+			    SET name = CASE WHEN name = '' THEN $2 ELSE name END,
+			        telegram_username = $3
+			  WHERE id = $1`,
+			id, name, from.Username)
 		return id, nil
 	}
-	name := strings.TrimSpace(from.FirstName + " " + from.LastName)
-	if err := b.pool.Raw().QueryRow(ctx,
-		`INSERT INTO person (public_id, telegram_id, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
-		from.ID, name).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO person (public_id, telegram_id, telegram_username, name)
+		 VALUES (gen_random_uuid(), $1, $2, $3) RETURNING id`,
+		from.ID, from.Username, name).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+// inviteLabel builds the label a Telegram channel row shows on Alerts
+// (Decision 13): the person's name, plus " @username" when they have one. An
+// empty name falls back to the bare "@username"; with neither, the empty
+// string — stored as NULL via nullableLabel (the row then prints the raw
+// target).
+func inviteLabel(name, username string) string {
+	if username == "" {
+		return name
+	}
+	if name == "" {
+		return "@" + username
+	}
+	return name + " @" + username
+}
+
+// nullableLabel is the label as the column stores it: NULL, not ”, when
+// nothing was computed (no name and no username, a group without a title).
+// The read API emits label only when it is not NULL, and the front's
+// `label ?? target` does not fall back on "" — a stored ” would print a
+// blank destination line.
+func nullableLabel(label string) any {
+	if label != "" {
+		return label
+	}
+	return nil
 }
 
 // memberForChat resolves the person pressing something in this chat AND the

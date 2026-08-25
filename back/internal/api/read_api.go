@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	sqlc "go.upcontrol.io/back/gen/pg"
 
 	"go.upcontrol.io/back/internal/account/session"
@@ -119,6 +121,18 @@ func (h *ReadAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int6
 			// renders state, not guesses (docs/plans/channel-notify-settings.md).
 			"notify": notifysettings.Resolve(row.Notify),
 		}
+		// label is the Telegram chat's own name (person name/@username or
+		// group title, Decision 12/13): sent only when the column is set, so
+		// channels with no name keep their sparse shape.
+		if row.Label != nil {
+			ch["label"] = *row.Label
+		}
+		// mutedUntil travels only while the window is still running (Decision
+		// 12): an expired mute is yesterday's fact, and the screen must not
+		// render "muted" over a channel whose alerts are already flowing.
+		if row.MutedUntil.Valid && row.MutedUntil.Time.After(time.Now()) {
+			ch["mutedUntil"] = row.MutedUntil.Time.UTC().Format(time.RFC3339)
+		}
 		channels = append(channels, ch)
 	}
 	// What can still be connected. Telegram is NOT here any more: a personal
@@ -181,22 +195,30 @@ func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 	if h.botUsername(r.Context()) != "" {
 		resp["telegramEnabled"] = true
 		invites := []map[string]any{}
+		// LEFT JOIN person: an invite minted with a personId (§3.3a) carries it
+		// back as the person's public id, so the Team row can find its own
+		// pending link; an unbound invite keeps the sparse shape.
 		if rows, ierr := h.pool.Raw().Query(r.Context(),
-			`SELECT id, role, created_at, expires_at FROM telegram_invite
-			  WHERE tenant_id = $1 AND redeemed_at IS NULL AND expires_at > now()
-			  ORDER BY created_at DESC`, tenantID); ierr == nil {
+			`SELECT ti.id, ti.created_at, ti.expires_at, p.public_id
+			  FROM telegram_invite ti
+			  LEFT JOIN person p ON p.id = ti.person_id
+			 WHERE ti.tenant_id = $1 AND ti.redeemed_at IS NULL AND ti.expires_at > now()
+			 ORDER BY ti.created_at DESC`, tenantID); ierr == nil {
 			for rows.Next() {
 				var id int64
-				var role string
 				var createdAt, expiresAt time.Time
-				if rows.Scan(&id, &role, &createdAt, &expiresAt) == nil {
-					invites = append(invites, map[string]any{
+				var personID pgtype.UUID
+				if rows.Scan(&id, &createdAt, &expiresAt, &personID) == nil {
+					invite := map[string]any{
 						"id":        intToStr(id),
-						"role":      role,
 						"status":    "pending",
 						"createdAt": createdAt.UTC().Format(time.RFC3339),
 						"expiresAt": expiresAt.UTC().Format(time.RFC3339),
-					})
+					}
+					if personID.Valid {
+						invite["personId"] = uuidStr(personID)
+					}
+					invites = append(invites, invite)
 				}
 			}
 			rows.Close()

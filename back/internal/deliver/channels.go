@@ -56,12 +56,18 @@ type AlertPayload struct {
 	// (no Resolve — a detector closes its own incidents), and email picks the
 	// badge and the "why you got this" line by it.
 	Detector string `json:"detector,omitempty"`
-	// Buttons: set by the worker for PERSONAL telegram channels only — the
-	// message then carries Acknowledge/Resolve inline buttons whose callback
-	// data is "ack:<incident_id>" / "resolve:<incident_id>". A broadcast
-	// group (no recipient person) never sets it: in a group, the button's
-	// presser cannot be name-verified (design D5).
+	// Buttons: set by the worker for every telegram channel — the message
+	// then carries Acknowledge/Resolve inline buttons whose callback data is
+	// "ack:<incident_id>" / "resolve:<incident_id>". A press is authorised by
+	// WHO pressed it (the bot resolves from.id to a member of the tenant),
+	// never by the chat the message landed in, so groups get the action
+	// buttons too. Group below drops the web_app row there.
 	Buttons bool `json:"buttons,omitempty"`
+	// Group: set by the worker for a broadcast group channel (no recipient
+	// person). The Bot API refuses web_app buttons outside private chats
+	// (Decision 8), so the keyboard keeps Acknowledge/Resolve and drops its
+	// Open/Explain row — the message already carries the same link as text.
+	Group bool `json:"group,omitempty"`
 }
 
 // ActionButton is an inline button (Telegram) or link (email/discord/slack).
@@ -130,15 +136,17 @@ func (c *TelegramChannel) Send(ctx context.Context, target string, p AlertPayloa
 }
 
 // telegramKeyboard is the inline keyboard under an alert, nil when the message
-// carries no actions at all — a broadcast group, a test alert, a recovered
-// follow-up (nothing left to acknowledge once it is over).
+// carries no actions at all — a test alert or a recovered follow-up (nothing
+// left to acknowledge once it is over).
 //
 // The last button opens the incident inside Telegram's own browser. It is a
-// web_app button, which Telegram accepts ONLY over https, so a local stack
-// keeps the callbacks and falls back to the text link the message already
-// carries. A detector incident swaps it for Explain (the app runs the AI read
-// on arrival) and drops Resolve: a detector closes its own incidents, and the
-// button would be one that cannot act.
+// web_app button, which Telegram accepts ONLY over https AND only in private
+// chats — a group keyboard drops it (Decision 8: the Bot API refuses web_app
+// buttons there, and the message already carries the text link) — so a local
+// stack keeps the callbacks and falls back to that link. A detector incident
+// swaps it for Explain (the app runs the AI read on arrival) and drops
+// Resolve: a detector closes its own incidents, and the button would be one
+// that cannot act.
 func telegramKeyboard(p AlertPayload, appURL string) [][]map[string]any {
 	if !p.Buttons || p.IncidentID == "" {
 		return nil
@@ -151,7 +159,7 @@ func telegramKeyboard(p AlertPayload, appURL string) [][]map[string]any {
 			{"text": "Resolve", "callback_data": "resolve:" + p.IncidentID},
 		})
 	}
-	if strings.HasPrefix(appURL, "https://") {
+	if !p.Group && strings.HasPrefix(appURL, "https://") {
 		label, query := "Open", ""
 		if p.Detector != "" {
 			label, query = "Explain", "&explain=1"

@@ -927,6 +927,8 @@ export interface paths {
                 content: {
                     "application/json": {
                         notify?: components["schemas"]["NotifySettings"];
+                        /** @description Only false is accepted: lifts the /mute window and releases the alerts it parked. */
+                        muted?: boolean;
                     };
                 };
             };
@@ -956,7 +958,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Mint a one-time Telegram invite link (role chosen at invite, default notify). Counts active + pending recipients against the plan's telegram_recipients axis. */
+        /** Mint a one-time Telegram invite link. The invite carries no role: the invitee arrives as notify. Counts active + pending recipients against the plan's telegram_recipients axis. */
         post: {
             parameters: {
                 query?: never;
@@ -964,10 +966,11 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody: {
+            requestBody?: {
                 content: {
                     "application/json": {
-                        role?: components["schemas"]["RecipientRole"];
+                        /** @description Bind the invite to one person on the project; absent means anyone holding the link may redeem it. */
+                        personId?: string;
                     };
                 };
             };
@@ -1026,37 +1029,7 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        /** Change the role an unredeemed invite will grant. */
-        patch: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        role: components["schemas"]["RecipientRole"];
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["TelegramInvite"];
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                404: components["responses"]["NotFound"];
-            };
-        };
+        patch?: never;
         trace?: never;
     };
     "/v1/channels/{id}/test": {
@@ -2792,6 +2765,13 @@ export interface components {
             kind: components["schemas"]["ChannelKind"];
             /** @description A handle, an address or a URL. */
             target: string;
+            /** @description The Telegram chat's own name — a person's name (plus @username) or a group's title; absent when the channel has none, and the reader then sees the raw target. */
+            label?: string;
+            /**
+             * Format: date-time
+             * @description Present only while a /mute window is still running — the moment the channel's alerts resume; never sent for a channel that is live or a window that has already expired.
+             */
+            mutedUntil?: string;
             /** @description One extra line, only where the channel behaves differently. */
             note?: string;
             notify?: components["schemas"]["NotifySettings"];
@@ -2840,9 +2820,10 @@ export interface components {
         };
         TelegramInvite: {
             id: string;
-            role: components["schemas"]["RecipientRole"];
             /** @enum {string} */
             status: "pending";
+            /** @description Present when the link is bound to one teammate's row (Link Telegram): the person's public id. The pending link then renders on that person's Team row, never in the Channels list, and its redeem links THAT person's Telegram instead of creating a second person. */
+            personId?: string;
             /** Format: date-time */
             createdAt?: string;
             /** Format: date-time */
@@ -2850,7 +2831,8 @@ export interface components {
         };
         TelegramInviteCreated: {
             id: string;
-            role: components["schemas"]["RecipientRole"];
+            /** @description The minted link's binding, echoed from the request when set. */
+            personId?: string;
             /**
              * @description `t.me/<bot>?start=inv_<token>` — the one-time deep link. The token appears exactly here and nowhere else: not in logs, not in telemetry, not retrievable after this response.
              * @example https://t.me/upcontrol_bot?start=inv_9f8e7d6c5b4a

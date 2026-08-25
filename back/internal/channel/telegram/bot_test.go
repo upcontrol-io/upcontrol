@@ -68,6 +68,40 @@ func TestPrjPayloadIsNotAnInvite(t *testing.T) {
 	}
 }
 
+// The label a channel row prints on Alerts (Decision 13): name plus
+// @username when both exist; a bare @username when the name is empty; the
+// name alone when there is no username; nothing to print when neither — the
+// row then falls back to the raw target, never to an invented placeholder.
+func TestInviteLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		username string
+		want     string
+	}{
+		{"Kira Volkova", "kira", "Kira Volkova @kira"},
+		{"Kira Volkova", "", "Kira Volkova"},
+		{"", "kira", "@kira"},
+		{"", "", ""},
+	} {
+		if got := inviteLabel(tc.name, tc.username); got != tc.want {
+			t.Errorf("inviteLabel(%q, %q) = %q, want %q", tc.name, tc.username, got, tc.want)
+		}
+	}
+}
+
+// The label a channel row stores (bot.go): a computed label passes through,
+// an empty one becomes nil, the argument pgx writes as NULL — the read emits
+// label only when it is not NULL and the front's `label ?? target` does not
+// fall back on "", so a stored ” would print a blank destination line.
+func TestNullableLabel(t *testing.T) {
+	if got := nullableLabel("Kira Volkova @kira"); got != "Kira Volkova @kira" {
+		t.Errorf("nullableLabel(non-empty) = %#v, want the label unchanged", got)
+	}
+	if got := nullableLabel(""); got != nil {
+		t.Errorf("nullableLabel(empty) = %#v, want nil", got)
+	}
+}
+
 func TestParseMuteDuration(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

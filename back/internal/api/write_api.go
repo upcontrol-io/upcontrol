@@ -121,8 +121,10 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// §7.4 / design D6: notify members read (deliveries, status-page, logs,
 	// incidents, export are GETs below); every mutation is a settings act and
-	// needs login. The Mini App and the web answer to the same gate.
-	if r.Method != http.MethodGet && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+	// needs login. Explain is the one POST that is a read: a Member may spend
+	// the quota on it (Decision 9), and the quota is the plan's, not the role's.
+	// The Mini App and the web answer to the same gate.
+	if r.Method != http.MethodGet && !explainPath(r.URL.Path) && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
@@ -196,6 +198,14 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// explainPath answers whether p is one of the three Explain endpoints
+// (Decision 9): /v1/incidents/{id}/explain, /v1/logs/explain,
+// /v1/logs/explain/preview. They are POSTs on the wire but reads in substance,
+// which is why the role gate above exempts exactly them and nothing else.
+func explainPath(p string) bool {
+	return strings.HasSuffix(p, "/explain") || strings.HasSuffix(p, "/explain/preview")
 }
 
 // --- Channels ---
@@ -277,7 +287,9 @@ func (h *WriteAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantI
 // patchChannel changes what the channel is notified about
 // (docs/plans/channel-notify-settings.md). The only PATCHable thing is
 // `notify`: the destination itself stays immutable — delete and re-add is the
-// honest way to change where a message lands.
+// honest way to change where a message lands. The one exception is `muted`
+// (§5): a /mute window set from the chat is lifted here, never set — the
+// screen owns one word on the window, and it is "stop".
 func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	id := h.channelRowID(r.Context(), tenantID, pathLast(r.URL.Path))
 	if id == 0 {
@@ -286,9 +298,45 @@ func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID
 	}
 	var req struct {
 		Notify notifysettings.Patch `json:"notify"`
+		Muted  *bool                `json:"muted"`
 	}
 	if !decodeStrict(w, r, &req) {
 		return
+	}
+	// Muting from the screen is refused outright: the window is the reader's
+	// own act in the chat ("/mute 30m"), with its own duration to choose, and
+	// a screen that offered it would be a second, weaker copy of the chat's
+	// command. Only lifting travels this path.
+	if req.Muted != nil {
+		if *req.Muted {
+			writeAPIErr(w, http.StatusBadRequest, "bad_request")
+			return
+		}
+		// The unmute CTE the bot runs for /unmute, keyed by the row instead of
+		// the person/target predicate (the id is already resolved and owned by
+		// this tenant): snapshot the windows, clear them, then pull only what
+		// those windows parked back to now. The bot keeps its own copy — the two
+		// callers share the invariant, not the code path.
+		if _, err := h.pool.Raw().Exec(r.Context(),
+			`WITH muted AS (
+			   SELECT id, muted_until FROM alert_channel
+			    WHERE id = $1 AND tenant_id = $2
+			      AND muted_until IS NOT NULL
+			 ), cleared AS (
+			   UPDATE alert_channel SET muted_until = NULL
+			    WHERE id IN (SELECT id FROM muted)
+			 ), released AS (
+			   UPDATE delivery_queue d SET next_try_at = now()
+			     FROM muted m
+			    WHERE d.channel_id = m.id AND d.state = 'pending'
+			      AND d.leased_by IS NULL AND d.class <> 'followup'
+			      AND d.next_try_at >= m.muted_until
+			 )
+			 SELECT count(*) FROM muted`,
+			id, tenantID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	// PAID ONLY: the 15-minute resolve follow-up is on every paid plan. Turning
 	// it on from Free answers 402 in the exact upgrade shape the client reads — the
@@ -394,6 +442,15 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		Role  string `json:"role"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	// The one spelling before anything is stored (§6.8): person.email is
+	// UNIQUE and byte-exact, so an invite under "Bob@Example.com" and a
+	// sign-in under "bob@example.com" would otherwise be two people with two
+	// memberships. auth.NormalizeEmail is the same fold the sign-in doors use.
+	req.Email = auth.NormalizeEmail(req.Email)
+	if req.Email == "" || !strings.Contains(req.Email, "@") {
+		writeAPIErr(w, http.StatusBadRequest, "bad_email")
+		return
+	}
 	if req.Role == "" {
 		req.Role = "notify"
 	}
@@ -403,8 +460,8 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		`SELECT id FROM person WHERE email = $1`, req.Email).Scan(&personID)
 	if err != nil {
 		_ = h.pool.Raw().QueryRow(r.Context(),
-			`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, '') RETURNING id`,
-			req.Email).Scan(&personID)
+			`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+			req.Email, auth.NameFromEmail(req.Email)).Scan(&personID)
 	}
 	_, _ = h.pool.Raw().Exec(r.Context(),
 		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'pending')
@@ -463,9 +520,12 @@ func (h *WriteAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenan
 	}
 	// Full revocation, one transaction (design D7): the member goes, their
 	// telegram destinations go (the next alert must not reach that chat),
-	// their unused invites burn, and their sessions die — so a removed member
-	// loses alerts AND the Mini App at once, with nothing left to race. The
-	// person row itself stays: the Telegram account exists even unlinked.
+	// their e-mail channel goes with them (§4 — leaving means the address
+	// stops being a destination, not just a login; it is matched by address,
+	// not recipient, because an e-mail channel is keyed by its target), their
+	// unused invites burn, and their sessions die — so a removed member loses
+	// alerts AND the Mini App at once, with nothing left to race. The person
+	// row itself stays: the Telegram account exists even unlinked.
 	tx, err := h.pool.Raw().Begin(r.Context())
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -475,7 +535,12 @@ func (h *WriteAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenan
 	for _, q := range []string{
 		`DELETE FROM tenant_member WHERE person_id = $1 AND tenant_id = $2`,
 		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'telegram' AND recipient_person_id = $1`,
-		`UPDATE telegram_invite SET expires_at = now() WHERE tenant_id = $2 AND invited_by = $1 AND redeemed_at IS NULL`,
+		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'email' AND lower(target) = (SELECT lower(email) FROM person WHERE id = $1)`,
+		// Both directions of the person-bound invite: invites they minted AND
+		// invites minted to link their own Telegram — either one, redeemed after
+		// the removal, would attach a chat to a person who is no longer here.
+		`UPDATE telegram_invite SET expires_at = now()
+		  WHERE tenant_id = $2 AND (invited_by = $1 OR person_id = $1) AND redeemed_at IS NULL`,
 		`DELETE FROM session WHERE person_id = $1 AND tenant_id = $2`,
 	} {
 		if _, err := tx.Exec(r.Context(), q, personID, tenantID); err != nil {

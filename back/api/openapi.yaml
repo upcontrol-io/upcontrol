@@ -351,6 +351,19 @@ components:
         id: { type: string }
         kind: { $ref: "#/components/schemas/ChannelKind" }
         target: { type: string, description: "A handle, an address or a URL." }
+        label:
+          type: string
+          description: >
+            The Telegram chat's own name — a person's name (plus @username) or a
+            group's title; absent when the channel has none, and the reader then
+            sees the raw target.
+        mutedUntil:
+          type: string
+          format: date-time
+          description: >
+            Present only while a /mute window is still running — the moment the
+            channel's alerts resume; never sent for a channel that is live or a
+            window that has already expired.
         note:
           type: string
           description: One extra line, only where the channel behaves differently.
@@ -425,19 +438,27 @@ components:
         status: { type: string, enum: [active, pending] }
     TelegramInvite:
       type: object
-      required: [id, role, status]
+      required: [id, status]
       properties:
         id: { type: string }
-        role: { $ref: "#/components/schemas/RecipientRole" }
         status: { type: string, enum: [pending] }
+        personId:
+          type: string
+          description: >
+            Present when the link is bound to one teammate's row (Link
+            Telegram): the person's public id. The pending link then renders on
+            that person's Team row, never in the Channels list, and its redeem
+            links THAT person's Telegram instead of creating a second person.
         createdAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time }
     TelegramInviteCreated:
       type: object
-      required: [id, role, link, expiresAt]
+      required: [id, link, expiresAt]
       properties:
         id: { type: string }
-        role: { $ref: "#/components/schemas/RecipientRole" }
+        personId:
+          type: string
+          description: The minted link's binding, echoed from the request when set.
         link:
           type: string
           description: >
@@ -1575,6 +1596,7 @@ paths:
               type: object
               properties:
                 notify: { $ref: "#/components/schemas/NotifySettings" }
+                muted: { type: boolean, description: "Only false is accepted: lifts the /mute window and releases the alerts it parked." }
       responses:
         "200":
           description: Updated; the resolved settings are returned.
@@ -1602,17 +1624,21 @@ paths:
     post:
       tags: [alerts]
       summary: >
-        Mint a one-time Telegram invite link (role chosen at invite, default
-        notify). Counts active + pending recipients against the plan's
-        telegram_recipients axis.
+        Mint a one-time Telegram invite link. The invite carries no role: the
+        invitee arrives as notify. Counts active + pending recipients against
+        the plan's telegram_recipients axis.
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               type: object
               properties:
-                role: { $ref: "#/components/schemas/RecipientRole" }
+                personId:
+                  type: string
+                  description: >
+                    Bind the invite to one person on the project; absent means
+                    anyone holding the link may redeem it.
       responses:
         "201":
           description: Created — the link carries the token exactly once.
@@ -1623,31 +1649,6 @@ paths:
         "402": { $ref: "#/components/responses/PaymentRequired" }
 
   /v1/telegram/invites/{id}:
-    patch:
-      tags: [alerts]
-      summary: Change the role an unredeemed invite will grant.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [role]
-              properties:
-                role: { $ref: "#/components/schemas/RecipientRole" }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              { schema: { $ref: "#/components/schemas/TelegramInvite" } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [alerts]
       summary: Burn an unredeemed invite (it can no longer be redeemed).

@@ -4,6 +4,57 @@ All notable changes to the self-hosted package. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org/).
 
+## [0.3.0] — 2026-08-26
+
+### Added
+- **Acknowledge and Resolve buttons in group alerts.** A group message used
+  to carry no buttons at all, because the one button it wanted — the Mini
+  App opener — is refused by the Bot API outside a private chat. A group now
+  gets the two buttons that work anywhere, and a press is authorised by who
+  pressed it: anyone on the project and only them, and someone else is told
+  so privately. Open and Explain stay on personal alerts, where the Mini App
+  can open; a detector spike carries Acknowledge only, in a group as in a
+  private chat.
+- **Chat labels on Alerts.** A Telegram row prints the person's name with
+  their `@username`, or the group's title, instead of a raw chat id — the
+  reader sees who a destination reaches, not its handle. Migration `025`
+  backfills existing personal rows from the person's name.
+- **`Link Telegram`, a person-bound invite.** A teammate's row on Team can
+  mint a Telegram link addressed to that one person: it works once, only for
+  them, and is shown once under the row, which turns to `Link pending`. The
+  redeem refuses to merge — another person's Telegram is turned away, and so
+  is a group chat — and a refusal rolls back, leaving the link valid for its
+  person.
+- **Muted channels are shown and liftable from the Alerts screen.** A
+  channel muted with `/mute` says `muted until` and the time on its row, and
+  `Unmute` lifts the window and releases the alerts it parked. Muting stays a
+  chat command: the screen only lifts.
+- **Explain is available to Members.** The three Explain calls left the write
+  gate: they are reads a Member may spend the AI quota on, like every other
+  read on a screen a Member already sees. Every write still demands an
+  Admin.
+
+### Changed
+- **The Telegram invite no longer carries a role.** Minting takes no role
+  and the contract carries none: whoever redeems a link joins as a Member.
+  A Telegram invitee arrives with no e-mail, and an Admin must have one.
+- **Invited addresses are normalised before the person is created.** The
+  address is trimmed and lower-cased on invite, so `Bob@Example.com` and
+  `bob@example.com` are one person, not two accounts for one reader, and the
+  display name is derived from the normalised form.
+
+### Removed
+- `PATCH /v1/telegram/invites/{id}`. Its only job was changing the role a
+  link would carry; the link carries no role now, so a link minted wrong is
+  revoked and re-minted, never patched.
+
+### Fixed
+- **A removed person's e-mail channel no longer stays behind.** Removing a
+  teammate deleted their membership, invites, sessions and Telegram
+  channels, but the e-mail channel survived and kept receiving alerts at an
+  address that no longer had a person. The delete now takes the e-mail
+  channel too, matched by address.
+
 ## [0.2.0] — 2026-08-24
 
 ### Added
