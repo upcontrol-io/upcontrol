@@ -1,5 +1,5 @@
-// Key management: issuance (on signup), rotation (with 24h overlap window),
-// and the GET /v1/keys response that shows the prefix + recent usage.
+// Key management: issuance on signup, rotation, and the GET /v1/keys
+// response showing prefix + recent usage.
 
 package api
 
@@ -41,7 +41,7 @@ func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		// Rotating the key breaks every deployed SDK — a settings act (§7.4).
+		// Rotating the key breaks every deployed SDK: a settings act.
 		if !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 			writeAPIErr(w, http.StatusForbidden, "notify_role")
 			return
@@ -88,7 +88,6 @@ func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 
-	// Generate a new key.
 	secret := randomHex() // 32 hex chars; first 12 = prefix, rest = secret
 	prefix := secret[:12]
 	fullKey := "uc_live_" + secret

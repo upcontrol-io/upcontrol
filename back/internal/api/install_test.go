@@ -9,9 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// The full mint→ingest→status loop runs in cli/e2e against the real stack;
-// these cover what is testable without Postgres: the per-IP throttle, the
-// pre-auth refusals, and the pure meta whitelist/cap/scrub pipeline.
+// The full mint→ingest→status loop runs in cli/e2e; these cover the throttle,
+// the pre-auth refusals, and the pure meta whitelist/cap/scrub pipeline.
 
 func TestInstallAllow_CooldownPerIP(t *testing.T) {
 	h := NewInstall(nil, nil, nil, "https://upcontrol.io", false)
@@ -32,9 +31,8 @@ func TestInstallAllow_CooldownPerIP(t *testing.T) {
 	}
 }
 
-// Pinned after the cold-install rehearsal: a self-host's install command
-// without --endpoint sends the token to upcontrol.io, where it dies as
-// "already used or expired". The hosted cloud keeps the short command.
+// A self-host's install command must carry --endpoint: without it the token
+// travels to upcontrol.io and dies. The hosted cloud keeps the short form.
 func TestInstallCommand_CarriesEndpointOffCloud(t *testing.T) {
 	if got := installCommand("tok1", "https://upcontrol.io"); got != "npx upcontrol init --token tok1" {
 		t.Fatalf("cloud command grew a flag it does not need: %q", got)
@@ -48,9 +46,8 @@ func TestInstallCommand_CarriesEndpointOffCloud(t *testing.T) {
 }
 
 func TestInstallAnonymous_SelfHostedIs404(t *testing.T) {
-	// Decision 22 (public-first-split): a self-host has no use-before-signup
-	// story — the anonymous mint answers as if the door does not exist, and a
-	// bare `npx upcontrol init` cannot create an orphan tenant.
+	// A self-host has no use-before-signup story: the anonymous mint answers
+	// as if the door does not exist.
 	h := NewInstall(nil, nil, nil, "", true)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/projects/anonymous", nil))
@@ -184,9 +181,8 @@ func TestMetaPayload(t *testing.T) {
 	})
 
 	t.Run("rejects a null body — never a silent wipe", func(t *testing.T) {
-		// JSON null decodes into a map as nil with no error, so without the
-		// explicit check it would store a provenance-only payload, silently
-		// clearing every field the previous spec carried.
+		// JSON null decodes into a nil map with no error: without the explicit
+		// check it would silently clear every previous field.
 		_, err := metaPayload([]byte(`null`), now)
 		if err == nil || err.code != "bad_body" {
 			t.Fatalf("a null body must 400 as bad_body, got %v", err)
@@ -222,9 +218,8 @@ func TestMetaPayload(t *testing.T) {
 	})
 
 	t.Run("strips newlines at store time", func(t *testing.T) {
-		// Decision 9's store-time half: a stored newline is the one byte that
-		// could put a forged </project-spec> on its own line inside the fence
-		// the explain prompt wraps the meta line in.
+		// A stored newline could put a forged </project-spec> on its own line
+		// inside the fence the explain prompt wraps the meta line in.
 		payload, err := metaPayload([]byte(`{"name":"a\nb\r\nc"}`), now)
 		if err != nil {
 			t.Fatalf("newlines are stripped, not rejected: %v", err)
@@ -236,10 +231,8 @@ func TestMetaPayload(t *testing.T) {
 	})
 
 	t.Run("strips the Unicode separators and keeps the digits that spell them", func(t *testing.T) {
-		// metaNewlines named U+2028/U+2029 in its comment and stripped the
-		// four-digit STRINGS "2028"/"2029" instead, so a project described as
-		// "Roadmap 2028" silently lost its year. Both halves are pinned here:
-		// the separators go, the digits stay.
+		// The separators go, the digits stay: "Roadmap 2028" must keep its
+		// year while U+2028/U+2029 are stripped.
 		payload, err := metaPayload([]byte(`{"name":"a b c","description":"Roadmap 2028"}`), now)
 		if err != nil {
 			t.Fatalf("separators are stripped, not rejected: %v", err)
@@ -257,9 +250,8 @@ func TestMetaPayload(t *testing.T) {
 	})
 
 	t.Run("caps the value as sent, so the scrubber's expansion cannot reject a compliant spec", func(t *testing.T) {
-		// The scrubber EXPANDS (jo@ex.com, 9 runes → [redacted:email:9], 18).
-		// Capping after it rejected values that were inside the published
-		// 200-rune cap — a compliant client got a 400 it could not act on.
+		// The scrubber EXPANDS (jo@ex.com → [redacted:email:9]): the cap must
+		// count the value as sent, or a compliant client gets a 400.
 		body := `{"description":"contact jo@ex.com ` + strings.Repeat("a", 182) + `"}`
 		payload, err := metaPayload([]byte(body), now)
 		if err != nil {

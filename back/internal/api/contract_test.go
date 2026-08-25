@@ -1,12 +1,7 @@
 //go:build contract
 
-// Package api_test contains the contract test (build-plan §2.7): each golden
-// JSON fixture — taken verbatim from front/src/lib/mockData.ts — is round-tripped
-// through the generated Go types. If a field in mockData does not fit a generated
-// struct, the round-trip loses it and the test fails. That is the contract: the
-// generated server speaks the same shapes the front already renders.
-//
-// Run: go test -tags=contract ./internal/api/...
+// Package api_test round-trips each golden JSON fixture (from mockData.ts)
+// through the generated types: a field that does not fit is a contract break.
 package api_test
 
 import (
@@ -45,9 +40,8 @@ func loadGolden(t *testing.T, name string) []byte {
 	return b
 }
 
-// roundTrip unmarshals golden into a generated-type value, re-marshals it, and
-// compares the canonical forms. The ptrTy param lets the caller pass a fresh
-// instance of the generated type (e.g. &apigen.Account{}).
+// roundTrip unmarshals golden into a generated-type value, re-marshals it,
+// and compares canonical forms. ptrTy is a fresh generated-type instance.
 func roundTrip[T any](t *testing.T, name string, golden []byte, ptrTy T) {
 	t.Helper()
 	if err := json.Unmarshal(golden, ptrTy); err != nil {
@@ -81,9 +75,8 @@ func TestPlanContract(t *testing.T) {
 	roundTrip(t, "plan", g, &apigen.PlanResponse{})
 }
 
-// TestGoldenFilesParse guards against committing a malformed fixture: every
-// golden must be valid JSON, parseable on its own. (Field order is preserved from
-// mockData for readability, so we do not require alphabetical key order.)
+// TestGoldenFilesParse guards against a malformed fixture: every golden must
+// parse on its own. (Field order is preserved from mockData, not alphabetical.)
 func TestGoldenFilesParse(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden.json"))
 	if err != nil {

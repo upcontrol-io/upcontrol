@@ -48,9 +48,8 @@ func TestStagesOmitUnmeasuredPhases(t *testing.T) {
 }
 
 func TestStagesSumToTotal(t *testing.T) {
-	// The property that makes a waterfall readable at all. TTFBMs is measured
-	// from the start of the request, so a naive pass-through would render this
-	// 546 ms request as 958 ms of bars.
+	// TTFBMs is measured from the start of the request: a naive pass-through
+	// would render this 546 ms request as 958 ms of bars.
 	res := executor.Result{DNSMs: 116, ConnectMs: 136, TLSMs: 160, TTFBMs: 546, TotalMs: 610}
 	var sum uint32
 	for _, s := range stagesFrom(res) {
@@ -76,11 +75,8 @@ func TestStagesGuardAgainstUnderflow(t *testing.T) {
 }
 
 func TestHtmlReportsAMeasuredZeroRatherThanVanishing(t *testing.T) {
-	// A 10 KB single-page shell arrives in the same millisecond as its first
-	// byte, so total == ttfb. html is derived from numbers we hold, which makes
-	// it measured — dropping it made the landing print the no-data marker for
-	// the one phase we can always compute, i.e. "we never looked" about
-	// something we did look at.
+	// total == ttfb for a single-page shell: html is derived from numbers we
+	// hold, so a zero here is measured, not absent.
 	res := executor.Result{DNSMs: 24, TTFBMs: 168, TotalMs: 168}
 	html := find(stagesFrom(res), "html")
 	if html == nil {
@@ -92,9 +88,8 @@ func TestHtmlReportsAMeasuredZeroRatherThanVanishing(t *testing.T) {
 }
 
 func TestPhasesThatNeverRanStayAbsent(t *testing.T) {
-	// The other half of the same rule: a zero from the recorder means the hook
-	// never fired. An IP literal has no name to resolve, plaintext has no
-	// handshake, and those must not render as "0 ms".
+	// The other half of the rule: a zero from the recorder means the hook never
+	// fired, and those phases must not render as "0 ms".
 	res := executor.Result{ConnectMs: 41, TTFBMs: 60, TotalMs: 100}
 	stages := stagesFrom(res)
 	if find(stages, "dns") != nil {
@@ -157,9 +152,8 @@ func TestNetworkRowsCarryDNSAndTLSWhenMeasured(t *testing.T) {
 }
 
 func TestNetworkRowsDropRedirectsForBlockedTarget(t *testing.T) {
-	// The SSRF guard refuses before any request is made, so there is no hop
-	// count to report — reporting "0 hops" would describe a request that never
-	// happened.
+	// The SSRF guard refuses before any request is made: "0 hops" would
+	// describe a request that never happened.
 	rows := networkRowsFrom(executor.Result{ErrorClass: "blocked_target"}, "down")
 	if find(rows, "redirects") != nil {
 		t.Error("redirects row present for a blocked target")
@@ -241,9 +235,8 @@ func TestDiscoveredRowsHeaders(t *testing.T) {
 }
 
 func TestSameHostTargetsRefusesAForeignURL(t *testing.T) {
-	// The boundary where a client-supplied URL stops being trusted. Without it,
-	// posting a stranger's endpoint enrols it into our probe schedule every five
-	// minutes, forever, on somebody else's bandwidth.
+	// The boundary where a client-supplied URL stops being trusted: without it,
+	// a stranger's endpoint joins the probe schedule forever.
 	got := sameHostTargets("https://mine.com", []string{
 		"https://mine.com/pricing",
 		"https://victim.example/heavy",
@@ -341,9 +334,8 @@ func TestPageRowsSeparateSilenceFromNeverAsking(t *testing.T) {
 }
 
 func TestAPIRowIsPickableAndCarriesItsURLAsID(t *testing.T) {
-	// The API sits with the things that have a checkbox: a subdomain API is
-	// already pickable under Hosts, and the path-based one is the same thing on
-	// a site that routes instead of subdomaining.
+	// The API sits with the things that have a checkbox: a path-based API is
+	// the same thing on a site that routes instead of subdomaining.
 	row := apiRow("https://x.io", &discover.API{
 		Path: "/api", Source: "answers directly", Status: 401, Confirmed: true,
 	})

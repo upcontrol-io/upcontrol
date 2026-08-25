@@ -1,12 +1,7 @@
 //go:build integration
 
-// Audit §13 (design D10): the moment a sign-in project is named by its first
-// website check, the status page's service slug (prj-N) is re-claimed from the
-// domain. The old prj-N address keeps resolving (publicStatus's project-id
-// fallback), a hand-picked slug is never rewritten, and a second naming of an
-// already-named project changes nothing.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/api/...
+// Naming a sign-in project re-claims its service slug (prj-N) from the domain;
+// hand-picked slugs never rewrite. Run with -tags=integration, UC_TEST_POSTGRES set.
 package api
 
 import (
@@ -43,9 +38,8 @@ func TestNamingReclaimsTheServiceSlug(t *testing.T) {
 	tenant := fmt.Sprintf("slugtest-%d", uniq)
 	domain := fmt.Sprintf("example-%d.com", uniq%100000)
 	var tenantID, projectID int64
-	// public_id is a uuid column — mint it in the database, never hand-typed
-	// (the hand-built strings this used to carry are not uuid syntax; same
-	// lesson the HA seeds taught).
+	// public_id is a uuid column: mint it in the database, never hand-typed
+	// (hand-built strings are not uuid syntax).
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
 		tenant).Scan(&tenantID); err != nil {
@@ -102,10 +96,8 @@ func TestNamingReclaimsTheServiceSlug(t *testing.T) {
 	}
 }
 
-// The sign-in door creates no status_page row at all, so the first website
-// check has nothing to rename — naming must CREATE the row under the domain
-// slug, or the account keeps handing out prj-N while the claimed slug goes
-// nowhere (the bug: a fresh account's Public URL read /status/prj-66).
+// The sign-in door creates no status_page row: naming must CREATE it under
+// the domain slug, or a fresh account keeps handing out prj-N.
 func TestNamingCreatesThePageRowWhenNoneExists(t *testing.T) {
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -121,9 +113,8 @@ func TestNamingCreatesThePageRowWhenNoneExists(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// A sign-in-shaped account that never touched the status page: tenant +
-	// unnamed project, and NO status_page row — exactly what /v1/auth/magic-link
-	// provisions.
+	// A sign-in-shaped account: unnamed project and NO status_page row, what
+	// /v1/auth/magic-link provisions.
 	uniq := time.Now().UnixNano()
 	domain := fmt.Sprintf("fresh-%d.com", uniq%100000)
 	var tenantID, projectID int64
