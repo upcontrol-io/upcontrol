@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// The 503 an explain answers when no key is configured has to differ by
-// deployment, because the door it can name differs. A self-host operator can
-// open Settings; a hosted tenant gets 404 there by design, so pointing them
-// at it would be a control that cannot act.
+// The no-key 503 differs by deployment: a self-host operator can open
+// Settings; a hosted tenant gets 404 there, so naming it helps nobody.
 func TestAINotConfiguredMessage(t *testing.T) {
 	selfHost := (&WriteAPI{selfHosted: true}).aiNotConfiguredMsg()
 	if !strings.Contains(selfHost, "Settings") {

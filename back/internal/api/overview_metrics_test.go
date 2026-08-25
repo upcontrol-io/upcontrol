@@ -7,10 +7,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/ch"
 )
 
-// The product tiles are only as honest as their note: a bare number is exactly
-// what "numbers ship with their normal range, never bare" forbids. A metric
-// with under 7 days of history has no computable range and must produce no
-// tile at all — a tile with no note is a bare number wearing a label.
+// A metric with under 7 days of history has no computable range and must
+// produce no tile: a tile with no note is a bare number wearing a label.
 func TestMetricTilesCarryARangeOrDontShip(t *testing.T) {
 	stats := []ch.MetricStat{
 		{Name: "signups", Latest: 31, P10: 28, P90: 35, Days: 7, Spark: []float64{29, 30, 31}},

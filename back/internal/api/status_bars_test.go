@@ -5,9 +5,8 @@ import (
 	"time"
 )
 
-// A day is the wrong bucket for an account that started this morning: its check
-// has been running for minutes, so six of the seven daily bars would read
-// `nodata` for a week — on exactly the page a new owner shows people.
+// A day is the wrong bucket for a brand-new account: six of seven daily bars
+// would read `nodata` for a week, on the page a new owner shows people.
 func TestBarSpanFollowsTheCheckIntervalUntilThereIsADayOfHistory(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 
@@ -48,9 +47,8 @@ func TestBarSpanFollowsTheCheckIntervalUntilThereIsADayOfHistory(t *testing.T) {
 			want:     24 * time.Hour,
 		},
 		{
-			// A row with no interval on it (legacy, or a kind that does not carry
-			// one) must not produce a zero-length bucket: that divides by zero in
-			// the bucket maths and would draw an empty strip forever.
+			// A row with no interval must not produce a zero-length bucket:
+			// that divides by zero in the bucket maths.
 			name:     "a missing interval falls back to five minutes",
 			oldest:   time.Time{},
 			interval: 0,

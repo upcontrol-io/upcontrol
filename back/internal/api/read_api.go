@@ -1,11 +1,5 @@
-// Read-only API handlers for the remaining /v1/* endpoints. Each reads the
-// session cookie → tenant_id, queries Postgres, and returns the exact shape the
-// front's mockData expects (so mock → fetch swaps without component changes).
-//
-// Static parts of responses (connectableSources, connectableChannels,
-// botInviteLink, the effort ladder) are returned as constants — they describe
-// what CAN be connected or achieved, not what the tenant has. They match the
-// front's mockData constants.
+// Read-only API handlers for the remaining /v1/* endpoints: session-scoped,
+// mockData-shaped. Static parts (connectable lists, the ladder) are constants.
 
 package api
 
@@ -34,12 +28,8 @@ type ReadAPI struct {
 	pool *pg.Pool
 	ch   *ch.Conn
 	sess *session.Manager
-	// botUsername resolves to "" when no Telegram bot is configured. Empty
-	// means the screen offers no Telegram destination at all — the
-	// alternative is a deep link to a bot that does not exist, which is the
-	// state this whole pass is about removing. A func, not a string: the
-	// username can arrive at runtime from the Settings screen, and the
-	// surface has to appear without a restart.
+	// botUsername resolves to "" when no bot is configured: no Telegram
+	// destination is offered. A func: the username arrives at runtime.
 	botUsername func(context.Context) string
 }
 
@@ -76,7 +66,6 @@ func (h *ReadAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // GET /v1/plan — the plan numbers (single-sourced with Pricing.tsx).
 func (h *ReadAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	// Get the tenant's plan.
 	var plan string
 	_ = h.pool.Raw().QueryRow(ctx, `SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
 	if plan == "" {
@@ -87,20 +76,19 @@ func (h *ReadAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	tgUsed, tgMax, _ := countTelegramRecipients(ctx, h.pool, tenantID)
 	resp := map[string]any{
 		"plan": plan,
-		// How often this plan may check. The picker greys nothing out — it opens
-		// the upgrade prompt — but it has to know where the wall is, and a client that
-		// hardcoded 5m would be a second home for a number this row owns.
+		// How often this plan may check: the picker needs the wall, and a
+		// hardcoded 5m would be a second home for this row's number.
 		"minIntervalSec": int(ent.MinIntervalSec),
 		"httpChecks":     map[string]int{"used": int(used), "max": int(ent.HttpChecks)},
 		// Depth, not consumption — the ring has no remainder, so the client says
 		// it in a sentence. Both numbers are the plan's own entitlement row.
 		"logWindow":           map[string]any{"lines": int(ent.WindowLines), "approxHours": float64(ent.WindowHours)},
 		"incidentHistoryDays": int(ent.IncidentDays),
-		// Telegram recipients are the one counted human axis (CLAUDE.md's named
-		// §1 reversal): both numbers are measured here, never hardcoded client-side.
+		// Telegram recipients are the one counted human axis: both numbers
+		// are measured here, never hardcoded client-side.
 		"telegramRecipients": map[string]int{"used": tgUsed, "max": tgMax},
 	}
-	// aiExplains: null on plans with unlimited (the field is absent, per §4.4).
+	// aiExplains: absent on unlimited plans.
 	if ent.AiExplains != nil {
 		aiUsed, _ := h.pool.Queries().CountAIExplains(ctx, tenantID)
 		resp["aiExplains"] = map[string]int{"used": int(aiUsed), "max": int(*ent.AiExplains)}
@@ -118,42 +106,31 @@ func (h *ReadAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int6
 			"kind":   row.Kind,
 			"target": row.Target,
 			// Always the resolved object, never the sparse column: the screen
-			// renders state, not guesses (docs/plans/channel-notify-settings.md).
+			// renders state, not guesses.
 			"notify": notifysettings.Resolve(row.Notify),
 		}
-		// label is the Telegram chat's own name (person name/@username or
-		// group title, Decision 12/13): sent only when the column is set, so
-		// channels with no name keep their sparse shape.
+		// label is the Telegram chat's own name, sent only when the column is
+		// set: channels with no name keep their sparse shape.
 		if row.Label != nil {
 			ch["label"] = *row.Label
 		}
-		// mutedUntil travels only while the window is still running (Decision
-		// 12): an expired mute is yesterday's fact, and the screen must not
-		// render "muted" over a channel whose alerts are already flowing.
+		// mutedUntil travels only while the window runs: the screen must not
+		// render "muted" over a channel whose alerts already flow.
 		if row.MutedUntil.Valid && row.MutedUntil.Time.After(time.Now()) {
 			ch["mutedUntil"] = row.MutedUntil.Time.UTC().Format(time.RFC3339)
 		}
 		channels = append(channels, ch)
 	}
-	// What can still be connected. Telegram is NOT here any more: a personal
-	// Telegram destination is a person, connected by redeeming a one-time
-	// invite from the People section (the old `?start=prj-N` tile was the
-	// guessable-link hole). E-mail/discord/slack stay typed destinations.
+	// What can still be connected. Telegram is absent: a personal destination
+	// is a person, connected by a one-time invite from People.
 	connectable := []map[string]any{}
 	connectable = append(connectable,
-		// "Address" until Aug 14, 2026: the field is a dropdown of People now, so
-		// the tile must not go on promising a box to type an address into.
 		map[string]any{"kind": "email", "name": "Email", "field": "Someone on the team", "hint": "Goes out alongside Telegram, never instead of it."},
 		map[string]any{"kind": "discord", "name": "Discord", "field": "Webhook URL", "placeholder": "https://discord.com/api/webhooks/…", "hint": "Server Settings → Integrations → Webhooks."},
 		map[string]any{"kind": "slack", "name": "Slack", "field": "Webhook URL", "placeholder": "https://hooks.slack.com/services/…", "hint": "Slack app settings → Incoming Webhooks."},
 	)
-	// Alerts that died in the queue (audit §3): the owner has to be told when a
-	// real alert never left, or a broken channel is indistinguishable from a
-	// working one until the outage it failed to report. Tests are excluded — a
-	// failed test is already reported on its own row, counting it here would
-	// say "alerts" about a button the owner just pressed. next_try_at is the
-	// closest thing the row has to a recency stamp (set at enqueue, moved only
-	// by retries, which die within ~30s of it).
+	// Alerts that died in the queue: a broken channel must be tellable from a
+	// working one. Tests are excluded; next_try_at is the recency stamp.
 	undelivered := 0
 	_ = h.pool.Raw().QueryRow(r.Context(),
 		`SELECT count(*) FROM delivery_queue
@@ -180,10 +157,7 @@ func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 			"status":   row.Status,
 		}
 		// A member with a linked telegram_id is a verified Telegram recipient
-		// (person.telegram_id is written only by invite redemption). The flag
-		// lets the row say "Telegram" where an e-mail row prints an address.
-		// TelegramID: sqlc-generated (gen/pg, ListRecipientsByTenant) — NULL until
-		// this person redeems a Telegram invite.
+		// (written only by invite redemption).
 		if row.TelegramID != nil {
 			rec["telegram"] = true
 		}
@@ -195,9 +169,8 @@ func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 	if h.botUsername(r.Context()) != "" {
 		resp["telegramEnabled"] = true
 		invites := []map[string]any{}
-		// LEFT JOIN person: an invite minted with a personId (§3.3a) carries it
-		// back as the person's public id, so the Team row can find its own
-		// pending link; an unbound invite keeps the sparse shape.
+		// LEFT JOIN person: a person-bound invite carries the person's public
+		// id so the Team row finds its own pending link.
 		if rows, ierr := h.pool.Raw().Query(r.Context(),
 			`SELECT ti.id, ti.created_at, ti.expires_at, p.public_id
 			  FROM telegram_invite ti
@@ -280,11 +253,8 @@ func (h *ReadAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64
 	connectable := []map[string]any{
 		{"key": "installer", "name": "Add it to your code", "setupTime": "1 command", "installer": true},
 		{"key": "deployhooks", "name": "Deploy hooks", "setupTime": "1 min", "docs": "/docs/integrations/vercel"},
-		// Grafana was offered here until Aug 14, 2026 (user decision, removed for
-		// now). A connect tile promises that pressing it starts a feed, and
-		// internal/source/webhook verifies stripe, github and vercel only — a POST
-		// to /hooks/grafana had nowhere to land, so the tile created a row that
-		// could never receive anything. It returns with the provider.
+		// No grafana tile: internal/source/webhook verifies stripe, github and
+		// vercel only, so the tile would create a row that can receive nothing.
 	}
 	signals, _ := h.pool.Queries().TenantSignals(r.Context(), tenantID)
 	lines, lastLog := h.logSummary(r.Context(), tenantID, signals)
@@ -298,7 +268,6 @@ func (h *ReadAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64
 // GET /v1/overview — the Dashboard aggregate.
 func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	// Monitors (reuse the monitor list query).
 	monRows, _ := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID)
 	monitors := make([]map[string]any, 0, len(monRows))
 	for _, row := range monRows {
@@ -314,15 +283,11 @@ func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	sources := append(sourcesFromSignals(signals, logLines, lastLog), connectedSources(conns)...)
 	ladder := []map[string]any{
 		{"key": "account", "title": "Create your account", "done": true},
-		// "Add the ingest key" is done when lines have actually arrived — a
-		// created monitor is a different rung, and counting it here told an
-		// account that had never sent a log line that it had.
+		// "Add the ingest key" is done when lines have actually arrived: a
+		// created monitor is a different rung.
 		{"key": "install", "title": "Add the ingest key", "done": logLines > 0},
 		{"key": "alert", "title": "Set up an alert channel", "done": signals.ChannelCount > 0},
 	}
-	// Availability, measured. The old constant said "Uptime 100% · last 24h" to a
-	// tenant whose probe had never run, which is the one number a monitoring
-	// product may not make up.
 	metrics, uptime, health := h.availability(ctx, tenantID)
 	resp := map[string]any{
 		"sources":  sources,
@@ -330,9 +295,8 @@ func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 		"metrics":  metrics,
 		"ladder":   ladder,
 	}
-	// Absent until a check has actually run in the last 24 hours: "100% · last
-	// 24h" for a probe that never ran is the one number a monitoring product may
-	// not make up, and the calm line simply carries no figure until it can.
+	// Absent until a check has run in the last 24 hours: a made-up "100%" is
+	// the one number a monitoring product may not invent.
 	if uptime != nil {
 		resp["uptime"] = uptime
 	}
@@ -350,14 +314,8 @@ func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 
-// --- helpers ---
-
-// logSummary answers "is this project sending lines, and when was the last one"
-// through ring.QueryBuilder — the only permitted path to the logs table
-// (invariant 4). It is a query rather than a Postgres counter because
-// tenant_line_ledger, which would hold exactly this, is not written by the
-// ingest path yet: reading it would report "nothing connected" to a project
-// that is streaming.
+// logSummary reads "is this project sending lines, and when was the last one"
+// through ring.QueryBuilder, the only permitted path to the logs table.
 func (h *ReadAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantSignalsRow) (uint64, time.Time) {
 	if h.ch == nil || s.ProjectID == 0 {
 		return 0, time.Time{}
@@ -371,24 +329,18 @@ func (h *ReadAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantS
 	return lines, last
 }
 
-// healthSegments is the width of the 7-day line: 42 four-hour buckets. The front
-// draws exactly this many, and `checks` keeps exactly 7 days (TTL), so the line
-// spans the whole retained record and never claims more.
+// healthSegments is the width of the 7-day line: 42 four-hour buckets, exactly
+// what `checks` retains, so the line spans the record and never claims more.
 const (
 	healthSegments  = 42
 	healthBucketDur = 4 * time.Hour
 )
 
 // availability computes the uptime tile and the 7-day health line from the
-// checks table. Both are nil/empty when nothing has been checked: a monitoring
-// product that reports 100% for a probe that never ran has told its worst
-// possible lie, and an absent line is the honest rendering of "no record yet".
+// checks table; nil/empty when nothing has been checked.
 func (h *ReadAPI) availability(ctx context.Context, tenantID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
-	// The product tiles (sign-ups, latency) are the events pipeline's output:
-	// metric readings the customer's app sends. They are read from ClickHouse
-	// now, not returned as a constant — and a metric with under 7 days of
-	// history produces no tile, because a bare number is exactly what "numbers
-	// ship with their normal range" forbids.
+	// The product tiles are the events pipeline's output, read from
+	// ClickHouse; under 7 days of history produces no tile.
 	metrics = []map[string]any{}
 	if h.ch == nil {
 		return metrics, nil, nil
@@ -449,13 +401,8 @@ func (h *ReadAPI) availability(ctx context.Context, tenantID int64) (metrics []m
 		}
 	}
 
-	// Uptime is not a tile any more (Aug 14, 2026, user decision). It used to be
-	// appended to `metrics`, where — with both product tiles hidden by the MVP
-	// trim — it was the only card left and `auto-fit` stretched it across the
-	// whole screen: a banner holding one bare number that the per-check lines
-	// below already carry. It travels as its own field so the Dashboard can put
-	// it in the calm line, and so `metrics` stays what it is: the product tiles,
-	// empty until the events pipeline ships.
+	// Uptime travels as its own field, not a tile: `metrics` stays the product
+	// tiles, and the Dashboard puts uptime in the calm line.
 	if day > 0 {
 		uptime = map[string]any{"value": pctLabel(dayOK, day), "note": "last 24h"}
 	}
@@ -468,14 +415,8 @@ func (h *ReadAPI) availability(ctx context.Context, tenantID int64) (metrics []m
 	}
 }
 
-// metricTiles turns metric stats into the Dashboard's tile shape: {label,
-// value, note, spark}. A stat with under 7 days of history ships no tile — the
-// p10–p90 of a week is the smallest range that means anything, and a tile
-// without a range is a bare number wearing a label (CLAUDE.md).
-//
-// Only names the Dashboard's tiles know are shown (metricTileUnits in the ch
-// package): real data with no home on screen is read but not invented into a
-// tile the design does not carry.
+// metricTiles turns metric stats into the Dashboard's tile shape; under 7 days
+// of history ships no tile. Only names metricTileUnits knows are shown.
 func metricTiles(stats []ch.MetricStat) []map[string]any {
 	tiles := make([]map[string]any, 0, len(stats))
 	for _, s := range stats {
@@ -543,11 +484,8 @@ func pctLabel(ok, total uint64) string {
 	return strconv.FormatFloat(float64(ok)/float64(total)*100, 'f', 2, 64) + "%"
 }
 
-// sourcesFromSignals builds the Sources list from what the tenant has actually
-// connected. An account with no checks and no log lines gets an EMPTY list, and
-// the screen says "nothing connected yet" — the previous constant answered every
-// tenant with "Site checks · up", which is a claim about their infrastructure
-// that we had not checked.
+// sourcesFromSignals builds the Sources list from what the tenant actually
+// connected: no checks and no lines means an EMPTY list, not a claim.
 func sourcesFromSignals(s sqlc.TenantSignalsRow, logLines uint64, lastLog time.Time) []map[string]any {
 	sources := make([]map[string]any, 0, 2)
 	if s.MonitorCount > 0 {
@@ -583,16 +521,12 @@ func sourcesFromSignals(s sqlc.TenantSignalsRow, logLines uint64, lastLog time.T
 }
 
 // connectedSources renders the rows the tenant connected by hand. A paused
-// source keeps its row and says so — pausing is not deleting, and a source that
-// vanished while paused would look like a failed disconnect.
+// source keeps its row and says so: pausing is not deleting.
 func connectedSources(rows []sqlc.ListSourceConnectionsRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		// Nothing has arrived yet: the row exists because someone connected it,
-		// which is not the same as it working. Status is derived from the signal
-		// rather than read from the column, so a connection that has never
-		// delivered anything cannot show a green dot — whatever the column says,
-		// including rows written before connectSource stopped inserting 'ok'.
+		// Status is derived from the signal, not the column: a connection that
+		// never delivered anything cannot show a green dot.
 		signal, status := "waiting...", "nodata"
 		if row.LastSignalAt.Valid {
 			signal, status = agoLabel(row.LastSignalAt.Time), row.Status
@@ -607,25 +541,20 @@ func connectedSources(rows []sqlc.ListSourceConnectionsRow) []map[string]any {
 		entry := map[string]any{
 			"id":   "src_" + strconv.FormatInt(row.ID, 10),
 			"mark": mark,
-			// The kind is what ties this row back to its Connect tile, so the
-			// screen can stop offering a source that is already connected. The
-			// derived rows (src_checks, src_logs) carry none: they are facts about
-			// what arrived, not connections, and nothing offers to add them.
+			// The kind ties this row back to its Connect tile. The derived rows
+			// (src_checks, src_logs) carry none: nothing offers to add them.
 			"kind":       row.Kind,
 			"name":       sourceName(row.Kind),
 			"status":     status,
 			"lastSignal": signal,
 			"paused":     row.Paused,
 		}
-		// The connection's own inbound URL (universal hooks): the front builds
-		// {origin}/hooks/{token} from it. Absent only on rows that predate the
-		// backfill, which cannot happen through migration 012.
+		// The connection's inbound hook token: the front builds
+		// {origin}/hooks/{token} from it.
 		if row.HookToken != nil && *row.HookToken != "" {
 			entry["hookToken"] = *row.HookToken
 		}
-		// The receipt: what the last event was, so the panel can show
-		// "Received github_push · 2s ago" instead of leaving the reader to
-		// guess whether their provider's test button worked.
+		// The receipt: what the last event was, so the panel can show it.
 		if row.LastEvent != nil && *row.LastEvent != "" {
 			entry["lastEvent"] = *row.LastEvent
 		}
@@ -666,12 +595,8 @@ func agoLabel(t time.Time) string {
 	}
 }
 
-// incidentWithEvidence is incidentToAPI plus the two collections that make the
-// card worth opening: the timeline, and the log slice frozen when the incident
-// fired. The timeline is not the lifecycle alone: the tenant's own events in
-// the 30 minutes before the open fold in too, which is what lets the card say
-// "a deploy landed right before this started" (product-plan) — the lifecycle
-// can only say what WE did.
+// incidentWithEvidence is incidentToAPI plus the timeline and the frozen log
+// slice. The timeline folds in the tenant's events around the break.
 func (h *ReadAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListIncidentsByTenantRow) map[string]any {
 	inc := incidentToAPI(row)
 
@@ -693,15 +618,8 @@ func (h *ReadAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListInciden
 		}
 	}
 
-	// The window the card cares about is the minutes around the break: 30 before
-	// the open through now (or the close). A deploy an hour earlier is not
-	// evidence. h.ch nil in tests — the lifecycle alone is still a timeline.
-	//
-	// `detectedAt` is passed as the pivot, not just as the window's anchor: the
-	// 50-row budget goes to the events NEAREST the break, from either side of
-	// it. Ordered from the window's start instead, a project doing more than a
-	// couple of events a minute filled all 50 slots inside the first minute of
-	// the half hour and the break never appeared in its own timeline.
+	// 30 minutes before the open through the close; `detectedAt` is the pivot,
+	// so the 50-row budget goes to the events NEAREST the break.
 	var events []ch.EventRow
 	if h.ch != nil && row.DetectedAt.Valid {
 		end := time.Now()
@@ -731,9 +649,8 @@ func (h *ReadAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListInciden
 	return inc
 }
 
-// timelineKind maps a lifecycle mark to the front's five event kinds. `opened`
-// is an error (it is the outage itself), `resolved` a check, and anything that
-// involves a person is people.
+// timelineKind maps a lifecycle mark to the front's five event kinds: `opened`
+// an error, `resolved` a check, anything with a person is people.
 func timelineKind(kind string) string {
 	switch kind {
 	case "opened":
@@ -747,10 +664,8 @@ func timelineKind(kind string) string {
 	}
 }
 
-// eventKind maps an event name to one of the front's five timeline kinds. The
-// front renders an icon per kind and `triageOf` reads `kind === 'deploy'` to
-// build its hypothesis and its rollback command, so this mapping is what makes
-// the incident card say "why" instead of only "down".
+// eventKind maps an event name to the front's timeline kinds: `triageOf` reads
+// `kind === 'deploy'` to build its hypothesis and rollback command.
 func eventKind(name string) string {
 	switch {
 	case strings.HasPrefix(name, "deploy"), strings.Contains(name, "deployment"):
@@ -765,9 +680,8 @@ func eventKind(name string) string {
 	}
 }
 
-// eventText is the line the card prints. A deploy names its sha because the
-// triage's fix is `vercel rollback <sha>` — a deploy entry with no sha turns a
-// runnable command back into advice.
+// eventText is the line the card prints. A deploy names its sha: the triage's
+// fix is `vercel rollback <sha>`.
 func eventText(e ch.EventRow) string {
 	if sha := e.Labels["sha"]; sha != "" {
 		return "Deploy " + sha
@@ -775,13 +689,8 @@ func eventText(e ch.EventRow) string {
 	return e.Name
 }
 
-// mergeTimeline folds the tenant's events into the incident's lifecycle marks,
-// oldest first. Both carry "HH:MM", which sorts chronologically within the
-// card's own window; entries with no clock keep their relative order after the
-// timed ones (empty string sorts first, but SliceStable keeps that harmless).
-//
-// An absent feed adds nothing. It must never add a placeholder row: a timeline
-// that invents "no deploys today" is making a claim about a feed nobody connected.
+// mergeTimeline folds the tenant's events into the lifecycle marks, oldest
+// first. An absent feed adds nothing: never a placeholder row.
 func mergeTimeline(lifecycle []map[string]any, events []ch.EventRow) []map[string]any {
 	if len(lifecycle) == 0 && len(events) == 0 {
 		return nil
@@ -802,12 +711,8 @@ func mergeTimeline(lifecycle []map[string]any, events []ch.EventRow) []map[strin
 	return out
 }
 
-// incidentToAPI builds the front's Incident shape from an incident row. Every
-// field the card renders is present, including the two collections we cannot
-// fill yet: `timeline` and `logSlice` ship as empty arrays rather than being
-// omitted, because the card iterates them — an absent key is a crash on the
-// client, and a fabricated one is worse than an empty section. The card hides
-// both blocks while they are empty.
+// incidentToAPI builds the front's Incident shape. `timeline` and `logSlice`
+// ship as empty arrays, never omitted: the card iterates them.
 func incidentToAPI(row sqlc.ListIncidentsByTenantRow) map[string]any {
 	ongoing := row.Status == "down" || row.Status == "check"
 	inc := map[string]any{
@@ -864,5 +769,3 @@ func toUpper(b byte) byte {
 	}
 	return b
 }
-
-// (incidentLister removed — we use sqlc.ListIncidentsByTenantParams directly.)

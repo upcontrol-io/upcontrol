@@ -25,17 +25,8 @@ func uuidStr(u pgtype.UUID) string {
 	return fmt.Sprintf("%x", u.Bytes[:])
 }
 
-// decodeStrict is the decoder every management PATCH body goes through
-// (audit §14 / docs' "Management is strict" card): an unknown field is a
-// precise 400 that NAMES the field, never a silent no-op. A typo in a
-// management call used to answer 200 while changing nothing — the caller
-// believed `{"url": …}` had retargeted their check, and nothing had.
-//
-// The front is on the typed contract (client.ts sends exactly the schema
-// fields), so this only bites external clients — which is the point: the
-// management API is the side that is allowed to say no.
-//
-// Returns false (and answers the request) when the body is unacceptable.
+// decodeStrict is the decoder every management PATCH body goes through: an
+// unknown field is a 400 that NAMES the field, never a silent no-op.
 func decodeStrict(w http.ResponseWriter, r *http.Request, into any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()

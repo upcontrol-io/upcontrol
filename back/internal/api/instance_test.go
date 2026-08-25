@@ -2,9 +2,8 @@ package api
 
 import "testing"
 
-// The vectors that matter are the ones the old check waved through: it only
-// refused whitespace and slashes, so every "bad" case below except the last
-// three was accepted and stored as a working relay (rehearsal #3, 2026-08-20).
+// The vectors that matter are the ones a whitespace/slash-only check waved
+// through: every "bad" case below except the last three was accepted as a relay.
 func TestValidRelayHost(t *testing.T) {
 	good := []string{
 		"smtp.eu.mailgun.org",
@@ -22,7 +21,7 @@ func TestValidRelayHost(t *testing.T) {
 	}
 
 	bad := []string{
-		"bad..host..name",         // empty label — the one the rehearsal found
+		"bad..host..name",         // empty label
 		".leading.dot",            // empty first label
 		"trailing.dot.",           // empty last label
 		"-leading.hyphen.com",     // label may not start with a hyphen

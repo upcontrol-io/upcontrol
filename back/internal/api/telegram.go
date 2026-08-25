@@ -1,15 +1,5 @@
-// Telegram invite endpoints (openspec telegram-bot-auth-and-recipients, D2/D9).
-//
-//   POST   /v1/telegram/invites      — mint a one-time inv_<token> link (login+)
-//   DELETE /v1/telegram/invites/{id} — burn an unredeemed invite
-//
-// The invite carries no role (Decision 10): the row is written 'notify' — a
-// Telegram invitee has no e-mail, and an Admin must have one — so there is
-// nothing to choose at mint and no PATCH to change it afterwards. The token is
-// the credential: stored as sha256, shown in the POST response exactly once
-// (the key rule — never in a log, never retrievable). The plan axis
-// telegram_recipients gates minting; the wall is the same 402 error.upgrade
-// every other paid feature answers with.
+// Telegram invite endpoints: mint a one-time inv_<token> link, burn an
+// unredeemed invite. The token is the credential: sha256, shown exactly once.
 
 package api
 
@@ -24,9 +14,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// inviteTTL: the link has to survive being forwarded to a colleague, so it is
-// days, not the magic link's minutes. One-time still bounds the damage of a
-// leaked link far more than any short TTL would.
+// inviteTTL: the link has to survive being forwarded to a colleague, so days,
+// not the magic link's minutes. One-time bounds a leak more than a short TTL.
 const inviteTTL = 7 * 24 * time.Hour
 
 // Telegram serves the invite endpoints.
@@ -64,9 +53,8 @@ func (h *Telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID, personID int64) {
 	ctx := r.Context()
-	// The body is optional (the Alerts screen sends {}, Task 1.8's bound
-	// invite sends a personId): a POST with no body at all mints an unbound
-	// invite, and decodeStrict would read absence as bad_body.
+	// The body is optional: a POST with no body mints an unbound invite, and
+	// decodeStrict would read absence as bad_body.
 	var req struct {
 		PersonID string `json:"personId"`
 	}
@@ -91,17 +79,13 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 
 	token := "inv_" + randomHex()
 	// The bot's own hasher, not a local sha256: mint and redeem hashing the
-	// token independently is how every invite ever minted was unredeemable —
-	// this side hashed the full "inv_…" string, the bot hashed the tail.
+	// token independently made every invite unredeemable.
 	hash := telegram.InviteTokenHash(token)
 	expires := time.Now().UTC().Add(inviteTTL)
 	var id int64
 	var personRowID any // nil for the unbound invite, the person row id when bound
-	// A personId in the body binds the link to one teammate's row (§3.3a): the
-	// redeem then links THAT person's Telegram instead of creating a second
-	// person by telegram_id. Resolved through tenant_member, so a public id
-	// from another tenant answers 404 exactly like a nonexistent one, and an
-	// already-linked person is a 409 — there is nothing to mint for them.
+	// A personId binds the link to one teammate's row: the redeem links THAT
+	// person, not a new one. Cross-tenant ids 404; already-linked is 409.
 	if req.PersonID != "" {
 		var linked *int64
 		if err := h.pool.Raw().QueryRow(ctx,
@@ -117,8 +101,8 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 			return
 		}
 	}
-	// 'notify' as a literal (Decision 10): the invite grants no role choice —
-	// a Telegram invitee has no e-mail, and an Admin must have one.
+	// 'notify' as a literal: the invite grants no role choice; an Admin must
+	// have an e-mail, and a Telegram invitee has none.
 	if err := h.pool.Raw().QueryRow(ctx,
 		`INSERT INTO telegram_invite (tenant_id, role, invited_by, token_hash, expires_at, person_id)
 		 VALUES ($1, 'notify', $2, $3, $4, $5) RETURNING id`,
@@ -151,11 +135,8 @@ func (h *Telegram) deleteInvite(w http.ResponseWriter, r *http.Request, tenantID
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- shared helpers (read_api and the gate both count the same thing) ---
-
 // countTelegramRecipients is THE definition of the telegram_recipients axis:
-// active members with a linked telegram_id (the owner included — decision 0.2,
-// Free is the owner's chat + 2 teammates) plus pending unredeemed invites.
+// active members with a linked telegram_id, plus pending unredeemed invites.
 func countTelegramRecipients(ctx context.Context, pool *pg.Pool, tenantID int64) (used, max int, err error) {
 	var usedI, maxI int
 	err = pool.Raw().QueryRow(ctx,
@@ -174,10 +155,8 @@ func planRecipientWall(max int) string {
 	return "Free allows 3 Telegram recipients; paid plans carry 10 and up. Your plan allows " + intToStr(int64(max)) + "."
 }
 
-// roleAtLeastLogin answers whether this person may manage this tenant (§7.4:
-// notify gets alerts and acknowledges; login changes things). The owner's own
-// membership row carries login (EnsureTenantMember's first member), so this one
-// check covers owner and login teammates; notify members are read-only here.
+// roleAtLeastLogin answers whether this person may manage this tenant: notify
+// gets alerts; login changes things. Covers owner and login teammates.
 func roleAtLeastLogin(ctx context.Context, pool *pg.Pool, personID, tenantID int64) bool {
 	var role string
 	return pool.Raw().QueryRow(ctx,

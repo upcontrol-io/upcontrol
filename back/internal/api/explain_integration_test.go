@@ -1,12 +1,7 @@
 //go:build integration
 
-// Handler-level coverage for the explain endpoint's quota gate (Review 23:
-// H2's handler half had none). An unknown plan string falls back to Free
-// instead of 500ing forever (tenant.plan is free text with no FK to
-// plan_entitlement), a dead database is the fail-closed 500, and an exhausted
-// quota is the 402 with the upgrade reason the client shows.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/api/...
+// Handler-level coverage of the explain quota gate: unknown plan falls back to
+// Free, a dead database 500s fail-closed, an exhausted quota answers 402.
 package api
 
 import (
@@ -73,9 +68,8 @@ func explainRequest(t *testing.T, line string) *http.Request {
 		strings.NewReader(fmt.Sprintf(`{"lines":[%q]}`, line)))
 }
 
-// A plan string outside the seeded plan_entitlement rows must not 500 the
-// endpoint forever: the gate falls back to Free — the most restrictive seeded
-// tier — and the answer comes back metered against Free's row.
+// A plan string outside the seeded plan_entitlement rows falls back to Free,
+// the most restrictive seeded tier, instead of 500ing forever.
 func TestExplainLogs_UnknownPlanFallsBackToFree(t *testing.T) {
 	h, tenantID, model := openExplainDB(t, "Legacy-2019")
 
@@ -128,9 +122,8 @@ func TestExplainLogs_ExhaustedQuotaIs402(t *testing.T) {
 			t.Fatalf("explain %d: status = %d (%s), want 200 — Free allows five", i, w.Code, w.Body.String())
 		}
 	}
-	// Five answers plus the refusal below sit exactly on explainBurst (6):
-	// empty the window first, so the next assertion someone adds ("the
-	// seventh is still 402") meets the quota gate, not the throttle's 429.
+	// Five answers plus the refusal sit exactly on explainBurst (6): empty the
+	// window first so the next assertion meets the quota gate, not the 429.
 	h.explainSeenAt = nil
 	w := httptest.NewRecorder()
 	h.explainLogs(w, explainRequest(t, "sixth: connect ECONNREFUSED 10.0.0.1:5432"), tenantID)
@@ -156,12 +149,8 @@ func TestExplainLogs_ExhaustedQuotaIs402(t *testing.T) {
 	}
 }
 
-// Regression (Mac rehearsal #2, 2026-08-20): Settings reads the wired brain's
-// identity by calling this endpoint with an empty `lines` — the front never
-// composes a real explanation just to learn `model`. A stray `missing_lines`
-// gate copy-pasted from explainLogs 400'd that call forever, so the Settings
-// AI block never left "Reading whether Explain is configured…". Empty lines
-// must reach the handler and come back 200 with the brain's id.
+// Settings reads the wired brain's identity with an empty `lines`: it must
+// reach the handler and answer 200 with the brain's id, never a 400.
 func TestPreviewExplain_EmptyLinesIsTheBrainProbe(t *testing.T) {
 	h, tenantID, _ := openExplainDB(t, "Free")
 

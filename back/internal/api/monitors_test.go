@@ -6,9 +6,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// The API is the gate, not the form: POST /v1/monitors accepted an empty
-// target and answered 201, creating a row that consumed one of the plan's
-// HTTP-check slots and handed the probe fleet an empty string to schedule.
+// The API is the gate, not the form: an empty target must not create a row
+// that consumes an HTTP-check slot and schedules an empty string.
 func TestValidateMonitorCreate(t *testing.T) {
 	cases := []struct {
 		name, kind, target, want string
@@ -32,9 +31,8 @@ func TestValidateMonitorCreate(t *testing.T) {
 	}
 }
 
-// A PATCH answers with the row as it now is. It used to answer "nodata" from a
-// literal, so a rename greyed a healthy check out until something re-read it.
-// This pins the helper the fixed caller passes real facts through.
+// A PATCH answers with the row as it now is, never a hardcoded "nodata":
+// this pins the helper the caller passes real facts through.
 func TestMonitorPatchKeepsStatus(t *testing.T) {
 	got := monitorRowToAPI("website", "Renamed", "https://example.com", "", 300,
 		"ok", pgtype.Timestamptz{}, pgtype.Timestamptz{}, pgtype.UUID{Valid: true})
