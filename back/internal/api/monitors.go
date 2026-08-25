@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -474,28 +475,12 @@ func writeAPIJSON(w http.ResponseWriter, code int, v any) {
 // lowercase hex without dashes, and the front sends that back.
 func parseUUID(s string) pgtype.UUID {
 	var u pgtype.UUID
-	if len(s) != 32 {
+	if len(s) != 32 || strings.ToLower(s) != s {
 		return u
 	}
-	b := make([]byte, 16)
-	for i := 0; i < 16; i++ {
-		var byteVal byte
-		for j := 0; j < 2; j++ {
-			c := s[i*2+j]
-			var d byte
-			switch {
-			case c >= '0' && c <= '9':
-				d = c - '0'
-			case c >= 'a' && c <= 'f':
-				d = c - 'a' + 10
-			case c >= 'A' && c <= 'F':
-				d = c - 'A' + 10
-			default:
-				return u
-			}
-			byteVal = byteVal<<4 | d
-		}
-		b[i] = byteVal
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return u
 	}
 	copy(u.Bytes[:], b)
 	u.Valid = true

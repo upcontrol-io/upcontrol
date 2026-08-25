@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -77,7 +78,7 @@ func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"key": map[string]any{
-			"id":        "key_" + intToStr(key.ID),
+			"id":        "key_" + strconv.FormatInt(key.ID, 10),
 			"prefix":    "uc_live_" + key.Prefix, // identifier only — the secret is never stored, never returned here
 			"createdAt": key.CreatedAt,
 		},
@@ -104,7 +105,7 @@ func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	}
 
 	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"id":        "key_" + intToStr(row.ID),
+		"id":        "key_" + strconv.FormatInt(row.ID, 10),
 		"prefix":    "uc_live_" + prefix, // what GET /v1/keys will list from now on
 		"value":     fullKey,             // shown exactly once
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
@@ -132,20 +133,6 @@ func randomHex() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-func intToStr(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[pos:])
 }
 
 var _ = json.NewEncoder
