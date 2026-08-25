@@ -1,7 +1,5 @@
-// The installer-collected project spec (ai-provider-and-scenarios plan,
-// Decision 15b): ONLY these five fields - never dependency lists, versions,
-// file paths, git remotes, env values or code. formatSpec prints the exact
-// spec before anything is sent (Decision 16); --no-meta skips the whole step.
+// The installer-collected project spec: ONLY these five fields - never
+// dependency lists, file paths, git remotes, env values or code.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -28,16 +26,12 @@ const FRAMEWORKS: ReadonlyArray<readonly [string, string]> = [
   ['react', 'react'],
 ];
 
-// The server caps each value at 200 runes as sent (PUT /v1/project/meta) and
-// rejects the whole spec when one is over, so a long package.json description
-// would destroy the upload for every other field. Trimming here is not a
-// silent cut of anything the user wrote for us: the value is theirs, it stays
-// whole on their disk, and the transparency block prints exactly what leaves.
+// The server rejects the whole spec when one value is over 200 runes, so a
+// long description must be trimmed here or it destroys the upload.
 const MAX_VALUE_RUNES = 200;
 
-// One line, always. A description carrying a newline would break the printed
-// transparency block into something that reads like two facts (the block's
-// whole job is to prove what is sent), and the server flattens it anyway.
+// One line, always: a newline would forge a second line inside the block
+// whose job is to prove what is sent, and the server flattens it anyway.
 function oneLine(value: string): string {
   return value.replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -47,11 +41,8 @@ function clean(value: string): string {
   return [...flat].length > MAX_VALUE_RUNES ? [...flat].slice(0, MAX_VALUE_RUNES).join('') : flat;
 }
 
-// A spec has to say something to be worth sending. runtime and language are
-// derived from the machine, not the project, so a package.json that yields
-// neither a name, a description nor a framework describes nothing about the
-// product - uploading it would overwrite a good spec (PUT replaces) with
-// two facts about whoever last ran init.
+// A spec must say something about the product: PUT replaces, so a spec with
+// only machine-derived runtime/language would overwrite a good one.
 const DESCRIPTIVE = ['name', 'description', 'framework'] as const;
 
 export function isDescriptive(spec: ProjectSpec): boolean {
@@ -79,7 +70,7 @@ export function collectSpec(cwd: string, runtime: string): ProjectSpec | null {
     const v = pkg[field];
     if (typeof v !== 'string') continue;
     // Flattened and capped here, so what the block prints, what the server
-    // stores and what the model reads are one string (Decision 16).
+    // stores and what the model reads are one string.
     const value = clean(v);
     if (value) spec[field] = value;
   }

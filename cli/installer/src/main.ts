@@ -1,10 +1,6 @@
 #!/usr/bin/env node
-// npx upcontrol - the one command (docs/plans/one-command-install.md).
-// Deterministic by design: no LLM runs here; the intelligence is the user's
-// own coding agent, and this CLI's job is to feed it (skill), equip the app
-// (pinned SDK), place the key (only into a gitignored .env, never echoed) and
-// prove the chain (verify). Subcommands: init (default), skills, verify,
-// status.
+// npx upcontrol - the one command. No LLM runs here: the CLI installs the
+// skill, pins the SDK, places the key and proves the chain (verify).
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
@@ -120,22 +116,15 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   let keySource = findKey(cwd);
   let claimUrl: string | undefined;
   let keyNote = '';
-  // True when this run TRIED to establish a key and could not - a redeem or
-  // mint that failed. Skill and SDK still land, but the result says
-  // success:false and init exits 1: an agent that reads "success":true while
-  // the key never arrived wires an app that silently sends nothing
-  // (cold-install rehearsal, finding 7).
+  // True when this run tried and failed to establish a key: the result says
+  // success:false and init exits 1, so no agent wires an app that sends nothing.
   let keyFailed = false;
-  // The key this run actually established, tracked as it is resolved. Reading
-  // the environment again afterwards sent the spec to whatever project
-  // UPCONTROL_API_KEY happened to name, ignoring the --key or --token the
-  // user passed to choose a different one.
+  // The key this run established. Reading the environment again afterwards
+  // sent the spec to the wrong project, ignoring --key or --token.
   let resolvedKey = '';
   if (flags.token) {
-    // The dashboard's one-time token: redeem it for THIS account's project
-    // key. On failure, never fall back to the anonymous mint - landing the
-    // user's logs in a project that is not theirs is the exact surprise the
-    // token exists to prevent.
+    // The dashboard's one-time token: redeem it for this account's project key.
+    // On failure never fall back to the anonymous mint: wrong-project logs.
     const redeemed = await redeemInstallToken(endpoint, flags.token);
     if (redeemed.ok && redeemed.key) {
       const gi = ensureEnvIgnored(cwd);
@@ -174,12 +163,8 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     }
   }
 
-  // The project spec (Decision 15b/16): collected only from package.json and
-  // the filesystem, printed verbatim before it is sent, and never allowed to
-  // affect the install's outcome. The key is the one THIS run established
-  // (--token, --key, a mint), falling back to the ambient one only when the
-  // run established none. No key, --no-meta, nothing collectible or nothing
-  // descriptive means no upload at all.
+  // The project spec: printed before it is sent, and never allowed to affect
+  // the install's outcome. No key, --no-meta, or nothing descriptive: no upload.
   const metaKey = resolvedKey || process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd);
   const collected = flags.noMeta || !metaKey ? null : collectSpec(cwd, 'node ' + process.version);
   const spec = collected && isDescriptive(collected) ? collected : null;
@@ -224,10 +209,8 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   out('');
   out('  The agent reads the installed upcontrol skill, stages a diff for your');
   out('  review, and finishes with `npx upcontrol verify`.');
-  // Last, not first: printed above the banner this was the first thing a
-  // human saw - a bare spec dump before any word about what init had done.
-  // It still prints BEFORE the upload, which is the half Decision 16 is
-  // about: nothing leaves until it has been shown.
+  // Printed before the upload, last in the banner: nothing leaves until it
+  // has been shown.
   if (spec && metaKey) {
     out('');
     out(formatSpec(spec));
@@ -418,13 +401,7 @@ async function main(): Promise<number> {
 }
 
 // process.exitCode, never process.exit(): exit() tears the process down on
-// the spot, on top of whatever libuv still holds. After any HTTP call that
-// left a keep-alive socket behind, Windows aborted there instead of exiting -
-// `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, exit 0xC0000409 -
-// which is how `init` came to crash whenever the backend refused the spec
-// upload. The same footgun truncates piped stdout mid-write. Setting the code
-// and letting the loop drain is the fix for both; every socket this CLI opens
-// is closed by the request helper, so there is nothing left to wait on.
+// top of live libuv handles and truncates piped stdout; the loop must drain.
 main().then(
   (code) => {
     process.exitCode = code;

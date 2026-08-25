@@ -1,8 +1,5 @@
-// The file-writing half of init: skill installation (byte-compared against the
-// bundled copy), the pinned SDK dependency, and key placement. Key placement
-// carries the one rule whose violation is a security incident (cli/SPEC.md
-// §5.2 rule 7): the key goes only into .env, only after .gitignore covers it,
-// and is never echoed anywhere.
+// The file-writing half of init: skill install, the pinned SDK dependency, key placement.
+// The key goes only into .env, only after .gitignore covers it, and is never echoed.
 
 import {
   cpSync,
@@ -23,12 +20,9 @@ export function bundledSkillDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'skill');
 }
 
-// Skill targets: .claude/skills/ for Claude Code, .agents/skills/ for Codex /
-// Gemini / Cursor / Windsurf (the cross-agent standard dir), and optionally
-// .github/skills/ for Copilot. Two copies by default, not a symlink: symlinks
-// need privileges on Windows and a broken link is worse than a duplicate the
-// installer byte-checks on every run.
-export function skillTargets(cwd: string, copilot: boolean): string[] {
+// Two copies by default, not a symlink: symlinks need privileges on Windows,
+// and a broken link is worse than a duplicate byte-checked on every run.
+function skillTargets(cwd: string, copilot: boolean): string[] {
   const t = [join(cwd, '.claude', 'skills', 'upcontrol'), join(cwd, '.agents', 'skills', 'upcontrol')];
   if (copilot) t.push(join(cwd, '.github', 'skills', 'upcontrol'));
   return t;
@@ -83,9 +77,8 @@ export interface DepResult {
   present: boolean;
 }
 
-// Pins the SDK exactly (SPEC §2.1: an installer from last month must not pull
-// a library released yesterday). An existing entry, exact or not, is left
-// alone — loosening or tightening somebody's dependency is not init's call.
+// Pins the SDK exactly; an existing entry is left alone: loosening or
+// tightening somebody's dependency is not init's call.
 export function pinSdkDependency(cwd: string): DepResult {
   const pkgPath = join(cwd, 'package.json');
   if (!existsSync(pkgPath)) return { added: false, present: false };
@@ -132,9 +125,8 @@ export interface GitignoreResult {
   fixed: boolean;
 }
 
-// ensureEnvIgnored guarantees `.env` cannot be committed before the key is
-// written. No .git directory means nothing tracks the file, but the ignore
-// entry is still written: repos get initialized after installers run.
+// Guarantees `.env` cannot be committed before the key is written. The entry
+// is written even without .git: repos get initialized after installers run.
 export function ensureEnvIgnored(cwd: string): GitignoreResult {
   const p = join(cwd, '.gitignore');
   const covers = (line: string): boolean => {

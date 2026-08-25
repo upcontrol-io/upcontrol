@@ -1,10 +1,5 @@
-// `import '@upcontrol/sdk/auto'` - the one-line entry (cli/SPEC.md §5.1):
-// app_started on boot, unhandled_exception on crashes, best-effort flush when
-// the event loop drains. Deliberately uses only observers that DO NOT change
-// process behavior: uncaughtExceptionMonitor observes without preventing the
-// crash, and beforeExit fires only on a naturally draining loop. No SIGTERM
-// handler - installing one would alter the process's default signal behavior,
-// which an observability library must never do.
+// The auto entry: app_started on boot, unhandled_exception on crashes, flush on loop drain.
+// Installs only observers that do not change process behavior; no signal handlers.
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

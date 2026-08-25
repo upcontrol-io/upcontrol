@@ -16,9 +16,8 @@ interface MockServer {
 
 const execFileP = promisify(execFile);
 
-// The whole init flow in agent mode against a mock mint server: JSON result,
-// skill files on disk, .gitignore fixed BEFORE the key lands in .env, and the
-// key never appearing in stdout - the §7 property this command exists for.
+// The whole init flow in agent mode against a mock mint server: .gitignore
+// fixed before the key lands in .env, and the key never in stdout.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'dist', 'main.js');
@@ -114,9 +113,8 @@ test('init with unreachable backend installs the skill but reports failure hones
   const cwd = mkdtempSync(join(tmpdir(), 'uc-init-'));
   const { stdout, code } = await runCliFail(cwd, ['init', '--endpoint', 'http://127.0.0.1:9']);
   const result = JSON.parse(stdout.trim().split('\n').pop()!);
-  // The rehearsal's finding 7: a run that never got a key may not say
-  // "success": true / exit 0 - an agent reading that wires an app that
-  // silently sends nothing. The skill/SDK half still lands.
+  // A run that never got a key may not say success:true: an agent reading
+  // that wires an app that silently sends nothing. The skill/SDK half lands.
   assert.equal(result.success, false);
   assert.equal(code, 1, 'a keyless init must exit 1');
   assert.equal(result.key.source, 'none');
