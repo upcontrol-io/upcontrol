@@ -30,8 +30,8 @@ func TestRenderInvitePinsTheDecision15Bytes(t *testing.T) {
 	if subject != wantSubject {
 		t.Fatalf("subject = %q, want %q", subject, wantSubject)
 	}
-	// The text part is byte-pinned (plan Decision 15): the email agent renders
-	// the same bytes in TypeScript, so equality here is the whole contract.
+	// The text part is byte-pinned: the email agent renders the same bytes in
+	// TypeScript, so equality here is the whole contract.
 	want := `Ada invited you to acme.io on UpControl.
 
 Accept the invitation and sign in:

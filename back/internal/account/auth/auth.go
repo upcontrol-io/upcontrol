@@ -1,5 +1,4 @@
-// Package auth implements the three login methods (plan §4.1) against the
-// session table. The magic-link flow is the simplest and the first implemented.
+// Package auth implements the login methods against the session table.
 package auth
 
 import (
@@ -24,10 +23,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Magic-link policy. The code is 8 hex chars, lives 10 minutes, and is capped at
-// 5 wrong attempts before the row must be reissued. A request for the same email
-// within the cooldown is rejected (per-email throttle); the per-IP throttle is a
-// sliding window handled in Postgres (magic_link_ip) so it holds across replicas.
+// Magic-link policy: code TTL, attempt cap, per-email cooldown; the per-IP
+// throttle is a Postgres sliding window, so it holds across replicas.
 const (
 	codeTTL       = 10 * time.Minute
 	maxAttempts   = 5
@@ -36,11 +33,8 @@ const (
 	ipBlockWindow = 5 * time.Minute
 )
 
-// Mailer sends the two mails that carry a sign-in credential: the magic-link
-// code the sign-in door issues, and the project invitation (§3.2). The real
-// implementation ships with the email daemon (block 7); until then it is nil
-// and prod log-in waits for that wiring (dev mode returns the code in the
-// response, so e2e works).
+// Mailer sends the two mails that carry a sign-in credential: the sign-in
+// code and the project invitation. Nil means no delivery; dev echoes the code.
 type Mailer interface {
 	SendCode(ctx context.Context, email, code string) error
 	SendInvite(ctx context.Context, to, code, project, invitedBy string) error
@@ -56,7 +50,7 @@ type MagicLink struct {
 	// Analytics recorder; nil (tests, unwired deployments) is a no-op.
 	rec *analytics.Recorder
 	// selfHosted (UC_SELF_HOSTED=1): tenants created here land on the
-	// 'Self-hosted' plan instead of 'Free' (public-first-split, Decision 7).
+	// 'Self-hosted' plan instead of 'Free'.
 	selfHosted bool
 }
 
@@ -70,8 +64,7 @@ func NewMagicLink(p *pg.Pool, sm *session.Manager, devMode bool, mailer Mailer, 
 }
 
 // WithSelfHosted marks the install as self-hosted: every tenant this door
-// creates gets the 'Self-hosted' plan. Chainable, mirrors the mailer's
-// WithSignInBase so NewMagicLink's signature (and its test callers) stay put.
+// creates gets the 'Self-hosted' plan. Chainable.
 func (h *MagicLink) WithSelfHosted(v bool) *MagicLink { h.selfHosted = v; return h }
 
 type magicLinkReq struct {
@@ -92,8 +85,7 @@ func (h *MagicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Normalised before anything is stored or looked up: the code is keyed by
-	// this string, so a request under one spelling and a redeem under another
-	// would never find each other.
+	// this string.
 	req.Email = NormalizeEmail(req.Email)
 	if req.Email == "" {
 		writeErr(w, http.StatusBadRequest, "missing_email")
@@ -128,24 +120,19 @@ func (h *MagicLink) request(w http.ResponseWriter, r *http.Request, email string
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Server-side event (plan: product-analytics §Decision 7): fired only when
-	// a code was actually issued, not on throttle or failure.
+	// Fired only when a code was actually issued, not on throttle or failure.
 	h.rec.ServerEvent(ctx, "magic_link_requested", 0, 0, nil)
 
-	// A mailer whose relay arrives at runtime (Settings-set SMTP) reports
-	// emptiness through the optional Configured interface — the ai.Configured
-	// idiom — and an empty one takes the same path as no mailer at all.
+	// A runtime-configured mailer reports emptiness through the optional
+	// Configured interface; an empty one takes the no-mailer path.
 	mail := h.mailer
 	if c, ok := mail.(interface{ Configured(context.Context) bool }); ok && !c.Configured(ctx) {
 		mail = nil
 	}
 
 	if h.devMode {
-		// Dev only relaxation: echo the code so e2e can log in without email.
-		// A configured mailer (the email agent in compose) still gets the send so
-		// the whole delivery path is exercised, but dev never depends on an
-		// inbox: a send failure is logged, not fatal, and the code rides the
-		// response regardless.
+		// Dev only: echo the code so e2e can log in without email. A send
+		// failure is logged, not fatal; the code rides the response.
 		if mail != nil {
 			if err := mail.SendCode(ctx, email, code); err != nil {
 				h.log.Warn("magic-link: send code failed", "email", email, "err", err)
@@ -155,8 +142,8 @@ func (h *MagicLink) request(w http.ResponseWriter, r *http.Request, email string
 		return
 	}
 
-	// Prod: deliver the code. Without a mailer the code is stored but unsent —
-	// log-in then waits on the email daemon (block 7). Never return the code.
+	// Prod: deliver the code. Without a mailer it is stored but unsent; the
+	// response never carries it.
 	if mail != nil {
 		if err := mail.SendCode(ctx, email, code); err != nil {
 			h.log.Warn("magic-link: send code failed", "email", email, "err", err)
@@ -164,24 +151,19 @@ func (h *MagicLink) request(w http.ResponseWriter, r *http.Request, email string
 			return
 		}
 	} else {
-		// Decision 17 (public-first-split): the ONE deliberate exception to the
-		// "never log the code" rule — with no mailer configured, the operator's
-		// log is the only way in. The HTTP response still never carries it.
+		// The one exception to "never log the code": with no mailer, the
+		// operator's log is the only way in. The response never carries it.
 		h.log.Warn("magic-link: no mailer; sign-in code", "email", email, "code", code)
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// ErrCodeCooldown means a code issued inside the cooldown is still outstanding.
-// Reissuing on demand would let anyone reset somebody else's live code by typing
-// their address, so the caller decides what to do: the sign-in door answers 429,
-// the watch door just provisions without handing back a token.
+// ErrCodeCooldown guards the cooldown: reissuing would let anyone reset
+// somebody else's live code, so the caller decides; the sign-in door answers 429.
 var ErrCodeCooldown = errors.New("magic-link: a code was issued recently")
 
-// issueCode stores one fresh code for email and returns it. Both doors go
-// through here, so both obey the same TTL, attempt cap and cooldown. It does NOT
-// create the account — callers that need one call ensurePerson/ensureAccount
-// first, which is also where the project's domain is decided.
+// issueCode stores one fresh code for email; both doors obey the same TTL,
+// cap and cooldown. It does NOT create the account.
 func (h *MagicLink) issueCode(ctx context.Context, email string) (string, error) {
 	if existing, err := h.pool.Queries().GetMagicLinkCode(ctx, email); err == nil {
 		if existing.CreatedAt.Valid && time.Since(existing.CreatedAt.Time) < emailCooldown {
@@ -201,9 +183,8 @@ func (h *MagicLink) issueCode(ctx context.Context, email string) (string, error)
 }
 
 func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token string) {
-	// The analytics scope (uc_vid + IP + UA) rides the context down to
-	// ensureAccount, so account_created fires with the same visitor identity
-	// this sign-in request carried.
+	// The analytics scope rides the context down, so account_created fires
+	// with this request's visitor identity.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
 	stored, err := h.pool.Queries().GetMagicLinkCode(ctx, email)
@@ -231,10 +212,8 @@ func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Ownership is proven here and only here: the code was verified above, so
-	// every pending invite for this person activates and each such tenant gets
-	// the e-mail channel (Decision 18). ensureAccount must never grow this —
-	// the request path runs it without any proof the caller owns the address.
+	// Ownership is proven here and only here; the request path must never
+	// activate invites, it proves nothing about the caller.
 	h.activateInvites(ctx, person.ID, email)
 	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
 	if err != nil {
@@ -242,17 +221,15 @@ func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 		return
 	}
 	session.SetCookie(w, sessToken, session.DefaultTTL, !h.devMode) // Secure only in prod (dev is HTTP)
-	// Visitor-to-account stitching (plan: product-analytics §Decision 5): the
-	// sign-in is the moment an anonymous uc_vid becomes a person. No cookie on
-	// the request means visitor_id 0 — the events still count, unlinked.
+	// The sign-in is the moment an anonymous uc_vid becomes a person; no
+	// cookie means visitor_id 0, the events still count unlinked.
 	h.rec.ServerEvent(ctx, "signed_in", person.ID, person.TenantID, nil)
 	h.rec.LinkPerson(ctx, person.ID, person.TenantID)
 	writeAccount(w, person)
 }
 
-// writeAccount is the body every sign-in door answers with. Shared for the same
-// reason ensureAccount is: two doors that build the account payload separately
-// are two doors that eventually describe the same account differently.
+// writeAccount is the body every sign-in door answers with, so two doors can
+// never describe the same account differently.
 func writeAccount(w http.ResponseWriter, person personInfo) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       uuidStr(person.PublicID),
@@ -272,34 +249,16 @@ type personInfo struct {
 	TenantID int64
 }
 
-// Provision is ensurePerson for callers outside the sign-in flow: the anonymous
-// watch on the landing page creates the same account the magic link would, so
-// the two doors cannot drift into producing different-looking tenants.
-//
-// domain names the project of a NEW account — the watch door knows the host the
-// visitor asked about, and a workspace called "example.com" for someone who
-// watched mysite.io is a lie on every screen. It is ignored when the account
-// already exists: a second watch adds monitors, it never renames a project
-// somebody is already using.
-//
-// rec is nil-safe (a nil Recorder is a documented no-op): pass it so the
-// new-account path fires account_created with the caller's visitor scope.
+// Provision is ensureAccount for callers outside the sign-in flow, so both
+// doors produce the same tenant. domain names a NEW project, never renames.
 func Provision(ctx context.Context, pool *pg.Pool, email, domain string, rec *analytics.Recorder, selfHosted bool) (personID, tenantID int64, err error) {
 	h := &MagicLink{pool: pool, rec: rec, selfHosted: selfHosted}
 	info, err := h.ensureAccount(ctx, email, domain)
 	return info.ID, info.TenantID, err
 }
 
-// IssueLoginCode stores a fresh magic-link code for a caller outside the sign-in
-// flow and returns it. The anonymous watch uses it: a visitor who just left an
-// address needs a way in, and it must be the same one-time, expiring, attempt-
-// capped code the sign-in door issues — a second kind of credential is a second
-// thing to get wrong.
-//
-// ip goes through the same cross-replica window the sign-in door records into.
-// Without it this would be a second, unmetered way to make us issue codes for
-// arbitrary addresses — harmless while they are stored unsent, a mailbomb the
-// day the mailer ships.
+// IssueLoginCode stores a fresh code for callers outside the sign-in flow; the
+// same credential the sign-in door issues. ip goes through the shared window.
 func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (string, error) {
 	email = NormalizeEmail(email)
 	h := &MagicLink{pool: pool}
@@ -312,17 +271,8 @@ func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (strin
 // ErrRateLimited means the caller's IP is past the shared magic-link window.
 var ErrRateLimited = errors.New("magic-link: too many requests from this address")
 
-// The sign-in door has no host to name a project after: the visitor typed an
-// address, not a site. It leaves the domain EMPTY and the first website check
-// names the project (internal/api/monitors.go), which is the same rule the watch
-// door follows — it just knows the host up front.
-//
-// It used to write "example.com" here, and that placeholder was not confined to
-// the database: it became the workspace name in the sidebar, the title of the
-// status page, the host in the custom-domain hint, the favicon we fetched, and
-// — on the first save — the page's public slug `example-com`. A name nobody
-// chose, on a page they hand to their customers. Empty renders as nothing, which
-// is what we actually know.
+// The sign-in door leaves the domain EMPTY: the first website check names the
+// project. A placeholder here would leak into every screen the customer sees.
 func (h *MagicLink) ensurePerson(ctx context.Context, email string) (personInfo, error) {
 	return h.ensureAccount(ctx, email, "")
 }
@@ -351,8 +301,7 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	tenantPubID := newUUID()
 	var tenantID int64
 	// 'Free' is the column default made explicit; a self-hosted install seeds
-	// the generous 'Self-hosted' row instead (Decision 7) — through BOTH doors,
-	// since Provision and the sign-in redeem share this function.
+	// 'Self-hosted' instead. Both doors share this function.
 	plan := "Free"
 	if h.selfHosted {
 		plan = "Self-hosted"
@@ -379,21 +328,15 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	_, _ = h.pool.Raw().Exec(ctx,
 		`INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state) VALUES ($1, $2, $3, $4, 'active')`,
 		tenantID, projectID, keyPrefix, keyHash[:])
-	// An account is born with a way to be told (prod audit §9): the sign-in door
-	// used to provision a tenant with zero channels, so the first incident of a
-	// new account notified nobody — the watch door seeds this and the sign-in
-	// door did not, two doors into different-looking accounts. Seeded exactly
-	// once, at creation; an existing account returns above and never lands here,
-	// and the NOT EXISTS keeps it idempotent even if creation is ever retried.
+	// An account is born with a way to be told: the email channel is seeded
+	// once at creation; NOT EXISTS keeps it idempotent on retry.
 	_, _ = h.pool.Raw().Exec(ctx,
 		`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
 		 SELECT gen_random_uuid(), $1, 'email', $2
 		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
 		tenantID, email)
-	// Fired only on the NEW-account path (the existing-account return above
-	// never lands here): the funnel's account_created step. The scope on ctx
-	// comes from whichever door created the account (redeem here, the watch
-	// door via Provision) — without it the event still fires at visitor_id 0.
+	// Fired only on the NEW-account path: the funnel's account_created step,
+	// scoped to whichever door created the account.
 	h.rec.ServerEvent(ctx, "account_created", p.ID, tenantID, nil)
 	h.rec.MarkAccountCreated(ctx, p.ID, tenantID)
 	return personInfo{
@@ -411,20 +354,8 @@ func (h *MagicLink) tenantForPerson(ctx context.Context, personID int64) (int64,
 	return tenantID, err
 }
 
-// activateInvites is the proof-of-ownership half of an invitation (Decision
-// 18): every pending membership of personID turns active, and each such tenant
-// gets the person's e-mail alert channel — the same channel ensureAccount
-// seeds a new account with, so an invitee becomes as reachable as a signup.
-// Called only from the two redeem doors, right after ensurePerson: the request
-// path proves nothing about the caller, and a pending membership a bare
-// request could activate would be an invite with no accept step.
-//
-// Errors are swallowed the way ensureAccount's seeds are: the sign-in itself
-// already proved the identity, and a failure here must not refuse it. But the
-// retry is free only while a row is still pending: a committed UPDATE whose
-// channel INSERT then fails leaves nothing to retry on the next sign-in, so
-// that channel is recovered by hand — createChannel, which accepts an active
-// member's address.
+// activateInvites is the proof-of-ownership half of an invitation, called only
+// from the redeem doors: pending memberships activate, tenants get the channel.
 func (h *MagicLink) activateInvites(ctx context.Context, personID int64, email string) {
 	// Defensive, same reason as in ensureAccount: the NOT EXISTS below
 	// compares target byte for byte, so the one spelling is the normalised one.
@@ -464,12 +395,8 @@ func (h *Me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// s.TokenHash is the sha256 of the cookie value — exactly what GetMe
-	// expects. In single-user mode (UC_AUTH=none) the session is synthetic
-	// and carries NO token hash — there is no session row to join off, so
-	// the same aggregate is keyed by the identity instead. Found in the
-	// cold-install rehearsal: the token-hash path 401ed the one mode whose
-	// whole point is answering without a cookie.
+	// s.TokenHash is the sha256 of the cookie value. Single-user mode carries
+	// no token hash, so the aggregate is keyed by identity instead.
 	var row sqlc.GetMeRow
 	if len(s.TokenHash) == 0 {
 		byID, err := h.pool.Queries().GetMeByIdentity(ctx, sqlc.GetMeByIdentityParams{
@@ -496,10 +423,8 @@ func (h *Me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"initials": initials(row.PersonName, ptrStr(row.Email)),
 			"plan":     row.Plan,
 			"billing":  row.Billing,
-			// The member's role (notify = read-only everywhere, login = full /app).
-			// The Mini App and the web gate the same screens off this one field.
-			// MemberRole: sqlc-generated (gen/pg, GetMe) — notify = read-only,
-			// login/owner = full /app, same gate web and Mini App.
+			// The member's role: notify = read-only everywhere, login/owner =
+			// full /app. Web and Mini App gate off this one field.
 			"role": row.MemberRole,
 		},
 		"project": map[string]any{
@@ -524,12 +449,8 @@ func (h *Logout) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- code verification (pure, unit-tested) ---
-
-// NotImplemented is the honest placeholder for the Google + Telegram OAuth
-// endpoints. They are MOUNTED (so all 30 spec paths resolve and the /sign-in
-// buttons reach a real response, not a 404) but answer 501 until the OAuth
-// wiring ships — never a silent 200 that reads as a successful login.
+// NotImplemented is the placeholder for the Google + Telegram OAuth endpoints:
+// mounted, but answers 501: never a silent 200 that reads as a login.
 type NotImplemented struct{ method string }
 
 func NewNotImplemented(method string) *NotImplemented { return &NotImplemented{method: method} }
@@ -561,9 +482,8 @@ func codeRecordFrom(c sqlc.MagicLinkCode) codeRecord {
 	}
 }
 
-// validateCode checks a submitted code against the stored record. It is the
-// single chokepoint for wrong/expired/redeemed/exhausted/replay — every failure
-// looks identical to the caller (no oracle). Constant-time compare on the hash.
+// validateCode is the single chokepoint; every failure looks identical to the
+// caller (no oracle). Constant-time compare on the hash.
 func validateCode(rec codeRecord, submitted string, now time.Time) bool {
 	if len(rec.Hash) == 0 || submitted == "" {
 		return false
@@ -574,39 +494,15 @@ func validateCode(rec codeRecord, submitted string, now time.Time) bool {
 	if rec.Redeemed { // already used (one-time)
 		return false
 	}
-	if rec.Attempts >= maxAttempts { // guessing cap (block-3 policy const)
+	if rec.Attempts >= maxAttempts { // guessing cap
 		return false
 	}
 	sum := sha256.Sum256([]byte(submitted))
 	return subtle.ConstantTimeCompare(sum[:], rec.Hash) == 1
 }
 
-// --- helpers ---
-
-// crossSitePost reports whether this POST came from another site.
-//
-// Every OTHER write in this API is protected from cross-site forgery by
-// accident: SameSite=Lax keeps the victim's session cookie off a cross-site
-// request, so the request arrives as nobody. The sign-in doors are the
-// exception, because they need no cookie from the victim — they INSTALL one.
-// An attacker who obtains a credential for an account THEY control (a Google
-// code minted against our public client id, or a magic-link code mailed to
-// their own address) can cross-site POST it here and leave the victim holding
-// a session in the attacker's tenant, reading their monitors and typing into
-// their project from then on.
-//
-// Two checks, either of which is enough on its own:
-//
-// Sec-Fetch-Site is set by the browser, cannot be forged by the page, and says
-// plainly where the request came from. A non-browser client (the CLI, a test,
-// curl) omits it entirely and is allowed through — nothing can forge a request
-// from a program that has no ambient session to abuse.
-//
-// The Content-Type is the second lock. A cross-site HTML form can only send
-// three encodings, none of them JSON, and the text/plain one is what makes a
-// form POST parse as JSON at all. Demanding application/json forces an
-// attacker onto fetch(), which then needs a CORS preflight this server never
-// answers.
+// crossSitePost reports a cross-site POST. Sign-in doors install a session, so
+// a browser must send Sec-Fetch-Site and a JSON Content-Type (forms cannot).
 func crossSitePost(r *http.Request) bool {
 	switch r.Header.Get("Sec-Fetch-Site") {
 	case "cross-site", "same-site", "none":
@@ -619,16 +515,8 @@ func crossSitePost(r *http.Request) bool {
 	return !strings.EqualFold(strings.TrimSpace(ct), "application/json")
 }
 
-// NormalizeEmail is the one spelling of an address this package stores or
-// looks anything up by.
-//
-// The person table's email column is UNIQUE and compared byte for byte, so
-// "Ada@example.com" and "ada@example.com" are two accounts with two tenants
-// and two sets of monitors. A phone capitalises the first letter of a text
-// field by default and Google returns the address in whatever case it holds
-// it, which is how the same person arrives spelled two ways through two doors.
-// Normalising at every entrance costs nothing and is the only place it can be
-// done once.
+// NormalizeEmail is the one spelling of an address this package stores or looks
+// up by: the email column is UNIQUE and byte-exact, casing would split accounts.
 func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
@@ -667,10 +555,8 @@ func initials(name, email string) string {
 	return "U"
 }
 
-// NameFromEmail names a new account from the local part of its address:
-// "ada@example.com" becomes "ada". An address with no usable local part
-// comes back unchanged rather than empty, or the person row is created
-// nameless.
+// NameFromEmail names a new account from the local part of its address; no
+// usable local part comes back unchanged rather than empty.
 func NameFromEmail(email string) string {
 	if i := strings.IndexByte(email, '@'); i > 0 {
 		return email[:i]

@@ -1,14 +1,5 @@
-// Package deliver is the alert delivery pipeline (plan §5.9). It picks up
-// pending items from delivery_queue, attempts to send them through the
-// appropriate channel (telegram/email/discord/slack), and records the outcome.
-//
-// Repeatable errors (429, 5xx, timeout, network) get exponential backoff with
-// jitter (1/2/4/8/16s, ≤5 attempts). Non-repeatable errors (400, 403, bot
-// blocked, address bounced) go straight to the DLQ.
-//
-// A per-channel circuit breaker opens when the channel has been down >5 min,
-// failing over to email (the backup). The breaker closes when the channel
-// recovers.
+// Package deliver is the alert delivery pipeline: pending items from
+// delivery_queue, sent through a channel, outcomes recorded.
 package deliver
 
 import (
@@ -16,13 +7,11 @@ import (
 	"time"
 )
 
-// MaxAttempts is the maximum number of delivery attempts before the item goes to
-// the DLQ. The plan (§9.1) says ≤5 attempts.
+// MaxAttempts is the delivery-attempt ceiling before the item goes to the DLQ.
 const MaxAttempts = 5
 
-// Backoff returns the delay before the next attempt after `attempt` failures.
-// The base delays are 1/2/4/8/16s (2^attempt), each with ±25% jitter so a
-// thundering herd of retries does not all land on the same second.
+// Backoff returns the delay after `attempt` failures: 1/2/4/8/16s (2^attempt)
+// with jitter, so a herd of retries does not land on the same second.
 func Backoff(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -62,9 +51,8 @@ func ClassifyError(statusCode int) Outcome {
 	}
 }
 
-// NextTryAt computes when the next attempt should happen, given the current
-// attempt count and outcome. For fatal outcomes, returns the zero time (the
-// item goes to the DLQ immediately — no further attempts).
+// NextTryAt computes the next attempt time; fatal or exhausted returns the
+// zero time, which is the DLQ.
 func NextTryAt(attempt int, outcome Outcome, now time.Time) time.Time {
 	if outcome == OutcomeFatal || attempt >= MaxAttempts {
 		return time.Time{} // zero = DLQ
@@ -75,14 +63,11 @@ func NextTryAt(attempt int, outcome Outcome, now time.Time) time.Time {
 	return now.Add(Backoff(attempt))
 }
 
-// --- circuit breaker ---
-
 // BreakerTimeout is how long a channel must be down before the breaker opens.
 const BreakerTimeout = 5 * time.Minute
 
-// Breaker tracks a channel's failure state. When the channel has been failing
-// for more than BreakerTimeout, the breaker opens and delivery fails over to the
-// backup channel (email). The breaker closes on the first success.
+// Breaker tracks a channel's failure state: open after BreakerTimeout of
+// failing, closed on the first success; open means fail over to the backup.
 type Breaker struct {
 	failuresSince time.Time // when the current failure streak started (zero = healthy)
 }
@@ -97,8 +82,8 @@ func (b *Breaker) RecordSuccess() {
 	b.failuresSince = time.Time{}
 }
 
-// RecordFailure extends or starts the failure streak. If the streak exceeds
-// BreakerTimeout, the breaker opens on the next IsOpen call.
+// RecordFailure extends or starts the failure streak; the breaker opens on
+// the next IsOpen call once the streak exceeds BreakerTimeout.
 func (b *Breaker) RecordFailure(now time.Time) {
 	if b.failuresSince.IsZero() {
 		b.failuresSince = now

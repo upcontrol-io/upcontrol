@@ -1,8 +1,5 @@
-// SMTPChannel is the self-host alert-email path: no email agent, the alert
-// leaves through the deployment's own SMTP relay (UC_SMTP_*) — the same relay
-// the magic-link mailer uses. ucworker registers it only when UC_EMAIL_URL is
-// unset and UC_SMTP_HOST is set; with the agent present, EmailChannel wins
-// (docs/plans/public-first-split.md, Decision 9).
+// SMTPChannel is the self-host alert-email path: the deployment's own SMTP
+// relay (UC_SMTP_*). With the agent present, EmailChannel wins.
 
 package deliver
 

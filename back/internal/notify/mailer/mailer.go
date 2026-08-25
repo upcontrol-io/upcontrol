@@ -1,7 +1,5 @@
-// Package mailer delivers the messages this product sends to a stranger: the
-// magic-link code and the project invitation. It sits behind the interface
-// auth.NewMagicLink already takes, so the sign-in door does not know or care
-// which transport is configured.
+// Package mailer delivers the magic-link code and the project invitation
+// behind the interface auth.NewMagicLink takes.
 package mailer
 
 import (
@@ -9,9 +7,8 @@ import (
 	"net/url"
 )
 
-// Config is the whole surface. A half-filled one is refused at construction:
-// a mailer that accepts mail and drops it is worse than no mailer, because the
-// operator has no way to tell the difference.
+// Config is the whole surface; a half-filled one is refused at construction:
+// a mailer that accepts and drops mail is worse than no mailer.
 type Config struct {
 	Host     string
 	Port     int
@@ -21,11 +18,8 @@ type Config struct {
 	FromName string
 }
 
-// RenderCode builds the message. Pure, so the link format is testable without a
-// network — and the format matters: SignIn redeems `?email=…&token=…` on mount.
-//
-// Both forms travel: the link for the common case, the bare code for the mail
-// client that mangles it. A message with only a link has one way to fail.
+// RenderCode builds the message, pure so the link format is testable. Both
+// forms travel: the link, and the bare code for the client that mangles it.
 func RenderCode(to, code, signInBase string) (subject, body string) {
 	link := fmt.Sprintf("%s/sign-in?email=%s&token=%s",
 		signInBase, url.QueryEscape(to), url.QueryEscape(code))
@@ -42,12 +36,8 @@ this message — nobody can sign in without it.
 	return subject, body
 }
 
-// RenderInvite builds the invitation message, the same shape RenderCode gives
-// the sign-in door: link plus bare code, so a mail client that mangles the link
-// still leaves a way in. Pure for the same reason, and the bytes are a
-// contract: the email agent (email/src/templates.ts) pins the same text part
-// in TypeScript, so a line that drifts here is a second invitation mail in the
-// wild.
+// RenderInvite builds the invitation, same shape as RenderCode. The bytes
+// are a contract: email/src/templates.ts pins the same text part.
 func RenderInvite(to, code, signInBase, project, invitedBy string) (subject, body string) {
 	link := fmt.Sprintf("%s/sign-in?email=%s&token=%s",
 		signInBase, url.QueryEscape(to), url.QueryEscape(code))

@@ -1,18 +1,5 @@
-// Telegram Mini App auth (design D3): POST /v1/auth/telegram accepts the
-// initData string Telegram's WebApp SDK produces, verifies its HMAC signature
-// with the bot token server-side, and — when the telegram_id belongs to a
-// tenant member — issues the same session cookie the magic link does. The
-// Mini App then runs the full /app with that member's role.
-//
-// Verification follows Telegram's algorithm exactly:
-//
-//	secret        = HMAC_SHA256(key="WebAppData",  msg=bot_token)
-//	expected_hash = HMAC_SHA256(key=secret,        msg=data_check_string)
-//
-// where data_check_string is every initData key=value pair except `hash`,
-// sorted by key, joined with '\n'. Freshness: auth_date older than 24 h is a
-// replay and refused. No bot token configured → the handler stays a 501
-// (trust must have something to verify against), never a client-attested yes.
+// Telegram Mini App auth: POST /v1/auth/telegram verifies initData's HMAC
+// with the bot token and issues the session cookie. No bot token = 501.
 
 package auth
 
@@ -35,7 +22,7 @@ import (
 )
 
 // initDataFreshness bounds replay: Telegram refreshes initData on every WebApp
-// open, so a legitimate one is seconds old. A day is the forgiving edge.
+// open; a day is the forgiving edge.
 const initDataFreshness = 24 * time.Hour
 
 // TelegramMiniApp handles POST /v1/auth/telegram.

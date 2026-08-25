@@ -151,10 +151,8 @@ func TestBreakerStreakExtendsNotResets(t *testing.T) {
 }
 
 func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
-	// The Telegram message IS the product on a phone (§4.7): what broke, the
-	// facts, the raw lines, and a link into the incident — a message that
-	// arrives without its way in makes the reader open a laptop, which is the
-	// thing the positioning is against.
+	// The Telegram message IS the product on a phone: what broke, the facts,
+	// the raw lines, and a link into the incident.
 	got := formatTelegram(AlertPayload{
 		Status:     "down",
 		Title:      "Checkout is down",
@@ -189,10 +187,8 @@ func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
 }
 
 func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
-	// A log-alert title IS an error message. The old renderer interpolated it
-	// raw, and one '<' in it — any generic type, any JSX fragment — made the
-	// Bot API reject the whole sendMessage as malformed HTML: an alert that
-	// failed to deliver BECAUSE of what it was alerting about.
+	// A log-alert title IS an error message: one '<' in it and the Bot API
+	// rejects the whole sendMessage as malformed HTML.
 	got := formatTelegram(AlertPayload{
 		Status:  "check",
 		Title:   "Error in api: Promise<Map<string, T>> rejected",
@@ -221,9 +217,8 @@ func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
 }
 
 func TestFormatTelegram_StatusIsShapePlusWords(t *testing.T) {
-	// Colour is never the only channel (the product's status rule, kept on a
-	// surface with no CSS): each status gets its emoji, and the words beside
-	// it carry the same fact.
+	// Colour is never the only channel: each status gets its emoji, and the
+	// words beside it carry the same fact.
 	for status, emoji := range map[string]string{"down": "🔴", "check": "🟠", "ok": "🟢"} {
 		got := formatTelegram(AlertPayload{Status: status, Title: "t"}, "")
 		if !strings.HasPrefix(got, emoji+" ") {
@@ -286,12 +281,8 @@ func TestDownForLine_StaysHonestUnderAMinute(t *testing.T) {
 	}
 }
 
-// The button invariant (Decision 8): an alert's inline buttons carry the
-// actions everywhere — a press is authorised by WHO pressed it (the bot
-// resolves from.id to a member of the chat's tenant), not by the chat — while
-// the web_app row is personal-only, because the Bot API refuses web_app
-// buttons outside private chats. Captured at the HTTP boundary: whatever
-// crosses the wire to Telegram is what the worker actually sends.
+// The button invariant: actions go everywhere, authorised by WHO pressed;
+// the web_app row is personal-only. Captured at the HTTP boundary.
 func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
@@ -347,8 +338,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 
 func TestStatusColor_IsStatusNotSeverity(t *testing.T) {
 	// Discord renders the colour, so it must follow the same three states the
-	// rest of the product uses — a "check" that came out green would say the
-	// opposite of the text beside it.
+	// rest of the product uses.
 	if statusColor("down") == statusColor("check") || statusColor("check") == statusColor("ok") {
 		t.Fatal("down / check / ok must be three distinct colours")
 	}
@@ -358,9 +348,7 @@ func TestStatusColor_IsStatusNotSeverity(t *testing.T) {
 }
 
 // keyboardDesc flattens a keyboard to "label=target | label=target" in row
-// order. Comparing whole strings pins the buttons, their order AND everything
-// absent in one assertion — and keeps the JSON encoder out of the assertion
-// path, where it escapes "&" and tests itself rather than the URL.
+// order; whole strings pin the buttons, their order and everything absent.
 func keyboardDesc(kb [][]map[string]any) string {
 	var out []string
 	for _, row := range kb {
@@ -411,19 +399,16 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
 		},
 		{
-			// A group keeps Acknowledge/Resolve (a press is authorised by who
-			// pressed it) but drops the web_app row: the Bot API refuses
-			// web_app buttons outside private chats (Decision 8), and the
-			// message already carries the same link as text.
+			// A group keeps Acknowledge/Resolve but drops the web_app row: the
+			// Bot API refuses web_app buttons outside private chats.
 			name:    "a group page is acknowledged or resolved",
 			payload: groupPage,
 			appURL:  app,
 			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
 		},
 		{
-			// Same rule as the private detector case (no Resolve — a detector
-			// closes its own incidents) minus the Explain web_app button a
-			// group cannot carry.
+			// Same rule as the private detector case (no Resolve; a detector
+			// closes its own incidents) minus the Explain button.
 			name:    "a group detector spike is acknowledged only",
 			payload: groupDetect,
 			appURL:  app,

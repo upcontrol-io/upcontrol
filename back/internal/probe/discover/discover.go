@@ -1,18 +1,5 @@
-// Package discover establishes facts about a host that one request cannot
-// answer: whether a missing page is reported as missing, whether the app exposes
-// a health endpoint, and what the response headers say about security and
-// caching.
-//
-// It is deliberately NOT a crawler. It reads nothing off robots.txt and follows
-// no sitemap; every request it makes is to a path this package names itself, on
-// the host the caller already probed. That bound is the point: /public/check is
-// anonymous, so one request to us becomes N requests to somebody else's server,
-// and a package that fans out over attacker-supplied URLs is an amplifier. When
-// sitemap discovery lands it belongs behind a per-domain cache and robots
-// etiquette, which none of this needs.
-//
-// Every request goes through the same executor as the fleet, so the SSRF guard
-// applies here too.
+// Package discover establishes facts one request cannot answer: error pages,
+// health endpoints, headers, pages, hosts. All requests ride the executor.
 package discover
 
 import (
@@ -36,37 +23,21 @@ type (
 	Result    = executor.Result
 )
 
-// Paths tried, in order, looking for a health endpoint. Stops at the first one
-// that answers 2xx: four sequential requests to a stranger's server is already
-// the outer edge of polite, and these four cover the overwhelming majority.
+// Paths tried, in order, for a health endpoint; stops at the first 2xx. Four
+// sequential requests to a stranger is the outer edge of polite.
 var healthPaths = []string{"/health", "/healthz", "/status", "/api/health"}
 
-// missingPath is requested to see how the host reports a page that is not there.
-// Fixed rather than random so the behaviour is reproducible; the odds a site
-// serves this path are nil, and if it did, the answer would be a true 200.
+// missingPath is requested to see how the host reports a missing page; fixed
+// so the behaviour is reproducible.
 const missingPath = "/uc-probe-missing-page-check"
 
 const (
 	perRequestTimeout = 2500 * time.Millisecond
-	// Total budget for everything in this package. The landing waits on the
-	// response, and its own stepping animation runs about 2.4s, so a few seconds
-	// is within the wait the reader already has. Whatever is not established by
-	// the deadline is reported as unmeasured rather than guessed.
-	//
-	// Raised from 4s when page discovery landed: robots and the sitemap are
-	// sequential before the shortlist can be probed at all.
+	// Total budget for everything in this package; the landing waits on the
+	// response. Unestablished by the deadline is reported unmeasured.
 	Budget = 6 * time.Second
-	// MaxRequests is the ceiling on outbound HTTP requests per Run, and it is a
-	// promise rather than an observation: robots (1) + sitemaps (3) + pages (5)
-	// + hosts (3) + error page (1) + health (4) + api (bundle 1 + confirm 1, or
-	// 3 conventional paths). Every cap in this package exists
-	// to keep this number true no matter what the far side's sitemap says,
-	// because /public/check is anonymous — one request to us must never become an
-	// unbounded number to somebody else.
-	//
-	// DNS lookups are not counted here and are not bounded by it: they go to a
-	// resolver, not to the customer, which is the whole reason host discovery is
-	// affordable at all.
+	// MaxRequests is the ceiling on outbound HTTP requests per Run; every cap
+	// in this package keeps this promise true. DNS lookups are not counted.
 	MaxRequests = 20
 )
 
@@ -81,48 +52,36 @@ type Headers struct {
 // ErrorPage is how the host answers a path that does not exist.
 type ErrorPage struct {
 	Status uint16
-	// Correct reports whether the status is actually an error. A site that
-	// answers 200 for a missing page is the case worth naming: an uptime checker
-	// pointed at any URL sees "fine" straight through an outage. Single-page
-	// apps do this by default.
+	// Correct reports whether the status is an error: a site answering 200
+	// for a missing page reads "fine" straight through an outage.
 	Correct bool
 }
 
-// Health is the health endpoint, if the host has one. A zero Path is a measured
-// answer ("we looked, there is none"), not an absence — the caller renders it as
-// "none", never as the unmeasured marker.
+// Health is the health endpoint. A zero Path is a measured "there is none",
+// not an absence.
 type Health struct {
 	Path string
 }
 
-// Facts carries only what was established. A nil field means the fact was not
-// measured — the API omits its row and the landing shows its no-data marker,
-// which is a different statement from "measured, and the answer is no".
+// Facts carries only what was established; a nil field means unmeasured,
+// which renders differently from "measured, and the answer is no".
 type Facts struct {
 	Headers   *Headers
 	ErrorPage *ErrorPage
 	Health    *Health
-	// Pages is the shortlist of the site's own pages worth watching. Empty when
-	// the host stated none and linked to none — an empty group is not rendered,
-	// which is a different thing from a group of unknowns.
+	// Pages is the shortlist of the site's own pages; empty when the host
+	// stated none and linked to none; an empty group is not rendered.
 	Pages []Page
 	// API is the app's own API entry point. Nil means unmeasured; a zero Path
 	// means we looked and the site exposes none.
 	API *API
-	// Hosts is the site's other hosts — api., app. and the like. Kept apart from
-	// Pages because a separate host is a separate failure domain, and because
-	// letting the two compete for one shortlist would cost a site with an API
-	// either its API or its pages.
+	// Hosts is the site's other hosts. Kept apart from Pages: a separate host
+	// is a separate failure domain, and one shortlist cannot serve both.
 	Hosts []Page
 }
 
-// Run establishes what it can about baseURL within Budget. res is the result of
-// the caller's own probe of the host, reused for the headers.
-//
-// It returns empty Facts when that probe got no response: a host that just
-// refused us, timed out, or was blocked by the SSRF guard must not then be sent
-// five more requests.
-// dns may be nil, which turns host discovery off; every other fact still stands.
+// Run establishes what it can about baseURL within Budget. Empty Facts when
+// the caller's probe got no response; dns nil turns host discovery off.
 func Run(ctx context.Context, p Prober, dns Resolver, baseURL string, res Result) Facts {
 	if res.StatusCode == 0 || res.ErrorClass == "blocked_target" {
 		return Facts{}
@@ -172,9 +131,8 @@ func probeErrorPage(ctx context.Context, p Prober, base string) *ErrorPage {
 	res := p.Execute(ctx, CheckSpec{
 		URL: base + missingPath, Method: http.MethodGet,
 		TimeoutMs: uint32(perRequestTimeout.Milliseconds()),
-		// Do not follow redirects: a site that redirects a missing page to its
-		// homepage has answered the question already, and following would report
-		// the homepage's 200 as the missing page's status.
+		// Do not follow redirects: a redirect to the homepage has answered
+		// the question; following would report the homepage's 200.
 		MaxRedirects: 1,
 	})
 	if res.StatusCode == 0 {

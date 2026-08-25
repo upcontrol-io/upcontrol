@@ -1,6 +1,5 @@
-// Tests for EmailChannel: the wire contract with the email agent's /send, captured at
-// the HTTP boundary (method, path, bearer, JSON body) plus the status
-// conventions ClassifyError feeds on.
+// Tests for EmailChannel: the wire contract with the agent's /send, captured
+// at the HTTP boundary, plus the status conventions ClassifyError feeds on.
 
 package deliver
 
@@ -65,8 +64,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		t.Errorf("to = %v, want ops@example.com", body["to"])
 	}
 	// The agent renders: the wire carries facts and a template name, never a
-	// finished subject or body. A regression back to ready-made content would
-	// silently drop the HTML part from every alert and nothing else would fail.
+	// finished subject or body.
 	if body["template"] != "alert" {
 		t.Errorf("template = %v, want alert", body["template"])
 	}
@@ -81,8 +79,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		t.Fatalf("vars missing from %v", body)
 	}
 	// incident_id is what the mail's button is built from: without it the
-	// reader is sent to the dashboard to go looking for what they were just
-	// written to about.
+	// reader is sent to the dashboard to go looking.
 	for _, c := range [][2]string{
 		{"class", "page"}, {"status", "down"}, {"title", "Test title"},
 		{"to", "ops@example.com"}, {"app_url", "https://x.test/app"},
@@ -92,9 +89,8 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 			t.Errorf("vars[%s] = %v, want %q", c[0], vars[c[0]], c[1])
 		}
 	}
-	// The monitor leads the fact table, then whatever the detector attached,
-	// then the incident. The ORDER is the assertion: it is the whole reason
-	// Fields is a slice and not a map.
+	// The monitor leads the fact table, then the detector's fields, then the
+	// incident. The ORDER is the assertion: it is why Fields is a slice.
 	fields, _ := vars["fields"].([]any)
 	want := [][3]any{
 		{"Monitor", "example.com/checkout", false},
@@ -112,10 +108,8 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 	}
 }
 
-// The order a map would not have kept. Go randomizes map iteration, so the
-// same alert used to list its facts differently on each render — and on the
-// channels that send one line per field, two identical alerts compared as
-// different text.
+// The order a map would not have kept: Go randomizes map iteration, so the
+// same alert used to list its facts differently on each render.
 func TestFormatEmailKeepsFieldOrder(t *testing.T) {
 	p := AlertPayload{
 		Title: "T",
@@ -207,9 +201,8 @@ func TestEmailChannelNoBearerWhenKeyEmpty(t *testing.T) {
 }
 
 func TestEmailChannelNon2xxReturnsStatusWithNilError(t *testing.T) {
-	// Package convention (doPost and worker.processItem): a non-2xx leaves
-	// err nil and hands the raw status to ClassifyError; only network
-	// failures return an error.
+	// Package convention: a non-2xx leaves err nil and hands the raw status to
+	// ClassifyError; only network failures return an error.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))

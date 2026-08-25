@@ -8,14 +8,12 @@ import (
 	"sync"
 )
 
-// PagesWanted is how many pages the shortlist carries. Five is what the strip
-// can show without becoming a list, and it is already more than the free plan's
-// three checks — the picker, not this package, is where the plan limit bites.
+// PagesWanted is how many pages the shortlist carries: what the strip can show
+// without becoming a list; the picker is where the plan limit bites.
 const PagesWanted = 5
 
-// Page is one discovered page and how it answered. Status 0 means it was found
-// but never probed (the budget ran out), which the caller reports as unknown
-// rather than as down.
+// Page is one discovered page and how it answered. Status 0 means found but
+// never probed, reported as unknown rather than down.
 type Page struct {
 	URL     string
 	Path    string
@@ -24,20 +22,13 @@ type Page struct {
 	TotalMs uint32
 	OK      bool
 	Slowest bool
-	// Error is the executor's class when the probe ran and failed. It is what
-	// separates "we never asked" from "we asked and nothing answered" — both
-	// leave Status at 0, and for a monitoring product the second is a finding,
-	// not a gap.
+	// Error is the executor's class when the probe ran and failed: "we asked
+	// and nothing answered", which for a monitoring product is a finding.
 	Error string
 }
 
-// findPages builds the shortlist and probes it.
-//
-// Order of discovery is chosen by cost, not by preference: robots.txt is one
-// small request and we need it anyway to behave, the sitemap is one or two more
-// and is the site's own statement of what its pages are, and homepage links cost
-// nothing at all because the body is already in hand — so they are the fallback
-// for the many sites that have no sitemap, not a second-class source.
+// findPages builds the shortlist and probes it. Discovery order is by cost:
+// robots, then the sitemap, homepage links as the free fallback.
 func findPages(ctx context.Context, p Prober, dns Resolver, base string, homepage []byte) (pages, hosts []Page) {
 	r := fetchRobots(ctx, p, base)
 
@@ -56,9 +47,8 @@ func findPages(ctx context.Context, p Prober, dns Resolver, base string, homepag
 	return pages, hosts
 }
 
-// probePages runs the shortlist concurrently. Bounded by its own length, which
-// rank capped at PagesWanted — so this cannot fan out however long the sitemap
-// happened to be.
+// probePages runs the shortlist concurrently, bounded by its own length
+// (rank capped it at PagesWanted).
 func probePages(ctx context.Context, p Prober, cands []candidate) []Page {
 	pages := make([]Page, len(cands))
 	var wg sync.WaitGroup

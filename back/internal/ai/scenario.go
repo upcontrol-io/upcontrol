@@ -1,10 +1,7 @@
 package ai
 
-// Scenario is one registered use of the LLM. The registry is the settings
-// home for every AI feature — prompts, caps and the output contract live
-// here, while env vars carry only deployment facts (base URL, key, model).
-// A future scheduled scenario (e.g. a daily report) is one new entry plus
-// one ucworker job, nothing else.
+// Scenario is one registered use of the LLM: prompts and caps live here,
+// env vars carry only deployment facts.
 type Scenario struct {
 	Key             string // registry key, e.g. "explain_logs"
 	Version         int    // bump on any prompt or schema change; feeds the cache hash, so a bump self-invalidates old answers
@@ -17,10 +14,8 @@ type Scenario struct {
 	// Temperature 0 omits the field, so the provider's default answers —
 	// the only value the reasoning families (gpt-5, o-series) accept.
 	Temperature float32
-	// ReasoningEffort rides as reasoning_effort when set ("minimal" | "low" |
-	// "medium" | "high"); empty omits it. Reasoning spends the SAME budget
-	// MaxOutputTokens caps, so a tight cap needs a low effort or the model
-	// thinks the whole budget away and finishes on "length".
+	// ReasoningEffort rides as reasoning_effort when set; empty omits it.
+	// Reasoning spends the same budget MaxOutputTokens caps.
 	ReasoningEffort string
 }
 
@@ -32,19 +27,15 @@ var ExplainLogs = Scenario{
 	MaxInputLines: 100,
 	MaxInputBytes: 32768,
 	MaxLineBytes:  2000,
-	// 2000 tokens (owner decision, Aug 18, 2026 — was 10000): the budget is
-	// shared by the model's reasoning AND the answer, so a cap this tight is a
-	// spend ceiling first. A run of finish_reason "length" errors here means
-	// the model thought past the budget — raise this before blaming the model.
-	// MaxOutputBytes stays a generous runaway-stream abort, not a promise.
+	// 2000 tokens: the budget is shared by reasoning and answer, a spend
+	// ceiling first. A run of finish_reason "length" means raise this.
 	MaxOutputTokens: 2000,
 	MaxOutputBytes:  65536,
 	// Provider default (field omitted): gpt-5-nano rejects any other value,
 	// and the strict JSON contract does the determinism work anyway.
 	Temperature: 0,
-	// Triage is pattern-reading, not proof: minimal keeps the 2000-token
-	// budget for the answer — at the default effort the model thought all
-	// 2000 away and every call died on finish_reason "length".
+	// Minimal keeps the token budget for the answer; the default effort
+	// thinks it all away and dies on finish_reason "length".
 	ReasoningEffort: "minimal",
 	SystemPrompt: `You are the log-analysis assistant inside UpControl, a monitoring product. You receive
 log lines an engineer selected, oldest line first, plus optional context about their
@@ -63,21 +54,14 @@ otherwise null. Be specific to the lines and context given, never generic.`,
 }
 
 // ExplainIncident is the scenario behind POST /v1/incidents/{id}/explain:
-// triage one incident — its facts, its timeline and the log lines frozen
-// when it fired — into the strict JSON answer shape with severity and area.
+// triage one incident into the strict JSON shape with severity and area.
 var ExplainIncident = Scenario{
-	Key: "explain_incident",
-	// v2: the card renders the WHOLE answer now, not just the cause, so the
-	// answer has to carry one. v1 forced "fix": null and capped the steps at
-	// three — written when the page showed a single line of it and a fix
-	// would have been dropped on the floor. Bumping the version self-
-	// invalidates every v1 answer still in the cache.
+	Key:           "explain_incident",
 	Version:       3, // v3: the product names itself UpControl in the prompt
 	MaxInputLines: 100,
 	MaxInputBytes: 32768,
 	MaxLineBytes:  2000,
-	// Same spend ceiling as ExplainLogs: the 2000-token budget is shared by
-	// reasoning and answer, so the effort stays minimal.
+	// Same spend ceiling as ExplainLogs: budget shared by reasoning and answer.
 	MaxOutputTokens: 2000,
 	MaxOutputBytes:  65536,
 	Temperature:     0,

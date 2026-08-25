@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// fakeDNS answers from a set of names that exist. It also records every lookup,
-// because the cost argument for this feature — DNS is cheap and goes to a
-// resolver, not to the customer — only holds if the lookups stay bounded.
+// fakeDNS answers from a set of names that exist and records every lookup:
+// the cost argument only holds if the lookups stay bounded.
 type fakeDNS struct {
 	mu      sync.Mutex
 	exists  map[string]bool
@@ -36,10 +35,8 @@ func hostNames(pages []Page) []string {
 }
 
 func TestHostsFoundInDNSWhenTheHTMLNeverMentionsThem(t *testing.T) {
-	// The case that motivated this: harpa.ai's homepage does not contain the
-	// string "api.harpa.ai" anywhere, its certificate is a wildcard so the SANs
-	// list nothing, and the call that reveals it happens in JavaScript we do not
-	// execute. One DNS lookup finds it.
+	// The motivating case: the homepage never names api.example.com, the cert is
+	// a wildcard, and the revealing call happens in JavaScript we do not run.
 	dns := &fakeDNS{exists: map[string]bool{"api.example.com": true}}
 	p := &bodyProber{body: map[string]string{"https://api.example.com": "ok"}}
 

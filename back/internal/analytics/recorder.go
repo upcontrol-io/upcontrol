@@ -15,19 +15,16 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Flush policy (§Decision 2): the write is asynchronous and never blocks an
-// HTTP response. Events accumulate in a buffered channel; the loop flushes
-// every flushEvery or at flushRows events, whichever comes first. Stop drains
-// the channel and performs one final flush.
+// Flush policy: writes are async and never block a response; the loop flushes
+// every flushEvery or at flushRows events. Stop drains, then flushes once.
 const (
 	flushEvery = time.Second
 	flushRows  = 100
 	bufferSize = 1024 // queued request-batches before dropping
 )
 
-// VisitorStore is the Postgres half: the web_visitor directory. The recorder
-// speaks to this interface, not to pg.Pool, so the recorder test runs against
-// a fake instead of a database.
+// VisitorStore is the Postgres half; the recorder speaks to this interface so
+// its test runs against a fake instead of a database.
 type VisitorStore interface {
 	// VisitorIDByToken resolves the visitor id for a token hash, creating the
 	// row (with first-touch attribution) on first sight.
@@ -51,10 +48,8 @@ func ts(at time.Time) pgtype.Timestamptz {
 }
 
 func (s PoolStore) VisitorIDByToken(ctx context.Context, tokenHash []byte, first FirstTouch, at time.Time) (int64, error) {
-	// First-touch upsert: first non-empty value wins on every field (§Decision
-	// 9), including across flush batches — a server event can create the row
-	// before the referrer-carrying page_view arrives — and RETURNING id covers
-	// both the insert and the conflict branch (no read-back round trip).
+	// First-touch upsert: first non-empty value wins on every field, across
+	// flush batches too; RETURNING id covers insert and conflict branches.
 	return s.Pool.Queries().UpsertWebVisitorFirst(ctx, sqlc.UpsertWebVisitorFirstParams{
 		TokenHash:        tokenHash,
 		FirstSeenAt:      ts(at),
@@ -122,8 +117,7 @@ type track struct {
 }
 
 // Recorder is the async analytics writer. A nil *Recorder is a valid no-op:
-// every entry point checks for nil, so tests and any unwired deployment get
-// silence instead of a panic.
+// every entry point checks for nil.
 type Recorder struct {
 	store VisitorStore
 	sink  EventSink
@@ -139,9 +133,8 @@ type Recorder struct {
 	invalid atomic.Uint64 // events dropped by validation, logged once per flush
 }
 
-// NewRecorder builds a Recorder around the two stores. The GeoIP database is
-// parsed here from the embedded bytes; a parse failure downgrades to
-// country="" rather than failing startup.
+// NewRecorder builds a Recorder around the two stores; a GeoIP parse failure
+// downgrades to country="" rather than failing startup.
 func NewRecorder(store VisitorStore, sink EventSink, log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
@@ -165,9 +158,8 @@ func (r *Recorder) Start() {
 	r.startO.Do(func() { go r.run() })
 }
 
-// Stop signals the loop to drain and flush, then waits. Idempotent and safe
-// to call from multiple shutdown tasks concurrently (they all wait on the
-// same done channel). The ctx bounds the wait, not the final flush itself.
+// Stop signals the loop to drain and flush, then waits; idempotent. The ctx
+// bounds the wait, not the final flush itself.
 func (r *Recorder) Stop(ctx context.Context) error {
 	if r == nil {
 		return nil
@@ -202,9 +194,8 @@ func (r *Recorder) Track(ctx context.Context, events []Event, personID, tenantID
 	r.enqueue(t)
 }
 
-// ServerEvent enqueues a single server-side event (public_check_run,
-// watch_signup, magic_link_requested, signed_in, account_created). The
-// visitor is resolved from the scope's uc_vid; no cookie means visitor_id 0.
+// ServerEvent enqueues a single server-side event; the visitor is resolved
+// from the scope's uc_vid, no cookie means visitor_id 0.
 func (r *Recorder) ServerEvent(ctx context.Context, name string, personID, tenantID int64, props map[string]string) {
 	if r == nil {
 		return
@@ -216,7 +207,7 @@ func (r *Recorder) ServerEvent(ctx context.Context, name string, personID, tenan
 }
 
 // LinkEmail records an email on the visitor row (watch_signup). The email
-// goes ONLY to Postgres, never into ClickHouse props (§Decision 7).
+// goes ONLY to Postgres, never into ClickHouse props.
 func (r *Recorder) LinkEmail(ctx context.Context, email string) {
 	if r == nil || email == "" {
 		return
@@ -257,9 +248,8 @@ func (r *Recorder) CountInvalid(n int) {
 	r.invalid.Add(uint64(n))
 }
 
-// baseTrack reduces the request scope to what is stored: country from the
-// raw IP (used once here, then discarded), the truncated IP hash, and the
-// parsed UA. This is the ONLY place the raw IP is read.
+// baseTrack reduces the request scope to what is stored: country from the raw
+// IP (used once here), the truncated IP hash, the parsed UA.
 func (r *Recorder) baseTrack(ctx context.Context) track {
 	t := track{at: time.Now()}
 	if s := ScopeFrom(ctx); s != nil {
@@ -275,10 +265,8 @@ func (r *Recorder) baseTrack(ctx context.Context) track {
 	return t
 }
 
-// enqueue never blocks: a full buffer means the flush loop cannot keep up,
-// and stalling an HTTP response over analytics is forbidden (§Decision 2).
-// The drop is WARN-logged and counted — silent loss is the one defect a
-// monitoring tool may not have.
+// enqueue never blocks: stalling an HTTP response over analytics is
+// forbidden. The drop is WARN-logged and counted, never silent.
 func (r *Recorder) enqueue(t track) {
 	select {
 	case r.in <- t:
@@ -329,9 +317,8 @@ func (r *Recorder) run() {
 	}
 }
 
-// flush groups the batch by visitor token, resolves each visitor exactly
-// once in Postgres, applies identity links and the last_seen touch, and
-// writes all event rows to ClickHouse in one batch INSERT.
+// flush groups the batch by visitor token, resolves each visitor once in
+// Postgres, applies links and the touch, and batch-inserts into ClickHouse.
 func (r *Recorder) flush(list []track) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -340,12 +327,8 @@ func (r *Recorder) flush(list []track) {
 		r.log.Warn("analytics: dropped invalid events", "count", n)
 	}
 
-	// Group by token BEFORE resolving: a link-only track (e.g. LinkEmail)
-	// can arrive ahead of the same visitor's first page_view, and merging the
-	// candidates first keeps one flush from splitting attribution across two
-	// upserts. The upsert itself is first-non-empty, so a server event that
-	// created the row in an earlier flush still picks up the referrer that
-	// arrives late — attribution survives the cross-flush race too.
+	// Group by token BEFORE resolving: a link-only track can arrive ahead of
+	// the same visitor's first page_view; the upsert stays first-non-empty.
 	type group struct {
 		tokenHash []byte
 		first     FirstTouch
@@ -374,9 +357,8 @@ func (r *Recorder) flush(list []track) {
 		if g.tokenHash != nil {
 			id, err := r.store.VisitorIDByToken(ctx, g.tokenHash, g.first, g.tracks[0].at)
 			if err != nil {
-				// Resolve failed: the events still go to ClickHouse with
-				// visitor_id 0 (an unresolved visitor is not an unknown event),
-				// and the link/touch updates are skipped — there is no row.
+				// The events still go to ClickHouse with visitor_id 0; the
+				// link/touch updates are skipped, there is no row.
 				r.log.Warn("analytics: visitor resolve failed", "err", err)
 				id = 0
 			}
@@ -420,8 +402,8 @@ func (r *Recorder) flush(list []track) {
 				})
 			}
 		}
-		// Bot-only batches never advance last_seen or events_count (§Decision
-		// 14): the directory must not rank a crawler as the most recent visitor.
+		// Bot-only batches never advance last_seen or events_count: the
+		// directory must not rank a crawler as the most recent visitor.
 		if g.id != 0 && nEvents > 0 && !botOnly {
 			if err := r.store.TouchVisitorLastSeen(ctx, g.id, touchAt, touchCountry, touchDevice, nEvents); err != nil {
 				r.log.Warn("analytics: visitor touch failed", "err", err)
@@ -429,12 +411,11 @@ func (r *Recorder) flush(list []track) {
 		}
 	}
 
-	// Always hand the sink the batch, even when the link-only tracks left it
-	// empty: the native insert no-ops on zero rows, and callers (tests, the
-	// drain path) get one completion signal per flush.
+	// Always hand the sink the batch, even when empty: the native insert
+	// no-ops on zero rows, and callers get one completion signal per flush.
 	if err := r.sink.InsertWebEvents(ctx, rows); err != nil {
-		// The batch is lost (no retry queue): analytics is lossy-by-design
-		// under ClickHouse outage, and the WARN is the honest record of it.
+		// The batch is lost (no retry queue): analytics is lossy by design
+		// under ClickHouse outage; the WARN is the honest record.
 		r.log.Warn("analytics: clickhouse insert failed", "err", err, "rows", len(rows))
 	}
 }

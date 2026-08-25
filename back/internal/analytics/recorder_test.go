@@ -49,8 +49,7 @@ func (f *fakeStore) VisitorIDByToken(_ context.Context, tokenHash []byte, first 
 	key := string(tokenHash)
 	f.upserts = append(f.upserts, first)
 	if id, ok := f.ids[key]; ok {
-		// The conflict branch of UpsertWebVisitorFirst (§Decision 14):
-		// is_bot = web_visitor.is_bot AND EXCLUDED.is_bot — a human event
+		// The conflict branch: is_bot = old AND new; a human event
 		// un-flags a previously-bot-flagged row.
 		f.isBot[id] = f.isBot[id] && first.IsBot
 		return id, nil
@@ -250,9 +249,8 @@ func TestRecorderFlushMergesFirstTouchAcrossTracks(t *testing.T) {
 	r.Start()
 	tok := MintVisitorToken()
 
-	// The link arrives BEFORE the first page_view (server event won the race).
-	// The one-shot first-touch insert must still see the page's attribution:
-	// flush merges per token before resolving.
+	// The link arrives BEFORE the first page_view; the one-shot first-touch
+	// insert must still see the page's attribution.
 	r.LinkEmail(scopedCtx(tok), "founder@example.com")
 	r.Track(scopedCtx(tok), []Event{{Name: "page_view", Path: "/", Referrer: "https://producthunt.com/", UTMMedium: "referral"}}, 0, 0)
 
@@ -290,9 +288,8 @@ func TestRecorderHumanEventUnFlagsBotVisitor(t *testing.T) {
 	r.Track(botCtx, []Event{{Name: "page_view", Path: "/"}}, 0, 0)
 	waitBatch(t, sink)
 
-	// Flush 2: the same cookie on a human browser. The upsert's EXCLUDED
-	// side carries is_bot=false and the sticky-AND conflict branch flips the
-	// row to is_bot=false (§Decision 14: one human event un-flags).
+	// Flush 2: the same cookie on a human browser; the sticky-AND conflict
+	// branch flips the row to is_bot=false.
 	r.Track(scopedCtx(tok), []Event{{Name: "page_view", Path: "/app"}}, 0, 0)
 	waitBatch(t, sink)
 
@@ -310,10 +307,8 @@ func TestRecorderHumanEventUnFlagsBotVisitor(t *testing.T) {
 	}
 }
 
-// The fake above emulates the sticky-AND conflict clause; this test pins
-// the SQL itself (§Decision 14). The back side has no SQL-execution harness
-// for upserts, so without it reverting analytics.sql to sticky-OR while
-// leaving the fake's emulation would keep every recorder test green.
+// The fake emulates the sticky-AND clause; this test pins the SQL itself, so
+// reverting analytics.sql to sticky-OR would fail here even with the fake.
 func TestUpsertFirstTouchStickyAndClauseIsInTheSQL(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "internal", "storage", "pg", "queries", "analytics.sql"))
 	if err != nil {
@@ -334,9 +329,8 @@ func TestRecorderBotOnlyBatchSkipsLastSeenTouch(t *testing.T) {
 	r.Track(ctx, []Event{{Name: "page_view", Path: "/"}, {Name: "page_view", Path: "/pricing"}}, 0, 0)
 	rows := waitBatch(t, sink)
 
-	// Bot events still land in ClickHouse under the resolved visitor id and
-	// still create the directory row (is_bot=true); only the touch is
-	// skipped so last_seen_at / events_count never advance on bot traffic.
+	// Bot events still land in ClickHouse and create the directory row; only
+	// the touch is skipped, so last_seen never advances on bot traffic.
 	if len(rows) != 2 || rows[0].VisitorID != 1 {
 		t.Fatalf("rows = %+v, want 2 bot rows under visitor 1", rows)
 	}

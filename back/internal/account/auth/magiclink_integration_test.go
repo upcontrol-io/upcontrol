@@ -1,16 +1,7 @@
 //go:build integration
 
-// The dev half of the magic-link contract (task 12): a configured mailer IS
-// called in dev, and a SendCode failure NEVER blocks the dev_token response.
-// Without this pin, a later "fix" that errors the response on a failed send
-// would lock out every dev login and still pass the unit suite, because the
-// unit tests only cover the pure helpers.
-//
-// The redeem half (task 2.5, Decision 18): a requested code activates nothing,
-// the redeem activates the pending membership and seeds the e-mail channel,
-// and a second sign-in adds no duplicate.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/account/auth/...
+// A SendCode failure never blocks the dev_token response; only the redeem
+// activates invites. Run: go test -tags=integration ./internal/account/auth/...
 package auth
 
 import (
@@ -105,12 +96,8 @@ func TestDevModeFailingSendStillReturnsDevToken(t *testing.T) {
 	}
 }
 
-// Decision 18: activation is proof of ownership only. A requested code proves
-// nothing (anyone can type an address), so the membership stays pending
-// through the request; the redeem — the one step that needed the code — turns
-// it active and seeds the e-mail channel in that tenant, symmetric with the
-// channel a fresh signup is born with. A second sign-in must not add a second
-// channel.
+// Activation is proof of ownership only: the request proves nothing, the
+// redeem activates and seeds. A second sign-in adds no second channel.
 func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -165,8 +152,7 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 		slog.New(slog.DiscardHandler))
 
 	// Every request rides its own client IP: the per-IP window is shared with
-	// every other run of this suite, and a rerun minutes later must not open
-	// as rate_limited for a reason this test does not touch.
+	// every other run of this suite.
 	seq := time.Now().UnixNano()
 	post := func(body string) *httptest.ResponseRecorder {
 		seq++
@@ -226,10 +212,8 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 		t.Fatalf("email channels for the invitee = %d, want exactly 1", n)
 	}
 
-	// A second sign-in: the first code is consumed, so a fresh one is minted.
-	// The cooldown is backdated first — the address is the same one that just
-	// signed in, so no amount of uniqueness can wait out the 60 seconds; the
-	// point under test is idempotence across sign-ins, not the throttle.
+	// A second sign-in mints a fresh code; the cooldown is backdated first.
+	// The point under test is idempotence across sign-ins, not the throttle.
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE magic_link_code SET created_at = now() - interval '2 minutes' WHERE email = $1`, email); err != nil {
 		t.Fatalf("backdate the code's cooldown: %v", err)

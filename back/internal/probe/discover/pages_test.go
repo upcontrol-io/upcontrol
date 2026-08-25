@@ -7,13 +7,11 @@ import (
 	"testing"
 )
 
-// bodyProber answers with a body per URL, and records every URL asked for, so a
-// test can assert on what this package refused to request as well as on what it
-// returned.
+// bodyProber answers with a body per URL and records every URL asked for,
+// so a test can assert on refusals as well as on returns.
 type bodyProber struct {
-	// probePages runs the shortlist concurrently, so the recorder needs a lock.
-	// Not pedantry: the request-ceiling test asserts on len(asked), and a lost
-	// append would quietly weaken exactly the guarantee it exists to prove.
+	// probePages runs the shortlist concurrently, so the recorder needs a lock:
+	// a lost append would quietly weaken the request-ceiling guarantee.
 	mu     sync.Mutex
 	body   map[string]string
 	status map[string]uint16
