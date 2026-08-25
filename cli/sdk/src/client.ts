@@ -1,9 +1,5 @@
-// The push client (cli/SPEC.md §5.3): batch 1.5s / 64 KB, in-memory ring
-// capped at 8 MB with an explicit drop event, exponential backoff with jitter,
-// idempotent batches (a failed batch is retried byte-identical - the server
-// content-addresses bodies, so a replay cannot double-write), honors the
-// receipt's sampling instruction. Nothing here ever throws to the caller and
-// nothing holds the event loop open (all timers are unref'd).
+// The push client: batches with backoff and jitter; a failed batch is retried byte-identical,
+// safe because the server content-addresses bodies. Never throws; all timers unref'd.
 
 import { scrub } from './scrub.js';
 
@@ -145,8 +141,8 @@ export class Client {
       this.dropped = 0;
     }
     if (!this.sentInstallVerified) {
-      // First batch of this process carries the chain proof (SPEC §8.1). If the
-      // batch fails it is retried whole, so the event cannot be lost.
+      // First batch of this process carries the install proof. If the batch
+      // fails it is retried whole, so the event cannot be lost.
       parts.push(
         JSON.stringify({
           ts: new Date().toISOString(),

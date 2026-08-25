@@ -1,12 +1,5 @@
-// The whole vertical against the real docker stack: mint an anonymous project,
-// write the key to .env, push events through the SDK, watch verify flip.
-// Gated like front's live suite: runs only under UC_CLI_E2E=1 with the stack
-// answering /health, and is skipped (not failed) otherwise.
-//
-//   docker compose up -d   (repo root: ./up.ps1 or ./up.sh)
-//   UC_CLI_E2E=1 node --test cli/e2e/
-//
-// Build both packages first: `npm run build` in cli/sdk and cli/installer.
+// The whole vertical against the real docker stack, gated by UC_CLI_E2E=1 and
+// /health answering: mint a key, push SDK events, watch verify flip.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

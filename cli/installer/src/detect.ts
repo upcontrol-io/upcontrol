@@ -1,10 +1,7 @@
-// Which coding agent (if any) is driving this process, from environment
-// markers — the same technique checkly@8.x proved at scale. An explicit
-// AI_AGENT/AGENT env always wins; CI is its own mode; a non-TTY stdout with no
-// known agent still gets machine-readable output, because a pipe cannot answer
-// prompts either.
+// Which coding agent (if any) drives this process, read from environment markers.
+// AI_AGENT/AGENT wins; CI is its own mode; a non-TTY stdout gets machine-readable output.
 
-export type CliMode = 'agent' | 'ci' | 'interactive';
+type CliMode = 'agent' | 'ci' | 'interactive';
 
 export interface Detection {
   mode: CliMode;
@@ -24,9 +21,8 @@ const ALIASES: Record<string, string> = {
   windsurf: 'windsurf',
 };
 
-// The number of distinct agents here is a published claim: both READMEs carry
-// a "works with N coding agents" badge that links back to this list. Adding an
-// agent means updating them, or the badge is asserting rather than measuring.
+// The READMEs carry a "works with N coding agents" badge linked to this list;
+// adding an agent means updating them, or the badge overstates.
 const MARKERS: Array<[string, string]> = [
   ['CLAUDECODE', 'claude-code'],
   ['CLAUDE_CODE', 'claude-code'],

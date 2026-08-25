@@ -16,9 +16,8 @@ interface MockBackend {
 }
 import { collectSpec, formatSpec } from '../src/meta.ts';
 
-// The project-spec half of init (ai-provider-and-scenarios plan, Decisions
-// 15b/16): only the five whitelisted fields, the exact transparency copy on
-// stdout, --no-meta sends nothing, and no meta failure can fail the install.
+// The project-spec half of init: five whitelisted fields, the transparency
+// copy on stdout, --no-meta sends nothing, no meta failure fails the install.
 
 const execFileP = promisify(execFile);
 
@@ -57,12 +56,8 @@ function mockBackend(metaStatus = 204): Promise<MockBackend> {
       req.on('data', (c) => (body += c));
       req.on('end', () => {
         metas.push({ auth: req.headers['x-upcontrol-key'], body: JSON.parse(body) });
-        // A refusal carries the server's real error envelope. A bare status
-        // with no body is a shape the API never sends, and answering that way
-        // hid a crash for a whole release: an unread response body kept an
-        // undici handle open and Node aborted the process during teardown
-        // (0xC0000409). The mock has to be able to fail the way the server
-        // fails, or the test proves nothing about the path it names.
+        // A refusal carries the server's real error envelope, never a bare
+        // status: the mock must fail the way the server fails.
         if (metaStatus >= 400) {
           res.writeHead(metaStatus, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: { code: 'meta_too_large', message: 'description exceeds the 200-character cap' } }));
@@ -193,13 +188,8 @@ test('init prints the spec, uploads it keyed, and the key never reaches stdout',
 });
 
 test('a refused upload leaves the process able to exit (0xC0000409 regression)', async () => {
-  // The crash: putProjectMeta returned on !res.ok without reading the body,
-  // undici kept the stream handle open, and Node aborted during teardown -
-  // `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, exit
-  // 3221226505 on Windows. It fired on the ordinary refusal path, so init
-  // crashed for every project whose spec the server declined. execFileP
-  // rejects on a non-zero exit, which is the assertion: reaching the next
-  // line means the process exited cleanly.
+  // Regression: an unread response body once kept a handle open and aborted
+  // teardown on the refusal path; reaching the next line means a clean exit.
   const srv = await mockBackend(400);
   const cwd = tmp();
   writeFileSync(
@@ -216,9 +206,8 @@ test('a refused upload leaves the process able to exit (0xC0000409 regression)',
 });
 
 test('the spec goes to the key this run established, not the ambient one', async () => {
-  // --key names the project the user chose. Re-reading UPCONTROL_API_KEY
-  // afterwards uploaded their spec to whatever project the environment
-  // happened to name instead.
+  // --key names the project the user chose; re-reading the environment
+  // afterwards would upload the spec to whatever project it happened to name.
   const srv = await mockBackend();
   const cwd = tmp();
   const chosen = 'uc_live_' + 'c'.repeat(32);
@@ -236,10 +225,8 @@ test('the spec goes to the key this run established, not the ambient one', async
 });
 
 test('a long or multi-line description is flattened and capped before it is printed or sent', async () => {
-  // The server caps at 200 runes as sent and rejects the whole spec when one
-  // value is over, so an ordinary long description would destroy the upload.
-  // A newline would also forge a second line inside the block whose entire
-  // job is to prove what leaves.
+  // The server rejects a spec with a value over 200 runes; a newline would
+  // forge a second line inside the block that proves what leaves.
   const srv = await mockBackend();
   const cwd = tmp();
   writeFileSync(
@@ -259,9 +246,8 @@ test('a long or multi-line description is flattened and capped before it is prin
 });
 
 test('a package.json describing nothing about the product uploads nothing', async () => {
-  // PUT replaces the whole spec, so sending {runtime, language} - two facts
-  // about the machine that ran init - would overwrite a good spec with
-  // nothing about the product.
+  // PUT replaces the whole spec: sending only machine facts would overwrite
+  // a good spec with nothing about the product.
   const srv = await mockBackend();
   const cwd = tmp();
   writeFileSync(join(cwd, 'package.json'), JSON.stringify({ version: '1.0.0' }));
