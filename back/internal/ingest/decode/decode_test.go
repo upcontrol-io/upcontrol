@@ -161,6 +161,24 @@ func TestDecodeUnparseableLineIsWarning(t *testing.T) {
 	}
 }
 
+func TestToStringFloats(t *testing.T) {
+	// Regression: json.Marshal already emits the shortest form, so no
+	// trailing-zero trimming (the old trimFloat turned 100 into "1").
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{100, "100"},
+		{2.5, "2.5"},
+		{1724668800, "1724668800"},
+	}
+	for _, c := range cases {
+		if got := toString(c.in); got != c.want {
+			t.Errorf("toString(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func hasWarning(ws []Warning, code WarningCode) bool {
 	for _, w := range ws {
 		if w.Code == code {

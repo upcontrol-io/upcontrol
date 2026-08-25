@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"time"
 
 	"go.upcontrol.io/back/internal/probe/guard"
@@ -349,19 +350,9 @@ func errorResult(err error, start time.Time) Result {
 	}
 }
 
-func isTimeout(err error) bool { return err != nil && contains2(err.Error(), "timeout") }
+func isTimeout(err error) bool { return err != nil && strings.Contains(err.Error(), "timeout") }
 func isBlocked(err error) bool {
 	return errors.Is(err, guard.ErrBlockedTarget)
 }
-func isDNS(err error) bool         { return err != nil && contains2(err.Error(), "dns:") }
-func isTLS(err error) bool         { return err != nil && contains2(err.Error(), "tls:") }
-func contains2(s, sub string) bool { return len(s) >= len(sub) && (s == sub || stringContains(s, sub)) }
-
-func stringContains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
+func isDNS(err error) bool { return err != nil && strings.Contains(err.Error(), "dns:") }
+func isTLS(err error) bool { return err != nil && strings.Contains(err.Error(), "tls:") }
