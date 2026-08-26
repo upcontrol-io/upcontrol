@@ -2,7 +2,7 @@ import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import styles from './Tooltip.module.css';
 
-export interface TooltipProps {
+interface TooltipProps {
   content: ReactNode;
   children: ReactNode;
   /** Applied to the trigger, so a caller can hide the whole tooltip at a breakpoint. */

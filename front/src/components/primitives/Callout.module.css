@@ -8,14 +8,6 @@
   border-left-color: var(--line-strong);
 }
 
-.tip {
-  border-left-color: var(--ok);
-}
-
-.warning {
-  border-left-color: var(--check);
-}
-
 .danger {
   border-left-color: var(--down);
 }

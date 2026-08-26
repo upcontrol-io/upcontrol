@@ -1,7 +1,7 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 
-export type Theme = 'dark' | 'light';
+type Theme = 'dark' | 'light';
 
 const STORAGE_KEY = 'uc-theme';
 

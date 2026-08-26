@@ -1,7 +1,7 @@
 import { CopyButton } from './CopyButton';
 import styles from './CopyField.module.css';
 
-export interface CopyFieldProps {
+interface CopyFieldProps {
   /** What lands in the clipboard. */
   text: string;
   /** What the field shows — defaults to `text` (e.g. a URL without its scheme). */

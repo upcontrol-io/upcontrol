@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import styles from './Callout.module.css';
 
-type CalloutTone = 'note' | 'tip' | 'warning' | 'danger';
+type CalloutTone = 'note' | 'danger';
 
 interface CalloutProps {
   tone?: CalloutTone;

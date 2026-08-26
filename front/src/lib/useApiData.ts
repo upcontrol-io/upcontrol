@@ -20,15 +20,12 @@ function subscribe(cb: () => void) {
 		listeners.delete(cb);
 	};
 }
-/** True when a read failed as unreachable. No args: any key anywhere (the
- *  shell banner); with keys: only those, so an unmounted page cannot stick. */
-export function useDegradation(...keys: string[]) {
+/** True when the given key's read failed as unreachable, so an unmounted
+ *  page cannot stick. */
+export function useDegradation(key: string) {
 	return useSyncExternalStore(
 		subscribe,
-		() =>
-			keys.length === 0
-				? degraded.size > 0
-				: keys.some((key) => degraded.has(key)),
+		() => degraded.has(key),
 		() => false, // SSR: assume live (no fetches ran)
 	);
 }
@@ -115,7 +112,7 @@ type State<T> = {
 	error: unknown;
 };
 
-export type ApiDataResult<T> = {
+type ApiDataResult<T> = {
 	data: T;
 	/** "Nothing has answered yet", NOT "a request is in flight". */
 	loading: boolean;

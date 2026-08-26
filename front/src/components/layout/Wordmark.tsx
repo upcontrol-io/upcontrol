@@ -3,7 +3,7 @@ import type { CSSProperties } from 'react';
 import { BrandMark } from '@/components/primitives';
 import styles from './Wordmark.module.css';
 
-export interface WordmarkProps {
+interface WordmarkProps {
 	/** The header's own logo class — supplies size and colour, which differ per screen. */
 	className?: string;
 	size?: number;

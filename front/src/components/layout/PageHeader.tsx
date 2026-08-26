@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './PageHeader.module.css';
 
-export interface PageHeaderProps {
+interface PageHeaderProps {
   title: ReactNode;
   /** One sentence saying what the screen is for. Omitted when the title says it. */
   description?: ReactNode;

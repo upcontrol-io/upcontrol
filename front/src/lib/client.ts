@@ -183,8 +183,6 @@ export const instance = {
 			method: "PUT",
 			body: JSON.stringify({ token, username }),
 		}),
-	deleteTelegramBot: () =>
-		fetchJSON<undefined>("/v1/instance/telegram-bot", { method: "DELETE" }),
 	putSMTP: (values: { host?: string; port?: string; username?: string; password?: string; from?: string }) =>
 		fetchJSON<undefined>("/v1/instance/smtp", {
 			method: "PUT",
