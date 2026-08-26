@@ -2,14 +2,17 @@ package analytics
 
 import (
 	"crypto/sha256"
-	_ "embed"
+	"errors"
+	"io/fs"
 	"net"
+	"os"
 
 	"github.com/oschwald/geoip2-golang"
 )
 
-//go:embed geoip/dbip-country-lite.mmdb
-var mmdbBytes []byte
+// defaultGeoDB is where a deployment drops the MMDB country database. The file
+// is an 8 MB monthly download, not part of the source tree: see infra/README.md.
+const defaultGeoDB = "/var/lib/upcontrol/geoip/country.mmdb"
 
 // geo resolves an IP to an ISO country code. A nil *geo is valid and answers
 // "": a missing database degrades to "country unknown".
@@ -17,9 +20,17 @@ type geo struct {
 	db *geoip2.Reader
 }
 
-// openGeo parses the embedded database.
+// openGeo opens the database named by UC_GEOIP_DB. No file installed is the
+// normal state, not an error: (nil, nil) means every country reads "".
 func openGeo() (*geo, error) {
-	db, err := geoip2.FromBytes(mmdbBytes)
+	path := os.Getenv("UC_GEOIP_DB")
+	if path == "" {
+		path = defaultGeoDB
+	}
+	db, err := geoip2.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

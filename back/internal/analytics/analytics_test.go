@@ -205,11 +205,20 @@ func TestScopeRoundTrip(t *testing.T) {
 }
 
 func TestGeoResolvesCountry(t *testing.T) {
-	g, err := openGeo()
-	if err != nil {
-		t.Fatalf("embedded mmdb failed to open: %v", err)
+	// A nil geo degrades to unknown instead of panicking — the branch that
+	// runs when no database is installed, so it is never skipped.
+	var nilGeo *geo
+	if c := nilGeo.Country("8.8.8.8"); c != "" {
+		t.Errorf("nil geo must answer \"\", got %q", c)
 	}
 
+	g, err := openGeo()
+	if err != nil {
+		t.Fatalf("geoip database failed to open: %v", err)
+	}
+	if g == nil {
+		t.Skip("no geoip database installed (UC_GEOIP_DB)")
+	}
 	// A well-known anycast address: resolvable in every country database.
 	if c := g.Country("8.8.8.8"); c == "" {
 		t.Error("8.8.8.8 must resolve to a country code")
@@ -219,11 +228,6 @@ func TestGeoResolvesCountry(t *testing.T) {
 		if c := g.Country(ip); c != "" {
 			t.Errorf("Country(%q) = %q, want \"\"", ip, c)
 		}
-	}
-	// A nil geo degrades to unknown instead of panicking.
-	var nilGeo *geo
-	if c := nilGeo.Country("8.8.8.8"); c != "" {
-		t.Errorf("nil geo must answer \"\", got %q", c)
 	}
 }
 
