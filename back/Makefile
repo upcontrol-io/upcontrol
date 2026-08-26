@@ -38,7 +38,7 @@ all: build
 generate:
 	@sh scripts/extract-schema.sh
 	$(SQLC) generate
-	$(OAPI) -package api -generate types,strict-server,spec -o gen/api/api.gen.go api/openapi.yaml
+	$(OAPI) -package api -generate types -o gen/api/api.gen.go api/openapi.yaml
 	$(BUF) generate
 
 ## build: compile the three binaries.
