@@ -263,5 +263,5 @@ func monitorTitle(ctx context.Context, pool *pg.Pool, monitorID int64, res *prob
 	}
 	// The errorClass→title mapping lives in triage (its buildTitle produced
 	// these exact strings before the switch was replaced by this call).
-	return triage.Build(name, errClassStr(res.ErrorClass), int(res.StatusCode), nil).Title
+	return triage.Build(name, errClassStr(res.ErrorClass), int(res.StatusCode)).Title
 }

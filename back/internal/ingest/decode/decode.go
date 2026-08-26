@@ -80,9 +80,9 @@ type Result struct {
 	Warnings []Warning
 }
 
-// Sniff decides the body's form from its bytes, with Content-Type as a hint only.
+// sniff decides the body's form from its bytes, with Content-Type as a hint only.
 // It never returns Unknown for non-empty input: the worst case is plain text.
-func Sniff(body []byte, contentType string) Format {
+func sniff(body []byte, contentType string) Format {
 	ct := strings.ToLower(strings.TrimSpace(contentType))
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
 	if len(trimmed) == 0 {
@@ -151,7 +151,7 @@ func Sniff(body []byte, contentType string) Format {
 // Decode sniffs then parses. It is total on the recognized formats: a parse
 // failure on one line becomes an unparseable_line warning, not a hard error.
 func Decode(body []byte, contentType string) Result {
-	format := Sniff(body, contentType)
+	format := sniff(body, contentType)
 	ws := &warningSet{}
 	var recs []Record
 	switch format {

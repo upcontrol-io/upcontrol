@@ -130,7 +130,7 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 			// Re-check the redirect target's URL (scheme/port), gated on the
 			// same flag as the pre-flight check (nil guardCheck skips this too).
 			if e.guardCheck != nil {
-				if err := guard.AllowedRedirectURL(req.URL.String()); err != nil {
+				if err := guard.CheckURL(req.URL.String()); err != nil {
 					return err
 				}
 			}

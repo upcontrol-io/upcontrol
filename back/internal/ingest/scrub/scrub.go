@@ -92,16 +92,9 @@ func matchAt(s string, i int) (match, bool) {
 	return match{}, false
 }
 
-func hasPrefix(s, prefix string, i int) bool {
-	if i+len(prefix) > len(s) {
-		return false
-	}
-	return s[i:i+len(prefix)] == prefix
-}
-
 func pemMatcher(s string, i int) (int, bool) {
 	const begin = "-----BEGIN "
-	if !hasPrefix(s, begin, i) {
+	if !strings.HasPrefix(s[i:], begin) {
 		return 0, false
 	}
 	hdr := s[i:]
@@ -126,7 +119,7 @@ func pemMatcher(s string, i int) (int, bool) {
 
 func bearerMatcher(s string, i int) (int, bool) {
 	const p = "Bearer "
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)
@@ -141,7 +134,7 @@ func bearerMatcher(s string, i int) (int, bool) {
 
 func prefixTokenFn(prefix string, minTail int) func(string, int) (int, bool) {
 	return func(s string, i int) (int, bool) {
-		if !hasPrefix(s, prefix, i) {
+		if !strings.HasPrefix(s[i:], prefix) {
 			return 0, false
 		}
 		j := i + len(prefix)
@@ -162,7 +155,7 @@ func isTokenByte(c byte) bool {
 
 func githubAnyMatcher(s string, i int) (int, bool) {
 	for _, p := range []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"} {
-		if hasPrefix(s, p, i) {
+		if strings.HasPrefix(s[i:], p) {
 			j := i + len(p)
 			for j < len(s) && isTokenByte(s[j]) {
 				j++
@@ -177,7 +170,7 @@ func githubAnyMatcher(s string, i int) (int, bool) {
 
 func slackAnyMatcher(s string, i int) (int, bool) {
 	for _, p := range []string{"xoxp-", "xoxb-", "xoxa-", "xoxs-"} {
-		if hasPrefix(s, p, i) {
+		if strings.HasPrefix(s[i:], p) {
 			j := i + len(p)
 			for j < len(s) && (isTokenByte(s[j]) || s[j] == '.') {
 				j++
@@ -232,7 +225,7 @@ func isB64(c byte) bool {
 
 func connStrMatcher(s string, i int) (int, bool) {
 	for _, sch := range []string{"postgres://", "postgresql://", "mysql://", "mongodb://", "redis://"} {
-		if hasPrefix(s, sch, i) {
+		if strings.HasPrefix(s[i:], sch) {
 			rest := s[i+len(sch):]
 			colon := strings.IndexByte(rest, ':')
 			if colon < 0 {
@@ -250,7 +243,7 @@ func connStrMatcher(s string, i int) (int, bool) {
 
 func sessionEqMatcher(s string, i int) (int, bool) {
 	const p = "session="
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)
@@ -265,7 +258,7 @@ func sessionEqMatcher(s string, i int) (int, bool) {
 
 func cookieSetMatcher(s string, i int) (int, bool) {
 	const p = "Set-Cookie: "
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)

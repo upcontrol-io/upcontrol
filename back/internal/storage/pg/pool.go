@@ -44,15 +44,9 @@ func (p *Pool) Ping(ctx context.Context) error { return p.db.Ping(ctx) }
 // Close releases the pool.
 func (p *Pool) Close() { p.db.Close() }
 
-// Queries exposes the sqlc-generated query interface. Callers reach the pool's
-// raw Conn via the generated db.go's WithTx; for advisory locks use Exec below.
+// Queries exposes the sqlc-generated query interface. Callers reach the pool's raw
+// Conn via WithTx in the generated db.go; locks borrow one via Raw().Acquire.
 func (p *Pool) Queries() *sqlc.Queries { return p.q }
-
-// Exec runs a raw SQL statement (for advisory locks and other non-query SQL).
-func (p *Pool) Exec(ctx context.Context, sql string, args ...any) error {
-	_, err := p.db.Exec(ctx, sql, args...)
-	return err
-}
 
 // Raw exposes the underlying pool for code that needs direct pgx access.
 func (p *Pool) Raw() *pgxpool.Pool { return p.db }

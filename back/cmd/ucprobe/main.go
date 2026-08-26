@@ -27,9 +27,18 @@ func setup(_ context.Context, d app.Deps) (func() error, error) {
 	mux.Handle("GET /health", d.Health.Handler())
 
 	if d.Config.NodeToken != "" {
-		apiAddr := getenv("UC_API_ADDR", "http://ucapi:8080")
-		nodeID := getenv("UC_NODE_ID", "ucprobe-"+d.Config.HTTPAddr)
-		region := getenv("UC_NODE_REGION", "default")
+		apiAddr := "http://ucapi:8080"
+		if v := os.Getenv("UC_API_ADDR"); v != "" {
+			apiAddr = v
+		}
+		nodeID := "ucprobe-" + d.Config.HTTPAddr
+		if v := os.Getenv("UC_NODE_ID"); v != "" {
+			nodeID = v
+		}
+		region := "default"
+		if v := os.Getenv("UC_NODE_REGION"); v != "" {
+			region = v
+		}
 		go runProbeLoop(apiAddr, nodeID, region, d.Config.NodeToken, d.Logger)
 	}
 
@@ -145,11 +154,4 @@ func mapErrClass(s string) probev1.ErrorClass {
 	default:
 		return probev1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}
-}
-
-func getenv(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

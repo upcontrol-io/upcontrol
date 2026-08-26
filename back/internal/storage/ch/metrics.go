@@ -3,6 +3,8 @@ package ch
 import (
 	"context"
 	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 // MetricRow is one row of the metrics table, written by the ingest batcher
@@ -18,18 +20,9 @@ type MetricRow struct {
 
 // InsertMetrics writes a batch of metric rows, mirroring InsertEvents.
 func (c *Conn) InsertMetrics(ctx context.Context, rows []MetricRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	batch, err := c.db.PrepareBatch(ctx, "INSERT INTO metrics "+
-		"(tenant_id, project_id, ts, name, labels, value)")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if err := batch.Append(r.TenantID, r.ProjectID, r.TS, r.Name, r.Labels, r.Value); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+	return insert(ctx, c, "INSERT INTO metrics "+
+		"(tenant_id, project_id, ts, name, labels, value)",
+		rows, func(b driver.Batch, r MetricRow) error {
+			return b.Append(r.TenantID, r.ProjectID, r.TS, r.Name, r.Labels, r.Value)
+		})
 }

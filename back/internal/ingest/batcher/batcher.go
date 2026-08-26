@@ -21,10 +21,9 @@ type Clock interface {
 // Options configures the flush policy; zero-value fields fall back to the
 // 8 MiB / 200 ms / 1-per-second defaults.
 type Options struct {
-	BatchBytes    int
-	BatchAge      time.Duration
-	MinInterval   time.Duration           // 1/sec-per-key floor; 0 means BatchAge alone
-	FlushCallback func(key string, n int) // optional, for tests/metrics
+	BatchBytes  int
+	BatchAge    time.Duration
+	MinInterval time.Duration // 1/sec-per-key floor; 0 means BatchAge alone
 }
 
 type Batcher struct {
@@ -137,8 +136,6 @@ func (b *Batcher) Tick(ctx context.Context) error {
 		b.mu.Unlock()
 		if err := b.sink.Flush(ctx, p.key, current.rows); err != nil {
 			firstErr = err
-		} else if b.opt.FlushCallback != nil {
-			b.opt.FlushCallback(p.key, len(current.rows))
 		}
 	}
 	return firstErr
@@ -157,8 +154,6 @@ func (b *Batcher) Close(ctx context.Context) error {
 		}
 		if err := b.sink.Flush(ctx, k, ba.rows); err != nil {
 			firstErr = err
-		} else if b.opt.FlushCallback != nil {
-			b.opt.FlushCallback(k, len(ba.rows))
 		}
 	}
 	return firstErr
@@ -175,21 +170,7 @@ func (b *Batcher) flush(ctx context.Context, key string, ba *batch) error {
 	if err := b.sink.Flush(ctx, key, rows); err != nil {
 		return err
 	}
-	if b.opt.FlushCallback != nil {
-		b.opt.FlushCallback(key, len(rows))
-	}
 	return nil
-}
-
-// Pending reports the total pending rows across all keys.
-func (b *Batcher) Pending() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := 0
-	for _, ba := range b.pending {
-		n += len(ba.rows)
-	}
-	return n
 }
 
 type sysClock struct{}
