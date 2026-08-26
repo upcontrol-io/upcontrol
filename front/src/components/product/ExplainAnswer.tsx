@@ -4,7 +4,7 @@ import { CodeBlock, CopyButton, CopyField } from '@/components/code';
 import type { ExplainResult } from '@/lib/client';
 import styles from './ExplainAnswer.module.css';
 
-export interface ExplainAnswerProps {
+interface ExplainAnswerProps {
 	/** The AI triage answer, as POST /v1/logs/explain returns it. */
 	result: ExplainResult;
 	/** The exact wire bytes that were sent to the model — the selection the

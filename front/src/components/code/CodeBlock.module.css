@@ -61,10 +61,6 @@
   margin: 0 calc(-1 * var(--space-2));
 }
 
-.line.highlighted {
-  background: var(--bg-hover);
-}
-
 /* Grammar-aware highlighting on the cool hue family, never status colours.
    Comments stay achromatic: their job is to recede. */
 .tokComment {

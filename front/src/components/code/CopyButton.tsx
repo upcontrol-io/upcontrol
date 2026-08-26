@@ -2,7 +2,7 @@ import { Button, type ButtonSize } from '@/components/primitives';
 import { CopyIcon, CheckIcon } from '@/icons';
 import { useCopyToClipboard } from '@/lib/useCopyToClipboard';
 
-export interface CopyButtonProps {
+interface CopyButtonProps {
   text: string;
   size?: ButtonSize;
   className?: string;

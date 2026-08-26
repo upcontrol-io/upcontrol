@@ -32,7 +32,7 @@ export interface LogRange {
 	to: number;
 }
 
-export interface LogTimelineProps {
+interface LogTimelineProps {
 	buckets: LogVolumeBucket[];
 	// Finer counts for the committed range; never a replacement for `buckets`
 	// (the whole-ring map), only consulted below a minute.

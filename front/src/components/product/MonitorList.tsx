@@ -60,12 +60,11 @@ export function MonitorList({ publish }: MonitorListProps) {
   // Starts empty and stays empty until the server answers: an unanswered read
   // is not a list of checks.
   const [monitors, setMonitors] = useState<Monitor[]>([]);
-  const [userEdited] = useState(false);
   useEffect(() => {
-    if (!userEdited && monitorsLive && liveMonitors) {
+    if (monitorsLive && liveMonitors) {
       setMonitors(liveMonitors as Monitor[]);
     }
-  }, [liveMonitors, monitorsLive, userEdited]);
+  }, [liveMonitors, monitorsLive]);
   const [formOpen, setFormOpen] = useState(false);
   const [newTarget, setNewTarget] = useState('');
   const [newKeyword, setNewKeyword] = useState('');
