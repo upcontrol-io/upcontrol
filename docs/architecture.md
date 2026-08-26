@@ -342,9 +342,10 @@ api zone 8384 -> 8373; account/ai/deliver zone 11074 -> 11063; worker/storage zo
   lookup falls through to the same string), _internals (no exports-map entry),
   mint/redeem dead fields (projectId, error, status - read-scope proven),
   putProjectMeta void, eight needless type exports dropped (sdk + installer).
-- deadcode ./cmd/... on the merged tree reports only the four ring/query
-  QueryBuilder rows (CutoffSeq, Slice, BeyondErrors, LatestExplain), which
-  pre-dated this wave (verified at base f93713b); no new rows.
+- deadcode ./cmd/... on the merged tree prints nothing. The four ring/query
+  QueryBuilder methods (CutoffSeq, Slice, BeyondErrors, LatestExplain) have no
+  caller outside their package, but that command never listed them: it does not
+  flag unused methods on a type its analysis reaches.
 
 ## Wave 3 candidates (remaining)
 
@@ -358,6 +359,10 @@ without new facts.
 - auth VerifyInitData export: unexporting trips a false unparam positive (the
   production caller rides http.Handler dispatch; unparam sees only tests).
 - ReportBlind RPC: uncalled, but removal needs a proto change.
+- The four ring/query QueryBuilder methods above: no caller outside the
+  package, but each carries a unit test that dies with it.
+- The WAL is write-only since the recovery API went: appended and fsync'd
+  before the receipt, never read back. Recovery is an owner call, not a trim.
 - parseLokiTS/parseUnixNano -> strconv: differ on 20+-digit overflow edges;
   stored-string behaviour change.
 - wal.go magic const (referenced nowhere; its comment is false - Append frames

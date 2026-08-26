@@ -152,8 +152,8 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 	logRecs, metricRows := h.splitMetrics(tenant, dec.Records)
 	rows := h.buildRows(ctx, tenant, logRecs, decision, ws)
 
-	// WAL: append and fsync BEFORE accepting; on crash, recovery replays past
-	// the checkpoint and no confirmed row is lost.
+	// WAL: append and fsync BEFORE accepting, so an accepted batch is on disk.
+	// No replay path exists yet; the file is a durability record, not recovery.
 	if h.d.WAL != nil && (len(rows) > 0 || len(metricRows) > 0) {
 		if err := h.walAppend(ctx, tenant, rows, metricRows); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, receiptErr("wal_failed"))
