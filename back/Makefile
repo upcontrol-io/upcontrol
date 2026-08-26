@@ -25,7 +25,6 @@ LOGIC_PKGS := \
 	./internal/incident/... \
 	./internal/deliver/... \
 	./internal/probe/... \
-	./internal/monitor/... \
 	./internal/account/... \
 	./internal/analytics/...
 
@@ -84,8 +83,7 @@ test-ha:
 ## cover: report coverage over the Logic zone (§0.1) and fail if it dropped
 ## below the saved baseline. gen/** and cmd/** are excluded by design
 ## (invariant 7: generated code is not unit-tested), so only the hand-written
-## Logic zone is gated. The filter keeps the aspirational LOGIC_PKGS list usable
-## even before every package exists on disk.
+## Logic zone is gated.
 COVER_OUT := coverage.out
 COVER_BASELINE := .coverage-baseline
 cover:
