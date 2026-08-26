@@ -121,6 +121,10 @@ services:
       # copies its ownership. Any other mount point is created root:root and
       # the API boots dead with "permission denied" on the WAL.
       - spool:/spool
+      # Optional country database for product analytics: drop an MMDB file at
+      # geoip/country.mmdb next to this compose file. An empty directory means
+      # "country unknown", which is the default (see README.md).
+      - ./geoip:/var/lib/upcontrol/geoip:ro
     environment:
       # Prod mode: Secure cookies, no magic-link code in HTTP responses.
       UC_ENVIRONMENT: prod

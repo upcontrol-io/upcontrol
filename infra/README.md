@@ -102,6 +102,29 @@ design: events are the "why" next to an incident and are tiny compared to
 logs. If yours are not tiny, add a TTL yourself:
 `ALTER TABLE events MODIFY TTL toDateTime(ts) + INTERVAL 365 DAY;`
 
+## Country data (optional)
+
+Product analytics stamps an ISO country code onto each `web_events` row. The
+lookup needs an MMDB country database — an 8 MB monthly download, deliberately
+**not** shipped in this repository. Without one the country column stays empty
+and nothing else changes.
+
+To install one, drop it in `geoip/` next to `docker-compose.yml` — the compose
+file mounts that directory read-only at the path ucapi reads once at startup
+(`/var/lib/upcontrol/geoip/country.mmdb`, overridable with `UC_GEOIP_DB`):
+
+```sh
+mkdir -p geoip
+curl -fsSL "https://download.db-ip.com/free/dbip-country-lite-$(date -u +%Y-%m).mmdb.gz" \
+  | gunzip > geoip/country.mmdb
+docker compose up -d ucapi
+```
+
+DB-IP publishes monthly and the new file appears partway through the month, so
+fall back to the previous month if that URL 404s. Their free databases are
+**CC BY 4.0**: crediting DB-IP is a condition of using one. Any MaxMind-format
+country database works — GeoLite2-Country is the other common choice.
+
 ## Backups
 
 Three things hold state; back up all three:

@@ -162,7 +162,8 @@ func TestRecorderTrackResolvesVisitorAndWritesRows(t *testing.T) {
 	if rows[0].Device != "desktop" || rows[0].OS != "windows" || rows[0].Browser != "chrome" {
 		t.Errorf("UA not stamped: %+v", rows[0])
 	}
-	if rows[0].Country == "" {
+	// Country only when a database is installed; the recorder holds it.
+	if r.geo != nil && rows[0].Country == "" {
 		t.Error("country must be resolved from the scope IP")
 	}
 	if rows[0].PersonID != 0 || rows[0].TenantID != 0 {
