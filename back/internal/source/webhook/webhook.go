@@ -3,7 +3,6 @@
 package webhook
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -488,12 +487,7 @@ func parseEventTimestamp(provider string, raw map[string]any) time.Time {
 // toUnix coerces a JSON number (always float64 after encoding/json) into a unix
 // second count; 0 means "not a number".
 func toUnix(v any) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int64:
-		return n
-	case int:
+	if n, ok := v.(float64); ok {
 		return int64(n)
 	}
 	return 0
@@ -539,6 +533,3 @@ func (h *Handler) markSeen(ctx context.Context, provider, eventID string) error 
 		provider, eventID)
 	return err
 }
-
-// bytes is otherwise unused in this file.
-var _ = bytes.NewReader

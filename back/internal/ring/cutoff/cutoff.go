@@ -30,10 +30,9 @@ var PlanEntitlements = map[string]Entitlement{
 
 // Result is what the recomputation produces.
 type Result struct {
-	CutoffSeq    int64
-	RetainSeq    int64
-	WindowHours  float64
-	BeyondErrors *int64 // nil = stay silent (0 errors)
+	CutoffSeq   int64
+	RetainSeq   int64
+	WindowHours float64
 }
 
 // Recompute walks the ledger backward for one project, deriving the two
@@ -97,10 +96,9 @@ func Recompute(ctx context.Context, pool *pg.Pool, projectID int64, ent Entitlem
 	cutoffSeq = applyTimeCeiling(buckets, cutoffSeq, ent.WindowHours, time.Now())
 
 	return &Result{
-		CutoffSeq:    cutoffSeq,
-		RetainSeq:    retainSeq,
-		WindowHours:  windowHours,
-		BeyondErrors: nil, // computed separately by QueryBuilder.BeyondErrors
+		CutoffSeq:   cutoffSeq,
+		RetainSeq:   retainSeq,
+		WindowHours: windowHours,
 	}, nil
 }
 

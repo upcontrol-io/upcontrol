@@ -2,6 +2,8 @@
 // 24-event dictionary; outside it is T4 (ordinary log line), and "uc.*" is reserved.
 package normalize
 
+import "strings"
+
 // Tier is the event's place in the alerting/correlation ladder.
 type Tier uint8
 
@@ -75,17 +77,13 @@ func Classify(name string) Event {
 	}
 	// Reserved prefix check first: a client cannot claim the upcontrol namespace
 	// even if (somehow) it collides with a canonical name.
-	if hasReservedPrefix(n) {
+	if strings.HasPrefix(n, ReservedPrefix) {
 		return Event{Tier: Tier5}
 	}
 	if e, ok := canonical[n]; ok {
 		return Event{Name: e.name, Tier: e.tier}
 	}
 	return Event{Tier: Tier4}
-}
-
-func hasReservedPrefix(n string) bool {
-	return len(n) >= len(ReservedPrefix) && n[:len(ReservedPrefix)] == ReservedPrefix
 }
 
 func trimLower(s string) string {

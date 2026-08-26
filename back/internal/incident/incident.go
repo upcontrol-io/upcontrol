@@ -29,11 +29,8 @@ const detectStatus = "check"
 // CloseReason enumerates the incident close reasons.
 const (
 	ReasonRecovered     = "recovered"
-	ReasonMaintenance   = "maintenance"
 	ReasonMonitorDelete = "monitor_deleted"
 	ReasonByHuman       = "by_human"
-	ReasonAbsorbed      = "absorbed"
-	ReasonDetectorOff   = "detector_off"
 )
 
 // Lifecycle manages incident open/close against the Postgres tables.
@@ -352,11 +349,6 @@ func (l *Lifecycle) CloseByFingerprint(ctx context.Context, tenantID, fp int64, 
 	})
 
 	return nil
-}
-
-// MarkNotified sets the notified_at timestamp when the first alert is sent.
-func (l *Lifecycle) MarkNotified(ctx context.Context, incidentID int64) error {
-	return l.pool.Queries().TouchIncidentNotified(ctx, incidentID)
 }
 
 // sliceLines is how many log lines the frozen slice keeps; more than this is

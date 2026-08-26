@@ -74,11 +74,3 @@ func (a *Allocator) Next(ctx context.Context) (int64, error) {
 	a.next++
 	return v, nil
 }
-
-// Remaining reports how many values the current block still holds. For tests and
-// observability; not for production decisions.
-func (a *Allocator) Remaining() int64 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.end - a.next
-}

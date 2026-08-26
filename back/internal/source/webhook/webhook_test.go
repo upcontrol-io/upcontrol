@@ -46,8 +46,6 @@ func TestToUnix(t *testing.T) {
 		want int64
 	}{
 		{float64(123), 123},
-		{int64(456), 456},
-		{int(789), 789},
 		{"x", 0},
 		{nil, 0},
 	} {

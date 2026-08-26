@@ -27,9 +27,9 @@ func TestSniff(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Sniff([]byte(c.body), c.ct)
+			got := sniff([]byte(c.body), c.ct)
 			if got != c.want {
-				t.Errorf("Sniff(%q) = %q, want %q", c.name, got, c.want)
+				t.Errorf("sniff(%q) = %q, want %q", c.name, got, c.want)
 			}
 		})
 	}

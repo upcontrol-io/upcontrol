@@ -92,6 +92,3 @@ func (d *Detector) processFail(s *State) Outcome {
 	s.Status = StatusCheck
 	return Outcome{}
 }
-
-// Threshold returns the configured consecutive-failure threshold.
-func (d *Detector) Threshold() int { return d.threshold }

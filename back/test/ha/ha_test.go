@@ -178,14 +178,14 @@ func TestAdvisoryLockExclusive(t *testing.T) {
 	const lockKey = 0x74657374 // "test"
 
 	// Acquire on pool A.
-	if err := pool.Exec(ctx, "SELECT pg_advisory_lock($1)", lockKey); err != nil {
+	if _, err := pool.Raw().Exec(ctx, "SELECT pg_advisory_lock($1)", lockKey); err != nil {
 		t.Fatalf("first lock: %v", err)
 	}
 
 	// Try to acquire on a second connection — should block.
 	acquired := make(chan error, 1)
 	go func() {
-		err := pool2.Exec(ctx, "SELECT pg_advisory_lock($1)", lockKey)
+		_, err := pool2.Raw().Exec(ctx, "SELECT pg_advisory_lock($1)", lockKey)
 		acquired <- err
 	}()
 
@@ -197,7 +197,7 @@ func TestAdvisoryLockExclusive(t *testing.T) {
 	}
 
 	// Release the first lock.
-	_ = pool.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
+	_, _ = pool.Raw().Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
 
 	select {
 	case err := <-acquired:
@@ -209,7 +209,7 @@ func TestAdvisoryLockExclusive(t *testing.T) {
 	}
 
 	// Clean up.
-	_ = pool.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
+	_, _ = pool.Raw().Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
 }
 
 func startPostgres(t *testing.T) string {

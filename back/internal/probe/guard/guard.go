@@ -93,9 +93,3 @@ func CheckURL(rawURL string) error {
 	}
 	return nil
 }
-
-// AllowedRedirectURL checks a redirect target the same way CheckURL does,
-// on every hop of a redirect chain.
-func AllowedRedirectURL(rawURL string) error {
-	return CheckURL(rawURL)
-}

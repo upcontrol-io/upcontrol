@@ -15,7 +15,6 @@ import (
 // every binary; the per-binary Load* functions read the subset they need.
 type Config struct {
 	HTTPAddr    string
-	RPCAddr     string // connect-go mounts on the same HTTP server in production; kept separate for tests
 	Environment string // dev|staging|prod
 
 	PostgresURL    string
@@ -81,12 +80,7 @@ type Config struct {
 	ShutdownTimeout time.Duration
 
 	// Ingest
-	SpoolDir       string
-	SpoolMaxBytes  int64
-	WALFsyncEvery  int // rows per group fsync
-	BatchBytes     int
-	BatchAge       time.Duration
-	MinFlushPerSec int // max 1 flush / sec per (table × bucket); 0 disables
+	SpoolDir string
 
 	// Probe / fleet
 	NodeToken string // shared secret a probe presents to Lease/SubmitResults
@@ -114,7 +108,6 @@ func Load(service string) (Config, error) {
 
 	c.Environment = getenv("UC_ENVIRONMENT", "dev")
 	c.HTTPAddr = getenv("UC_HTTP_ADDR", ":8080")
-	c.RPCAddr = getenv("UC_RPC_ADDR", c.HTTPAddr)
 
 	c.PostgresURL = os.Getenv("UC_POSTGRES_URL")
 	// If the URL has no password but UC_POSTGRES_PASSWORD(_FILE) is set,
@@ -165,11 +158,6 @@ func Load(service string) (Config, error) {
 	c.ShutdownTimeout = getenvDuration("UC_SHUTDOWN_TIMEOUT", 20*time.Second, &errs)
 
 	c.SpoolDir = getenv("UC_SPOOL_DIR", "./spool")
-	c.SpoolMaxBytes = getenvInt64("UC_SPOOL_MAX_BYTES", 1<<30, &errs) // 1 GiB
-	c.WALFsyncEvery = getenvInt("UC_WAL_FSYNC_EVERY", 256, &errs)
-	c.BatchBytes = getenvInt("UC_BATCH_BYTES", 8<<20, &errs) // 8 MiB
-	c.BatchAge = getenvDuration("UC_BATCH_AGE", 200*time.Millisecond, &errs)
-	c.MinFlushPerSec = getenvInt("UC_MIN_FLUSH_PER_SEC", 1, &errs)
 
 	c.NodeToken = getenvOrFile("UC_NODE_TOKEN", &c.Warnings)
 	c.SecretKeyHex = getenvOrFile("UC_SECRET_KEY_HEX", &c.Warnings)
@@ -255,19 +243,6 @@ func getenvInt(k string, def int, errs *[]string) int {
 		return def
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil {
-		*errs = append(*errs, fmt.Sprintf("%s: not an int (%q)", k, v))
-		return def
-	}
-	return n
-}
-
-func getenvInt64(k string, def int64, errs *[]string) int64 {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		*errs = append(*errs, fmt.Sprintf("%s: not an int (%q)", k, v))
 		return def

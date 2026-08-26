@@ -227,16 +227,11 @@ func recomputeCutoff(ctx context.Context, pool *pg.Pool, d app.Deps) {
 		}
 
 		// Persist to project_window.
-		var beyondErrors *int64
-		if result.BeyondErrors != nil {
-			beyondErrors = result.BeyondErrors
-		}
 		_ = pool.Queries().UpsertProjectWindow(ctx, sqlc.UpsertProjectWindowParams{
-			ProjectID:    p.id,
-			CutoffSeq:    result.CutoffSeq,
-			RetainSeq:    result.RetainSeq,
-			WindowHours:  pgtype.Numeric{Int: new(big.Int).SetUint64(uint64(result.WindowHours * 100)), Exp: -2, Valid: true},
-			BeyondErrors: beyondErrors,
+			ProjectID:   p.id,
+			CutoffSeq:   result.CutoffSeq,
+			RetainSeq:   result.RetainSeq,
+			WindowHours: pgtype.Numeric{Int: new(big.Int).SetUint64(uint64(result.WindowHours * 100)), Exp: -2, Valid: true},
 		})
 	}
 }
