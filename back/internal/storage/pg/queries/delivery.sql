@@ -44,9 +44,6 @@ UPDATE delivery_queue
    SET leased_by = NULL, lease_until = NULL, attempts = attempts + 1, next_try_at = $1
  WHERE id = $2;
 
--- name: SetChannelBreaker :exec
-UPDATE alert_channel SET breaker_open_until = $1 WHERE id = $2;
-
 -- name: EnqueueDelivery :exec
 -- Called by the incident lifecycle when an alert should go out.
 INSERT INTO delivery_queue (tenant_id, incident_id, channel_id, idem_key, class, payload)

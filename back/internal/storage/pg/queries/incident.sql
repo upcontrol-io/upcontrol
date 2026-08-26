@@ -62,6 +62,3 @@ ON CONFLICT (incident_id, seq) DO NOTHING;
 -- name: ListIncidentSlice :many
 SELECT seq, ts, level, service, message FROM incident_slice
  WHERE incident_id = $1 ORDER BY seq;
-
--- name: GetProjectSeqNext :one
-SELECT next FROM project_seq WHERE project_id = $1;

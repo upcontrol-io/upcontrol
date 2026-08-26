@@ -42,9 +42,6 @@ SELECT id, prefix, state, created_at, last_used_at
 SELECT at, source, outcome FROM key_usage_log
   WHERE tenant_id = $1 ORDER BY at DESC LIMIT 10;
 
--- name: CountSourcesByTenant :one
-SELECT count(*)::int FROM source_connection WHERE tenant_id = $1 AND paused = false;
-
 -- name: TenantSignals :one
 -- What the tenant has actually connected, in one round trip: the source list,
 -- the effort ladder and the "no data yet" copy all derive from these counters

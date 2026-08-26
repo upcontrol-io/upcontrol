@@ -136,17 +136,6 @@ func (q *Queries) GetOpenIncident(ctx context.Context, monitorID *int64) (GetOpe
 	return i, err
 }
 
-const getProjectSeqNext = `-- name: GetProjectSeqNext :one
-SELECT next FROM project_seq WHERE project_id = $1
-`
-
-func (q *Queries) GetProjectSeqNext(ctx context.Context, projectID int64) (int64, error) {
-	row := q.db.QueryRow(ctx, getProjectSeqNext, projectID)
-	var next int64
-	err := row.Scan(&next)
-	return next, err
-}
-
 const listIncidentSlice = `-- name: ListIncidentSlice :many
 SELECT seq, ts, level, service, message FROM incident_slice
  WHERE incident_id = $1 ORDER BY seq

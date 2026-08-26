@@ -269,17 +269,3 @@ func (q *Queries) Reschedule(ctx context.Context, arg RescheduleParams) error {
 	_, err := q.db.Exec(ctx, reschedule, arg.NextTryAt, arg.ID)
 	return err
 }
-
-const setChannelBreaker = `-- name: SetChannelBreaker :exec
-UPDATE alert_channel SET breaker_open_until = $1 WHERE id = $2
-`
-
-type SetChannelBreakerParams struct {
-	BreakerOpenUntil pgtype.Timestamptz
-	ID               int64
-}
-
-func (q *Queries) SetChannelBreaker(ctx context.Context, arg SetChannelBreakerParams) error {
-	_, err := q.db.Exec(ctx, setChannelBreaker, arg.BreakerOpenUntil, arg.ID)
-	return err
-}
