@@ -1,7 +1,7 @@
 // Scrubs secrets into typed markers before the wire; hand-written because regex backtracking
 // is catastrophic on multi-MB log lines. The server scrubs again as a second layer.
 
-export interface ScrubResult {
+interface ScrubResult {
   cleaned: string;
   counts: Record<string, number>;
 }

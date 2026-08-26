@@ -10,15 +10,9 @@ export interface Detection {
 
 const ALIASES: Record<string, string> = {
   claude: 'claude-code',
-  'claude-code': 'claude-code',
-  cursor: 'cursor',
   codex: 'codex-cli',
-  'codex-cli': 'codex-cli',
   gemini: 'gemini-cli',
-  'gemini-cli': 'gemini-cli',
   copilot: 'github-copilot',
-  'github-copilot': 'github-copilot',
-  windsurf: 'windsurf',
 };
 
 // The READMEs carry a "works with N coding agents" badge linked to this list;

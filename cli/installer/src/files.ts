@@ -45,7 +45,7 @@ function dirEqual(a: string, b: string): boolean {
   return fa.every((f) => readFileSync(join(a, f)).equals(readFileSync(join(b, f))));
 }
 
-export interface SkillResult {
+interface SkillResult {
   installed: string[];
   updated: boolean;
 }
@@ -72,7 +72,7 @@ export function skillFresh(cwd: string): boolean {
   return dirEqual(src, claude) && dirEqual(src, agents);
 }
 
-export interface DepResult {
+interface DepResult {
   added: boolean;
   present: boolean;
 }
@@ -99,7 +99,7 @@ export function pinSdkDependency(cwd: string): DepResult {
   return { added: true, present: true };
 }
 
-export type KeySource = 'env' | 'dotenv' | 'flag' | 'token' | 'minted' | 'none';
+type KeySource = 'env' | 'dotenv' | 'flag' | 'token' | 'minted' | 'none';
 
 export function findKey(cwd: string, env: NodeJS.ProcessEnv = process.env): KeySource {
   if (env.UPCONTROL_API_KEY?.trim()) return 'env';
@@ -120,7 +120,7 @@ export function readDotenvKey(cwd: string): string | null {
   return null;
 }
 
-export interface GitignoreResult {
+interface GitignoreResult {
   covered: boolean;
   fixed: boolean;
 }

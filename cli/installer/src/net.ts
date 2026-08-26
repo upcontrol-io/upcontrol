@@ -10,13 +10,11 @@ export function endpointFrom(env: NodeJS.ProcessEnv, flag?: string): string {
   return (flag || env.UPCONTROL_ENDPOINT || DEFAULT_ENDPOINT).replace(/\/+$/, '');
 }
 
-export interface MintResult {
+interface MintResult {
   ok: boolean;
   status?: number;
   key?: string;
   claimUrl?: string;
-  projectId?: string;
-  error?: string;
 }
 
 export async function mintAnonymousProject(endpoint: string, agent: string | null): Promise<MintResult> {
@@ -31,18 +29,17 @@ export async function mintAnonymousProject(endpoint: string, agent: string | nul
         arch: process.arch,
       }),
     });
-    if (!res.ok) return { ok: false, status: res.status, error: 'mint_refused' };
-    const body = parseJSON<{ key?: string; claimUrl?: string; projectId?: string }>(res.text);
-    if (!body?.key) return { ok: false, status: res.status, error: 'mint_malformed' };
-    return { ok: true, key: body.key, claimUrl: body.claimUrl, projectId: body.projectId };
+    if (!res.ok) return { ok: false, status: res.status };
+    const body = parseJSON<{ key?: string; claimUrl?: string }>(res.text);
+    if (!body?.key) return { ok: false, status: res.status };
+    return { ok: true, key: body.key, claimUrl: body.claimUrl };
   } catch {
-    return { ok: false, error: 'unreachable' };
+    return { ok: false };
   }
 }
 
-export interface RedeemResult {
+interface RedeemResult {
   ok: boolean;
-  status?: number;
   key?: string;
   error?: string;
 }
@@ -56,16 +53,16 @@ export async function redeemInstallToken(endpoint: string, token: string): Promi
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
     });
-    if (!res.ok) return { ok: false, status: res.status, error: 'refused' };
+    if (!res.ok) return { ok: false, error: 'refused' };
     const body = parseJSON<{ key?: string }>(res.text);
-    if (!body?.key) return { ok: false, status: res.status, error: 'malformed' };
+    if (!body?.key) return { ok: false, error: 'malformed' };
     return { ok: true, key: body.key };
   } catch {
     return { ok: false, error: 'unreachable' };
   }
 }
 
-export interface InstallStatus {
+interface InstallStatus {
   ok: boolean;
   status?: number;
   verified?: boolean;
@@ -90,14 +87,14 @@ export async function fetchInstallStatus(endpoint: string, key: string): Promise
 }
 
 // Deliberately shorter than the other calls: a black-holed endpoint must not
-// hold init open just to deliver a value nobody reads.
+// hold init open.
 const META_TIMEOUT_MS = 3_000;
 
-// Best effort by contract: the return value says whether the spec landed, and
-// a refused or unreachable upload must never fail the install.
-export async function putProjectMeta(endpoint: string, key: string, spec: ProjectSpec): Promise<boolean> {
+// Best effort by contract: a refused or unreachable upload must never fail
+// the install.
+export async function putProjectMeta(endpoint: string, key: string, spec: ProjectSpec): Promise<void> {
   try {
-    const res = await request(
+    await request(
       endpoint + '/v1/project/meta',
       {
         method: 'PUT',
@@ -106,9 +103,8 @@ export async function putProjectMeta(endpoint: string, key: string, spec: Projec
       },
       META_TIMEOUT_MS,
     );
-    return res.ok;
   } catch {
-    return false;
+    /* best effort */
   }
 }
 

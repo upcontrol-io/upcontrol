@@ -123,8 +123,3 @@ function safeJson(v: unknown): string {
     return String(v);
   }
 }
-
-// Internal seam for the auto entry - not part of the public surface.
-export function _internals(): { client: Client } {
-  return { client };
-}
