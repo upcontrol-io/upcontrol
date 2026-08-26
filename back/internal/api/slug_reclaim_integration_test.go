@@ -57,7 +57,7 @@ func TestNamingReclaimsTheServiceSlug(t *testing.T) {
 		t.Fatalf("status_page: %v", err)
 	}
 
-	h := &Monitors{pool: pool}
+	h := &monitors{pool: pool}
 	slugOf := func() string {
 		var slug string
 		if err := pool.Raw().QueryRow(ctx,
@@ -129,7 +129,7 @@ func TestNamingCreatesThePageRowWhenNoneExists(t *testing.T) {
 		t.Fatalf("project: %v", err)
 	}
 
-	h := &Monitors{pool: pool}
+	h := &monitors{pool: pool}
 	h.nameProjectIfUnnamed(ctx, projectID, "website", "https://"+domain)
 
 	var slug, title string
@@ -181,7 +181,7 @@ func TestNamingNeverRewritesAHandPickedSlug(t *testing.T) {
 		t.Fatalf("status_page: %v", err)
 	}
 
-	h := &Monitors{pool: pool}
+	h := &monitors{pool: pool}
 	h.nameProjectIfUnnamed(ctx, projectID, "website", "https://picked.example.com")
 
 	var slug string

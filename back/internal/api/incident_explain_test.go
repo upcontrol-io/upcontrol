@@ -22,9 +22,9 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// openIncidentExplainDB applies migrations and returns a WriteAPI wired to
+// openIncidentExplainDB applies migrations and returns a writeAPI wired to
 // the stub brain, plus a tenant on the given plan.
-func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*WriteAPI, int64) {
+func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*writeAPI, int64) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -55,12 +55,12 @@ func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*WriteAPI
 		fmt.Sprintf("incident-explain-%d", time.Now().UnixNano()), plan).Scan(&tenantID); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	return &WriteAPI{pool: pool, acct: ai.New(pool, &stubExplainLLM{}, ai.Prices{})}, tenantID
+	return &writeAPI{pool: pool, acct: ai.New(pool, &stubExplainLLM{}, ai.Prices{})}, tenantID
 }
 
 // seedIncidentWithSlice plants one ongoing incident with a lifecycle mark
 // and, unless withSlice is false, a frozen log slice. Returns the PUBLIC id.
-func seedIncidentWithSlice(t *testing.T, h *WriteAPI, tenantID int64, withSlice bool) (int64, string) {
+func seedIncidentWithSlice(t *testing.T, h *writeAPI, tenantID int64, withSlice bool) (int64, string) {
 	t.Helper()
 	ctx := context.Background()
 	var projectID int64

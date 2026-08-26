@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,17 +17,17 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Keys handles GET /v1/keys and POST /v1/keys/rotate.
-type Keys struct {
+// keys handles GET /v1/keys and POST /v1/keys/rotate.
+type keys struct {
 	pool *pg.Pool
 	sess *session.Manager
 }
 
-func NewKeys(p *pg.Pool, sm *session.Manager) *Keys {
-	return &Keys{pool: p, sess: sm}
+func NewKeys(p *pg.Pool, sm *session.Manager) *keys {
+	return &keys{pool: p, sess: sm}
 }
 
-func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
@@ -53,7 +52,7 @@ func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	key, err := h.pool.Queries().GetAPIKeyForTenant(ctx, tenantID)
 	if err != nil {
@@ -86,7 +85,7 @@ func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	})
 }
 
-func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 
 	secret := randomHex() // 32 hex chars; first 12 = prefix, rest = secret
@@ -112,8 +111,8 @@ func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	})
 }
 
-// IssueKey creates an API key for a new project. Called from the signup flow.
-func IssueKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64) (fullKey string, err error) {
+// issueKey creates an API key for a new project. Called from the signup flow.
+func issueKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64) (fullKey string, err error) {
 	secret := randomHex()
 	prefix := secret[:12]
 	fullKey = "uc_live_" + secret
@@ -134,5 +133,3 @@ func randomHex() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
-var _ = json.NewEncoder

@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The vectors that matter are the ones a whitespace/slash-only check waved
 // through: every "bad" case below except the last three was accepted as a relay.
@@ -43,21 +46,13 @@ func TestValidRelayHost(t *testing.T) {
 	}
 
 	// 63 is the label ceiling, 255 the whole-name ceiling.
-	if !validRelayHost(rep('a', 63) + ".example.com") {
+	if !validRelayHost(strings.Repeat("a", 63) + ".example.com") {
 		t.Error("a 63-character label should pass")
 	}
-	if validRelayHost(rep('a', 64) + ".example.com") {
+	if validRelayHost(strings.Repeat("a", 64) + ".example.com") {
 		t.Error("a 64-character label should fail")
 	}
-	if validRelayHost(rep('a', 256)) {
+	if validRelayHost(strings.Repeat("a", 256)) {
 		t.Error("a 256-character name should fail")
 	}
-}
-
-func rep(c byte, n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = c
-	}
-	return string(b)
 }

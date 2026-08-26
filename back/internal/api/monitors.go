@@ -22,18 +22,18 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
-type Monitors struct {
+// monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
+type monitors struct {
 	pool *pg.Pool
 	sess *session.Manager
 }
 
-func NewMonitors(p *pg.Pool, sm *session.Manager) *Monitors {
-	return &Monitors{pool: p, sess: sm}
+func NewMonitors(p *pg.Pool, sm *session.Manager) *monitors {
+	return &monitors{pool: p, sess: sm}
 }
 
 // ServeHTTP routes by method + path pattern.
-func (h *Monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
@@ -63,7 +63,7 @@ func (h *Monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	rows, err := h.pool.Queries().ListMonitorsByTenant(r.Context(), tenantID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -78,7 +78,7 @@ func (h *Monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) 
 	writeAPIJSON(w, http.StatusOK, out)
 }
 
-func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	var req struct {
 		Type     string `json:"type"`
 		Name     string `json:"name"`
@@ -159,7 +159,7 @@ func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 
 // nameProjectIfUnnamed sets project.domain from a website check's target, only
 // while it is unset: the WHERE carries the condition, so no race decides twice.
-func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, kind, target string) {
+func (h *monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, kind, target string) {
 	if kind != "website" {
 		return
 	}
@@ -198,7 +198,7 @@ func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, ki
 		projectID, claimed, host)
 }
 
-func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
 	var req struct {
 		Name     *string `json:"name"`
 		Target   *string `json:"target"`
@@ -250,7 +250,7 @@ func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		ptrStrSafe(full.Status), full.SslExpiresAt, full.DomainExpiresAt, full.PublicID))
 }
 
-func (h *Monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
 	ctx := r.Context()
 	pubID := parseUUID(id)
 	// Close an open incident while the monitor id still resolves: monitor_id is
@@ -274,13 +274,13 @@ func (h *Monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Monitors) notFound(w http.ResponseWriter) {
+func (h *monitors) notFound(w http.ResponseWriter) {
 	writeAPIErr(w, http.StatusNotFound, "not_found")
 }
 
 // inTx runs fn on Queries bound to a fresh transaction; commits on nil, rolls
 // back otherwise. Used so monitor create + schedule row land atomically.
-func (h *Monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
+func (h *monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
 	tx, err := h.pool.Raw().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
@@ -366,7 +366,7 @@ func intervalLabel(sec int32) string {
 
 // tenantPlan reads the tenant's plan, falling back to Free. The gates and
 // GET /v1/plan must read the same row.
-func (h *Monitors) tenantPlan(ctx context.Context, tenantID int64) string {
+func (h *monitors) tenantPlan(ctx context.Context, tenantID int64) string {
 	var plan string
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
@@ -378,7 +378,7 @@ func (h *Monitors) tenantPlan(ctx context.Context, tenantID int64) string {
 
 // intervalRefusal returns why this plan may not run that often, or "". Empty
 // input is "not asked for": the column's default applies.
-func (h *Monitors) intervalRefusal(ctx context.Context, plan, interval string) string {
+func (h *monitors) intervalRefusal(ctx context.Context, plan, interval string) string {
 	if interval == "" {
 		return ""
 	}

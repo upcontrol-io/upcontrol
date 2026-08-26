@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"go.upcontrol.io/back/internal/account/session"
-	"go.upcontrol.io/back/internal/channel/telegram"
+	tgbot "go.upcontrol.io/back/internal/channel/telegram"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -19,8 +19,8 @@ import (
 // not the magic link's minutes. One-time bounds a leak more than a short TTL.
 const inviteTTL = 7 * 24 * time.Hour
 
-// Telegram serves the invite endpoints.
-type Telegram struct {
+// telegram serves the invite endpoints.
+type telegram struct {
 	pool *pg.Pool
 	sess *session.Manager
 	// A func, not a string: the bot username can arrive at runtime from the
@@ -28,11 +28,11 @@ type Telegram struct {
 	botUsername func(context.Context) string
 }
 
-func NewTelegram(p *pg.Pool, sm *session.Manager, botUsername func(context.Context) string) *Telegram {
-	return &Telegram{pool: p, sess: sm, botUsername: botUsername}
+func NewTelegram(p *pg.Pool, sm *session.Manager, botUsername func(context.Context) string) *telegram {
+	return &telegram{pool: p, sess: sm, botUsername: botUsername}
 }
 
-func (h *Telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
@@ -52,7 +52,7 @@ func (h *Telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID, personID int64) {
+func (h *telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID, personID int64) {
 	ctx := r.Context()
 	// The body is optional: a POST with no body mints an unbound invite, and
 	// decodeStrict would read absence as bad_body.
@@ -81,7 +81,7 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 	token := "inv_" + randomHex()
 	// The bot's own hasher, not a local sha256: mint and redeem hashing the
 	// token independently made every invite unredeemable.
-	hash := telegram.InviteTokenHash(token)
+	hash := tgbot.InviteTokenHash(token)
 	expires := time.Now().UTC().Add(inviteTTL)
 	var id int64
 	var personRowID any // nil for the unbound invite, the person row id when bound
@@ -124,7 +124,7 @@ func (h *Telegram) createInvite(w http.ResponseWriter, r *http.Request, tenantID
 	writeAPIJSON(w, http.StatusCreated, resp)
 }
 
-func (h *Telegram) deleteInvite(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *telegram) deleteInvite(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	// "Burning" is expiry-by-hand: the row stays auditable, the token dies.
 	tag, err := h.pool.Raw().Exec(r.Context(),
 		`UPDATE telegram_invite SET expires_at = now()

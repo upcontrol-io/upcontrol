@@ -21,9 +21,9 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// openRecipientsDB applies migrations and returns a WriteAPI over a fresh
+// openRecipientsDB applies migrations and returns a writeAPI over a fresh
 // tenant, with a named active inviter as ServeHTTP would supply.
-func openRecipientsDB(t *testing.T) (*WriteAPI, int64, int64) {
+func openRecipientsDB(t *testing.T) (*writeAPI, int64, int64) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -55,7 +55,7 @@ func openRecipientsDB(t *testing.T) (*WriteAPI, int64, int64) {
 		tenantID, inviterID); err != nil {
 		t.Fatalf("seed inviter membership: %v", err)
 	}
-	return &WriteAPI{pool: pool}, tenantID, inviterID
+	return &writeAPI{pool: pool}, tenantID, inviterID
 }
 
 // inviteMailer records the invitation and can fail it as a down agent does.
@@ -352,7 +352,7 @@ func TestCreateRecipient_ActiveMemberShortCircuits(t *testing.T) {
 
 // seedMember plants a person + membership directly with no live code (the
 // invite path mints one, and its cooldown would swallow the resend).
-func seedMember(t *testing.T, h *WriteAPI, tenantID int64, status string) (int64, string) {
+func seedMember(t *testing.T, h *writeAPI, tenantID int64, status string) (int64, string) {
 	t.Helper()
 	addr := fmt.Sprintf("%s%d@example.com", status, time.Now().UnixNano())
 	var personID int64

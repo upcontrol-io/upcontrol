@@ -173,13 +173,12 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 // WireIngest builds the full POST /i pipeline. The returned Batcher must be
 // Tick'd periodically and Close'd on shutdown.
 
-// Type aliases re-export the concrete types so cmd/ucapi wires through the api
-// package without importing ingest or batcher directly.
+// Batcher is re-exported so cmd/ucapi can name the ticker's type without
+// importing batcher directly.
 
-type Ingester = ingest.Ingester
 type Batcher = batcher.Batcher
 
-func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*Ingester, *Batcher, error) {
+func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
 	// WAL: durable append+fsync before receipt.
 	w, err := wal.Open(filepath.Join(spoolDir, "ingest.wal"))
 	if err != nil {
