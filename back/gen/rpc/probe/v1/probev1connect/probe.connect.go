@@ -52,7 +52,9 @@ type ProbeServiceClient interface {
 	SubmitResults(context.Context, *connect.Request[v1.SubmitResultsRequest]) (*connect.Response[v1.SubmitResultsResponse], error)
 	// ReportBlind: the probe declares itself blind — this cycle's results were
 	// DISCARDED by the probe itself (e.g. its anchor sites were unreachable, so
-	// its measurements cannot be trusted). This is what prevents false incidents.
+	// its measurements cannot be trusted). Server half only: no probe reports
+	// blindness yet, so a probe whose own network fails still submits its
+	// results.
 	ReportBlind(context.Context, *connect.Request[v1.ReportBlindRequest]) (*connect.Response[v1.ReportBlindResponse], error)
 }
 
@@ -119,7 +121,9 @@ type ProbeServiceHandler interface {
 	SubmitResults(context.Context, *connect.Request[v1.SubmitResultsRequest]) (*connect.Response[v1.SubmitResultsResponse], error)
 	// ReportBlind: the probe declares itself blind — this cycle's results were
 	// DISCARDED by the probe itself (e.g. its anchor sites were unreachable, so
-	// its measurements cannot be trusted). This is what prevents false incidents.
+	// its measurements cannot be trusted). Server half only: no probe reports
+	// blindness yet, so a probe whose own network fails still submits its
+	// results.
 	ReportBlind(context.Context, *connect.Request[v1.ReportBlindRequest]) (*connect.Response[v1.ReportBlindResponse], error)
 }
 

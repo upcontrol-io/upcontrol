@@ -15,7 +15,6 @@ tool (
 require (
 	connectrpc.com/connect v1.20.0
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
-	github.com/getkin/kin-openapi v0.142.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
@@ -134,6 +133,7 @@ require (
 	github.com/firefart/nonamedreturns v1.0.6 // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
 	github.com/fzipp/gocyclo v0.6.0 // indirect
+	github.com/getkin/kin-openapi v0.142.0 // indirect
 	github.com/ghostiam/protogetter v0.3.20 // indirect
 	github.com/go-critic/go-critic v0.14.3 // indirect
 	github.com/go-faster/city v1.0.1 // indirect

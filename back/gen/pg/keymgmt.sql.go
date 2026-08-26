@@ -51,41 +51,6 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 	return i, err
 }
 
-const getActiveKeyForRotate = `-- name: GetActiveKeyForRotate :one
-SELECT id, tenant_id, project_id, prefix, state, rotating_until, created_at
-  FROM api_key
- WHERE tenant_id = $1 AND state IN ('active', 'rotating')
- ORDER BY created_at DESC
- LIMIT 1
-`
-
-type GetActiveKeyForRotateRow struct {
-	ID            int64
-	TenantID      int64
-	ProjectID     int64
-	Prefix        string
-	State         string
-	RotatingUntil pgtype.Timestamptz
-	CreatedAt     pgtype.Timestamptz
-}
-
-// Get the current active key's details (needed to compute the full key for the
-// rotate response — but we can't show the old key's secret, only its prefix).
-func (q *Queries) GetActiveKeyForRotate(ctx context.Context, tenantID int64) (GetActiveKeyForRotateRow, error) {
-	row := q.db.QueryRow(ctx, getActiveKeyForRotate, tenantID)
-	var i GetActiveKeyForRotateRow
-	err := row.Scan(
-		&i.ID,
-		&i.TenantID,
-		&i.ProjectID,
-		&i.Prefix,
-		&i.State,
-		&i.RotatingUntil,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
 const rotateAPIKey = `-- name: RotateAPIKey :one
 WITH old AS (
     UPDATE api_key
@@ -111,23 +76,9 @@ type RotateAPIKeyRow struct {
 }
 
 // Atomic: set old key to rotating, insert new key, return new key.
-// Called after GetActiveKeyForRotate to get the project_id.
 func (q *Queries) RotateAPIKey(ctx context.Context, arg RotateAPIKeyParams) (RotateAPIKeyRow, error) {
 	row := q.db.QueryRow(ctx, rotateAPIKey, arg.TenantID, arg.Prefix, arg.SecretHash)
 	var i RotateAPIKeyRow
 	err := row.Scan(&i.ID, &i.Prefix, &i.CreatedAt)
 	return i, err
-}
-
-const setKeyRotating = `-- name: SetKeyRotating :exec
-UPDATE api_key
-   SET state = 'rotating', rotating_until = now() + INTERVAL '24 hours'
- WHERE tenant_id = $1 AND state = 'active'
-`
-
-// Mark the current active key as rotating with a 24h overlap window. The old
-// key continues to authenticate until rotating_until passes (back-impl D4).
-func (q *Queries) SetKeyRotating(ctx context.Context, tenantID int64) error {
-	_, err := q.db.Exec(ctx, setKeyRotating, tenantID)
-	return err
 }

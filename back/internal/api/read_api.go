@@ -52,8 +52,6 @@ func (h *readAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.recipients(w, r, s.TenantID)
 	case "/v1/incidents":
 		h.incidents(w, r, s.TenantID)
-	case "/v1/keys":
-		h.keys(w, r, s.TenantID)
 	case "/v1/sources":
 		h.sources(w, r, s.TenantID)
 	case "/v1/overview":
@@ -210,40 +208,6 @@ func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int
 		items = append(items, h.incidentWithEvidence(r.Context(), row))
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-// GET /v1/keys — the active API key + recent usage.
-func (h *readAPI) keys(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	ctx := r.Context()
-	key, err := h.pool.Queries().GetAPIKeyForTenant(ctx, tenantID)
-	if err != nil {
-		writeAPIJSON(w, http.StatusOK, map[string]any{"key": nil, "usage": []any{}})
-		return
-	}
-	usageRows, _ := h.pool.Queries().ListKeyUsage(ctx, tenantID)
-	usage := make([]map[string]any, 0, len(usageRows))
-	for _, u := range usageRows {
-		ts := ""
-		if u.At.Valid {
-			ts = u.At.Time.Format("15:04")
-		}
-		usage = append(usage, map[string]any{
-			"time":     ts,
-			"endpoint": u.Source,
-			"status":   202,
-		})
-		if u.Outcome == "rejected" {
-			usage[len(usage)-1]["status"] = 401
-		}
-	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"key": map[string]any{
-			"id":        "key_" + strconv.FormatInt(key.ID, 10),
-			"prefix":    "uc_live_" + key.Prefix, // identifier only — the secret is not stored
-			"createdAt": key.CreatedAt,
-		},
-		"usage": usage,
-	})
 }
 
 // GET /v1/sources — connected sources + what is still connectable.

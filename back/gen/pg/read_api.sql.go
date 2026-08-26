@@ -35,17 +35,6 @@ func (q *Queries) CountMonitors(ctx context.Context, tenantID int64) (int32, err
 	return column_1, err
 }
 
-const countSourcesByTenant = `-- name: CountSourcesByTenant :one
-SELECT count(*)::int FROM source_connection WHERE tenant_id = $1 AND paused = false
-`
-
-func (q *Queries) CountSourcesByTenant(ctx context.Context, tenantID int64) (int32, error) {
-	row := q.db.QueryRow(ctx, countSourcesByTenant, tenantID)
-	var column_1 int32
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const getAPIKeyForTenant = `-- name: GetAPIKeyForTenant :one
 SELECT id, prefix, state, created_at, last_used_at
   FROM api_key WHERE tenant_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
