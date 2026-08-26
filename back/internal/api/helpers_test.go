@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// decodeStrict is the §14 contract: a management PATCH with a mistyped field
-// answers 400 naming the field, never a silent 200 no-op. The typo case is the
-// one the docs' example literally promises ("intervl" → error naming it).
+// decodeStrict's contract: a mistyped field answers 400 naming the field,
+// never a silent 200 no-op ("intervl" → error naming it).
 func TestDecodeStrictNamesTheUnknownField(t *testing.T) {
 	var req struct {
 		Interval *string `json:"interval"`

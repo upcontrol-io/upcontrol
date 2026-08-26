@@ -68,59 +68,6 @@
  gap: var(--space-8);
 }
 
-.dogfood {
- border: 1px solid var(--line-strong);
- border-radius: var(--radius-lg);
- background: var(--bg-raised);
- padding: 20px var(--space-6);
- display: flex;
- flex-wrap: wrap;
- align-items: center;
- gap: 14px var(--space-6);
-}
-
-.dogfoodText {
- flex: 1;
- min-width: 220px;
- display: flex;
- flex-direction: column;
- gap: 4px;
-}
-
-.dogfoodTitle {
- font-size: var(--text-body-size);
- font-weight: 600;
- color: var(--text-primary);
-}
-
-.dogfoodBody {
- font-size: var(--text-caption);
- line-height: 1.5;
- color: var(--text-body);
-}
-
-.dogfoodCta {
- height: 40px;
- padding: 0 18px;
- flex-shrink: 0;
- border: 1px solid transparent;
- border-radius: 8px;
- background: var(--text-primary);
- color: var(--inverse);
- font-size: var(--text-sm);
- font-weight: 600;
- white-space: nowrap;
- display: inline-flex;
- align-items: center;
- transition: opacity var(--duration-hover) var(--ease);
-}
-
-.dogfoodCta:hover {
- opacity: 0.86;
-}
-
-/* The overall-state hero: an --ok-tinted panel, the one place the page leads
-   with a status colour (always paired with the text, per brief §1). */
 .banner {
  border: 1px solid var(--line-strong);
  border-radius: var(--radius-lg);
@@ -139,12 +86,8 @@
  background: var(--ok);
 }
 
-/* The honest states (audit §1): the banner carries its state by colour AND
-   shape AND text (brief §5) — never colour alone. The down/degraded marker is
-   a SQUARE (the tipDot language), the operational one stays the round dot, so
-   the state survives greyscale, colour-blindness and a theme that damps the
-   fills. Backgrounds are the matching -bg tints, never full-strength — this is
-   a page-level surface, not a chart bar. */
+/* The banner carries its state by colour AND shape AND text, never colour
+   alone; backgrounds are the -bg tints, not full strength. */
 .banner_down {
  background: var(--down-bg);
 }
@@ -165,9 +108,8 @@
  color: var(--down);
 }
 
-/* A live page announces itself: a soft ring leaves the dot every few seconds.
-   `currentColor` so the ring follows the state's own colour (the state dot
-   classes set `color` alongside `background`). */
+/* A live page announces itself: a soft ring leaves the dot; currentColor
+   follows the state's own colour. */
 @keyframes status-ring {
  0% {
   box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
@@ -213,62 +155,10 @@
  gap: var(--space-4);
 }
 
-/* ---------- Pages & endpoints + Network (what the check watches) ---------- */
-
-.watched,
 .network {
  display: flex;
  flex-direction: column;
  gap: var(--space-4);
-}
-
-/* One panel, groups as tinted divider rows — not three identical boxes. */
-.watchPanel {
- border: 1px solid var(--line);
- border-radius: var(--radius-md);
- background: var(--bg-raised);
- overflow: hidden;
-}
-
-.watchGroupHead {
- display: flex;
- align-items: baseline;
- gap: var(--space-3);
- padding: 9px var(--space-4);
- background: var(--bg-sunken);
- border-bottom: 1px solid var(--line);
-}
-
-.watchGroup + .watchGroup .watchGroupHead {
- border-top: 1px solid var(--line);
-}
-
-.watchGroupTitle {
- font-size: var(--text-caption);
- font-weight: 600;
- color: var(--text-primary);
-}
-
-.watchGroupSource {
- font-family: var(--font-mono);
- font-size: var(--text-xs);
- color: var(--text-faint);
-}
-
-.watchRow {
- display: flex;
- align-items: baseline;
- gap: var(--space-3);
- padding: 10px var(--space-4);
- transition: background-color var(--duration-hover) var(--ease);
-}
-
-.watchRow:hover {
- background: var(--bg-hover);
-}
-
-.watchRow + .watchRow {
- border-top: 1px solid var(--line);
 }
 
 .watchDot {
@@ -277,30 +167,6 @@
  flex-shrink: 0;
  align-self: center;
  border-radius: var(--radius-pill);
-}
-
-.watchName {
- font-family: var(--font-mono);
- font-size: var(--text-caption);
- color: var(--text-primary);
- white-space: nowrap;
-}
-
-.watchMeta {
- flex: 1;
- min-width: 0;
- font-size: var(--text-caption);
- color: var(--text-muted);
- white-space: nowrap;
- overflow: hidden;
- text-overflow: ellipsis;
-}
-
-.watchStatus {
- font-family: var(--font-mono);
- font-size: var(--text-xs);
- color: var(--text-muted);
- white-space: nowrap;
 }
 
 /* Owner metrics as a tile grid. The floor is a min() so a 390px phone never
@@ -448,10 +314,8 @@
  height: 26px;
 }
 
-/* Each bar is wrapped in the Tooltip trigger span — that wrapper is the flex
-   item, so it must carry flex:1 or the whole strip collapses to a sliver.
-   Hover lifts the WRAPPER: the bar itself carries an inline transform from the
-   data-grow reveal, which would override a class-based hover. */
+/* The Tooltip trigger span is the flex item: it carries flex:1, and hover
+   lifts the wrapper because the bar's inline transform would override it. */
 .bars > * {
  flex: 1;
  min-width: 1px;
@@ -555,9 +419,8 @@
  flex-direction: column;
 }
 
-/* One column now: no timestamp renders here, so a reserved 72px lane was
-   squeezing the state text into a sliver and leaving the rest of the row
-   empty, worst at 375-390px where there is no width to spare. */
+/* One column: no timestamp renders here, so a reserved 72px lane only
+   squeezed the state text into a sliver. */
 .update {
  padding: 6px 0;
 }
@@ -573,60 +436,14 @@
  font-weight: 500;
 }
 
-/* An ongoing incident is the page's current event, not history: the card's
-   border carries the state tint and the state word is down-coloured. The word
-   `ongoing` itself is the text half — colour never travels alone. */
+/* An ongoing incident is the current event, not history: border tint plus
+   the down-coloured word ongoing; colour never travels alone. */
 .incidentOngoing {
  border-color: color-mix(in srgb, var(--down) 45%, var(--line));
 }
 
 .incidentOngoing .updateState {
  color: var(--down);
-}
-
-.subscribe {
- border: 1px solid var(--line);
- border-radius: var(--radius-md);
- background: var(--bg-raised);
- padding: var(--space-4);
- display: flex;
- flex-wrap: wrap;
- align-items: center;
- gap: var(--space-3);
-}
-
-.subscribeText {
- flex: 1;
- min-width: 200px;
- font-size: var(--text-sm);
- color: var(--text-body);
-}
-
-.subscribeButton {
- height: 36px;
- padding: 0 var(--space-3);
- flex-shrink: 0;
- border: 1px solid var(--line-strong);
- border-radius: var(--radius-sm);
- background: transparent;
- color: var(--text-primary);
- font-size: var(--text-caption);
- font-weight: 500;
- white-space: nowrap;
- display: inline-flex;
- align-items: center;
- gap: var(--space-2);
- transition: background-color var(--duration-hover) var(--ease);
-}
-
-.subscribeButton:hover {
- background: var(--bg-hover);
-}
-
-.subscribeNote {
- font-size: var(--text-xs);
- color: var(--text-faint);
- white-space: nowrap;
 }
 
 .footer {
@@ -654,12 +471,6 @@
 .poweredByName:hover {
  text-decoration: underline;
  text-underline-offset: 2px;
-}
-
-.llmsLink {
- font-family: var(--font-mono);
- font-size: var(--text-xs);
- color: var(--text-muted);
 }
 
 /* Tooltip content — colored status square + mono label, per 08-status-page.dc.html. */
@@ -709,8 +520,7 @@
   padding-right: var(--space-4);
  }
 
- .banner,
- .dogfood {
+ .banner {
   padding-left: var(--space-4);
   padding-right: var(--space-4);
  }
@@ -723,10 +533,6 @@
  .bars {
   height: 20px;
   gap: 1px;
- }
-
- .watchMeta {
-  display: none;
  }
 
  .netValue {

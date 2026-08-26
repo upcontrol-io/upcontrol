@@ -9,39 +9,22 @@ import { normalizeTarget } from '@/lib/normalizeTarget';
 import { MonitorOnboarding } from './MonitorOnboarding';
 import styles from './MonitorList.module.css';
 
-/**
- * The checks this instance runs: the list, the create form and the delete
- * confirm.
- *
- * One kind: Website (Decision 20 — Heartbeat is cut from
- * v1; its backend vertical does not exist, and a create option without an
- * engine is a phantom incident waiting to fire). A keyword is a condition on
- * a website check, so it lives in the form as a field; SSL and domain expiry
- * are watched for free on every check and appear as facts on the row.
- *
- * No client-side plan gate: the Self-hosted entitlement is generous and the
- * server is the one gate there is — a refusal renders in the server's words.
- */
+/** The checks this instance runs: list, create form, delete confirm. One
+ *  kind (Website); SSL and domain expiry are free facts on every row. */
 
 // `30s` is gone: the probe is sized against a minute. The floor is the
 // server's; every option here is at or above it.
 const INTERVALS = ['1m', '5m', '30m', '1h'];
 
-/**
- * The part of the target the name does not already say, or '' when the two are
- * the same address. `https://upcontrol.io` under a row called `upcontrol.io` is one line
- * of height per check spent restating the line above it.
- */
+/** The part of the target the name does not already say, or '' when the two
+ *  are the same address. */
 function restOfTarget(monitor: Monitor): string {
   const bare = monitor.target.replace(/^https?:\/\//, '').replace(/\/$/, '');
   return bare === monitor.name ? '' : monitor.target;
 }
 
-/**
- * SSL and domain expiry, with the halves we have no date for left out — a check
- * created a minute ago has neither, and "SSL — · domain —" is a row of dashes
- * where the reader expected a fact.
- */
+/** SSL and domain expiry, halves without a date left out (a fresh check has
+ *  neither; a row of dashes reads as a missing fact). */
 function expiryLabel(monitor: Monitor): string {
   if (!monitor.expiry) return '';
   return [monitor.expiry.ssl, monitor.expiry.domain]
@@ -58,13 +41,9 @@ function statusDot(status: Monitor['status']) {
 /** Ids for the optimistic row, replaced by the server's own on the re-read. */
 let nextId = 1;
 
-export interface MonitorListProps {
-  /**
-   * When present, every row carries a "public" checkbox: the same monitor is
-   * also a component of the status page. `shown` is keyed by monitor id, which
-   * IS the component key — both are `%x` of the row's UUID, so the two lists
-   * need no translation between them.
-   */
+interface MonitorListProps {
+  /** When present, rows carry a "public" checkbox: the monitor is also a
+   *  status-page component; monitor id IS the component key. */
   publish?: {
     shown: Record<string, boolean>;
     onToggle: (key: string, next: boolean) => void;
@@ -81,21 +60,18 @@ export function MonitorList({ publish }: MonitorListProps) {
   // Starts empty and stays empty until the server answers: an unanswered read
   // is not a list of checks.
   const [monitors, setMonitors] = useState<Monitor[]>([]);
-  const [userEdited] = useState(false);
   useEffect(() => {
-    if (!userEdited && monitorsLive && liveMonitors) {
+    if (monitorsLive && liveMonitors) {
       setMonitors(liveMonitors as Monitor[]);
     }
-  }, [liveMonitors, monitorsLive, userEdited]);
+  }, [liveMonitors, monitorsLive]);
   const [formOpen, setFormOpen] = useState(false);
   const [newTarget, setNewTarget] = useState('');
   const [newKeyword, setNewKeyword] = useState('');
   const [newName, setNewName] = useState('');
   const [newInterval, setNewInterval] = useState('5m');
-  // Deleting a check is irreversible — it takes its history with it — so it
-  // asks first, with the light inline confirm. Not `ConfirmPanel`: that one
-  // demands a PIN and belongs to actions that reach into the customer's own
-  // infrastructure.
+  // Deleting a check takes its history with it, so it asks first, with the
+  // light inline confirm (ConfirmPanel's PIN belongs to other actions).
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -120,9 +96,8 @@ export function MonitorList({ publish }: MonitorListProps) {
   }
 
   function createMonitor() {
-    // "upcontrol.io" and "https://upcontrol.io/" are the same address: the scheme is
-    // added and the trailing slash dropped before anything travels, so the
-    // spelling never decides whether the check creates.
+    // The scheme is added and the trailing slash dropped before anything
+    // travels, so spelling never decides whether the check creates.
     const target = normalizeTarget(newTarget);
     // What the reader typed wins; empty falls back to the address. The row
     // hides the URL line when the name already IS the address (restOfTarget).
@@ -179,10 +154,8 @@ export function MonitorList({ publish }: MonitorListProps) {
     );
   }
 
-  // A live-and-empty list is a first run: the scan onboarding — type one
-  // address, pick the discovered checks — replaces an empty table, with the
-  // manual form still one click away. The list re-read after Start watching
-  // flips this screen to the table by itself.
+  // A live-and-empty list is a first run: the scan onboarding replaces the
+  // table; the re-read after Start watching flips this screen by itself.
   if (monitorsLive && monitors.length === 0 && !formOpen) {
     return (
       <div className={styles.wrap}>

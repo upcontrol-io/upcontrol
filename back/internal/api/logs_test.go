@@ -29,10 +29,8 @@ func TestParseLogWindow(t *testing.T) {
 	}
 }
 
-// The contract pins the numbers, not just the mechanics: Decision 13, the
-// handler comment and the openapi description all say six per minute, so a
-// change here must be a deliberate contract change, not a constant edit the
-// tests silently follow.
+// The contract pins the numbers: the handler comment and the openapi
+// description both say six per minute; changing it is a contract change.
 func TestExplainThrottleContract(t *testing.T) {
 	if explainBurst != 6 {
 		t.Fatalf("explainBurst = %d, want 6 — the contract (Decision 13) promises six per minute", explainBurst)
@@ -42,12 +40,10 @@ func TestExplainThrottleContract(t *testing.T) {
 	}
 }
 
-// explainAllow's window mechanics, exercised by pre-seeding the map (no clock
-// plumbing): aged-out slots drop before the count, the refusal path writes the
-// pruned slice back, a refused burst never extends its own lockout, the window
-// is per tenant, and the >512 GC pass evicts stale tenants only.
+// explainAllow's mechanics, exercised by pre-seeding the map: aged-out slots
+// drop first, refusals write nothing, the window is per tenant, GC >512.
 func TestExplainAllow(t *testing.T) {
-	h := &WriteAPI{}
+	h := &writeAPI{}
 	now := time.Now()
 	// slots builds a window oldest-first (the append order explainAllow
 	// itself maintains) from ages given in seconds.
@@ -78,9 +74,8 @@ func TestExplainAllow(t *testing.T) {
 		t.Fatalf("twenty refusals moved the window: %v — a refused burst must not extend its own lockout", got)
 	}
 
-	// Aged-out slots drop before the burst count: three stale plus three
-	// fresh still admits, and the stored window is the three kept plus the
-	// new slot (this is the refusal path's write-back in reverse).
+	// Aged-out slots drop before the burst count: three stale plus three fresh
+	// still admits, and the stored window is the three kept plus the new slot.
 	h.explainSeenAt = map[int64][]time.Time{7: slots(120, 110, 100, 30, 20, 10)}
 	if ok, _ := h.explainAllow(7); !ok {
 		t.Fatal("three fresh slots (three aged out) were refused")
@@ -125,13 +120,10 @@ func TestExplainAllow(t *testing.T) {
 	}
 }
 
-// The handler's gate placement and the 429's shape. The pool is nil on
-// purpose: a request that passed both validation and the throttle would panic
-// on the first read, so the 429 here proves the throttle stands before any
-// database work — and the 400s prove validation stands before the throttle
-// and burns no slot (a request that spends nothing is not an explain).
+// The handler's gate placement. The nil pool makes any slip panic, so the 429
+// proves the throttle precedes any read; the 400s precede it and burn no slot.
 func TestExplainLogs_Throttle(t *testing.T) {
-	h := &WriteAPI{}
+	h := &writeAPI{}
 	explain := func(body string, tenantID int64) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		h.explainLogs(w, httptest.NewRequest(http.MethodPost, "/v1/logs/explain", strings.NewReader(body)), tenantID)

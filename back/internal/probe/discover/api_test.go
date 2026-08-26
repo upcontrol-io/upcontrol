@@ -8,9 +8,8 @@ import (
 )
 
 func TestAPIBaseIsTheCommonPrefixNotTheShortestLiteral(t *testing.T) {
-	// datrade.io serves its API from /api/api/v1 — a doubled segment no list of
-	// conventional names would guess. Reporting the bare "/api" would name a
-	// path that may not answer at all.
+	// A doubled segment no list of conventional names would guess; reporting
+	// the bare "/api" would name a path that may not answer at all.
 	bundle := `fetch("/api/api/v1/users/me");const o="/api/api/v1/orders";x("/api/api/v1/plans")`
 	if got := apiBaseIn(bundle); got != "/api/api/v1" {
 		t.Errorf("apiBaseIn = %q, want /api/api/v1", got)
@@ -88,9 +87,8 @@ func TestAPIFallsBackToConventionalPaths(t *testing.T) {
 }
 
 func TestAnSPA200OfItsOwnHTMLIsNotAnAPI(t *testing.T) {
-	// The trap: a single-page app answers 200 with its shell for every path, so
-	// a 200 alone proves nothing. JSON, or an auth refusal, is what identifies
-	// an API — the refusal being an API saying "I am here, but not to you".
+	// The trap: a single-page app answers 200 with its shell for every path.
+	// JSON, or an auth refusal, is what identifies an API.
 	html := http.Header{}
 	html.Set("Content-Type", "text/html; charset=utf-8")
 	if isAPIAnswer(Result{StatusCode: 200, Header: html}) {

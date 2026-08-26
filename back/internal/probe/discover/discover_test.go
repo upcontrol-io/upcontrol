@@ -46,8 +46,7 @@ func okRes(h http.Header) Result { return Result{StatusCode: 200, OK: true, Head
 
 func TestRunSkipsAHostThatNeverAnswered(t *testing.T) {
 	// A host that refused, timed out or was blocked must not then be sent five
-	// more requests. This is politeness, and for blocked_target it is the SSRF
-	// guard's decision being honoured rather than worked around.
+	// more requests; for blocked_target it is the SSRF guard honoured.
 	for _, res := range []Result{
 		{StatusCode: 0, ErrorClass: "timeout"},
 		{StatusCode: 0, ErrorClass: "dns"},

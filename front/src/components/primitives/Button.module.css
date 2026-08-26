@@ -26,12 +26,6 @@
   font-size: var(--text-sm);
 }
 
-.lg {
-  height: var(--control-lg);
-  padding: 0 var(--space-6);
-  font-size: var(--text-body-size);
-}
-
 .primary {
   background: var(--text-primary);
   color: var(--inverse);
@@ -77,20 +71,4 @@
 .icon {
   display: inline-flex;
   flex-shrink: 0;
-}
-
-.spinner {
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  opacity: 0.7;
-  animation: uc-spin 700ms linear infinite;
-}
-
-@keyframes uc-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }

@@ -16,7 +16,7 @@ func TestExecuteOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000})
 	if !r.OK {
 		t.Errorf("OK = false, want true (err=%s %s)", r.ErrorClass, r.ErrorDetail)
@@ -36,7 +36,7 @@ func TestExecute500(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000})
 	if r.OK {
 		t.Error("OK = true, want false for 500")
@@ -56,7 +56,7 @@ func TestExecuteKeywordMatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{
 		URL: srv.URL, TimeoutMs: 5000, Keyword: "Add to cart",
 	})
@@ -72,7 +72,7 @@ func TestExecuteKeywordMissing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{
 		URL: srv.URL, TimeoutMs: 5000, Keyword: "Add to cart",
 	})
@@ -85,8 +85,8 @@ func TestExecuteKeywordMissing(t *testing.T) {
 }
 
 func TestExecuteBlockedMetadataIP(t *testing.T) {
-	// The pre-flight CheckURL catches raw IP URLs in blocked ranges even
-	// without the dialer guard (which is disabled in NewWithoutGuard).
+	// The pre-flight CheckURL rejects raw IP URLs in blocked ranges before
+	// any dialing runs.
 	e := New()
 	r := e.Execute(context.Background(), CheckSpec{URL: "http://169.254.169.254/"})
 	if r.OK {
@@ -115,7 +115,7 @@ func TestExecuteBodyHash(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r1 := e.Execute(context.Background(), CheckSpec{URL: srv.URL})
 	r2 := e.Execute(context.Background(), CheckSpec{URL: srv.URL})
 	if r1.BodyHash == 0 {
@@ -140,13 +140,12 @@ func TestExecuteCountsRedirects(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{URL: srv.URL + "/a", TimeoutMs: 5000})
 	if !r.OK {
 		t.Fatalf("OK = false (err=%s %s)", r.ErrorClass, r.ErrorDetail)
 	}
-	// Two hops: /a → /b → /c. The field used to be declared and never assigned,
-	// so a landing row reading it always said "0 hops".
+	// Two hops: /a → /b → /c; a landing row reading RedirectCount must see 2.
 	if r.RedirectCount != 2 {
 		t.Errorf("RedirectCount = %d, want 2", r.RedirectCount)
 	}
@@ -158,7 +157,7 @@ func TestExecuteNoRedirectsCountsZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := NewWithoutGuard()
+	e := &Executor{}
 	r := e.Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000})
 	if r.RedirectCount != 0 {
 		t.Errorf("RedirectCount = %d, want 0", r.RedirectCount)
@@ -202,7 +201,7 @@ func TestExecuteSendsAUserAgent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	NewWithoutGuard().Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000})
+	(&Executor{}).Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000})
 	if got != UserAgent {
 		t.Errorf("User-Agent = %q, want %q", got, UserAgent)
 	}
@@ -216,7 +215,7 @@ func TestCollectBodyIsOptIn(t *testing.T) {
 		_, _ = w.Write([]byte("<html><a href=\"/pricing\">p</a></html>"))
 	}))
 	defer srv.Close()
-	e := NewWithoutGuard()
+	e := &Executor{}
 
 	// The fleet stores check rows and has no use for 64 KB of HTML per probe.
 	if r := e.Execute(context.Background(), CheckSpec{URL: srv.URL}); r.Body != nil {

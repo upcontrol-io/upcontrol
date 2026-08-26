@@ -1,10 +1,12 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// The vectors that matter are the ones the old check waved through: it only
-// refused whitespace and slashes, so every "bad" case below except the last
-// three was accepted and stored as a working relay (rehearsal #3, 2026-08-20).
+// The vectors that matter are the ones a whitespace/slash-only check waved
+// through: every "bad" case below except the last three was accepted as a relay.
 func TestValidRelayHost(t *testing.T) {
 	good := []string{
 		"smtp.eu.mailgun.org",
@@ -22,7 +24,7 @@ func TestValidRelayHost(t *testing.T) {
 	}
 
 	bad := []string{
-		"bad..host..name",         // empty label — the one the rehearsal found
+		"bad..host..name",         // empty label
 		".leading.dot",            // empty first label
 		"trailing.dot.",           // empty last label
 		"-leading.hyphen.com",     // label may not start with a hyphen
@@ -44,21 +46,13 @@ func TestValidRelayHost(t *testing.T) {
 	}
 
 	// 63 is the label ceiling, 255 the whole-name ceiling.
-	if !validRelayHost(rep('a', 63) + ".example.com") {
+	if !validRelayHost(strings.Repeat("a", 63) + ".example.com") {
 		t.Error("a 63-character label should pass")
 	}
-	if validRelayHost(rep('a', 64) + ".example.com") {
+	if validRelayHost(strings.Repeat("a", 64) + ".example.com") {
 		t.Error("a 64-character label should fail")
 	}
-	if validRelayHost(rep('a', 256)) {
+	if validRelayHost(strings.Repeat("a", 256)) {
 		t.Error("a 256-character name should fail")
 	}
-}
-
-func rep(c byte, n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = c
-	}
-	return string(b)
 }

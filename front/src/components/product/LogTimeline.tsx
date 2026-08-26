@@ -5,7 +5,7 @@ import type {
 } from "react";
 import styles from "./LogTimeline.module.css";
 
-export interface LogVolumeBucket {
+interface LogVolumeBucket {
 	minute: string;
 	level: string;
 	lines: number;
@@ -13,17 +13,15 @@ export interface LogVolumeBucket {
 
 /** One sub-minute bucket. `bucket`, not `minute`: at five seconds that name
  *  would be a claim about precision nobody measured. */
-export interface LogDetailBucket {
+interface LogDetailBucket {
 	bucket: string;
 	level: string;
 	lines: number;
 }
 
-/** Sub-minute counts for the range the reader is holding, when they asked for
- *  them. `bucketSeconds` is the width the server actually used, which is not
- *  always the width requested — it snaps a request up to a size it can answer,
- *  so nothing below this can be drawn however far the reader zooms. */
-export interface LogVolumeDetail {
+/** Sub-minute counts for the held range; `bucketSeconds` is the width the
+ *  server actually used (it snaps up), so nothing finer can be drawn. */
+interface LogVolumeDetail {
 	bucketSeconds: number;
 	buckets: LogDetailBucket[];
 }
@@ -34,23 +32,13 @@ export interface LogRange {
 	to: number;
 }
 
-export interface LogTimelineProps {
+interface LogTimelineProps {
 	buckets: LogVolumeBucket[];
-	/**
-	 * Finer counts for the committed range, when one is held and the reader
-	 * asked. It never replaces `buckets`: those span the whole ring and are what
-	 * the domain and every zoomed-out column are read from, and a map narrowed to
-	 * the territory already chosen cannot get the reader back. This is only
-	 * consulted below a minute, where `buckets` has nothing left to say.
-	 */
+	// Finer counts for the committed range; never a replacement for `buckets`
+	// (the whole-ring map), only consulted below a minute.
 	detail?: LogVolumeDetail;
-	/**
-	 * Fires when the reader *settles* on a range — pointer up, key press, chip —
-	 * and never mid-drag. Panning re-renders this component on every frame; the
-	 * stream underneath must not follow it frame by frame, which is why the
-	 * committed range is a different value from the one being dragged.
-	 * `null` means the whole window.
-	 */
+	// Fires on settle (pointer up, key, chip), never mid-drag: the committed
+	// range is a different value from the dragged one. null: whole window.
 	onRangeChange?: (range: LogRange | null) => void;
 }
 
@@ -58,11 +46,8 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/**
- * Chart body height. Geometry, not palette: the stacked segments are laid out
- * in JS, so the number has to be readable from here — a stylesheet cannot hand
- * it back. The colours all live in tokens.css, where the rule applies.
- */
+/** Chart body height: geometry, not palette; JS lays out the segments, and a
+ *  stylesheet cannot hand the number back. */
 const CHART_H = 76;
 
 /** Floor for one column plus its gap. The ladder below is chosen so that no
@@ -75,23 +60,19 @@ const TICK_MIN = 88;
 
 const SECOND = 1_000;
 
-/** Bucket sizes, finest first. The sub-minute rungs are only reachable while a
- *  `detail` answer is in hand — the ring's own strip is per minute, and drawing
- *  a second's column from a minute's number would be inventing five-nines of
- *  precision from one measurement. */
+/** Bucket sizes, finest first; sub-minute rungs only with `detail` in hand:
+ *  a second's column from a minute's number invents precision. */
 const STEPS = [
 	...[1, 2, 5, 10, 15, 30].map((s) => s * SECOND),
 	...[1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * MINUTE),
 ];
 
-/** The tightest zoom with nothing finer than minutes to draw from. Below five
- *  of them the per-minute source is spreading five columns across a whole panel
- *  — magnification with no new information in it. */
+/** The tightest zoom from minutes alone: below five of them there is no new
+ *  information, only magnification. */
 const MIN_SPAN = 5 * MINUTE;
 
-/** The same rule one rung down: with detail in hand the floor is ten of its
- *  buckets, so zooming stops exactly where the measurements stop, not where the
- *  pixels do. */
+/** The same rule one rung down: the floor is ten detail buckets, so zooming
+ *  stops where the measurements stop. */
 const MIN_DETAIL_COLUMNS = 10;
 
 /** Bottom to top. Errors sit on the baseline, so a run of them reads as one
@@ -111,9 +92,8 @@ const DOT_CLASS: Record<Level, string> = {
 	info: styles.dotInfo,
 };
 
-/** Window presets, anchored to the newest edge. Only the ones that are actually
- *  narrower than the ring are offered — the rest would all be "All" wearing a
- *  different label, and a control that cannot act is a bug report waiting. */
+/** Window presets, anchored to the newest edge; only those actually narrower
+ *  than the ring are offered. */
 const PRESETS = [
 	{ label: "15m", ms: 15 * MINUTE },
 	{ label: "1h", ms: HOUR },
@@ -129,10 +109,8 @@ interface Column {
 	total: number;
 }
 
-/** Folds either histogram's rows into one column per instant. The two answers
- *  name their timestamp differently on the wire — `minute` for the ring's map,
- *  `bucket` for the finer read — so the caller says which field to read rather
- *  than this guessing from the shape. */
+/** Folds either histogram into one column per instant; the caller names the
+ *  timestamp field (`minute` for the map, `bucket` for the fine read). */
 function foldRows<T extends { level: string; lines: number }>(
 	rows: T[],
 	at: (row: T) => string,
@@ -166,9 +144,8 @@ const secondFmt = new Intl.DateTimeFormat("en-US", {
 	hour12: false,
 });
 
-/** How precise a timestamp has to be to tell two of them apart at this zoom.
- *  Under a few minutes that means seconds: hour:minute would print the same
- *  label over every column of a burst and the axis would stop being one. */
+/** Timestamp precision needed to tell two apart at this zoom: under a few
+ *  minutes that means seconds. */
 function markAt(t: number, span: number): string {
 	const d = new Date(t);
 	if (span > 4 * DAY) return dayFmt.format(d);
@@ -177,9 +154,8 @@ function markAt(t: number, span: number): string {
 	return clockFmt.format(d);
 }
 
-/** Keeps a viewport inside the ring, at a span the reader is allowed to hold.
- *  Every navigation goes through here, so no gesture can strand the view past
- *  an edge or collapse it to nothing. */
+/** Keeps a viewport inside the ring at a legal span; every navigation goes
+ *  through here. */
 function clampRange(range: LogRange, domain: LogRange, minSpan: number): LogRange {
 	const full = domain.to - domain.from;
 	const span = Math.min(Math.max(range.to - range.from, minSpan), full);
@@ -189,9 +165,8 @@ function clampRange(range: LogRange, domain: LogRange, minSpan: number): LogRang
 	return { from, to: from + span };
 }
 
-/** Scales the viewport around a fixed instant — the one under the cursor for a
- *  wheel, the centre for a key. Zooming around the middle when the pointer is
- *  at the edge slides the thing being pointed at out from under it. */
+/** Scales the viewport around a fixed instant (cursor or centre): zooming the
+ *  middle when the pointer is at an edge slides the target away. */
 function zoomedTo(
 	view: LogRange,
 	domain: LogRange,
@@ -206,10 +181,8 @@ function zoomedTo(
 	return clampRange({ from, to: from + next }, domain, minSpan);
 }
 
-/** Lines per level inside an exact instant range. The bars are drawn on aligned
- *  buckets that can overhang the viewport by up to one bucket, so the readout's
- *  numbers are summed from the source instead: the sentence says "in view", and
- *  it has to mean the view rather than the bars that approximate it. */
+/** Lines per level in an exact range, summed from the source: aligned bars can
+ *  overhang the viewport, and "in view" must mean the view. */
 function sumBetween(source: Column[], from: number, to: number): Column {
 	const out: Column = { t: from, error: 0, warn: 0, info: 0, total: 0 };
 	let lo = 0;
@@ -229,55 +202,32 @@ function sumBetween(source: Column[], from: number, to: number): Column {
 	return out;
 }
 
-/**
- * The window's volume as a timeline the reader can drive.
- *
- * The strip used to be a fixed picture of the whole ring: one column per
- * minute, squeezed to whatever width was left. Past a few hours of traffic that
- * is a texture, not a chart — every column is a hairline and nothing can be
- * pointed at. So the ring became a *domain* and the picture became a *viewport*
- * over it: pan with a drag, zoom with ctrl+wheel or the keys, select a stretch
- * with shift+drag, and the bucket size follows the zoom rather than the data.
- *
- * NOTE — this deliberately reverses the older "the window is a line count, not
- * a time range" rule (owner decision). What it does *not* reverse is the reason
- * behind it: the ring is finite, so the domain ends where the ring ends. Every
- * gesture clamps to it and the readout says "start of window" when the reader
- * reaches the edge, rather than panning on into a past that was never stored.
- *
- * Colour never carries anything alone (brief §5): the readout states each level
- * in words and the hovered bucket prints its own numbers.
- */
+/** The window's volume as a drivable timeline: ring as domain, picture as
+ *  viewport (pan, zoom, select). Gestures clamp to the ring's finite edges. */
 export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps) {
-	// One row per source bucket. Levels fold into the API's own three: `debug`
-	// (and anything else a collector labelled a line with) arrives as its own
-	// group and belongs with `info`. The previous strip dropped those rows on the
-	// floor, so a debug-only minute drew as an empty column.
+	// One row per source bucket; `debug` and other labels fold into `info` so a
+	// debug-only minute is not an empty column.
 	const map = useMemo(
 		() => foldRows(buckets, (bucket) => bucket.minute),
 		[buckets],
 	);
-	// The fine rows, when the server sent any. They cover the committed range and
-	// nothing else, which is why they are a second source rather than the source:
-	// everything outside that range still has to come from the minutes.
+	// The fine rows cover the committed range only: a second source, everything
+	// outside it still comes from the minutes.
 	const fine = useMemo(
 		() => (detail ? foldRows(detail.buckets, (bucket) => bucket.bucket) : []),
 		[detail],
 	);
 
-	// The domain is always the map's. Reading it from `fine` would shrink the
-	// whole strip to the range the reader just picked, leaving them zoomed in
-	// with nothing to navigate back out by.
+	// The domain is always the map's: reading it from `fine` would strand the
+	// reader zoomed into their own pick..
 	const domain = useMemo<LogRange | null>(() => {
 		if (map.length === 0) return null;
 		return { from: map[0].t, to: map[map.length - 1].t + MINUTE };
 	}, [map]);
 	const hasDomain = domain !== null;
 
-	// Nothing below this was measured, so nothing below it is drawn: without a
-	// detail answer the finest real width is a minute, and with one it is
-	// whatever width the server says it used — never the width that was asked
-	// for, which it is free to coarsen.
+	// Nothing below this was measured, so nothing below it is drawn: the width
+	// the server used, never the one asked for..
 	const finest = fine.length > 0 && detail ? detail.bucketSeconds * SECOND : MINUTE;
 	const minSpan = fine.length > 0 ? finest * MIN_DETAIL_COLUMNS : MIN_SPAN;
 	const clamp = useCallback(
@@ -290,19 +240,15 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		[minSpan],
 	);
 
-	// `null` is the whole window AND a standing promise to keep following it: the
-	// ring grows while the panel is open, and a reader who never navigated must
-	// not have to press anything to see the newest minute.
+	// `null` is the whole window and follows it as the ring grows; a reader who
+	// never navigated still sees the newest minute..
 	const [view, setView] = useState<LogRange | null>(null);
 	const [hover, setHover] = useState<number | null>(null);
 	const [brush, setBrush] = useState<{ from: number; to: number } | null>(null);
 	const [dragging, setDragging] = useState(false);
 	const [width, setWidth] = useState(0);
-	// Chrome matches `:focus-visible` on a tabindex'd div even when the focus
-	// arrived from a click, because it cannot tell whether the element expects
-	// keyboard input. The product's one focus ring therefore fired around the
-	// whole strip every time somebody merely dragged it. The ring is not dropped
-	// — it is re-drawn from here, and only the keyboard sets it.
+	// Chrome grants :focus-visible to a tabindex'd div on a click, so dragging
+	// fired the ring; re-drawn here, set only by the keyboard..
 	const pointerFocus = useRef(false);
 	const [ringed, setRinged] = useState(false);
 
@@ -337,9 +283,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		return () => observer.disconnect();
 	}, [hasDomain]);
 
-	// Level of detail: the finest bucket whose columns still clear COL_MIN, and
-	// never one finer than what was measured. `finest` is the floor, so a rung
-	// the source cannot fill is not a rung at all.
+	// Level of detail: the finest bucket whose columns clear COL_MIN, floored
+	// at `finest`..
 	const step = useMemo(() => {
 		const room = Math.max(1, Math.floor(width / COL_MIN));
 		return (
@@ -385,18 +330,16 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 	const barW = Math.max(1, colW - COL_GAP);
 	const peak = columns.reduce((high, column) => Math.max(high, column.total), 1);
 
-	// Three paths for the whole chart instead of one node per segment: at full
-	// width this is several hundred columns re-shaped on every frame of a drag,
-	// and a thousand DOM nodes cannot be re-laid out at that rate.
+	// Three paths instead of a node per segment: several hundred columns reshape
+	// every drag frame, and a thousand nodes cannot re-lay out at that rate..
 	const shapes = useMemo(() => {
 		const out: Record<Level, string> = { error: "", warn: "", info: "" };
 		for (let i = 0; i < columns.length; i += 1) {
 			const column = columns[i];
 			if (column.total === 0) continue;
 			const present = LEVELS.filter((level) => column[level] > 0);
-			// A column that carries anything is at least one pixel per level in it:
-			// "one error in this minute" is the reading this panel exists to make
-			// visible, and rounding it away would draw silence over it.
+			// A column that carries anything gets one pixel per level: rounding away
+			// "one error this minute" draws silence over it..
 			const height = Math.max(present.length, Math.round((column.total / peak) * CHART_H));
 			const x = (i * colW).toFixed(1);
 			const w = barW.toFixed(1);
@@ -438,9 +381,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		[source, effective.from, effective.to],
 	);
 
-	// Latest-value mirror for the wheel listener, which is attached once and
-	// non-passively (React's own onWheel cannot preventDefault reliably) and so
-	// would otherwise close over the first render's viewport forever.
+	// Latest-value mirror for the once-attached, non-passive wheel listener,
+	// which would otherwise close over the first render's viewport..
 	const stateRef = useRef({ view: effective, domain, width });
 	stateRef.current = { view: effective, domain, width };
 
@@ -468,16 +410,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		const onWheel = (event: WheelEvent) => {
 			const { view: current, domain: dom, width: w } = stateRef.current;
 			if (!dom || w === 0) return;
-			// Deliberately NO ctrl/meta+wheel zoom (owner decision). It is the usual
-			// chart gesture and a trackpad pinch arrives as exactly that, but the
-			// browser's own binding on ctrl+wheel is page zoom — so the cost of
-			// aiming a few pixels short of the strip is the entire page jumping a
-			// zoom level. Zoom is on the buttons, the keys, double-click and
-			// shift-drag instead, none of which can misfire into the browser.
-			//
-			// A horizontal gesture is a pan. A plain vertical one is left alone: the
-			// panel sits mid-page, and a strip that swallows the wheel traps the
-			// reader on it.
+			// No ctrl/meta+wheel zoom: the browser owns that binding (page zoom), so
+			// a near-miss costs the whole page a zoom level. Horizontal pans only.
 			if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
 			event.preventDefault();
 			const shift = (event.deltaX / w) * (current.to - current.from);
@@ -536,9 +470,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		if (!drag || !domain) return;
 		const x = localX(event.clientX);
 		if (drag.mode !== "brush") {
-			// A tap rather than a drag. Touch has no hover, so this is the only way
-			// to read one bucket's own numbers on a phone; with a mouse the next
-			// move overwrites it immediately and nothing changes.
+			// A tap rather than a drag: touch has no hover, so this is the only way
+			// to read one bucket's numbers on a phone..
 			if (Math.abs(x - drag.x) < 6) {
 				if (colW > 0) setHover(Math.min(columns.length - 1, Math.max(0, Math.floor(x / colW))));
 				return;
@@ -555,9 +488,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 		commit(clamp({ from, to }, domain));
 	}
 
-	/** Zoom in on the instant under the pointer — the maps gesture, and the one
-	 *  that replaces ctrl+wheel. Zooming out stays on the button and the key: a
-	 *  modifier here would be the same trap in a different costume. */
+	// Zoom in on the instant under the pointer (the maps gesture); zooming out
+	// stays on the button and the key.
 	function onDoubleClick(event: ReactPointerEvent<HTMLDivElement>) {
 		if (!domain || width === 0) return;
 		const anchor = effective.from + (localX(event.clientX) / width) * span;
@@ -598,9 +530,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 				return;
 		}
 		event.preventDefault();
-		// Driving it from the keyboard earns the ring even if the focus originally
-		// came from a click — otherwise the arrows move a strip with no indication
-		// of what they are moving.
+		// Keyboard driving earns the ring even after click-focus: otherwise the
+		// arrows move a strip with no indication of what moves..
 		setRinged(true);
 		commit(next);
 	}
@@ -681,12 +612,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 					>
 						All
 					</button>
-					{/* Always holds its slot. This button comes and goes with every pan
-					    away from the live edge, and dropping it from the flow shunted
-					    every control to its left — including the zoom pair, which is the
-					    one place the pointer keeps returning to. Hidden rather than
-					    disabled: `visibility` keeps the width but takes the button out of
-					    the tab order and the a11y tree, so nothing dead is exposed. */}
+					{/* Always holds its slot (visibility, not removal): dropping it shunted
+					    every control left of it, where the pointer keeps returning. */}
 					<button
 						type="button"
 						className={`${styles.chip} ${atEdge ? styles.reserved : ""}`}
@@ -697,9 +624,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 				</div>
 			</div>
 
-			{/* `pan-y` and not `none`: a horizontal drag belongs to the timeline, but
-			    a vertical one is the reader scrolling the page, and swallowing that
-			    strands them on a phone. */}
+			{/* `pan-y`, not `none`: a horizontal drag belongs to the timeline, a
+			    vertical one is the reader scrolling the page. */}
 			<div
 				ref={bodyRef}
 				className={[styles.body, dragging && styles.dragging, ringed && styles.ringed]
@@ -779,10 +705,8 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 			<div className={styles.axis}>
 				{ticks.map((t) => {
 					const at = ((t - effective.from) / span) * 100;
-					// Centred on its own instant, except at the two ends, where half the
-					// label would hang off the strip and be clipped to ":00". Anchoring
-					// the outermost label to the edge shifts it by a few pixels; leaving
-					// it centred loses the hour it was there to state.
+					// Centred except at the ends, where the outermost label anchors to
+					// the edge or loses its hour to clipping..
 					const anchor = at < 3 ? "none" : at > 97 ? "translateX(-100%)" : "translateX(-50%)";
 					return (
 						<span key={t} className={styles.tick} style={{ left: `${at}%`, transform: anchor }}>

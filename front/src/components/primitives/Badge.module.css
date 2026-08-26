@@ -14,33 +14,8 @@
   border-radius: var(--radius-sm);
 }
 
-.pill {
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
-}
-
 .neutral {
   color: var(--text-muted);
-}
-
-.new {
-  color: var(--text-primary);
-  border-color: var(--text-primary);
-}
-
-.beta {
-  color: var(--text-muted);
-}
-
-.deprecated {
-  color: var(--text-faint);
-  border-style: dashed;
-}
-
-.plan {
-  color: var(--text-primary);
-  border-color: var(--text-primary);
-  font-weight: 600;
 }
 
 /* Status-graded tones (confidence, health): the tint rides in the surface and

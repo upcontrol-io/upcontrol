@@ -11,8 +11,6 @@ import (
 	"go.upcontrol.io/back/internal/ingest/cardinality"
 )
 
-// --- fakes ---
-
 type fakeKeys struct{ bad bool }
 
 func (f *fakeKeys) Resolve(_ context.Context, key string) (Tenant, error) {
@@ -70,8 +68,6 @@ func post(t *testing.T, h *Ingester, body string, headers map[string]string) *ht
 	h.Handle(rr, req)
 	return rr
 }
-
-// --- tests ---
 
 func TestKeyInHeader(t *testing.T) {
 	h, sink, _ := newIngester(0, nil)

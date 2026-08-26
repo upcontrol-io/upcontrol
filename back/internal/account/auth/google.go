@@ -1,20 +1,7 @@
 package auth
 
-// Google sign-in, the authorization-code half.
-//
-// The browser sends the person to Google, Google sends them back to
-// /sign-in?code=…, and the page posts that code here. This handler is the only
-// place the client secret is ever used: the code is exchanged server-side for
-// an id_token, and the verified email comes from that token. A token minted in
-// the browser never enters this flow, because a browser cannot be asked to
-// prove where a token came from.
-//
-// Three things are checked on the way in, and none of them is optional:
-// the redirect_uri must be one this deployment published (an open redirect
-// parameter is how an authorization code ends up somewhere else), the token's
-// audience must be our own client (a token issued for a different application
-// is somebody else's credential), and the email must be one Google says it
-// verified (an unverified address is a claim, not an identity).
+// Google sign-in, the authorization-code half: the code is exchanged
+// server-side; redirect_uri, audience and email_verified are all checked.
 
 import (
 	"context"
@@ -33,9 +20,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// googleTokenURL is Google's OAuth 2.0 token endpoint. A field rather than a
-// constant so a test can point it at an httptest server; nothing else changes
-// it, and it is never read from the environment.
+// googleTokenURL is Google's token endpoint; NewGoogle copies it into the
+// handler's tokenURL field, which tests may repoint.
 const googleTokenURL = "https://oauth2.googleapis.com/token"
 
 // The issuer Google stamps into an id_token. Both spellings are current and
@@ -45,8 +31,8 @@ var googleIssuers = map[string]bool{
 	"https://accounts.google.com": true,
 }
 
-// Google handles POST /v1/auth/google.
-type Google struct {
+// google handles POST /v1/auth/google.
+type google struct {
 	pool       *pg.Pool
 	sess       *session.Manager
 	rec        *analytics.Recorder
@@ -56,10 +42,8 @@ type Google struct {
 
 	clientID     string
 	clientSecret string
-	// The exact redirect_uri values this deployment is willing to exchange a
-	// code for. An allowlist rather than one configured value because the app
-	// is served from more than one origin (the container on :80, the dev server
-	// on :5173) and the URI must match the one the browser actually used.
+	// The exact redirect_uri values this deployment exchanges a code for; an
+	// allowlist because the app is served from more than one origin.
 	redirects []string
 
 	tokenURL string
@@ -67,9 +51,8 @@ type Google struct {
 }
 
 // NewGoogle builds the handler. An empty clientID or clientSecret leaves it
-// unconfigured, which answers 503 and says so — the same shape the AI and
-// billing clients use, and never a 200 that reads as a successful login.
-func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, redirects []string, devMode bool, rec *analytics.Recorder, log *slog.Logger) *Google {
+// unconfigured, which answers 503, never a 200 that reads as a login.
+func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, redirects []string, devMode bool, rec *analytics.Recorder, log *slog.Logger) *google {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -79,7 +62,7 @@ func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, r
 			clean = append(clean, r)
 		}
 	}
-	return &Google{
+	return &google{
 		pool: p, sess: sm, rec: rec, log: log, devMode: devMode,
 		clientID: clientID, clientSecret: clientSecret, redirects: clean,
 		tokenURL: googleTokenURL,
@@ -87,12 +70,12 @@ func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, r
 	}
 }
 
-// WithSelfHosted mirrors MagicLink's: a tenant created through this door lands
+// WithSelfHosted mirrors magicLink's: a tenant created through this door lands
 // on the same plan a tenant created through that one does.
-func (h *Google) WithSelfHosted(v bool) *Google { h.selfHosted = v; return h }
+func (h *google) WithSelfHosted(v bool) *google { h.selfHosted = v; return h }
 
 // Configured reports whether this deployment can complete a Google sign-in.
-func (h *Google) Configured() bool {
+func (h *google) Configured() bool {
 	return h != nil && h.clientID != "" && h.clientSecret != "" && len(h.redirects) > 0
 }
 
@@ -102,14 +85,11 @@ type googleReq struct {
 	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
-func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
-	// The door an attacker does not need a victim's cookie to walk through: it
-	// installs one. A code minted against our own public client id, for an
-	// account the attacker controls, cross-site POSTed here would leave the
-	// reader signed into somebody else's tenant. The page's `state` cannot stop
-	// that, because an attacker simply does not use the page.
+	// This door installs a session, so it needs no victim cookie: a code
+	// cross-site POSTed here would sign the reader into the attacker's tenant.
 	if crossSitePost(r) {
 		writeErr(w, http.StatusForbidden, "cross_site")
 		return
@@ -135,9 +115,8 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.allowedRedirect(req.RedirectURI) {
-		// Not an oracle for which URIs exist: the caller supplied this value and
-		// already knows what they sent. Refusing loudly beats handing Google a
-		// redirect_uri we never published.
+		// The caller supplied this value, so refusing loudly is no oracle leak;
+		// never hand Google a redirect_uri we never published.
 		h.log.Warn("google: redirect_uri not allowed", "redirect_uri", req.RedirectURI)
 		writeErr(w, http.StatusBadRequest, "bad_redirect_uri")
 		return
@@ -145,9 +124,8 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	idToken, err := h.exchange(ctx, req)
 	if err != nil {
-		// One error for every failure below — a bad code, an expired code, a
-		// code already spent, Google being down. The caller learns that it did
-		// not work, and nothing else.
+		// One error for every failure: the caller learns it did not work, and
+		// nothing else.
 		h.log.Warn("google: code exchange failed", "err", err)
 		writeErr(w, http.StatusUnauthorized, "invalid_token")
 		return
@@ -159,19 +137,17 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Normalised, or the same person signing in through the two doors lands in
-	// two accounts: Google returns the address in whatever case it holds, and
-	// the person table's email column is UNIQUE and byte-exact.
+	// Normalised, or the same person through the two doors lands in two
+	// accounts: the email column is UNIQUE and byte-exact.
 	email := NormalizeEmail(claims.Email)
-	door := &MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}
+	door := &magicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}
 	person, err := door.ensurePerson(ctx, email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Google verified the address, which is the same proof a magic-link redeem
-	// carries: pending invites activate and their e-mail channels seed here
-	// (Decision 18) — same call, same place in the flow, never the request path.
+	// Google verified the address, the same proof a magic-link redeem carries:
+	// invites activate here, never on the request path.
 	door.activateInvites(ctx, person.ID, email)
 	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
 	if err != nil {
@@ -184,7 +160,7 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeAccount(w, person)
 }
 
-func (h *Google) allowedRedirect(uri string) bool {
+func (h *google) allowedRedirect(uri string) bool {
 	for _, allowed := range h.redirects {
 		if uri == allowed {
 			return true
@@ -195,7 +171,7 @@ func (h *Google) allowedRedirect(uri string) bool {
 
 // exchange trades the one-time code for Google's token response and returns the
 // raw id_token. The client secret leaves the process here and nowhere else.
-func (h *Google) exchange(ctx context.Context, req googleReq) (string, error) {
+func (h *google) exchange(ctx context.Context, req googleReq) (string, error) {
 	form := url.Values{
 		"code":          {req.Code},
 		"client_id":     {h.clientID},
@@ -223,9 +199,8 @@ func (h *Google) exchange(ctx context.Context, req googleReq) (string, error) {
 		return "", fmt.Errorf("token response unreadable: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// Google's error body names the reason (invalid_grant, redirect_uri_
-		// mismatch) and carries no secret of ours, so it is worth logging — but
-		// it is the caller's own input echoed back, never a token.
+		// Google's error body names the reason and carries no secret of ours;
+		// it is the caller's input echoed back, never a token.
 		var g struct {
 			Error string `json:"error"`
 			Desc  string `json:"error_description"`
@@ -254,15 +229,9 @@ type googleClaims struct {
 	Name          string `json:"name"`
 }
 
-// verify checks the claims of an id_token this process received directly from
-// Google's token endpoint over TLS.
-//
-// The signature is deliberately NOT checked, and that is Google's own documented
-// position: a token fetched over a direct HTTPS call to their endpoint is
-// already authenticated by the channel, and re-verifying it buys a key-fetch
-// and a cache to get wrong. The claims still have to be checked, because the
-// channel says who sent the token and nothing about who it was minted for.
-func (h *Google) verify(idToken string) (googleClaims, error) {
+// verify checks an id_token received directly from Google's token endpoint over
+// TLS. The signature is not checked (the channel authenticates it); claims are.
+func (h *google) verify(idToken string) (googleClaims, error) {
 	var c googleClaims
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {

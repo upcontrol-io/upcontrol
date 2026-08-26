@@ -7,12 +7,9 @@ import (
 )
 
 func TestWatchIsNotThrottledByTheCheckThatPrecededIt(t *testing.T) {
-	// The whole landing flow is: check a host, tick the rows, press Watch —
-	// comfortably inside the check's cooldown. Sharing one bucket meant that
-	// press answered 429, and the landing reads a failed watch as "no backend"
-	// and walks on to the sample status page: the conversion created no account
-	// and said nothing. The two must throttle independently.
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}}
+	// The landing flow (check, tick, watch) sits inside the check's cooldown:
+	// the two must throttle independently, or the watch dies as "no backend".
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}}
 	const ip = "203.0.113.9"
 	if !h.checkAllow(ip, "example.com") {
 		t.Fatal("the first check from an address must be allowed")
@@ -54,9 +51,8 @@ func TestBareHostStripsEverythingButTheDomain(t *testing.T) {
 }
 
 func TestBareHostKeepsAnEmptyInputEmpty(t *testing.T) {
-	// Provision falls back to its own placeholder when the domain is empty; a
-	// bareHost that invented one ("https://" -> "https:") would name a project
-	// after a scheme fragment instead.
+	// Provision falls back to its own placeholder when the domain is empty: a
+	// bareHost that invented one would name a project after a scheme fragment.
 	for _, in := range []string{"", "   ", "https://", "/pricing"} {
 		if got := bareHost(in); got != "" {
 			t.Errorf("bareHost(%q) = %q, want empty", in, got)
@@ -84,11 +80,8 @@ func TestSlugFromHostReadsAsTheSiteName(t *testing.T) {
 }
 
 func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
-	// Whatever comes in, what comes out is either empty (caller falls back to the
-	// project id) or a plain lowercase segment: no leading/trailing dashes, no
-	// runs, nothing needing escaping in a URL.
-	// "münchen.example" is the non-ASCII case: an IDN reaches slugFromHost as
-	// UTF-8 and must still come out as a plain URL segment.
+	// The output is empty (caller falls back to the project id) or a plain
+	// lowercase segment; an IDN like "münchen.example" is no exception.
 	for _, in := range []string{"", "...", "-", "—", "münchen.example", "a..b", "-lead-", strings.Repeat("x", 80) + ".com"} {
 		got := slugFromHost(in)
 		if got == "" {
@@ -109,10 +102,8 @@ func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
 }
 
 func TestMonitorNameNamesTheTargetNotTheTypedHost(t *testing.T) {
-	// Discovery finds api. and app. hosts and they become checks of their own.
-	// Naming them after the address the visitor typed labelled all three
-	// "harpa.ai", and a status page listing three components with one name is a
-	// list nobody can read.
+	// Discovery's api./app. hosts become checks of their own: naming them after
+	// the typed host labelled every component "harpa.ai".
 	cases := []struct{ host, target, want string }{
 		{"harpa.ai", "https://harpa.ai", "harpa.ai"},
 		{"harpa.ai", "https://api.harpa.ai", "api.harpa.ai"},
@@ -128,10 +119,8 @@ func TestMonitorNameNamesTheTargetNotTheTypedHost(t *testing.T) {
 }
 
 func TestSameHostTargetsAcceptsASubdomain(t *testing.T) {
-	// sameHostTargets' refusals are pinned in public_check_test.go; the case the
-	// watch adds is the one it must NOT refuse. An api./app. host is a thing its
-	// owner needs watched, and it is pickable on the landing — dropping it here
-	// would tick a row that then quietly created no check.
+	// The case the watch adds is the one sameHostTargets must NOT refuse: an
+	// api./app. host is pickable on the landing and must become a check.
 	got := sameHostTargets("https://mine.com", []string{
 		"https://api.mine.com/v1",
 		"https://mine.com.evil.test/x", // suffix trick, not a subdomain

@@ -8,17 +8,14 @@ import (
 	"strings"
 )
 
-// API is the app's own API entry point. An empty Path is a measured answer ("we
-// looked and found none"), never an absence — the caller renders that as "none",
-// the same way it does for the health URL.
+// API is the app's own API entry point. An empty Path is a measured "we looked
+// and found none", never an absence.
 type API struct {
 	Path   string
 	Source string // "in the app bundle" | "answers directly"
 	Status uint16
-	// Confirmed reports whether the path itself answered like an API. A base
-	// lifted from a bundle often does not: datrade.io's app talks to /api/api/v1,
-	// so /api/api is a real prefix that returns 404 on its own. Worth telling the
-	// reader where the API lives, but not worth pretending the root is watchable.
+	// Confirmed reports whether the path itself answered like an API; a base
+	// lifted from a bundle often does not.
 	Confirmed bool
 }
 
@@ -27,9 +24,8 @@ type API struct {
 var apiPaths = []string{"/api", "/api/v1", "/graphql", "/openapi.json", "/swagger.json"}
 
 const (
-	// The bundle is read up to this much. An SPA's main chunk is usually a few
-	// hundred KB; past a megabyte we are downloading someone's whole app to find
-	// one string, which is not a trade this feature is worth.
+	// The bundle is read up to this much; past a megabyte we are downloading
+	// someone's whole app to find one string.
 	bundleMaxBytes = 1 << 20
 	apiMaxPaths    = 3
 )
@@ -41,23 +37,16 @@ var (
 	apiLiteralRe = regexp.MustCompile(`["'` + "`" + `](/(?:api|graphql)[a-zA-Z0-9/_.-]*)["'` + "`" + `]`)
 )
 
-// findAPI locates the app's API. The bundle comes first because it is one
-// request and gives the real base path — datrade.io serves its API from
-// /api/api/v1, which no list of conventional names would have guessed — and the
-// conventional paths are the fallback for apps whose bundle says nothing.
-//
-// This exists because an SPA hides its API from everything else we do: the
-// homepage carries no links, the sitemap does not exist, and the call itself
-// happens in JavaScript we do not execute. The base URL is nevertheless written
-// down, in the bundle the browser downloads anyway.
-func findAPI(ctx context.Context, p Prober, base string, homepage []byte) *API {
+// findAPI locates the app's API: the bundle first (one request, the real base
+// path), conventional paths as the fallback.
+func findAPI(ctx context.Context, p prober, base string, homepage []byte) *API {
 	if api := apiFromBundle(ctx, p, base, homepage); api != nil {
 		return api
 	}
 	return apiFromPaths(ctx, p, base)
 }
 
-func apiFromBundle(ctx context.Context, p Prober, base string, homepage []byte) *API {
+func apiFromBundle(ctx context.Context, p prober, base string, homepage []byte) *API {
 	src := mainBundle(base, homepage)
 	if src == "" {
 		return nil
@@ -91,9 +80,8 @@ func apiFromBundle(ctx context.Context, p Prober, base string, homepage []byte) 
 	}
 }
 
-// mainBundle picks the app's own script out of the page. Third-party tags
-// (analytics, chat widgets) are on other hosts and are skipped: their bundles
-// are not this app's, and fetching them would be a request to a stranger.
+// mainBundle picks the app's own script out of the page; third-party bundles
+// are on other hosts, and fetching them would be a request to a stranger.
 func mainBundle(base string, homepage []byte) string {
 	if len(homepage) == 0 {
 		return ""
@@ -129,12 +117,8 @@ func absolute(base, src string) string {
 	}
 }
 
-// apiBaseIn returns the common base of the API routes written in a bundle.
-//
-// The longest common prefix, not the shortest literal: a bundle mentioning
-// /api/api/v1/users/me and /api/api/v1/orders describes an API rooted at
-// /api/api/v1, and reporting the bare /api would name a path that may not even
-// answer.
+// apiBaseIn returns the common base of the API routes in a bundle: the longest
+// common prefix cut back to a path boundary, not the shortest literal.
 func apiBaseIn(bundle string) string {
 	seen := map[string]bool{}
 	var routes []string
@@ -179,11 +163,9 @@ func commonPrefix(a, b string) string {
 	return a[:i]
 }
 
-// apiFromPaths tries the conventional entry points. The catch an SPA sets is
-// that it answers 200 with its own HTML for every path, so a 200 alone proves
-// nothing: what identifies an API is a JSON answer, or an authentication
-// refusal, which is itself an API saying "I am here, but not to you".
-func apiFromPaths(ctx context.Context, p Prober, base string) *API {
+// apiFromPaths tries the conventional entry points; an SPA answers 200 with
+// HTML for every path, so only a JSON answer or an auth refusal identifies one.
+func apiFromPaths(ctx context.Context, p prober, base string) *API {
 	root := strings.TrimRight(base, "/")
 	tried := 0
 	for _, path := range apiPaths {
@@ -191,9 +173,8 @@ func apiFromPaths(ctx context.Context, p Prober, base string) *API {
 			return nil // out of budget with candidates left: not "none"
 		}
 		if tried >= apiMaxPaths {
-			// Our own cap, not a timeout. We searched everything we were willing
-			// to ask for, so the honest answer is "none" — nil would claim the
-			// search never finished.
+			// Our own cap, not a timeout: we searched all we were willing to
+			// ask, so the honest answer is "none", not nil.
 			break
 		}
 		tried++

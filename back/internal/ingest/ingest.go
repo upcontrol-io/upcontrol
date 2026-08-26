@@ -1,14 +1,5 @@
-// Package ingest is the POST /i pipeline coordinator. It wires the pure-logic
-// pieces together in the order the plan (§4.5) fixes:
-//
-//	key-auth  →  idempotency  →  decode  →  scrub  →  normalize  →  seq
-//	          →  cardinality  →  batcher  →  WAL(fsync)  →  receipt
-//
-// Every dependency is an interface defined here (consumer-side), so the handler
-// is unit-testable with fakes and the real storage/pg + storage/ch + ring/seq
-// are wired in cmd/ucapi. The handler ALWAYS returns 2xx on sane input with a
-// structured receipt; the only non-2xx are 401 (bad key), 429 (rate limited) and
-// 503 (spool full) — see §4.5.
+// Package ingest is the POST /i coordinator (decode → scrub → normalize → seq
+// → cardinality → batcher → WAL → receipt); sane input always gets 2xx.
 package ingest
 
 import (
@@ -27,8 +18,7 @@ import (
 	"go.upcontrol.io/back/internal/ingest/scrub"
 )
 
-// MaxBodyBytes caps a single POST /i body. The plan's pre-auth limit; oversized
-// bodies never reach decode.
+// MaxBodyBytes caps a single POST /i body before auth; oversized never reach decode.
 const MaxBodyBytes = 16 << 20
 
 // Tenant identifies the authenticated source of a batch.
@@ -43,34 +33,30 @@ type KeyResolver interface {
 	Resolve(ctx context.Context, key string) (Tenant, error)
 }
 
-// SeqAllocator hands out the next sequence number for the given project. The
-// wire-up keeps one ring/seq.Allocator per project behind this seam — a lease
-// against another project's counter (or a project with no project_seq row)
-// silently stamps every line seq 0, which collapses the ring's ordering.
+// SeqAllocator hands out the next sequence number for the given project. A
+// lease against the wrong project stamps seq 0 and collapses ring ordering.
 type SeqAllocator interface {
 	Next(ctx context.Context, projectID int64) (int64, error)
 }
 
-// BatchSink is where decoded rows land (the batcher). One Add per row.
+// BatchSink is where decoded rows land (the batcher); one Add per row.
 type BatchSink interface {
 	Add(ctx context.Context, table string, row []byte) error
 }
 
-// Idempotency records a batch so a replay does not double-write. Claim returns
-// replay=true if this batch_key was already seen; in that case storedAccepted is
-// the count from the first accept (returned verbatim in the receipt).
+// Idempotency records a batch so a replay does not double-write; Claim
+// returns replay=true plus the first accept's count for the receipt.
 type Idempotency interface {
 	Claim(ctx context.Context, batchKey string, bodyHash []byte, accepted int) (replay bool, storedAccepted int, err error)
 }
 
-// SpoolFiller reports the ingest spool's fill percentage (0–100), the input to
-// the overload steps (§3.9). ucapi computes it from the WAL/spool size.
+// SpoolFiller reports the ingest spool's fill percentage (0–100), the
+// overload steps' input.
 type SpoolFiller interface {
 	FillPercent(ctx context.Context) (int, error)
 }
 
-// WALAppender appends a serialized batch and fsyncs it before the receipt is
-// sent (plan §4.3). The real implementation wraps ingest/wal.
+// WALAppender appends a serialized batch and fsyncs it before the receipt is sent.
 type WALAppender interface {
 	AppendSync(ctx context.Context, payload []byte) error
 }
@@ -95,8 +81,8 @@ type Ingester struct {
 // New builds an Ingester. card may be nil (cardinality capping is skipped).
 func New(d Deps) *Ingester { return &Ingester{d: d} }
 
-// Receipt is the §4.5 structured acknowledgement. Warnings/Sampling are omitted
-// when empty (the front's "zero is silence" rule).
+// Receipt is the structured acknowledgement; empty fields stay absent
+// (zero is silence).
 type Receipt struct {
 	Accepted int        `json:"accepted"`
 	Metrics  int        `json:"metrics,omitempty"` // lines routed to the metrics table, not logs
@@ -110,7 +96,7 @@ type ReceiptW struct {
 	Count int    `json:"count"`
 }
 
-// Sampling is the overload instruction (§3.9): keep this fraction of level.
+// Sampling is the overload instruction: keep this fraction of level.
 type Sampling struct {
 	Level string  `json:"level"`
 	Keep  float64 `json:"keep"`
@@ -119,8 +105,8 @@ type Sampling struct {
 // ErrBadKey is the 401 sentinel.
 var ErrBadKey = errors.New("ingest: invalid or unknown api key")
 
-// Handle is POST /i. Hand-written (not generated): the openapi spec marks /i
-// x-hand-written so the generator's validation never runs here (§4.5).
+// Handle is POST /i, hand-written (not generated): the openapi spec marks /i
+// x-hand-written so generator validation never runs here.
 func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
@@ -135,8 +121,7 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Overload check (§3.9): if the spool is full enough that even events must be
-	// shed, refuse with 503 + Retry-After.
+	// Overload check: a full-enough spool refuses with 503 + Retry-After.
 	fill, _ := h.d.Spool.FillPercent(ctx)
 	decision := computeOverload(fill)
 
@@ -162,14 +147,13 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.merge(dec.Warnings)
 
-	// Metric lines leave the log path entirely: a JSON line carrying both a
-	// `metric` and a `value` is a reading, not a message. Splitting before
-	// buildRows means metric rows never consume seq numbers or level sheds.
+	// Metric lines leave the log path entirely: a JSON line with both `metric`
+	// and `value` is a reading, never a seq number or level shed.
 	logRecs, metricRows := h.splitMetrics(tenant, dec.Records)
 	rows := h.buildRows(ctx, tenant, logRecs, decision, ws)
 
-	// WAL: append the (tenant, project, rows) payload and fsync BEFORE accepting.
-	// On crash, recovery replays past the checkpoint — no confirmed row lost.
+	// WAL: append and fsync BEFORE accepting, so an accepted batch is on disk.
+	// No replay path exists yet; the file is a durability record, not recovery.
 	if h.d.WAL != nil && (len(rows) > 0 || len(metricRows) > 0) {
 		if err := h.walAppend(ctx, tenant, rows, metricRows); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, receiptErr("wal_failed"))
@@ -177,9 +161,8 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Idempotency claim: if this exact body was already accepted, return the
-	// stored count, do not re-write. The count is logs + metrics — the receipt's
-	// `accepted` is every line that landed.
+	// Claim: an already-accepted body returns the stored count without
+	// re-writing; accepted counts every line that landed (logs + metrics).
 	if h.d.Idem != nil {
 		replay, stored, err := h.d.Idem.Claim(ctx, hex.EncodeToString(hash), hash, len(rows)+len(metricRows))
 		if err == nil && replay {
@@ -188,8 +171,8 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Push rows to the batcher (→ ClickHouse). The batcher flushes per its policy;
-	// the sink routes by table key, so metrics land in the metrics table.
+	// Push rows to the batcher; the sink routes by table key, so metrics land
+	// in the metrics table.
 	for _, row := range rows {
 		_ = h.d.Sink.Add(ctx, "logs", row)
 	}
@@ -245,9 +228,8 @@ func keyFromBody(body []byte) string {
 	return ""
 }
 
-// RowEnvelope is the per-row payload handed to the batcher and the WAL. It is a
-// serialized ch.LogRow; the CH sink adapter decodes it back into the native
-// column form when the batcher flushes.
+// RowEnvelope is the per-row payload handed to the batcher and the WAL; the
+// CH sink decodes it back into native column form on flush.
 type RowEnvelope struct {
 	TenantID  int64             `json:"tenant_id"`
 	ProjectID int64             `json:"project_id"`
@@ -296,7 +278,7 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 			}
 			env.Service, _ = h.d.Card.Add("service", env.Service)
 		}
-		// Overload shed mask (§3.9): drop rows below the kept level.
+		// Overload shed mask: drop rows below the kept level.
 		if d.shed[env.Level] {
 			ws.add("class_shed", 1)
 			continue
@@ -313,8 +295,8 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 	return out
 }
 
-// walAppend serializes the (tenant, rows) batch and appends+fsyncs it via the
-// WAL dependency. With no WAL configured (unit tests) it is a no-op seam.
+// walAppend serializes the (tenant, rows) batch and appends+fsyncs it via
+// the WAL seam; a nil WAL (unit tests) makes it a no-op.
 func (h *Ingester) walAppend(ctx context.Context, t Tenant, rows, metricRows [][]byte) error {
 	if h.d.WAL == nil {
 		return nil
@@ -328,22 +310,15 @@ func (h *Ingester) walAppend(ctx context.Context, t Tenant, rows, metricRows [][
 	return h.d.WAL.AppendSync(ctx, payload)
 }
 
-// --- overload (§3.9) ----------------------------------------------------
-
-// overloadDecision captures the §3.9 stepped response to spool fill.
+// overloadDecision is the stepped response to spool fill.
 type overloadDecision struct {
 	shed      map[string]bool // levels to drop
 	sampling  *Sampling       // instruction returned in the receipt
 	rejectAll bool            // spool at 100%: refuse entirely
 }
 
-// computeOverload maps a fill percentage to the plan's 60/75/90/100% steps:
-//   - 60%: shed debug
-//   - 75%: shed debug+info
-//   - 90%: shed debug+info+warn  (keep error + events)
-//   - 100%: reject everything (503)
-//
-// The sampling field tells the client what fraction to keep going forward.
+// computeOverload maps a fill percentage to the 60/75/90/100% steps; the
+// sampling field tells the client what fraction to keep going forward.
 func computeOverload(fillPct int) overloadDecision {
 	d := overloadDecision{shed: map[string]bool{}}
 	switch {
@@ -364,8 +339,6 @@ func computeOverload(fillPct int) overloadDecision {
 	}
 	return d
 }
-
-// --- helpers ------------------------------------------------------------
 
 type warningAccumulator struct {
 	counts map[string]int

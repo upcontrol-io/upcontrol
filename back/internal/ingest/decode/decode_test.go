@@ -27,9 +27,9 @@ func TestSniff(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Sniff([]byte(c.body), c.ct)
+			got := sniff([]byte(c.body), c.ct)
 			if got != c.want {
-				t.Errorf("Sniff(%q) = %q, want %q", c.name, got, c.want)
+				t.Errorf("sniff(%q) = %q, want %q", c.name, got, c.want)
 			}
 		})
 	}
@@ -158,6 +158,24 @@ func TestDecodeUnparseableLineIsWarning(t *testing.T) {
 	}
 	if len(r.Records) != 1 {
 		t.Errorf("records = %d, want 1 (the good line)", len(r.Records))
+	}
+}
+
+func TestToStringFloats(t *testing.T) {
+	// Regression: json.Marshal already emits the shortest form, so no
+	// trailing-zero trimming (the old trimFloat turned 100 into "1").
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{100, "100"},
+		{2.5, "2.5"},
+		{1724668800, "1724668800"},
+	}
+	for _, c := range cases {
+		if got := toString(c.in); got != c.want {
+			t.Errorf("toString(%v) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

@@ -1,7 +1,5 @@
-// Package api wires the ingest pipeline into the ucapi HTTP server. The four
-// adapters here bridge the handler's interfaces (defined in internal/ingest) to
-// the real storage layer (storage/pg, storage/ch) and the supporting packages
-// (ingest/wal, ingest/batcher, ingest/cardinality, ring/seq).
+// Package api wires the ingest pipeline into the ucapi HTTP server: adapters
+// bridge the handler's interfaces to storage and the supporting packages.
 package api
 
 import (
@@ -23,10 +21,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// chLogSink adapts batcher.Sink: when the batcher flushes, it decodes each JSON
-// RowEnvelope back into a ch.LogRow and batch-inserts into ClickHouse. The JSON
-// roundtrip is the seam that keeps the batcher CH-agnostic; a future optimisation
-// can pass typed rows through a typed batcher to avoid it.
+// chLogSink adapts batcher.Sink: decoded RowEnvelopes batch-insert into
+// ClickHouse. The JSON roundtrip is the seam that keeps the batcher CH-agnostic.
 type chLogSink struct {
 	conn *ch.Conn
 }
@@ -50,12 +46,8 @@ func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error 
 	return errors.Join(logErr, evErr)
 }
 
-// decodeRows is the log path's decode step: JSON RowEnvelopes in, ch.LogRows
-// plus the promoted ch.EventRows out. A row the classifier marked with an
-// event name (env.Event) is double-written: the log line stays in logs, and a
-// copy goes to events — the feed LastDeployAt, the incident timeline's deploy
-// join and the absence detector all live on events. Labels are a copy: the sha
-// aliasing below must never leak back into env.Attrs (the LogRow shares it).
+// decodeRows decodes RowEnvelopes into LogRows plus promoted EventRows; an
+// event-named row is double-written. Labels are cloned: sha aliasing stays out.
 func decodeRows(rows [][]byte) ([]ch.LogRow, []ch.EventRow) {
 	logRows := make([]ch.LogRow, 0, len(rows))
 	var eventRows []ch.EventRow
@@ -178,17 +170,15 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 	return pct, nil
 }
 
-// WireIngest builds the full POST /i pipeline from real dependencies. The
-// returned Ingester's Handle method is the POST /i http.HandlerFunc; the returned
-// Batcher must be Tick'd periodically and Close'd on shutdown.
+// WireIngest builds the full POST /i pipeline. The returned Batcher must be
+// Tick'd periodically and Close'd on shutdown.
 
-// Type aliases re-export the concrete types so cmd/ucapi wires through the api
-// package without importing ingest or batcher directly.
+// Batcher is re-exported so cmd/ucapi can name the ticker's type without
+// importing batcher directly.
 
-type Ingester = ingest.Ingester
 type Batcher = batcher.Batcher
 
-func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*Ingester, *Batcher, error) {
+func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
 	// WAL: durable append+fsync before receipt.
 	w, err := wal.Open(filepath.Join(spoolDir, "ingest.wal"))
 	if err != nil {
@@ -218,11 +208,8 @@ func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*Ingester, *
 	return ing, bs, nil
 }
 
-// seqAllocators satisfies ingest.SeqAllocator with one ring/seq.Allocator per
-// project. Keying by project matters twice over: two projects must never draw
-// from one counter, and a lease against a project id that has no project_seq
-// row errors — which ingest records as seq 0 on every line, collapsing the
-// ring's order (and the /app log selection keyed on seq) for the whole window.
+// seqAllocators holds one ring/seq.Allocator per project: two projects must
+// never draw from one counter, and a failed lease collapses seq to 0.
 type seqAllocators struct {
 	leaser seq.BlockLeaser
 

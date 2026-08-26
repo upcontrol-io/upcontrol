@@ -1,49 +1,14 @@
-/**
- * useApiData — generic fetch hook for entity-level data (monitors, sources,
- * channels, etc.). Each call fetches from the API on mount and caches the
- * result so multiple components sharing the same entity don't refetch.
- *
- * Degradation signal: a fetch that fails (backend unreachable) is NOT silent —
- * `useDegradation()` lets the shell show a banner. Without this, a dev proxy
- * aimed at the wrong port looks "working" for half a day.
- *
- * `/app` carries no sample data any more: a caller that omits `fallback` gets
- * `data: undefined` and `failed: true` once the request has settled without an
- * answer, and renders an explicit error state. That is deliberately NOT the same
- * shape as a live empty answer — "we could not ask" and "you have none" are
- * different facts, and a screen that draws the second when it means the first is
- * telling the reader their account is empty on the strength of a network error.
- *
- * The in-flight promise lives at MODULE level, not in a ref, and the effect
- * carries no "already fetched" guard. That is what makes the hook survive
- * StrictMode: React mounts, tears down and remounts every component in dev, so
- * an effect that guards on a ref starts the request on the first pass, marks
- * itself cancelled on the teardown, and then skips the second pass — the
- * response arrives with nobody left to receive it, and the screen keeps
- * rendering the mock fallback for good, silently (neither `.then` nor `.catch`
- * reaches state, so not even the degradation banner fires). Subscribing to a
- * shared promise instead means the remounted effect re-attaches to the same
- * request and applies the result. `useAccount` was immune for this reason,
- * which is why the sidebar showed live data while every other panel did not.
- *
- * Invalidation is a broadcast, not a cache drop (Aug 14, 2026). `invalidateApiData`
- * used to delete the entry and stop there, so nothing on screen knew: a source
- * connected on /app/sources appeared only after a reload, and deleting one of
- * three checks left the sidebar's "HTTP checks 3 / 3" standing. A cache every
- * reader has to be told about by hand is not a cache, it is a second copy of the
- * truth — so every mounted reader of an invalidated key refetches at once.
- */
+/** Shared-promise fetch cache: the in-flight promise lives at module level so
+ *  StrictMode remounts re-attach; invalidation broadcasts to every reader. */
 import { useState, useEffect, useRef, useSyncExternalStore } from "react";
 
 const cache = new Map<string, { data: unknown; ts: number }>();
 const inflight = new Map<string, Promise<boolean>>();
-// The last failure per key, for callers that branch on WHY the read failed
-// (`isOffline`): a refusal is a different fact from "nobody answered". A
-// successful read clears it.
+// Last failure per key, for callers that branch on why the read failed
+// (isOffline): a refusal is a different fact from "nobody answered".
 const errors = new Map<string, unknown>();
 const TTL = 30_000; // 30 seconds — short enough for live data, long enough for tab switches
 
-// --- degradation store (module-level, reactive via useSyncExternalStore) ---
 const degraded = new Set<string>();
 const listeners = new Set<() => void>();
 function emit() {
@@ -55,18 +20,12 @@ function subscribe(cb: () => void) {
 		listeners.delete(cb);
 	};
 }
-/** True when a read failed because the backend was unreachable. No args:
- *  any degraded key anywhere (the account shell's banner). With keys: only
- *  those keys — the public status page is key-scoped because the poller
- *  re-reads only mounted readers, so a degraded key left behind by an
- *  unmounted page would never clear on its own. */
-export function useDegradation(...keys: string[]) {
+/** True when the given key's read failed as unreachable, so an unmounted
+ *  page cannot stick. */
+export function useDegradation(key: string) {
 	return useSyncExternalStore(
 		subscribe,
-		() =>
-			keys.length === 0
-				? degraded.size > 0
-				: keys.some((key) => degraded.has(key)),
+		() => degraded.has(key),
 		() => false, // SSR: assume live (no fetches ran)
 	);
 }
@@ -82,14 +41,11 @@ function markDegraded(key: string) {
 	}
 }
 
-// --- per-key invalidation store ---
-// Who is reading this key right now. A mutation invalidates the key and every
-// reader re-reads; nobody has to remember which screens share an entity.
+// Who is reading this key right now: a mutation makes every reader re-read,
+// so no screen has to know which others share the entity.
 const readers = new Map<string, Set<() => void>>();
-// Bumped on every invalidation. A response that started before the write it
-// raced carries the older generation and is dropped rather than cached: the
-// answer predates the change, so caching it would put the deleted monitor back
-// for a whole TTL.
+// Bumped on every invalidation: a response that raced a write carries the
+// older generation and is dropped, not cached.
 const generation = new Map<string, number>();
 
 function genOf(key: string) {
@@ -115,11 +71,8 @@ function fresh(key: string) {
 	return entry && Date.now() - entry.ts < TTL ? entry : null;
 }
 
-/**
- * Start (or join) the request for `key`. Resolves to whether the data is live:
- * true means `cache` holds a fresh response, false means the fetch failed and
- * the caller keeps its fallback.
- */
+/** Start (or join) the request for `key`; resolves to whether the data is
+ *  live (cached) or the fetch failed and the caller keeps its fallback. */
 function load(key: string, fetcher: () => Promise<unknown>): Promise<boolean> {
 	const existing = inflight.get(key);
 	if (existing) return existing;
@@ -159,16 +112,16 @@ type State<T> = {
 	error: unknown;
 };
 
-export type ApiDataResult<T> = {
+type ApiDataResult<T> = {
 	data: T;
-	/** "Nothing has answered yet", NOT "a request is in flight" — see below. */
+	/** "Nothing has answered yet", NOT "a request is in flight". */
 	loading: boolean;
 	live: boolean;
-	/** Settled with nothing live to show — a failed *background* refetch keeps
-	 *  the last live answer and stays false. Distinct from a live empty answer. */
+	/** Settled with nothing live to show; a failed background refetch keeps the
+	 *  last live answer and stays false. Distinct from a live empty answer. */
 	failed: boolean;
-	/** The error behind `failed`, for callers that branch on its kind
-	 * (`isOffline(err)`): undefined whenever the read is live. */
+	/** The error behind `failed`, for callers that branch on its kind via
+	 * isOffline(err); undefined whenever the read is live. */
 	error: unknown;
 };
 
@@ -207,21 +160,17 @@ export function useApiData<T>(
 				};
 	};
 	const [state, setState] = useState<State<T | undefined>>(() => initial(key));
-	// A different entity is a different question: its answer has not arrived, so
-	// the caller must not be told the previous one has settled. React's own
-	// "adjust state during render" pattern — cheaper than an effect, which would
-	// paint the old entity's data once first.
+	// A different entity is a different question: adjust during render, cheaper
+	// than an effect, which would paint the old entity's data once first.
 	if (state.key !== key) setState(initial(key));
 
-	// Callers pass an inline arrow, so the fetcher is a new function every render
-	// and cannot be an effect dependency. The ref keeps the latest one without
-	// re-running the effect.
+	// The fetcher is a new function every render (inline arrows); the ref keeps
+	// the latest one without re-running the effect.
 	const fetcherRef = useRef(fetcher);
 	fetcherRef.current = fetcher;
 
-	// Re-read on invalidation. `nonce` is what carries the broadcast into the
-	// effect below, so the refetch runs through exactly the same path as the
-	// first read — including the StrictMode-safe shared promise.
+	// `nonce` carries the broadcast into the effect below, so a refetch runs
+	// the same path as the first read, shared promise included.
 	const [nonce, setNonce] = useState(0);
 	useEffect(
 		() => subscribeKey(key, () => setNonce((current) => current + 1)),
@@ -247,21 +196,15 @@ export function useApiData<T>(
 			if (cancelled) return;
 			const loaded = cache.get(key);
 			setState((current) => {
-				// A failed BACKGROUND refetch keeps the answer already on screen:
-				// the reader holds a live one, and flipping to `failed` here would
-				// blank a working panel over a hiccup — the degradation banner
-				// (`markDegraded`, in `load`'s catch) is the designed signal, not
-				// this. The first answer path is unchanged: a read that fails with
-				// nothing live to keep still settles as failed and renders the
-				// error state.
+				// A failed background refetch keeps the live answer already on screen;
+				// the degradation banner is the signal, not this.
 				if (!live && current.live && current.data !== undefined) {
 					return current;
 				}
 				return {
 					key,
-					// A failed fetch keeps whatever the caller already had: the fallback
-					// for a public page, `undefined` for `/app` — which is what makes the
-					// screen render its error state rather than an invented empty list.
+					// A failed fetch keeps what the caller had (fallback or undefined),
+					// so the screen renders its error state, not an invented empty list.
 					data: live && loaded ? (loaded.data as T) : current.data,
 					settled: true,
 					live,
@@ -277,25 +220,19 @@ export function useApiData<T>(
 
 	return {
 		data: state.data,
-		// "Nothing has answered yet", NOT "a request is in flight". A refetch after
-		// a write keeps the rows on screen and swaps them when the answer lands;
-		// treating it as loading would blank the panel on every toggle.
+		// "Nothing has answered yet", not "a request is in flight": a refetch
+		// keeps the rows on screen and swaps them when the answer lands.
 		loading: !state.settled,
 		live: state.live,
-		// Settled with nothing to show. The caller draws a load error — never an
-		// empty state, which would report a network failure as "you have none".
+		// Settled with nothing to show: draw a load error, never an empty state
+		// that reports a network failure as "you have none".
 		failed: state.settled && !state.live,
 		error: state.error,
 	};
 }
 
-/**
- * Invalidate cache keys after a mutation, and tell every mounted reader to
- * re-read them. Variadic because one write is rarely one entity: a deleted
- * monitor changes the monitor list, the dashboard, the status page's components
- * and the plan's usage count, and a screen that names only its own key is how
- * the count kept saying 3 of 3.
- */
+/** Invalidate keys after a mutation and tell every mounted reader to re-read
+ *  them; variadic because one write touches several entities. */
 export function invalidateApiData(...keys: string[]) {
 	for (const key of keys) {
 		cache.delete(key);
@@ -305,22 +242,8 @@ export function invalidateApiData(...keys: string[]) {
 	}
 }
 
-/** Invalidate all cached data (e.g. after sign-out). */
-export function invalidateAllApiData() {
-	invalidateApiData(...new Set([...cache.keys(), ...readers.keys()]));
-}
-
-// --- auto-refresh poller (module-level, outside React on purpose) ---
 // Every mounted reader re-reads its key every 5 s while the tab is visible,
-// through the same invalidation broadcast a write uses, so server-side change
-// reaches the screen with no reload. StrictMode mounts and remounts components,
-// but the tab owns this timer, not React: no cleanup, it lives for the life of
-// the page. A hidden tab skips its ticks and refreshes once, immediately, when
-// it becomes visible again instead of waiting for the next one.
-// A tick skips keys with a request already in flight: a tick that dropped one
-// would starve the key once latency exceeds POLL_MS (the generation guard
-// drops the older answer), so the poll adapts to latency instead. Write
-// invalidations are NOT filtered — they must still supersede racing reads.
+// through the same broadcast a write uses; ticks skip keys already in flight.
 const POLL_MS = 5_000;
 
 function pollTick() {

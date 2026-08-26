@@ -2,7 +2,7 @@ import { Button, type ButtonSize } from '@/components/primitives';
 import { CopyIcon, CheckIcon } from '@/icons';
 import { useCopyToClipboard } from '@/lib/useCopyToClipboard';
 
-export interface CopyButtonProps {
+interface CopyButtonProps {
   text: string;
   size?: ButtonSize;
   className?: string;
@@ -13,7 +13,7 @@ export interface CopyButtonProps {
   onCopied?: () => void;
 }
 
-/** Copy → Copied! for 2s → revert. Every copy affordance in the product goes through this one component. */
+/** Copy -> Copied! for 2s -> revert; every copy affordance goes through this. */
 export function CopyButton({ text, size = 'sm', className, label = 'Copy', onCopied }: CopyButtonProps) {
   const [copied, copy] = useCopyToClipboard();
 

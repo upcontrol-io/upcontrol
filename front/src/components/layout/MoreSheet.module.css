@@ -7,9 +7,8 @@
   background: rgba(0, 0, 0, 0.45);
 }
 
-/* Glass, like the bar that opens it: the sheet rises from the tab bar, so a
-   flat opaque panel arriving over a glass one would break the illusion at
-   the exact moment the two touch. */
+/* Glass, like the bar that opens it: an opaque panel arriving over a glass
+   one would break the illusion where they touch. */
 .sheet {
   position: fixed;
   inset: auto 0 0 0;

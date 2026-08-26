@@ -1,10 +1,7 @@
-// Client-side scrubbing (cli/SPEC.md §6): runs BEFORE the wire, replaces each
-// secret with a typed marker `[redacted:type:len]`. A hand-written scanner, not
-// regexes: pathological input (a 2 MB stack-dump line) is normal in logs, and
-// backtracking there is catastrophic. The server scrubs again - two independent
-// layers, this one is the primary.
+// Scrubs secrets into typed markers before the wire; hand-written because regex backtracking
+// is catastrophic on multi-MB log lines. The server scrubs again as a second layer.
 
-export interface ScrubResult {
+interface ScrubResult {
   cleaned: string;
   counts: Record<string, number>;
 }
@@ -233,9 +230,8 @@ function scanCookies(s: string, hits: Hit[]): void {
   }
 }
 
-// Card numbers: 13-19 digits, optionally separated by single spaces or dashes,
-// passing Luhn. The digit-run scan tolerates separators but requires uniform
-// grouping so timestamps and IDs do not false-positive.
+// Card numbers: 13-19 digits with uniform separator grouping, passing Luhn,
+// so timestamps and IDs do not false-positive.
 function scanCards(s: string, hits: Hit[]): void {
   let i = 0;
   const n = s.length;
@@ -273,9 +269,8 @@ function scanCards(s: string, hits: Hit[]): void {
   }
 }
 
-// An `@` inside a URL authority (scheme://user:pass@host) is userinfo, not an
-// email - the db-password scanner owns that span and mislabeling it as email
-// would also swallow the host, which the line needs to stay diagnosable.
+// An `@` inside a URL authority is userinfo, not an email: the db-password
+// scanner owns that span, and mislabeling it would swallow the host too.
 function isUrlUserinfo(s: string, start: number): boolean {
   for (let j = start - 1; j >= 0 && start - j <= 80; j--) {
     const c = s.charCodeAt(j);

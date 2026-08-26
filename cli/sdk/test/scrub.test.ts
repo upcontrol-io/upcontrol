@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { scrub } from '../dist/esm/scrub.js';
 
-// Every §6.1 vector: the secret is replaced by a typed marker and counted.
-// A regression here is a security incident, not a bug (cli/SPEC.md §6.3).
+// Every scrub vector: the secret is replaced by a typed marker and counted.
+// A regression here is a security incident, not a bug.
 
 function expectRedacted(input: string, type: string, mustKeep: string[] = []) {
   const r = scrub(input);

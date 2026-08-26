@@ -7,11 +7,8 @@ import (
 	"testing"
 )
 
-// fakeStore models the atomic Postgres UPDATE. Each LeaseSeqBlock call takes the
-// mutex, reads `next`, advances it by blockSize, and returns the old value —
-// exactly what `UPDATE project_seq SET next = next + N RETURNING next - N` does
-// under Postgres' row lock. Two allocators sharing one store therefore see
-// disjoint blocks, the guarantee the real two-ucapi deployment relies on.
+// fakeStore models the atomic Postgres UPDATE: each LeaseSeqBlock advances
+// `next` by blockSize under the mutex; two allocators see disjoint blocks.
 type fakeStore struct {
 	mu   sync.Mutex
 	next int64
@@ -42,9 +39,6 @@ func TestAllocatorSequential(t *testing.T) {
 			t.Fatalf("seq[%d] = %d, want %d", i, v, i)
 		}
 	}
-	if a.Remaining() != 50 {
-		t.Errorf("Remaining = %d, want 50 (250 used of 300 leased)", a.Remaining())
-	}
 }
 
 func TestAllocatorLeasesAtBoundary(t *testing.T) {
@@ -55,11 +49,8 @@ func TestAllocatorLeasesAtBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 10 used: the first block [0,10) is exhausted, Remaining must be 0 before
-	// the next call leases again.
-	if a.Remaining() != 0 {
-		t.Errorf("Remaining = %d, want 0 at block boundary", a.Remaining())
-	}
+	// 10 used: the first block [0,10) is exhausted, so the next call must
+	// lease a fresh block and hand out 10.
 	v, err := a.Next(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +67,8 @@ func TestAllocatorLeasesAtBoundary(t *testing.T) {
 	}
 }
 
-// TestTwoInstancesNoOverlap is the §3.6 gate: two allocator instances (two
-// ucapi processes) sharing one project_seq must NEVER hand out the same seq.
+// Two allocator instances (two ucapi processes) sharing one project_seq must
+// NEVER hand out the same seq.
 func TestTwoInstancesNoOverlap(t *testing.T) {
 	const blockSize = 1000
 	const perInstance = 5000

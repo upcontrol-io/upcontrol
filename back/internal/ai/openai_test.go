@@ -14,8 +14,7 @@ import (
 )
 
 // testScenario is a local value everywhere: ExplainLogs is mutable shared
-// state and must not leak between tests, and the client must read every cap
-// from the scenario it is handed, not from the registry.
+// state and must not leak between tests.
 func testScenario(maxOutputBytes int) Scenario {
 	return Scenario{
 		Key:             "openai_test",
@@ -51,25 +50,22 @@ func sseHandler(t *testing.T, chunks []string, capture *map[string]any) http.Han
 	}
 }
 
-// newTestClient is the client every stream test drives: the scripted server,
-// the shared test key and model alias. Tests that vary a field (a trailing
-// slash on BaseURL, a timeout, an injected transport) build their own.
+// newTestClient is the client every stream test drives; tests that vary a
+// field build their own.
 func newTestClient(srv *httptest.Server) *OpenAIClient {
 	return testOpenAIAt(srv.URL)
 }
 
-// testOpenAIAt builds a client pointed at the given base with the shared
-// test key and model alias — for tests that vary the base URL spelling.
+// testOpenAIAt builds a client pointed at the given base, for tests that
+// vary the base URL spelling.
 func testOpenAIAt(base string) *OpenAIClient {
 	return &OpenAIClient{Settings: func(context.Context) OpenAISettings {
 		return OpenAISettings{BaseURL: base, Model: "gpt-test", Key: "sk-test"}
 	}}
 }
 
-// adaptServer 400s any request carrying the named parameter (with the given
-// provider message) and streams a good answer otherwise, recording every
-// decoded request body. Each test gets its own server URL, so the global
-// quirk memo (keyed by brain ID) never crosses tests.
+// adaptServer 400s any request carrying the named parameter and streams a
+// good answer otherwise; its own URL, so the quirk memo never crosses tests.
 func adaptServer(t *testing.T, rejectParam, message string, calls *int, bodies *[]map[string]any) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,10 +86,8 @@ func adaptServer(t *testing.T, rejectParam, message string, calls *int, bodies *
 	}))
 }
 
-// TestOpenAIClient_AdaptsToGatewayRejectingMaxCompletionTokens pins the
-// dialect adapter's older-gateway half: a 400 naming max_completion_tokens
-// as unrecognized gets ONE retry without it, max_tokens still carries the
-// cap, and the learned quirk spares the next call the extra round trip.
+// A 400 naming max_completion_tokens gets one retry without it; max_tokens
+// carries the cap, and the learned quirk spares the next call.
 func TestOpenAIClient_AdaptsToGatewayRejectingMaxCompletionTokens(t *testing.T) {
 	var calls int
 	var bodies []map[string]any
@@ -122,9 +116,8 @@ func TestOpenAIClient_AdaptsToGatewayRejectingMaxCompletionTokens(t *testing.T) 
 	}
 }
 
-// TestOpenAIClient_AdaptsToOpenAIRejectingMaxTokens pins the other half —
-// OpenAI's own newer models, whose refusal names BOTH spellings and must
-// drop max_tokens, not the replacement it points at.
+// OpenAI's own refusal names both spellings: the retry must drop max_tokens,
+// not the replacement it points at.
 func TestOpenAIClient_AdaptsToOpenAIRejectingMaxTokens(t *testing.T) {
 	var calls int
 	var bodies []map[string]any
@@ -147,11 +140,8 @@ func TestOpenAIClient_AdaptsToOpenAIRejectingMaxTokens(t *testing.T) {
 	}
 }
 
-// The mirror of the temperature quirk: a scenario names an effort, and a model
-// that does no reasoning refuses to be asked for one. Seen live on gpt-4o-mini
-// through api.openai.com — "Unrecognized request argument supplied:
-// reasoning_effort" — which nothing here caught, so the retry re-sent the same
-// argument and the reader got a 500 from a provider that was working perfectly.
+// A scenario names an effort and a non-reasoning model refuses it: one retry
+// without reasoning_effort.
 func TestOpenAIClient_AdaptsToModelRejectingReasoningEffort(t *testing.T) {
 	var calls int
 	var bodies []map[string]any
@@ -178,18 +168,12 @@ func TestOpenAIClient_AdaptsToModelRejectingReasoningEffort(t *testing.T) {
 	}
 }
 
-// streamAnswer is the strict-shape payload every happy-path stream carries.
-// The client only assembles bytes, so tests may split or repeat it freely.
-// Deliberately a different name from the integration suite's validAnswer —
-// both consts compile into this package under -tags=integration.
+// streamAnswer is the strict-shape payload every happy-path stream carries;
+// tests may split or repeat it freely.
 const streamAnswer = `{"problem":"p","cause":"c","confidence":"high","fix":null,"investigate":[]}`
 
-// TestOpenAIClient_StreamAssemblesAnswerAndUsage drives the client against an
-// httptest SSE server: content chunks (one terminated with the CRLF a
-// compliant server sends, one carrying an explicit usage:null so a per-chunk
-// null is never mistaken for the final usage), then the usage chunk, then
-// [DONE]. It asserts the assembled JSON, the captured usage numbers and the
-// request body the scenario dictated.
+// Drives the client against a scripted SSE server and asserts the assembled
+// JSON, the usage numbers and the request body the scenario dictated.
 func TestOpenAIClient_StreamAssemblesAnswerAndUsage(t *testing.T) {
 	answer := streamAnswer
 	half := len(answer) / 2
@@ -253,9 +237,8 @@ func TestOpenAIClient_StreamAssemblesAnswerAndUsage(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_AbortsPastByteCap streams more content than the scenario's
-// MaxOutputBytes and asserts the call fails instead of draining the stream
-// (Decision 13) — nothing assembled is returned to be charged for.
+// Streams more than MaxOutputBytes and asserts the call fails instead of
+// draining; nothing assembled is returned to be charged for.
 func TestOpenAIClient_AbortsPastByteCap(t *testing.T) {
 	big := strings.Repeat(streamAnswer, 128) // ≥ 6000 bytes for the two slices below
 	srv := httptest.NewServer(sseHandler(t, []string{
@@ -280,9 +263,8 @@ func TestOpenAIClient_AbortsPastByteCap(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_Non2xxCarriesStatusAndBody pins the operator-facing error
-// shape: status plus the first bytes of the provider's own body, so a
-// misconfigured gateway says so instead of degrading into a parse error.
+// The error carries the status plus the first bytes of the provider's own
+// body, so a misconfigured gateway says so.
 func TestOpenAIClient_Non2xxCarriesStatusAndBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"bad key"}}`, http.StatusUnauthorized)
@@ -299,9 +281,8 @@ func TestOpenAIClient_Non2xxCarriesStatusAndBody(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_ProviderErrorChunkFailsCall pins that an error object
-// pushed mid-stream (quota, content filter) fails the call with the
-// provider's own message instead of degrading into "no content".
+// An error object pushed mid-stream fails the call with the provider's own
+// message, not "no content".
 func TestOpenAIClient_ProviderErrorChunkFailsCall(t *testing.T) {
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n",
@@ -320,11 +301,8 @@ func TestOpenAIClient_ProviderErrorChunkFailsCall(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_FinishReasonLengthIsError pins that a stream cut at
-// max_tokens (finish_reason "length") is an error, not a truncated answer
-// charged as a whole one — and that the spend travels out with the error:
-// the stream is drained past the failure to the usage chunk, because the
-// provider was paid for the truncated call either way.
+// finish_reason "length" is an error, not a truncated answer; the spend
+// travels out with it.
 func TestOpenAIClient_FinishReasonLengthIsError(t *testing.T) {
 	answer := `{"problem":"p","cause":"c"`
 	srv := httptest.NewServer(sseHandler(t, []string{
@@ -353,10 +331,8 @@ func TestOpenAIClient_FinishReasonLengthIsError(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_AbsentUsageRecordsUnknownTokens pins the -1 sentinel: a
-// stream that never carries usage must record unknown tokens, never a false
-// zero that reads as a free call. The model falls back to the configured
-// name when the stream carries none.
+// A stream with no usage chunk records the -1 sentinel, never a false zero;
+// the model falls back to the configured name.
 func TestOpenAIClient_AbsentUsageRecordsUnknownTokens(t *testing.T) {
 	answer := streamAnswer
 	srv := httptest.NewServer(sseHandler(t, []string{
@@ -378,14 +354,8 @@ func TestOpenAIClient_AbsentUsageRecordsUnknownTokens(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_InjectedClientStillTimesOut pins that the timeout rides
-// the request context: an injected HTTP client (which never sees the
-// http.Client.Timeout field) must still be cut off at c.Timeout. The handler
-// parks on a channel the test closes the moment Complete is back, so it
-// costs the 50ms deadline, not a fixed sleep. (Parking on r.Context().Done()
-// instead does not work on this stack: the server-side request context is
-// never cancelled when the client aborts, and srv.Close() then waits on the
-// parked handler forever.)
+// The timeout rides the request context: an injected HTTP client is still
+// cut at c.Timeout. Parking on r.Context().Done() would hang srv.Close().
 func TestOpenAIClient_InjectedClientStillTimesOut(t *testing.T) {
 	released := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -395,7 +365,7 @@ func TestOpenAIClient_InjectedClientStillTimesOut(t *testing.T) {
 
 	c := newTestClient(srv)
 	c.Timeout = 50 * time.Millisecond
-	c.HTTPClient = &http.Client{} // no Timeout of its own — the context must bind
+	c.httpClient = &http.Client{} // no Timeout of its own; the context must bind
 	_, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
 	close(released)
 	if err == nil {
@@ -406,9 +376,8 @@ func TestOpenAIClient_InjectedClientStillTimesOut(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_SkipsMalformedChunk pins that one unparseable data line
-// in an otherwise healthy stream is skipped, not fatal: the answer still
-// assembles from the chunks around it.
+// One unparseable data line in an otherwise healthy stream is skipped, not
+// fatal.
 func TestOpenAIClient_SkipsMalformedChunk(t *testing.T) {
 	answer := streamAnswer
 	half := len(answer) / 2
@@ -434,9 +403,8 @@ func TestOpenAIClient_SkipsMalformedChunk(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_ErrorChunkFallsBackToTypeAndCode pins the error-chunk
-// fallbacks: no message means type + code, and neither means an explicit
-// sentence — the returned error must never be a dangling colon.
+// No message means type + code, neither means an explicit sentence; the
+// error must never be a dangling colon.
 func TestOpenAIClient_ErrorChunkFallsBackToTypeAndCode(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -464,9 +432,7 @@ func TestOpenAIClient_ErrorChunkFallsBackToTypeAndCode(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_OtherFinishReasonsFailTheSameWay pins the whole promise,
-// not just "length": any finish reason other than "stop" (content_filter,
-// tool_calls, whatever a gateway invents) is an error, never an answer.
+// Any finish reason other than "stop" is an error, never an answer.
 func TestOpenAIClient_OtherFinishReasonsFailTheSameWay(t *testing.T) {
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, `{"problem":"p"`) + "},\"finish_reason\":\"content_filter\"}]}\n\n",
@@ -483,10 +449,8 @@ func TestOpenAIClient_OtherFinishReasonsFailTheSameWay(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_StreamedModelLastChunkWins pins the last-wins rule: the
-// final chunk's model field (the usage chunk, which the provider sends when
-// the completion is settled) is the authoritative name for the ledger, not
-// the first delta's.
+// The final chunk's model field is the authoritative name for the ledger,
+// not the first delta's.
 func TestOpenAIClient_StreamedModelLastChunkWins(t *testing.T) {
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"model\":\"gpt-first\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer) + "},\"finish_reason\":\"stop\"}]}\n\n",
@@ -504,9 +468,8 @@ func TestOpenAIClient_StreamedModelLastChunkWins(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_BoundsStreamedModelName pins the cap on the streamed
-// name: it lands in ai_call.model, an unbounded column, on a
-// provider-controlled stream — and it must stay valid UTF-8 after the cut.
+// The streamed name lands in an unbounded column; it stays capped and valid
+// UTF-8 after the cut.
 func TestOpenAIClient_BoundsStreamedModelName(t *testing.T) {
 	long := strings.Repeat("é", 200) // multibyte: the cut must not split a rune
 	srv := httptest.NewServer(sseHandler(t, []string{
@@ -527,11 +490,8 @@ func TestOpenAIClient_BoundsStreamedModelName(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_GarbageOnlyStreamNamesTheChunks pins the operator-facing
-// error for a stream that carries nothing parseable: the count and the first
-// malformed line travel with it. The string-shaped error object several
-// gateways emit (it does not fit the chat error shape) is exactly this case
-// — its reason must surface, not drown in a generic "no content".
+// A stream with nothing parseable names the count and the first malformed
+// line; the string-shaped error object is exactly this case.
 func TestOpenAIClient_GarbageOnlyStreamNamesTheChunks(t *testing.T) {
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"error\":\"rate limited by upstream\"}\n\n",
@@ -550,9 +510,8 @@ func TestOpenAIClient_GarbageOnlyStreamNamesTheChunks(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_ConsecutiveGarbageEndsTheStream pins the bound: a run of
-// unparseable lines fails the call instead of reading and logging one warn
-// per line until the deadline.
+// A run of unparseable lines fails the call instead of logging until the
+// deadline.
 func TestOpenAIClient_ConsecutiveGarbageEndsTheStream(t *testing.T) {
 	chunks := make([]string, 40)
 	for i := range chunks {
@@ -570,11 +529,8 @@ func TestOpenAIClient_ConsecutiveGarbageEndsTheStream(t *testing.T) {
 	}
 }
 
-// TestOpenAIClient_TotalGarbageEndsTheStream pins the total bound: a gateway
-// alternating one valid-but-empty chunk with one garbage line never trips the
-// consecutive cap (every garbage run resets on the chunk between) and
-// assembles no content (so the byte cap cannot trip) — the total is the only
-// honest stop short of the deadline.
+// Alternating valid-but-empty and garbage chunks never trips the run cap; the
+// total bound is the only honest stop short of the deadline.
 func TestOpenAIClient_TotalGarbageEndsTheStream(t *testing.T) {
 	chunks := make([]string, 0, 160)
 	for i := 0; i < 80; i++ {

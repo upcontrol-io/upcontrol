@@ -1,6 +1,5 @@
-// ingest-batch idempotency — implements ingest.Idempotency over ingest_batch so
-// a replay of the same body returns the first accept's count and never
-// double-writes (plan §3.8).
+// ingest-batch idempotency: implements ingest.Idempotency over ingest_batch
+// so a replay of the same body returns the first accept's count, never double-writes.
 
 package pg
 

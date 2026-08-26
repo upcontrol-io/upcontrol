@@ -1,17 +1,5 @@
-// The installer's three endpoints (docs/plans/one-command-install.md, built on
-// cli/SPEC.md §7.1/§7.3/§8):
-//
-//   POST /v1/projects/anonymous — mint a tenant+project+key with no person
-//     attached ("use before signup"). The response carries the key ONCE plus a
-//     one-time claim token; the CLI writes the key to .env itself, so the key
-//     never crosses an agent's context.
-//   POST /v1/claim — a signed-in person presents the claim token and becomes a
-//     member of the anonymous tenant. One-time; never changes the key.
-//   GET /v1/install/status — key-authenticated read the CLI's `verify` polls:
-//     has install_verified arrived, how many lines, what names are arriving.
-//   PUT /v1/project/meta — key-authenticated spec upload from the installer
-//     (ai-provider plan, Decision 15b): five whitelisted fields, capped and
-//     scrubbed, stored as Explain context.
+// The installer's endpoints: anonymous project mint, claim, install status
+// poll, install token mint/redeem and the key-authed project-spec upload.
 
 package api
 
@@ -36,29 +24,28 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// anonCooldown throttles the anonymous mint per IP. In-memory and therefore
-// per-replica (same documented trade-off as write_api's allowOnce): two
-// replicas mean at worst two mints per IP per window, bounded either way.
+// anonCooldown throttles the anonymous mint per IP, in-memory and therefore
+// per-replica: two replicas mean at worst two mints per IP per window.
 const anonCooldown = 30 * time.Second
 
-// Install carries the three handlers' dependencies.
-type Install struct {
+// install carries the three handlers' dependencies.
+type install struct {
 	pool         *pg.Pool
 	chc          *ch.Conn
 	keys         *pg.KeyResolver
 	sess         *session.Manager
 	publicOrigin string
 
-	// selfHosted (UC_SELF_HOSTED=1): the anonymous mint answers 404 —
-	// a self-host has no use-before-signup story (Decision 22).
+	// selfHosted (UC_SELF_HOSTED=1): the anonymous mint answers 404; a
+	// self-host has no use-before-signup story.
 	selfHosted bool
 
 	mu   sync.Mutex
 	last map[string]time.Time
 }
 
-func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin string, selfHosted bool) *Install {
-	return &Install{
+func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin string, selfHosted bool) *install {
+	return &install{
 		pool:         pool,
 		chc:          chc,
 		keys:         pg.NewKeyResolver(pool, nil),
@@ -69,13 +56,11 @@ func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin s
 	}
 }
 
-func (h *Install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/projects/anonymous" && r.Method == http.MethodPost:
-		// Decision 22 (public-first-split): a self-host has no use-before-signup
-		// story, and an anonymous tenant there is an invisible orphan — a bare
-		// `npx upcontrol init` would pour logs into an account no one can see.
-		// 404: the door does not exist on this install.
+		// A self-host has no use-before-signup story: an anonymous tenant there
+		// is an invisible orphan. 404: the door does not exist on this install.
 		if h.selfHosted {
 			writeAPIErr(w, http.StatusNotFound, "not_found")
 			return
@@ -97,15 +82,12 @@ func (h *Install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // installTokenTTL: the token only has to survive a copy from browser to
-// terminal. Long enough for a coffee, short enough that a leaked screenshot
-// goes stale before it travels.
+// terminal; a leaked screenshot goes stale before it travels.
 const installTokenTTL = 10 * time.Minute
 
-// issueToken is POST /v1/install/token (session-authed): mints the one-time
-// token the dashboard's install card embeds in `npx upcontrol init --token …`.
-// The dashboard NEVER shows a bare `npx upcontrol` — run signed-out it would
-// mint an anonymous project and route this account's logs past it (plan §2.1).
-func (h *Install) issueToken(w http.ResponseWriter, r *http.Request) {
+// issueToken mints the one-time token for `npx upcontrol init --token`. A
+// bare signed-out init would mint an anonymous project and bypass this account.
+func (h *install) issueToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
@@ -134,11 +116,8 @@ func (h *Install) issueToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// installCommand builds the copy-paste line the dashboard's install card
-// shows. Off the hosted cloud the CLI's default endpoint is the wrong
-// machine: without --endpoint a self-host's token travels to upcontrol.io
-// and dies as "already used or expired" (cold-install rehearsal) — the
-// command must carry the origin it was minted on.
+// installCommand builds the copy-paste init line. Off the hosted cloud the
+// CLI's default endpoint is the wrong machine: carry the minting origin.
 func installCommand(token, publicOrigin string) string {
 	cmd := "npx upcontrol init --token " + token
 	if publicOrigin != "" && publicOrigin != "https://upcontrol.io" {
@@ -151,12 +130,9 @@ type redeemReq struct {
 	Token string `json:"token"`
 }
 
-// redeem is POST /v1/install/redeem (no session — the CLI calls it from the
-// terminal): burns the token and issues an ADDITIONAL api_key for the
-// project, returning the secret exactly once. Not a rotation — nothing
-// already deployed breaks. Single-use is enforced by the atomic UPDATE, so a
-// replayed token gets the same 404 as a wrong one (no oracle).
-func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
+// redeem burns the token and issues an ADDITIONAL api_key, once. Not a
+// rotation: the atomic UPDATE makes a replay answer the same 404 (no oracle).
+func (h *install) redeem(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !h.allow("redeem:" + installClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
@@ -176,7 +152,7 @@ func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusNotFound, "invalid_token")
 		return
 	}
-	key, err := IssueKey(ctx, h.pool, tenantID, projectID)
+	key, err := issueKey(ctx, h.pool, tenantID, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -184,10 +160,9 @@ func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, http.StatusOK, map[string]any{"key": key})
 }
 
-// allow throttles by (bucket:ip) key — mint and redeem are separate buckets on
-// purpose (the "two anonymous endpoints, two throttle buckets" lesson: a
-// cooldown that refuses the second half of one flow is not a safeguard).
-func (h *Install) allow(ip string) bool {
+// allow throttles by (bucket:ip) key. Mint and redeem are separate buckets:
+// a cooldown that refuses the second half of one flow is not a safeguard.
+func (h *install) allow(ip string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
@@ -214,14 +189,14 @@ type anonymousReq struct {
 	Arch         string `json:"arch"`
 }
 
-func (h *Install) anonymous(w http.ResponseWriter, r *http.Request) {
+func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !h.allow("mint:" + installClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	// The body carries versions only (SPEC §7.1: no email, no hostname, no
-	// paths). It is optional and never trusted for anything but a log line.
+	// The body carries versions only (no email, no hostname, no paths), and
+	// is never trusted for anything but a log line.
 	var req anonymousReq
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
 
@@ -250,7 +225,7 @@ func (h *Install) anonymous(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = raw.Exec(ctx,
 		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID)
-	key, err := IssueKey(ctx, h.pool, tenantID, projectID)
+	key, err := issueKey(ctx, h.pool, tenantID, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -268,7 +243,7 @@ type claimReq struct {
 	ClaimToken string `json:"claimToken"`
 }
 
-func (h *Install) claim(w http.ResponseWriter, r *http.Request) {
+func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
@@ -301,8 +276,7 @@ func (h *Install) claim(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestKey reads the project key from either header the CLI may send
-// (X-Upcontrol-Key first, then an Authorization bearer) — the same extraction
-// POST /i accepts.
+// (X-Upcontrol-Key first, then Authorization bearer), as POST /i accepts.
 func requestKey(r *http.Request) string {
 	key := r.Header.Get("X-Upcontrol-Key")
 	if key == "" {
@@ -313,7 +287,7 @@ func requestKey(r *http.Request) string {
 	return key
 }
 
-func (h *Install) status(w http.ResponseWriter, r *http.Request) {
+func (h *install) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := requestKey(r)
 	if key == "" {
@@ -377,31 +351,16 @@ func (h *Install) status(w http.ResponseWriter, r *http.Request) {
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 
-// The five fields the installer may send (contract: ProjectMeta schema).
-// Anything else in the body is dropped, not rejected — the spec is
-// deliberately this narrow (Decision 15b: never versions, paths, git remotes,
-// env values or code).
+// The five fields the installer may send; anything else is dropped. Never
+// versions, paths, git remotes, env values or code.
 var metaFields = [5]string{"name", "description", "framework", "runtime", "language"}
 
-// metaMaxRunes caps one spec value, counted in runes on the value AS SENT,
-// before the scrubber runs. That ordering is deliberate: the scrubber
-// EXPANDS (jo@ex.com, 9 runes, becomes [redacted:email:9], 18), so capping
-// after it rejected values that were inside the published cap — a compliant
-// client got a 400 it could neither act on nor explain. 200 is the number
-// ProjectMeta's schema publishes and the only one a caller can honour, so it
-// is the number enforced; redaction may push the stored value past it, still
-// bounded because every marker replaces text it is derived from. Over-cap is
-// a 400 naming the field, never a silent cut (the no-silent-truncation rule).
+// metaMaxRunes caps one value in runes AS SENT, before the scrubber (which
+// expands). Over-cap is a 400 naming the field, never a silent cut.
 const metaMaxRunes = 200
 
-// metaNewlines flattens every line break a spec value can carry: \n, \r and
-// the Unicode line/paragraph separators U+2028/U+2029, which reach the
-// provider as line breaks even though they are not ASCII newlines. The
-// escapes are the code points, NOT the digit strings "2028"/"2029" — spelt
-// as literals this silently deleted the year out of any project described as
-// "Roadmap 2028". The fence tags themselves are neutralized at render time
-// (ai.UserMessage), so this strip keeps a stored value one line — it is not
-// the injection boundary (Decision 9's store-time half).
+// metaNewlines flattens \n, \r and U+2028/U+2029, which reach the provider
+// as line breaks. Fence tags are neutralized at render time (ai.UserMessage).
 var metaNewlines = strings.NewReplacer(
 	"\n", "", "\r", "",
 	"\u2028", "", "\u2029", "",
@@ -414,20 +373,8 @@ type metaError struct {
 	message string
 }
 
-// metaPayload turns a PUT /v1/project/meta body into the stored project.meta
-// JSON: only the whitelisted fields survive, each value is capped as sent,
-// then scrubbed and flattened to one line (the spec is customer-authored text
-// headed for prompts, so it is scrubbed before storage, never on read).
-//
-// PUT replaces the whole spec — an omitted field is dropped exactly as
-// thoroughly as an explicit null would be, which is what PUT means and what
-// the installer sends (the complete spec, every run). So the null check below
-// is NOT wipe-prevention, and must not be justified as such: it is a type
-// check. JSON null decodes into a string as "" with no error, and accepting
-// it would record `"name": ""` — a claim that the project is named the empty
-// string, which differs from "this spec carries no name".
-//
-// Pure so the privacy contract is testable without Postgres.
+// metaPayload whitelists, caps and scrubs the spec into stored project.meta
+// JSON. The null check below is a type check: null must not become `""`.
 func metaPayload(body []byte, now time.Time) ([]byte, *metaError) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
@@ -439,9 +386,8 @@ func metaPayload(body []byte, now time.Time) ([]byte, *metaError) {
 		if !ok {
 			continue
 		}
-		// A *string separates "absent/null" from "a string" using the decoder
-		// itself: unmarshalling null into *string yields nil without error,
-		// so no raw-bytes literal check is needed beside a working decoder.
+		// A *string separates "absent/null" from "a string" via the decoder:
+		// null into *string yields nil without error.
 		var s *string
 		if err := json.Unmarshal(v, &s); err != nil || s == nil {
 			return nil, &metaError{code: "bad_body", message: f + " must be a string"}
@@ -458,10 +404,9 @@ func metaPayload(body []byte, now time.Time) ([]byte, *metaError) {
 	return b, nil
 }
 
-// setMeta is PUT /v1/project/meta: the installer's project-spec upload
-// (Decision 15b). Key-authenticated exactly like install status; nothing is
-// stored before the whitelist, cap and scrubber have all passed.
-func (h *Install) setMeta(w http.ResponseWriter, r *http.Request) {
+// setMeta is PUT /v1/project/meta, key-authenticated like install status;
+// nothing is stored before the whitelist, cap and scrubber have all passed.
+func (h *install) setMeta(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := requestKey(r)
 	if key == "" {

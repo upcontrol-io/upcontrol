@@ -1,14 +1,7 @@
 //go:build integration
 
-// The orphaned-incident contract (owner decision, 2026-08-24): deleting a
-// check may not leave its open incident behind. incident.monitor_id is
-// ON DELETE SET NULL, so the incident row survives the monitor with nothing
-// left to close it — the delete handler must close it while the monitor id
-// still resolves, the timeline must say what ended it ("Monitor deleted", not
-// "Closed: monitor_deleted"), and the public page stops listing a chronicle
-// about a component the reader can no longer see.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/api/...
+// Deleting a check may not orphan its open incident: the handler closes it
+// while the id still resolves. Run with -tags=integration, UC_TEST_POSTGRES set.
 package api
 
 import (
@@ -28,9 +21,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// orphanFixture is one account in the state the delete path has to tidy up: a
-// login-role member, a website monitor, and an open availability incident on
-// that monitor.
+// orphanFixture: one account with a login member, a website monitor, and an
+// open availability incident on that monitor.
 type orphanFixture struct {
 	pool          *pg.Pool
 	projectID     int64
@@ -111,9 +103,8 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 	}
 }
 
-// deleteMonitor drives the same route the account app uses, session cookie and
-// all — the point is proving the handler tidies up, not replaying its steps by
-// hand in the order the handler is supposed to do them.
+// deleteMonitor drives the real route with the session cookie: proving the
+// handler tidies up, not replaying its steps by hand.
 func (f *orphanFixture) deleteMonitor(t *testing.T) {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodDelete, "/v1/monitors/"+f.monitorPubID, nil)
@@ -125,14 +116,13 @@ func (f *orphanFixture) deleteMonitor(t *testing.T) {
 	}
 }
 
-// publicIncidentTitles reads the public page through its route. prj-N is the
-// address an account that never configured its page resolves by, so the
-// fixture needs no status_page row.
+// publicIncidentTitles reads the public page through its route; prj-N needs
+// no status_page row.
 func (f *orphanFixture) publicIncidentTitles(t *testing.T) []string {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/public/status/prj-%d", f.projectID), nil)
 	w := httptest.NewRecorder()
-	(&WriteAPI{pool: f.pool}).public(w, r)
+	(&writeAPI{pool: f.pool}).public(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /public/status/prj-%d = %d (%s), want 200", f.projectID, w.Code, w.Body.String())
 	}
@@ -157,10 +147,8 @@ func TestDeletingAMonitorClosesItsOpenIncident(t *testing.T) {
 
 	ctx := context.Background()
 	var status string
-	// close_reason is NULL on an incident nobody closed, which is the very
-	// regression this test catches — scanning it into a plain string turns that
-	// failure into "cannot scan NULL", a message about pgx rather than about the
-	// bug.
+	// close_reason is NULL on an incident nobody closed: scan a *string or the
+	// failure reads as a pgx message, not the bug.
 	var closeReason *string
 	var resolved bool
 	if err := f.pool.Raw().QueryRow(ctx,
@@ -196,9 +184,8 @@ func TestDeletingAMonitorClosesItsOpenIncident(t *testing.T) {
 
 func TestADeletedMonitorsIncidentLeavesTheStatusPage(t *testing.T) {
 	f := newOrphanFixture(t)
-	// Listed before the delete, or the absence below proves nothing: a page
-	// that never showed the incident and a page that stopped showing it look
-	// the same.
+	// Listed before the delete, or the absence below proves nothing: never
+	// shown and stopped showing look the same.
 	if !slices.Contains(f.publicIncidentTitles(t), f.incidentTitle) {
 		t.Fatalf("the open incident is not on the public page before the delete; fixture is broken")
 	}

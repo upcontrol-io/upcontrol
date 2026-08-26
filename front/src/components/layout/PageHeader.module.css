@@ -48,9 +48,8 @@
   overflow-wrap: anywhere;
 }
 
-/* A reading measure, so one sentence does not run the whole width of a wide
-   screen. In rem, never `ch` — the house rule, because `ch` is the width of
-   "0" and about 1.5x Geist's average character. */
+/* A reading measure, so one sentence does not run a wide screen; rem, never
+   `ch` (ch is the width of "0", ~1.5x the average character). */
 .description {
   max-width: var(--doc-measure-sm);
   font-size: var(--text-sm);

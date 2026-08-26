@@ -1,27 +1,8 @@
-// Package webhook handles inbound webhooks (plan §7.1) on two routes that
-// share one mount, POST /hooks/{segment}:
-//
-//   - A segment naming a known provider (stripe, github, vercel) is the legacy
-//     globally-secreted route: HMAC-verified against one env secret per
-//     provider, written as tenant 0. Kept so nothing configured before the
-//     token era breaks; deprecated, not a second product.
-//   - Any other segment is a per-connection hook token (universal hooks,
-//     Aug 14, 2026 — docs/plans/universal-hooks.md): the token resolves a
-//     source_connection, so the event is attributed to its tenant and project
-//     and the connection's last_signal_at is finally written by the thing it
-//     describes. The token in the URL is the credential (128 bits, revoked by
-//     disconnecting) — no HMAC gate, which is exactly what lets any provider
-//     that can POST JSON use the endpoint. Signing providers are still
-//     recognised by their headers for parsing, just not gated on it.
-//
-// Both routes deduplicate via webhook_seen (idempotent on (scope, event_id))
-// and write the event to ClickHouse's events table for the correlation
-// detectors. They are intentionally lenient on shape — the plan says "always
-// 2xx on sane input" — but the legacy route stays strict on signature.
+// Package webhook handles POST /hooks/{segment}: provider segments take the
+// legacy HMAC route (tenant 0); any other segment is a per-connection token.
 package webhook
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -46,14 +27,12 @@ type Handler struct {
 	secrets map[string][]byte // provider → secret (HMAC key)
 }
 
-// New builds the handler.
 func New(pool *pg.Pool, chConn *ch.Conn, secrets map[string][]byte) *Handler {
 	return &Handler{pool: pool, ch: chConn, secrets: secrets}
 }
 
-// knownProviders are the legacy globally-secreted routes. Any other path
-// segment is treated as a per-connection hook token — a token can therefore
-// never collide with a provider name, because tokens are hex and these are not.
+// knownProviders are the legacy globally-secreted routes; any other segment is
+// a hook token; tokens are hex, so no collision with a provider name.
 var knownProviders = map[string]bool{"stripe": true, "github": true, "vercel": true}
 
 // ServeHTTP is POST /hooks/{segment} — a provider name or a hook token.
@@ -82,7 +61,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveLegacy is the pre-token route: one global secret per provider, events
-// written as tenant 0 (docs/backend-gaps.md). Nothing new should point here.
+// written as tenant 0. Nothing new should point here.
 func (h *Handler) serveLegacy(w http.ResponseWriter, r *http.Request, provider string, body []byte) {
 	// Verify the signature. The provider-specific verify function knows the
 	// header name and algorithm.
@@ -144,8 +123,6 @@ func (h *Handler) serveLegacy(w http.ResponseWriter, r *http.Request, provider s
 	w.WriteHeader(http.StatusOK)
 }
 
-// --- the token route (universal hooks) ---
-
 // connection is what a hook token resolves to — everything attribution needs.
 type connection struct {
 	ID        int64
@@ -179,16 +156,13 @@ func (h *Handler) serveToken(w http.ResponseWriter, r *http.Request, token strin
 	}
 	if conn.Paused {
 		// 200, and nothing recorded: a 4xx would make a well-behaved provider
-		// retry a feed the owner switched off, and a paused connection must
-		// not keep collecting signals (or "paused" quietly means "hidden").
+		// retry a feed the owner switched off.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	// A signing provider is recognised by its headers so its events keep their
-	// normalized names (github_push, vercel_deployment_created, payment_*);
-	// everything else parses generically. Neither is gated on a signature —
-	// the token is the credential here.
+	// normalized names; everything else parses generically, token = credential.
 	provider := detectProvider(r.Header)
 	evt, raw, err := parseEventRaw(provider, body)
 	if err != nil {
@@ -230,11 +204,8 @@ func (h *Handler) serveToken(w http.ResponseWriter, r *http.Request, token strin
 
 	_ = h.markSeen(r.Context(), scope, evt.EventID)
 
-	// The green dot on the Sources screen derives from last_signal_at, and
-	// this is its writer: the connection is "up" because something arrived,
-	// which is the only thing "up" may mean for a feed. last_event is the
-	// panel's receipt — it shows WHAT arrived, because the provider's own
-	// "send test webhook" button is the tester and the receipt is the proof.
+	// last_signal_at is the Sources screen's green dot: the connection is "up"
+	// because something arrived; last_event is the panel's receipt.
 	_, _ = h.pool.Raw().Exec(r.Context(),
 		`UPDATE source_connection SET last_signal_at = now(), status = 'ok', last_event = $2 WHERE id = $1`,
 		conn.ID, evt.Name)
@@ -256,10 +227,8 @@ func detectProvider(h http.Header) string {
 	return ""
 }
 
-// genericEventName finds a name for a payload no normalizer claimed: GitHub's
-// event header first (push events carry no `action` in the body), then the
-// fields half the webhook world uses, then the connection kind — an event
-// named after its feed still correlates by time, an "unknown" does not read.
+// genericEventName finds a name for a payload no normalizer claimed: the
+// GitHub event header, then common fields, then the connection kind.
 func genericEventName(h http.Header, raw map[string]any, kind string) string {
 	if ghEvent := h.Get("X-GitHub-Event"); ghEvent != "" {
 		return sanitizeEventName("github_" + ghEvent)
@@ -276,8 +245,7 @@ func genericEventName(h http.Header, raw map[string]any, kind string) string {
 }
 
 // genericEventID prefers the provider's own idempotency key (header or body),
-// falling back to a body hash so dedup works even for providers that never
-// heard of one. Identical retries collapse; distinct payloads never do.
+// falling back to a body hash: identical retries collapse, distinct ones don't.
 func genericEventID(h http.Header, raw map[string]any, body []byte) string {
 	if id := h.Get("X-GitHub-Delivery"); id != "" {
 		return id
@@ -320,8 +288,6 @@ func sanitizeEventName(s string) string {
 	}
 	return out
 }
-
-// --- signature verification ---
 
 func verifySignature(provider string, h http.Header, body []byte, secret []byte) bool {
 	switch provider {
@@ -373,8 +339,6 @@ func verifyStripe(sigHeader string, body, secret []byte) bool {
 	signedPayload := timestamp + "." + string(body)
 	return verifyHMACSHA256([]byte(signedPayload), secret, signature)
 }
-
-// --- event parsing ---
 
 type Event struct {
 	EventID     string
@@ -452,7 +416,7 @@ func parseEventName(provider string, raw map[string]any) string {
 }
 
 func normalizeStripeEvent(t string) string {
-	// Map Stripe's long event names to the 24-event dictionary (plan §4.3).
+	// Map Stripe's long event names to the 24-event dictionary.
 	switch {
 	case strings.Contains(t, "payment_intent.succeeded"):
 		return "payment_succeeded"
@@ -480,10 +444,8 @@ func parseLabels(_ string, raw map[string]any) map[string]string {
 }
 
 func parseEventTimestamp(provider string, raw map[string]any) time.Time {
-	// Correlating a deploy with an incident needs the time the PROVIDER says the
-	// event happened, not the moment we received it (clock skew + queueing lag
-	// would misplace the deploy marker). Fall back to now only if the field is
-	// absent or unparseable — never drop the event.
+	// Correlating a deploy with an incident needs the PROVIDER's time, not
+	// arrival time; fall back to now only if absent, never drop the event.
 	switch provider {
 	case "stripe":
 		if v, ok := raw["created"]; ok {
@@ -525,12 +487,7 @@ func parseEventTimestamp(provider string, raw map[string]any) time.Time {
 // toUnix coerces a JSON number (always float64 after encoding/json) into a unix
 // second count; 0 means "not a number".
 func toUnix(v any) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int64:
-		return n
-	case int:
+	if n, ok := v.(float64); ok {
 		return int64(n)
 	}
 	return 0
@@ -554,17 +511,13 @@ func parseStripeAmount(raw map[string]any) (int64, string, bool) {
 	return int64(amt), strings.ToUpper(curr), true
 }
 
-// --- dedup ---
-
 func (h *Handler) checkSeen(ctx context.Context, provider, eventID string) (bool, error) {
 	var exists int
 	err := h.pool.Raw().QueryRow(ctx,
 		`SELECT 1 FROM webhook_seen WHERE provider = $1 AND event_id = $2`,
 		provider, eventID).Scan(&exists)
-	// "No row" is the normal case — the event is NEW. Returning ErrNoRows as
-	// an error made the caller's `err != nil || seen` treat every first event
-	// as a duplicate and drop it: the handler answered 200 and wrote nothing,
-	// for every webhook that was not a retry.
+	// "No row" is the normal case (the event is NEW); ErrNoRows must not read
+	// as seen, or every first webhook is dropped as a duplicate.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -580,6 +533,3 @@ func (h *Handler) markSeen(ctx context.Context, provider, eventID string) error 
 		provider, eventID)
 	return err
 }
-
-// Unused import suppression.
-var _ = bytes.NewReader

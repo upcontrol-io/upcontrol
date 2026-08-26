@@ -59,9 +59,8 @@
   color: var(--text-body);
 }
 
-/* The square the monitors table uses for the same job, so the one control that
-   removes a row looks the same wherever a row can be removed. It had no border
-   at all here, which left a bare glyph carrying a destructive action. */
+/* The square the monitors table uses: the one control that removes a row
+   looks the same wherever a row can be removed. */
 .remove {
   position: relative;
   flex-shrink: 0;
@@ -167,9 +166,8 @@
   background: var(--bg-hover);
 }
 
-/* The global `.uc-app` touch floor in global.css never reaches this page (the
-   self-host shell's root carries no such class), so every control here needs
-   its own floor. Height only, per the tap-min convention. */
+/* No .uc-app wrapper on this page, so every control carries its own touch
+   floor. Height only, per the tap-min convention. */
 @media (max-width: 700px) {
   .rowMain > button,
   .confirmStrip > button,
@@ -185,9 +183,8 @@
     justify-content: center;
   }
 
-  /* Same shape as Settings.module.css's .rotateRow: an outcome sentence next
-     to two buttons. Without wrap, a long confirm sentence pushes Delete off
-     the edge of a narrow phone. */
+  /* An outcome sentence next to two buttons: without wrap, a long confirm
+     sentence pushes Delete off the edge of a narrow phone. */
   .confirmStrip {
     flex-wrap: wrap;
   }

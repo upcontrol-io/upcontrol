@@ -1,10 +1,5 @@
-// Package executor is the probe's HTTP checker (plan §5.3). Given a CheckSpec,
-// it resolves DNS, applies the SSRF guard, performs the request with per-phase
-// and returns a Result.
-//
-// The executor is the ONLY piece of the probe that touches the network. It runs
-// on ucprobe, which holds no DB secrets (invariant 1): the guard is the last
-// line of defense before a connection is opened to a customer-supplied URL.
+// Package executor is the probe's HTTP checker: resolve DNS, apply the SSRF
+// guard, run the request; the guard is the last line before a customer URL.
 package executor
 
 import (
@@ -19,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"time"
 
 	"go.upcontrol.io/back/internal/probe/guard"
@@ -34,15 +30,12 @@ type CheckSpec struct {
 	MaxBodyBytes  uint32 // 0 = 65536 default
 	CollectExpiry bool
 	// CollectBody keeps the response body on the Result instead of discarding it
-	// after hashing. Opt-in for the same reason as CollectExpiry: most callers
-	// are the fleet, storing a check row, and have no use for 64 KB of HTML.
+	// after hashing; opt-in because the fleet has no use for 64 KB of HTML.
 	CollectBody bool
 }
 
-// UserAgent identifies us on every request. Without it Go sends
-// "Go-http-client/2.0", which WAFs routinely block — and once this package
-// fetches robots.txt and site pages, an anonymous client string is also simply
-// bad manners. The URL is how an operator finds out who we are.
+// UserAgent identifies us on every request; Go's default "Go-http-client/2.0"
+// is blocked by WAFs and tells an operator nothing about who is asking.
 const UserAgent = "upcontrol/1.0 (+https://upcontrol.io/bot)"
 
 // Result is the output: the check outcome and its timings.
@@ -63,16 +56,13 @@ type Result struct {
 	// never ran (an IP URL, or a connection that failed before DNS).
 	DNSAddrs uint32
 	// TLSVersion is "TLS 1.2"/"TLS 1.3"; empty for plaintext or a failed
-	// handshake. Both are read straight off the response, so a caller gets them
-	// for the same price as the timings.
+	// handshake (read straight off the response, no extra cost).
 	TLSVersion string
-	// Header is the response's headers, nil when no response arrived. Carried
-	// because the alternative — a second request just to read HSTS or
-	// Cache-Control — asks someone else's server for a page we already have.
+	// Header is the response's headers, nil when no response arrived; carried so
+	// HSTS/Cache-Control need no second request for a page we already have.
 	Header http.Header
 	// Body is the response body, present only when CheckSpec.CollectBody asked
-	// for it. Same reasoning as Header: link discovery reads the homepage we
-	// already fetched rather than fetching it twice.
+	// for it (link discovery reads the homepage we already fetched).
 	Body []byte
 }
 
@@ -83,11 +73,6 @@ type Executor struct {
 
 // New builds a production executor with the SSRF guard active.
 func New() *Executor { return &Executor{guardCheck: guard.CheckResolvedIPs} }
-
-// NewWithoutGuard builds an executor that skips the SSRF check. TESTS ONLY —
-// the guard is always active in production. Needed because httptest binds to
-// 127.0.0.1 which the guard blocks.
-func NewWithoutGuard() *Executor { return &Executor{guardCheck: nil} }
 
 // Execute runs a single check and returns the result. It never panics: every
 // error becomes a Result with an ErrorClass.
@@ -110,10 +95,8 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 		maxRedirects = 5
 	}
 
-	// Pre-flight URL validation. In production (guardCheck active) the full
-	// CheckURL runs (scheme + port + IP). In test mode (NewWithoutGuard) ALL
-	// guard checks are skipped — httptest binds to 127.0.0.1 which every guard
-	// check blocks.
+	// Pre-flight URL validation: the full CheckURL (scheme + port + IP) runs
+	// only when guardCheck is set; the zero Executor skips every guard check.
 	if e.guardCheck != nil {
 		if err := guard.CheckURL(spec.URL); err != nil {
 			return blockedResult(err)
@@ -144,11 +127,10 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("too_many_redirects")
 			}
-			// Re-check the redirect target's URL (scheme/port). Gated on the same
-			// flag as the pre-flight check so NewWithoutGuard means what it says:
-			// httptest binds a random high port, which this refuses.
+			// Re-check the redirect target's URL (scheme/port), gated on the
+			// same flag as the pre-flight check (nil guardCheck skips this too).
 			if e.guardCheck != nil {
-				if err := guard.AllowedRedirectURL(req.URL.String()); err != nil {
+				if err := guard.CheckURL(req.URL.String()); err != nil {
 					return err
 				}
 			}
@@ -256,12 +238,10 @@ func (e *Executor) buildTransport(timeout time.Duration) *http.Transport {
 	}
 }
 
-// --- timing recorder ---
-
 type timingRecorder struct {
 	start time.Time
 	// dnsAddrs rides along with the timings: DNSDone carries the resolved
-	// addresses, so counting them here costs nothing and needs no second lookup.
+	// addresses, so counting them here costs no second lookup.
 	dnsAddrs          uint32
 	dnsStart          time.Time
 	dnsDone           time.Time
@@ -320,12 +300,8 @@ func httptraceCtx(ctx context.Context, t *timingRecorder) context.Context {
 	})
 }
 
-// --- helpers ---
-
-// tlsVersionName renders the handshake version the way a person reads it. An
-// unknown constant returns "" rather than a hex code: a reader who cannot act on
-// "0x0305" is better served by the field being absent (spec rule: zero is
-// silence).
+// tlsVersionName renders the handshake version the way a person reads it; an
+// unknown constant returns "" (zero is silence).
 func tlsVersionName(v uint16) string {
 	switch v {
 	case tls.VersionTLS13:
@@ -374,21 +350,9 @@ func errorResult(err error, start time.Time) Result {
 	}
 }
 
-func isTimeout(err error) bool { return err != nil && contains2(err.Error(), "timeout") }
+func isTimeout(err error) bool { return err != nil && strings.Contains(err.Error(), "timeout") }
 func isBlocked(err error) bool {
 	return errors.Is(err, guard.ErrBlockedTarget)
 }
-func isDNS(err error) bool         { return err != nil && contains2(err.Error(), "dns:") }
-func isTLS(err error) bool         { return err != nil && contains2(err.Error(), "tls:") }
-func contains2(s, sub string) bool { return len(s) >= len(sub) && (s == sub || stringContains(s, sub)) }
-
-func stringContains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-// Unused import suppression removed — httptest/url are in the test file.
+func isDNS(err error) bool { return err != nil && strings.Contains(err.Error(), "dns:") }
+func isTLS(err error) bool { return err != nil && strings.Contains(err.Error(), "tls:") }

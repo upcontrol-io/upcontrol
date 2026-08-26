@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
-	subject, body := RenderCode("ada@example.com", "1ece76e3", "https://upcontrol.io")
+	subject, body := renderCode("ada@example.com", "1ece76e3", "https://upcontrol.io")
 	if subject == "" {
 		t.Fatal("subject is empty")
 	}
@@ -23,15 +23,15 @@ func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
 }
 
 func TestRenderInvitePinsTheDecision15Bytes(t *testing.T) {
-	subject, body := RenderInvite("kira@example.com", "1ece76e3", "https://upcontrol.io", "acme.io", "Ada")
+	subject, body := renderInvite("kira@example.com", "1ece76e3", "https://upcontrol.io", "acme.io", "Ada")
 	// The subject is a sentence the invitee reads in their inbox list, so it
 	// carries no trailing period.
 	wantSubject := "Ada invited you to acme.io on UpControl"
 	if subject != wantSubject {
 		t.Fatalf("subject = %q, want %q", subject, wantSubject)
 	}
-	// The text part is byte-pinned (plan Decision 15): the email agent renders
-	// the same bytes in TypeScript, so equality here is the whole contract.
+	// The text part is byte-pinned: the email agent renders the same bytes in
+	// TypeScript, so equality here is the whole contract.
 	want := `Ada invited you to acme.io on UpControl.
 
 Accept the invitation and sign in:
@@ -63,17 +63,5 @@ func TestBuildMessageCarriesTheHeaders(t *testing.T) {
 	// No display name: the From header is the bare address, not "<addr>".
 	if msg := string(buildMessage("no-reply@upcontrol.io", "", "a@b.c", "s", "t")); !strings.Contains(msg, "From: no-reply@upcontrol.io\r\n") {
 		t.Fatalf("bare-address From header wrong:\n%s", msg)
-	}
-}
-
-func TestNewSMTPRefusesAnIncompleteConfig(t *testing.T) {
-	for _, cfg := range []Config{
-		{Host: "", From: "hi@upcontrol.io"},
-		{Host: "smtp.example.com", From: ""},
-	} {
-		if _, err := NewSMTP(cfg, nil); err == nil {
-			t.Fatalf("NewSMTP(%+v) returned no error; a half-configured mailer that "+
-				"silently drops mail is worse than none", cfg)
-		}
 	}
 }

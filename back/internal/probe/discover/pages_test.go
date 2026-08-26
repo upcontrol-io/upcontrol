@@ -7,13 +7,11 @@ import (
 	"testing"
 )
 
-// bodyProber answers with a body per URL, and records every URL asked for, so a
-// test can assert on what this package refused to request as well as on what it
-// returned.
+// bodyProber answers with a body per URL and records every URL asked for,
+// so a test can assert on refusals as well as on returns.
 type bodyProber struct {
-	// probePages runs the shortlist concurrently, so the recorder needs a lock.
-	// Not pedantry: the request-ceiling test asserts on len(asked), and a lost
-	// append would quietly weaken exactly the guarantee it exists to prove.
+	// probePages runs the shortlist concurrently, so the recorder needs a lock:
+	// a lost append would quietly weaken the request-ceiling guarantee.
 	mu     sync.Mutex
 	body   map[string]string
 	status map[string]uint16
@@ -230,8 +228,8 @@ func TestRankCapsTheShortlistHoweverLongTheSitemap(t *testing.T) {
 	for i := range 5000 {
 		cands = append(cands, candidate{URL: base + "/page-" + string(rune('a'+i%26)) + string(rune('a'+i/26%26))})
 	}
-	if got := rank(base, cands, robots{}); len(got) > PagesWanted {
-		t.Errorf("shortlist = %d, want at most %d", len(got), PagesWanted)
+	if got := rank(base, cands, robots{}); len(got) > pagesWanted {
+		t.Errorf("shortlist = %d, want at most %d", len(got), pagesWanted)
 	}
 }
 
@@ -267,8 +265,8 @@ func TestDiscoveryStaysUnderTheRequestCeiling(t *testing.T) {
 		base + "/c.xml":      sitemapXML(locs...),
 	}}
 	facts := Run(context.Background(), p, nil, base, Result{StatusCode: 200, OK: true})
-	if len(facts.Pages) > PagesWanted {
-		t.Errorf("pages = %d, want at most %d", len(facts.Pages), PagesWanted)
+	if len(facts.Pages) > pagesWanted {
+		t.Errorf("pages = %d, want at most %d", len(facts.Pages), pagesWanted)
 	}
 	if len(p.asked) > MaxRequests {
 		t.Errorf("made %d requests, want at most %d: %v", len(p.asked), MaxRequests, p.asked)
@@ -277,7 +275,7 @@ func TestDiscoveryStaysUnderTheRequestCeiling(t *testing.T) {
 
 // findPagesOnly keeps the page tests reading about pages: host discovery has its
 // own budget and its own file.
-func findPagesOnly(p Prober, homepage []byte) []Page {
+func findPagesOnly(p prober, homepage []byte) []Page {
 	pages, _ := findPages(context.Background(), p, nil, base, homepage)
 	return pages
 }

@@ -1,12 +1,5 @@
-// Package ch is the ClickHouse storage layer. It is the ONLY writer of the logs
-// and events tables (invariant 4: every query goes through ring.QueryBuilder for
-// reads; every write comes through here). The batcher (ingest/batcher) calls
-// Inserter.Flush with decoded, scrubbed, seq'd rows; this package turns them into
-// a native-protocol batch INSERT.
-//
-// The connection holds no business logic: it is a thin, pooled client over
-// clickhouse-go/v2. Probe nodes (ucprobe) MUST NOT import this package
-// (invariant 1, enforced by depguard).
+// Package ch is the ClickHouse storage layer and the ONLY writer of the logs
+// and events tables; ucprobe must not import it (depguard-enforced).
 package ch
 
 import (
@@ -69,9 +62,8 @@ func (c *Conn) Ping(ctx context.Context) error { return c.db.Ping(ctx) }
 // Close releases the pool.
 func (c *Conn) Close() error { return c.db.Close() }
 
-// LogRow is one row of the logs table. TenantID/ProjectID/Seq are added by the
-// ingest layer after authentication and seq allocation; the rest comes from the
-// decoder (with cardinality capping already applied to Host/Service/Source).
+// LogRow is one row of the logs table; TenantID/ProjectID/Seq are added by the
+// ingest layer, the rest comes from the decoder (cardinality already applied).
 type LogRow struct {
 	TenantID    uint64
 	ProjectID   uint64
@@ -86,30 +78,38 @@ type LogRow struct {
 	Attrs       map[string]string
 }
 
-// InsertLogs writes a batch of log rows via the native batch protocol. The
-// batcher calls this per flush; one INSERT per call → one ClickHouse part.
-func (c *Conn) InsertLogs(ctx context.Context, rows []LogRow) error {
+// insert runs the shared batch-insert shape: no-op on empty rows, one
+// PrepareBatch, one app call per row, one Send.
+func insert[T any](ctx context.Context, c *Conn, sql string, rows []T, app func(driver.Batch, T) error) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	batch, err := c.db.PrepareBatch(ctx, "INSERT INTO logs "+
-		"(tenant_id, project_id, ts, seq, source, service, host, level, message, fingerprint, attrs)")
+	batch, err := c.db.PrepareBatch(ctx, sql)
 	if err != nil {
 		return err
 	}
 	for _, r := range rows {
-		if err := batch.Append(
-			r.TenantID, r.ProjectID, r.TS, r.Seq,
-			r.Source, r.Service, r.Host, r.Level, r.Message, r.Fingerprint, r.Attrs,
-		); err != nil {
+		if err := app(batch, r); err != nil {
 			return err
 		}
 	}
 	return batch.Send()
 }
 
-// EventRow is one row of the events table (never displaced by the ring — the
-// absence detector lives on events).
+// InsertLogs writes a batch of log rows via the native batch protocol. The
+// batcher calls this per flush; one INSERT per call → one ClickHouse part.
+func (c *Conn) InsertLogs(ctx context.Context, rows []LogRow) error {
+	return insert(ctx, c, "INSERT INTO logs "+
+		"(tenant_id, project_id, ts, seq, source, service, host, level, message, fingerprint, attrs)",
+		rows, func(b driver.Batch, r LogRow) error {
+			return b.Append(
+				r.TenantID, r.ProjectID, r.TS, r.Seq,
+				r.Source, r.Service, r.Host, r.Level, r.Message, r.Fingerprint, r.Attrs,
+			)
+		})
+}
+
+// EventRow is one row of the events table (never displaced by the ring).
 type EventRow struct {
 	TenantID    uint64
 	ProjectID   uint64
@@ -122,27 +122,15 @@ type EventRow struct {
 
 // InsertEvents writes a batch of event rows.
 func (c *Conn) InsertEvents(ctx context.Context, rows []EventRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	batch, err := c.db.PrepareBatch(ctx, "INSERT INTO events "+
-		"(tenant_id, project_id, ts, name, labels, amount_minor, currency)")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if err := batch.Append(r.TenantID, r.ProjectID, r.TS, r.Name, r.Labels, r.AmountMinor, r.Currency); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+	return insert(ctx, c, "INSERT INTO events "+
+		"(tenant_id, project_id, ts, name, labels, amount_minor, currency)",
+		rows, func(b driver.Batch, r EventRow) error {
+			return b.Append(r.TenantID, r.ProjectID, r.TS, r.Name, r.Labels, r.AmountMinor, r.Currency)
+		})
 }
 
-// WebEventRow is one row of the web_events table (product analytics). The
-// recorder (internal/analytics) is the only writer. VisitorID is the Postgres
-// web_visitor id (0 = anonymous: no uc_vid cookie); PersonID/TenantID are 0
-// unless a live session stamped them. Country is an ISO code (” = unknown);
-// IPHash is sha256(client IP) truncated to 8 bytes — a full IP is never stored.
+// WebEventRow is one row of web_events; analytics is the only writer. IPHash
+// is sha256(client IP) truncated to 8 bytes; a full IP is never stored.
 type WebEventRow struct {
 	TS          time.Time
 	VisitorID   uint64
@@ -166,29 +154,19 @@ type WebEventRow struct {
 // InsertWebEvents writes a batch of web event rows. is_app is MATERIALIZED in
 // the table (startsWith(path, '/app')) and therefore not part of the insert.
 func (c *Conn) InsertWebEvents(ctx context.Context, rows []WebEventRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	batch, err := c.db.PrepareBatch(ctx, "INSERT INTO web_events "+
+	return insert(ctx, c, "INSERT INTO web_events "+
 		"(visitor_id, person_id, tenant_id, ts, name, path, title, referrer, "+
-		"utm_source, utm_medium, utm_campaign, country, ip_hash, device, os, browser, props)")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if err := batch.Append(
-			r.VisitorID, r.PersonID, r.TenantID, r.TS, r.Name, r.Path, r.Title, r.Referrer,
-			r.UTMSource, r.UTMMedium, r.UTMCampaign, r.Country, r.IPHash, r.Device, r.OS, r.Browser, r.Props,
-		); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+		"utm_source, utm_medium, utm_campaign, country, ip_hash, device, os, browser, props)",
+		rows, func(b driver.Batch, r WebEventRow) error {
+			return b.Append(
+				r.VisitorID, r.PersonID, r.TenantID, r.TS, r.Name, r.Path, r.Title, r.Referrer,
+				r.UTMSource, r.UTMMedium, r.UTMCampaign, r.Country, r.IPHash, r.Device, r.OS, r.Browser, r.Props,
+			)
+		})
 }
 
-// CheckRow is one row of the checks table. It feeds the availability
-// detector's history and the public status page. Written by the probe service
-// once per SubmitResults batch.
+// CheckRow is one row of the checks table: the availability detector's history
+// and the public status page; written once per SubmitResults batch.
 type CheckRow struct {
 	TenantID   uint64
 	MonitorID  uint64
@@ -207,27 +185,17 @@ type CheckRow struct {
 
 // InsertChecks writes a batch of check rows via the native batch protocol.
 func (c *Conn) InsertChecks(ctx context.Context, rows []CheckRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	batch, err := c.db.PrepareBatch(ctx, "INSERT INTO checks "+
+	return insert(ctx, c, "INSERT INTO checks "+
 		"(tenant_id, monitor_id, ts, region, ok, status_code, error_class, "+
-		"dns_ms, connect_ms, tls_ms, ttfb_ms, total_ms, body_hash)")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if err := batch.Append(
-			r.TenantID, r.MonitorID, r.TS, r.Region, r.OK, r.StatusCode, r.ErrorClass,
-			r.DNSMs, r.ConnectMs, r.TLSMs, r.TTFBMs, r.TotalMs, r.BodyHash,
-		); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+		"dns_ms, connect_ms, tls_ms, ttfb_ms, total_ms, body_hash)",
+		rows, func(b driver.Batch, r CheckRow) error {
+			return b.Append(
+				r.TenantID, r.MonitorID, r.TS, r.Region, r.OK, r.StatusCode, r.ErrorClass,
+				r.DNSMs, r.ConnectMs, r.TLSMs, r.TTFBMs, r.TotalMs, r.BodyHash,
+			)
+		})
 }
 
-// Raw exposes the underlying driver for callers (ring.QueryBuilder, migrations)
-// that need to run arbitrary SQL. Invariant 4 keeps logs reads behind
-// ring.QueryBuilder; this is the seam.
+// Raw exposes the underlying driver for callers that need arbitrary SQL; logs
+// reads stay behind ring.QueryBuilder; this is the seam.
 func (c *Conn) Raw() driver.Conn { return c.db }

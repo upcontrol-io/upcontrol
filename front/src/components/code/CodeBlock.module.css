@@ -61,17 +61,8 @@
   margin: 0 calc(-1 * var(--space-2));
 }
 
-.line.highlighted {
-  background: var(--bg-hover);
-}
-
-/* Grammar-aware highlighting on one cool hue family (--accent and its two
-   neighbours), never the status colours. Three coloured roles, not six: the
-   distinctions that earn their keep are string-vs-code and comment-vs-code.
-
-   Comments stay achromatic on purpose — their job is to recede, and colouring
-   them works against that. The key and the endpoint stay the brightest thing
-   in the block, because they are what the reader came to copy. */
+/* Grammar-aware highlighting on the cool hue family, never status colours.
+   Comments stay achromatic: their job is to recede. */
 .tokComment {
   color: var(--code-comment);
   font-style: italic;

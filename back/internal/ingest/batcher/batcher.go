@@ -1,17 +1,5 @@
-// Package batcher accumulates decoded log rows and flushes them to ClickHouse
-// in batches. The flush policy (plan §4.3) is the only thing between ingest
-// throughput and ClickHouse's part count:
-//
-//   - flush at batchBytes (default 8 MiB), OR
-//   - flush when a batch is older than batchAge (default 200 ms) BUT not more
-//     often than once per second per key (the 1/sec-per-(table×bucket) floor),
-//   - and always flush everything on Close.
-//
-// The §3.7 gate is "1 row/sec for an hour → ≤ 3600 parts": a part is born per
-// INSERT, so capping inserts at one per second per key caps parts at 3600/hour.
-//
-// The batcher owns no ClickHouse client; it calls a Sink, so the flush policy is
-// unit-testable with a fake sink and a fake clock (synctest-friendly).
+// Package batcher accumulates decoded rows and flushes them to ClickHouse in
+// batches; the 1/sec-per-key flush floor caps part count (one part per INSERT).
 package batcher
 
 import (
@@ -20,28 +8,24 @@ import (
 	"time"
 )
 
-// Sink receives a flushed batch for one key (table×bucket). The implementation
-// (storage/ch) does the actual batch INSERT.
+// Sink receives a flushed batch for one key (table×bucket).
 type Sink interface {
 	Flush(ctx context.Context, key string, rows [][]byte) error
 }
 
-// Clock is the minimal time surface the batcher needs; tests pass a fake so the
-// 200 ms / 1 s thresholds are deterministic under testing/synctest.
+// Clock is the minimal time surface the batcher needs; tests pass a fake.
 type Clock interface {
 	Now() time.Time
 }
 
-// Options configures the flush policy. Zero values fall back to the plan's
+// Options configures the flush policy; zero-value fields fall back to the
 // 8 MiB / 200 ms / 1-per-second defaults.
 type Options struct {
-	BatchBytes    int
-	BatchAge      time.Duration
-	MinInterval   time.Duration           // 1/sec-per-key floor; 0 means BatchAge alone
-	FlushCallback func(key string, n int) // optional, for tests/metrics
+	BatchBytes  int
+	BatchAge    time.Duration
+	MinInterval time.Duration // 1/sec-per-key floor; 0 means BatchAge alone
 }
 
-// Batcher accumulates rows per key and flushes per the policy.
 type Batcher struct {
 	sink Sink
 	clk  Clock
@@ -64,7 +48,7 @@ const (
 	defaultMinInterval = 1 * time.Second
 )
 
-// New builds a Batcher. clk may be nil (real clock).
+// New builds a Batcher; clk nil means the real clock.
 func New(sink Sink, clk Clock, opt Options) *Batcher {
 	if opt.BatchBytes <= 0 {
 		opt.BatchBytes = defaultBatchBytes
@@ -81,9 +65,8 @@ func New(sink Sink, clk Clock, opt Options) *Batcher {
 	return &Batcher{sink: sink, clk: clk, opt: opt, pending: map[string]*batch{}}
 }
 
-// Add appends a row under key. If the key's batch crosses BatchBytes it is
-// flushed immediately (size threshold ignores MinInterval). Returns nil once the
-// row is accepted (it may or may not be flushed yet).
+// Add appends a row under key, flushing at once if the batch crosses
+// BatchBytes (the size threshold ignores MinInterval).
 func (b *Batcher) Add(ctx context.Context, key string, row []byte) error {
 	flushNow := false
 	var toFlush *batch
@@ -111,9 +94,8 @@ func (b *Batcher) Add(ctx context.Context, key string, row []byte) error {
 	return nil
 }
 
-// Tick ages out batches: any key whose batch is older than BatchAge AND whose
-// last flush was at least MinInterval ago is flushed. ucworker/ucapi drives this
-// on a short ticker (e.g. every 50 ms).
+// Tick flushes batches older than BatchAge whose key is past MinInterval;
+// callers drive it on a short ticker.
 func (b *Batcher) Tick(ctx context.Context) error {
 	now := b.clk.Now()
 	// Snapshot the keys eligible for flush under the lock, then flush outside.
@@ -135,9 +117,8 @@ func (b *Batcher) Tick(ctx context.Context) error {
 	}
 	b.mu.Unlock()
 
-	// Flush each eligible batch. To avoid flushing a batch that grew between the
-	// snapshot and the flush, swap-and-flush: take the batch out, replace with a
-	// fresh empty one.
+	// Swap-and-flush: take the batch out and replace it, so a row added between
+	// the snapshot and the flush is never lost or double-flushed.
 	var firstErr error
 	for _, p := range elig {
 		b.mu.Lock()
@@ -155,8 +136,6 @@ func (b *Batcher) Tick(ctx context.Context) error {
 		b.mu.Unlock()
 		if err := b.sink.Flush(ctx, p.key, current.rows); err != nil {
 			firstErr = err
-		} else if b.opt.FlushCallback != nil {
-			b.opt.FlushCallback(p.key, len(current.rows))
 		}
 	}
 	return firstErr
@@ -175,8 +154,6 @@ func (b *Batcher) Close(ctx context.Context) error {
 		}
 		if err := b.sink.Flush(ctx, k, ba.rows); err != nil {
 			firstErr = err
-		} else if b.opt.FlushCallback != nil {
-			b.opt.FlushCallback(k, len(ba.rows))
 		}
 	}
 	return firstErr
@@ -193,21 +170,7 @@ func (b *Batcher) flush(ctx context.Context, key string, ba *batch) error {
 	if err := b.sink.Flush(ctx, key, rows); err != nil {
 		return err
 	}
-	if b.opt.FlushCallback != nil {
-		b.opt.FlushCallback(key, len(rows))
-	}
 	return nil
-}
-
-// Pending reports the total rows across all keys (for tests/observability).
-func (b *Batcher) Pending() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := 0
-	for _, ba := range b.pending {
-		n += len(ba.rows)
-	}
-	return n
 }
 
 type sysClock struct{}

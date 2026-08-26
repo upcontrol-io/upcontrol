@@ -54,9 +54,8 @@ func TestNewUUID_UniqueAndValid(t *testing.T) {
 }
 
 func TestFreezeSlice_WithoutClickHouseIsANoOp(t *testing.T) {
-	// The slice is evidence, not a precondition: an incident must still open when
-	// there is no ClickHouse to read the window from (tests, a degraded node),
-	// and it must not error on that path — the alert matters more than the card.
+	// The slice is evidence, not a precondition: an incident must still open
+	// with no ClickHouse (tests, a degraded node) and not error there.
 	l := New(nil, nil)
 	if err := l.freezeSlice(t.Context(), 1, 2, 3); err != nil {
 		t.Fatalf("freezeSlice without ClickHouse must be a silent no-op, got: %v", err)
@@ -64,9 +63,8 @@ func TestFreezeSlice_WithoutClickHouseIsANoOp(t *testing.T) {
 }
 
 func TestUUIDStr_IsDashlessLowercaseHex(t *testing.T) {
-	// The public_id format is shared with every other handler (uuidStr in
-	// internal/api renders the same way); a dashed or upper-case rendering here
-	// would make the same incident look like two different ids across responses.
+	// The public_id format is shared with every handler; a dashed or
+	// upper-case rendering here would split one incident into two ids.
 	id := newUUID()
 	s := uuidStr(id)
 	if len(s) != 32 {
@@ -81,10 +79,8 @@ func TestUUIDStr_IsDashlessLowercaseHex(t *testing.T) {
 	}
 }
 
-// The detection alert crosses a queue: this side writes a JSON map, the
-// delivery side reads deliver.AlertPayload by struct tag. Nothing fails when a
-// key is misspelled — the field just never arrives — so the round trip is
-// pinned here rather than discovered in somebody's inbox.
+// The detection alert crosses a queue: a misspelled key never fails, the
+// field just never arrives, so the round trip is pinned here, not in an inbox.
 func TestDetectAlertPayload_SurvivesTheRoundTrip(t *testing.T) {
 	p := DetectOpen{
 		Detector: "errorrate",
@@ -135,11 +131,8 @@ func TestDetectAlertPayload_SurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
-// The close wording lives inside Close (there is no pure helper for it), and
-// the raw reason is a storage detail the timeline must not leak: "Closed:
-// monitor_deleted" reads like an error code, and implies a recovery that never
-// happened. Pinned here against Postgres like the api package's integration
-// tests: UC_TEST_POSTGRES unset = skip.
+// Pins the timeline wording: the raw reason is storage detail and must not
+// leak. UC_TEST_POSTGRES unset = skip.
 func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {

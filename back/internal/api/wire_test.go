@@ -8,10 +8,8 @@ import (
 	"go.upcontrol.io/back/internal/ingest"
 )
 
-// The flush seam promotes classified rows to the events table (plan T1): the
-// classifier's Event name survives into a ch.EventRow with the deploy sha
-// aliased from commit_sha, a plain line stays log-only, and corrupt JSON is
-// dropped without a panic.
+// The flush seam promotes classified rows to events: the Event name survives,
+// sha is aliased from commit_sha, plain lines stay log-only, corrupt JSON drops.
 func TestDecodeRows(t *testing.T) {
 	cases := []struct {
 		name          string

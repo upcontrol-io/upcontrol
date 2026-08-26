@@ -1,13 +1,7 @@
 //go:build integration
 
-// Handler-level coverage for the incident explain (incident-triage-honesty
-// T5): the id gate (an incident this tenant does not own is a 404 before
-// anything is counted), the happy path through the stub brain (an incident
-// with a frozen slice answers 200 with a cause), and the quota wall (a plan
-// whose entitlement allows zero explains answers the 402 upgrade shape the
-// client reads).
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/api/...
+// Handler-level coverage of the incident explain: the id gate (404 before
+// anything is counted), the stub-brain happy path, and the 402 quota wall.
 package api
 
 import (
@@ -28,10 +22,9 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// openIncidentExplainDB applies migrations and returns a WriteAPI wired to
-// the stub brain, plus a tenant on the given plan, mirroring openExplainDB
-// above.
-func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*WriteAPI, int64) {
+// openIncidentExplainDB applies migrations and returns a writeAPI wired to
+// the stub brain, plus a tenant on the given plan.
+func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*writeAPI, int64) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -47,7 +40,7 @@ func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*WriteAPI
 	}
 	t.Cleanup(pool.Close)
 	// The quota-0 case needs an entitlement row that allows nothing; every
-	// seeded plan allows some. Same column shape as the seeded rows.
+	// seeded plan allows some.
 	if zeroQuota {
 		if _, err := pool.Raw().Exec(ctx,
 			`INSERT INTO plan_entitlement (plan, http_checks, regions, window_lines, window_hours, retain_mult, ai_explains, incident_days)
@@ -62,19 +55,12 @@ func openIncidentExplainDB(t *testing.T, plan string, zeroQuota bool) (*WriteAPI
 		fmt.Sprintf("incident-explain-%d", time.Now().UnixNano()), plan).Scan(&tenantID); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	return &WriteAPI{pool: pool, acct: ai.New(pool, &stubExplainLLM{}, ai.Prices{})}, tenantID
+	return &writeAPI{pool: pool, acct: ai.New(pool, &stubExplainLLM{}, ai.Prices{})}, tenantID
 }
 
 // seedIncidentWithSlice plants one ongoing incident with a lifecycle mark
-// and — unless withSlice is false — a frozen log slice: the rows both
-// incidentWithEvidence and the explain handler read. withSlice false seeds
-// the incident and its lifecycle mark only, for the empty-slice promise (an
-// incident that fired with nothing frozen still explains, off its timeline).
-// Returns the PUBLIC id, as `uuidStr` renders it — the only id a caller ever
-// holds, because incidentToAPI sends nothing else. Returning the serial id
-// here is what let the handler 404 every real click while this test passed:
-// the test addressed the row by a number no response had ever carried.
-func seedIncidentWithSlice(t *testing.T, h *WriteAPI, tenantID int64, withSlice bool) (int64, string) {
+// and, unless withSlice is false, a frozen log slice. Returns the PUBLIC id.
+func seedIncidentWithSlice(t *testing.T, h *writeAPI, tenantID int64, withSlice bool) (int64, string) {
 	t.Helper()
 	ctx := context.Background()
 	var projectID int64

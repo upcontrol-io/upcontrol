@@ -13,16 +13,14 @@ import (
 	"time"
 )
 
-// Agent sends through an external email-agent service: one
-// HTTP POST per message, and the service owns the template, the retry queue
-// and the provider. UC_EMAIL_URL set = this mailer; empty = the caller
-// stays on SMTP.
-type Agent struct {
+// agent sends through an external email-agent service: one HTTP POST per
+// message; the service owns the template, queue and provider.
+type agent struct {
 	url    string // service base, e.g. http://mail-agent:8080, no trailing slash
 	key    string // bearer token; empty = the service runs with auth disabled
 	base   string // sign-in origin the magic link points at
 	log    *slog.Logger
-	client *http.Client // one per Agent; every send shares its timeout
+	client *http.Client // one per agent; every send shares its timeout
 }
 
 // sendRequest is the exact body the agent's /send validates: a kind, a template
@@ -34,16 +32,16 @@ type sendRequest struct {
 	Vars     map[string]string `json:"vars"`
 }
 
-// NewAgent refuses an empty URL the way NewSMTP refuses a half config: a
-// mailer pointed at nothing must fail at boot, not on the first message.
-func NewAgent(url, key string, log *slog.Logger) (*Agent, error) {
+// NewAgent refuses an empty URL: a mailer pointed at nothing must fail at
+// boot, not on the first message.
+func NewAgent(url, key string, log *slog.Logger) (*agent, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, errors.New("mailer: UC_EMAIL_URL is empty")
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Agent{
+	return &agent{
 		url:    strings.TrimRight(url, "/"),
 		key:    key,
 		log:    log,
@@ -52,12 +50,11 @@ func NewAgent(url, key string, log *slog.Logger) (*Agent, error) {
 }
 
 // WithSignInBase sets the origin the magic link points at (e.g. https://upcontrol.io).
-func (a *Agent) WithSignInBase(base string) *Agent { a.base = base; return a }
+func (a *agent) WithSignInBase(base string) *agent { a.base = base; return a }
 
-// SendCode queues one magic-link with the agent. The code crosses the wire to
-// the service but is never logged, the same rule SMTP follows: a log line
-// carrying it is a second place to steal a session from.
-func (a *Agent) SendCode(ctx context.Context, to, code string) error {
+// SendCode queues one magic-link with the agent. The code crosses the wire
+// but is never logged: a log line carrying it is a second place to steal from.
+func (a *agent) SendCode(ctx context.Context, to, code string) error {
 	if err := a.post(ctx, to, sendRequest{
 		Kind:     "transactional",
 		Template: "magic-link",
@@ -70,12 +67,9 @@ func (a *Agent) SendCode(ctx context.Context, to, code string) error {
 	return nil
 }
 
-// SendInvite queues one project invitation. The same code the sign-in door
-// mints rides it, so it crosses the wire but is never logged, and the code is
-// the only credential in either mail: `to` stays in the envelope, and the
-// agent builds the link from `sign_in_base` plus `code` the way renderInvite
-// expects (email/src/templates.ts).
-func (a *Agent) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
+// SendInvite queues one project invitation. The code crosses the wire but is
+// never logged; `to` stays in the envelope, the agent builds the link itself.
+func (a *agent) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
 	if err := a.post(ctx, to, sendRequest{
 		Kind:     "transactional",
 		Template: "invite",
@@ -94,9 +88,8 @@ func (a *Agent) SendInvite(ctx context.Context, to, code, project, invitedBy str
 }
 
 // post delivers one request to the agent's /send and turns the HTTP outcome
-// into an error. Both message types ride it; only the template and the vars
-// differ, and the success log names the message, so it stays with the callers.
-func (a *Agent) post(ctx context.Context, to string, req sendRequest) error {
+// into an error; both message types ride it.
+func (a *agent) post(ctx context.Context, to string, req sendRequest) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("mailer: encode email-agent request: %w", err)

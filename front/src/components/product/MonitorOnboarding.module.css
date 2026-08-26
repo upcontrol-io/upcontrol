@@ -1,6 +1,5 @@
 /* The status page's first-run block: one address in, discovery rows out,
-   nothing created until Start watching. Sits under the page's own h1, inside
-   the config screen's 680px column. */
+   nothing created until Start watching. */
 .block {
   display: flex;
   flex-direction: column;
@@ -49,9 +48,8 @@
   gap: var(--space-4);
 }
 
-/* The pick-list is one raised card, the same surface language as the Public
-   URL card above it once the page is live. `overflow: hidden` lets the group
-   bands and row fills run to the card's own edge. */
+/* One raised card; overflow: hidden lets the group bands and row fills run
+   to the card's own edge. */
 .resultsCard {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -93,11 +91,8 @@
   color: var(--text-faint);
 }
 
-/* box · dot+word · name · meta. Both text columns are floored at 0 so a long
-   URL wraps inside its column instead of pushing the row past the page. The
-   row IS the Checkbox primitive (its hidden input is clipped-absolute, so it
-   takes no grid cell); scoped under .group so this grid outranks the
-   primitive's own inline-flex whatever the stylesheet order. */
+/* box · dot+word · name · meta; text columns floored at 0 so a long URL wraps
+   in place. Scoped under .group to outrank the Checkbox's own inline-flex. */
 .group .row {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr);
@@ -174,10 +169,8 @@
   flex-shrink: 0;
 }
 
-/* Phone floor: the row (the checkbox's own tap target), the field and the two
-   Buttons in this block. Button's own `.md` height is 40px and relies on
-   `.uc-app` to reach 44 (global.css) — this page is never wrapped in that
-   class, so Scan and Start watching are bumped locally instead. */
+/* Phone floor for the rows and buttons here: this page is never wrapped in
+   .uc-app, so the 44px global.css would supply is set locally. */
 @media (max-width: 700px) {
   .group .row,
   .hostCell input,

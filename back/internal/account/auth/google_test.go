@@ -1,8 +1,7 @@
 package auth
 
-// Tests for the Google door. Everything here runs without a database: the
-// checks under test all happen before a person is ever looked up, which is the
-// point — a request that fails any of them must never reach the account layer.
+// Tests for the Google door. Everything runs without a database: the checks
+// under test happen before a person is ever looked up.
 
 import (
 	"encoding/base64"
@@ -22,10 +21,8 @@ func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 const testClientID = "233728563388-test.apps.googleusercontent.com"
 
-// idToken builds an unsigned JWT with the given payload. Unsigned on purpose:
-// the handler receives its token over a direct TLS call to Google's endpoint
-// and checks claims, not signatures, so a test that signed anything would be
-// testing a step the code does not take.
+// idToken builds an unsigned JWT: the handler checks claims, not signatures,
+// so signing here would test a step the code does not take.
 func idToken(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	payload, err := json.Marshal(claims)
@@ -49,7 +46,7 @@ func liveClaims() map[string]any {
 
 // googleWith builds a handler pointed at a fake token endpoint. The endpoint
 // records the form it was posted so the exchange itself can be asserted.
-func googleWith(t *testing.T, handler http.HandlerFunc) *Google {
+func googleWith(t *testing.T, handler http.HandlerFunc) *google {
 	t.Helper()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -58,15 +55,15 @@ func googleWith(t *testing.T, handler http.HandlerFunc) *Google {
 	return g
 }
 
-// The body shape below is what the page sends. jsonPost sets the header that
-// goes with it: without one the cross-site guard refuses, which is its job.
+// jsonPost sets the header that goes with the body shape below; without it
+// the cross-site guard refuses, which is its job.
 func jsonPost(body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/google", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }
 
-func postGoogle(h *Google, body string) *httptest.ResponseRecorder {
+func postGoogle(h *google, body string) *httptest.ResponseRecorder {
 	req := jsonPost(body)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -101,9 +98,8 @@ func TestGoogleUnconfiguredAnswers503AndNamesItself(t *testing.T) {
 }
 
 func TestGoogleRefusesAnUnpublishedRedirectURI(t *testing.T) {
-	// The parameter travels from the browser, so it is attacker-controlled. An
-	// allowlist here is what stops a code being exchanged against a redirect
-	// this deployment never published.
+	// The parameter is attacker-controlled; the allowlist stops a code being
+	// exchanged against a redirect this deployment never published.
 	var called bool
 	g := googleWith(t, func(w http.ResponseWriter, r *http.Request) { called = true })
 	rr := postGoogle(g, `{"code":"x","redirect_uri":"https://evil.example/sign-in"}`)
@@ -126,9 +122,8 @@ func TestGoogleSendsTheCodeAndTheVerifierToTheTokenEndpoint(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id_token":"` + idToken(t, liveClaims()) + `"}`))
 	})
-	// exchange() directly rather than through ServeHTTP: what happens after a
-	// successful exchange needs a database, and the form this test is about is
-	// built before any of that.
+	// exchange() directly: what follows a successful exchange needs a database,
+	// and the form this test is about is built before any of that.
 	tok, err := g.exchange(t.Context(), googleReq{
 		Code:         "the-code",
 		RedirectURI:  "http://localhost/sign-in",
@@ -161,9 +156,8 @@ func TestGoogleSendsTheCodeAndTheVerifierToTheTokenEndpoint(t *testing.T) {
 }
 
 func TestGoogleOmitsTheVerifierWhenThePageSentNone(t *testing.T) {
-	// PKCE is what the page adds, not what this server demands: a caller that
-	// did not send a verifier must not have an empty one forwarded, which
-	// Google rejects outright.
+	// A caller that sent no verifier must not have an empty one forwarded,
+	// which Google rejects outright.
 	var form url.Values
 	g := googleWith(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -236,9 +230,8 @@ func TestGoogleVerifyRejectsMalformedTokens(t *testing.T) {
 }
 
 func TestGoogleConfiguredNeedsAllThreeParts(t *testing.T) {
-	// A deployment with a client id and no secret cannot complete an exchange,
-	// and one with no published redirect can never match. Both must read as
-	// unconfigured rather than fail later with a 401 nobody can explain.
+	// A client id with no secret cannot complete an exchange; both must read as
+	// unconfigured rather than fail later with an unexplained 401.
 	uris := []string{"http://localhost/sign-in"}
 	if NewGoogle(nil, nil, "id", "", uris, true, nil, discardLogger()).Configured() {
 		t.Error("no secret must not read as configured")
@@ -266,11 +259,8 @@ func TestGoogleDropsBlankRedirectEntries(t *testing.T) {
 	}
 }
 
-// The guard that makes the page's `state` check something an attacker cannot
-// decline to participate in. This is the one door that needs no cookie from a
-// victim, because it installs one: a code minted against our own public client
-// id, for an account the attacker controls, would otherwise leave the reader
-// signed into somebody else's tenant.
+// The door installs a session, so a code cross-site POSTed here would sign the
+// reader into the attacker's tenant; the guard cannot be skipped by the page.
 
 const goodBody = `{"code":"c","redirect_uri":"http://localhost/sign-in"}`
 
@@ -292,10 +282,8 @@ func TestGoogleRefusesACrossSitePost(t *testing.T) {
 }
 
 func TestGoogleRefusesAFormEncodedPost(t *testing.T) {
-	// The shape of the attack: a cross-site HTML form can send only three
-	// encodings, and text/plain is the one whose body parses as JSON. Demanding
-	// application/json forces an attacker onto fetch(), which then needs a CORS
-	// preflight this server never answers.
+	// A cross-site HTML form can send only three encodings; text/plain is the
+	// one whose body parses as JSON. application/json forces a CORS preflight.
 	g := googleWith(t, func(http.ResponseWriter, *http.Request) {
 		t.Error("the token endpoint was reached by a form post")
 	})
@@ -313,9 +301,8 @@ func TestGoogleRefusesAFormEncodedPost(t *testing.T) {
 }
 
 func TestGoogleAllowsThePageAndTheProgram(t *testing.T) {
-	// same-origin is the page itself; an absent Sec-Fetch-Site is a non-browser
-	// caller (the CLI, a test, curl), which carries no ambient session to forge.
-	// The charset parameter has to survive too, because browsers send one.
+	// same-origin is the page; absent Sec-Fetch-Site is a non-browser caller
+	// with no ambient session. The charset parameter must survive too.
 	for _, site := range []string{"same-origin", ""} {
 		var reached bool
 		g := googleWith(t, func(w http.ResponseWriter, _ *http.Request) {

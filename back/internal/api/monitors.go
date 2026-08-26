@@ -1,15 +1,11 @@
-// Monitor CRUD handlers for the /v1/monitors surface. Each handler reads the
-// session cookie → tenant_id, scopes every query to that tenant (invariant 3),
-// and returns the Monitor shape the front's mockData expects.
-//
-// The entitlement gate (POST → 402 with upgrade.reason) is the ONLY paid wall
-// in this surface: the plan's http_checks limit (3 on Free). A 4th monitor on
-// Free is rejected with the exact upgrade shape the client reads.
+// Monitor CRUD handlers for the /v1/monitors surface, tenant-scoped and
+// mockData-shaped. The entitlement gate (402 + upgrade.reason) is the wall.
 
 package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -26,25 +22,25 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
-type Monitors struct {
+// monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
+type monitors struct {
 	pool *pg.Pool
 	sess *session.Manager
 }
 
-func NewMonitors(p *pg.Pool, sm *session.Manager) *Monitors {
-	return &Monitors{pool: p, sess: sm}
+func NewMonitors(p *pg.Pool, sm *session.Manager) *monitors {
+	return &monitors{pool: p, sess: sm}
 }
 
 // ServeHTTP routes by method + path pattern.
-func (h *Monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// §7.4: notify members read, login members change. Checks are the product's
-	// own surface, so creating/editing/deleting one is a settings act.
+	// Notify members read, login members change: creating/editing/deleting a
+	// check is a settings act.
 	if r.Method != http.MethodGet && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
@@ -67,7 +63,7 @@ func (h *Monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	rows, err := h.pool.Queries().ListMonitorsByTenant(r.Context(), tenantID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -82,7 +78,7 @@ func (h *Monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) 
 	writeAPIJSON(w, http.StatusOK, out)
 }
 
-func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	var req struct {
 		Type     string `json:"type"`
 		Name     string `json:"name"`
@@ -95,18 +91,14 @@ func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		return
 	}
 	kind := strings.ToLower(req.Type)
-	// The API is the gate, not the form: the client's own length check is a
-	// courtesy, and without this an empty target produced a real monitor row
-	// that consumed one of the plan's three HTTP-check slots and handed the
-	// probe fleet an empty string to schedule. Refused before any rate or
-	// count check: a bad request must not consume a gate.
+	// The API is the gate, not the form: a bad request is refused before any
+	// count check, so it must not consume one of the plan's slots.
 	if code := validateMonitorCreate(kind, req.Target); code != "" {
 		writeAPIErr(w, http.StatusBadRequest, code)
 		return
 	}
-	// How often it may run is a plan number too (Aug 14, 2026): Free runs every
-	// 5 minutes. The client's own picker is a courtesy — the entitlement row is
-	// the gate, and it answers 402 with the reason the upgrade prompt shows.
+	// How often it may run is a plan number too: the entitlement row is the
+	// gate, answering 402 with the reason the upgrade prompt shows.
 	plan := h.tenantPlan(r.Context(), tenantID)
 	if msg := h.intervalRefusal(r.Context(), plan, req.Interval); msg != "" {
 		writeUpgradeRequired(w, msg)
@@ -133,9 +125,8 @@ func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		Kind: kind, Name: req.Name, Target: req.Target,
 		Keyword: keyword, IntervalSec: parseInterval(req.Interval),
 	}
-	// Create the monitor AND seed its schedule row in one transaction, so a
-	// crash between the two can never leave a monitor the probe fleet can't
-	// see (block 2: without EnsureMonitorSchedule the monitor never leases).
+	// Create the monitor AND seed its schedule row in one transaction: without
+	// EnsureMonitorSchedule the probe fleet never leases the monitor.
 	var row sqlc.CreateMonitorRow
 	err := h.inTx(r.Context(), func(q *sqlc.Queries) error {
 		var cerr error
@@ -152,15 +143,8 @@ func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The first website check names the project, if nothing has named it yet. The
-	// sign-in door creates the account with no domain (it only ever saw an email
-	// address), so this is where a workspace stops being anonymous — and the host
-	// somebody chose to watch first is the best answer available.
-	//
-	// Deliberately only when empty: a project that already carries a name is one
-	// somebody may have shared a status-page link to, and adding a second check
-	// must never rename it out from under that link. Heartbeats are skipped —
-	// their target is a ping URL we generated, not a site.
+	// The first website check names the project, only when it is still unnamed:
+	// a shared status-page link must not be renamed out from under it.
 	h.nameProjectIfUnnamed(r.Context(), projectID, params.Kind, row.Target)
 
 	var kw string
@@ -173,11 +157,9 @@ func (h *Monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		pgtype.Timestamptz{}, pgtype.Timestamptz{}, row.PublicID))
 }
 
-// nameProjectIfUnnamed sets project.domain from a website check's target, but
-// only while the project has no domain at all. The UPDATE carries that condition
-// in its WHERE rather than in a read-then-write, so two checks created at once
-// cannot both decide they are the first one.
-func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, kind, target string) {
+// nameProjectIfUnnamed sets project.domain from a website check's target, only
+// while it is unset: the WHERE carries the condition, so no race decides twice.
+func (h *monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, kind, target string) {
 	if kind != "website" {
 		return
 	}
@@ -189,16 +171,12 @@ func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, ki
 		`UPDATE project SET domain = $2 WHERE id = $1 AND (domain IS NULL OR domain = '')`,
 		projectID, host)
 	if err != nil || ct.RowsAffected() == 0 {
-		// A project that already carries a name keeps it — and only the winner of
-		// the naming race re-claims the slug, which is what serializes two checks
-		// created at once.
+		// A named project keeps it; only the winner of the naming race
+		// re-claims the slug.
 		return
 	}
-	// The moment the project is named is the moment the page it hands out stops
-	// being service debris (audit §13 / D10): `prj-3` becomes `example-com`.
-	// Only the service slug is rewritten — a hand-picked one may already be in
-	// somebody's bookmark, and the old `prj-N` link keeps working either way,
-	// because publicStatus resolves it through the project-id fallback.
+	// Naming the project rewrites only the service slug (`prj-3` to
+	// `example-com`): a hand-picked slug may be bookmarked; prj-N still resolves.
 	service := "prj-" + strconv.FormatInt(projectID, 10)
 	claimed := claimSlugFor(ctx, h.pool, host, projectID)
 	if claimed == "" || claimed == service {
@@ -210,12 +188,8 @@ func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, ki
 	if err != nil || ct.RowsAffected() > 0 {
 		return
 	}
-	// No page row to rename: the sign-in door creates none, so the account that
-	// signed in first and added a check second was left handing out prj-N while
-	// the claimed slug went nowhere. Create the row under the site's name, the
-	// same INSERT the watch door does at provisioning. The NOT EXISTS guard
-	// keeps a hand-picked page intact, and DO NOTHING on a slug race just means
-	// the prj-N fallback keeps working.
+	// No page row to rename: create it under the site's name, as the watch door
+	// does. NOT EXISTS keeps a hand-picked page; DO NOTHING rides a slug race.
 	_, _ = h.pool.Raw().Exec(ctx,
 		`INSERT INTO status_page (tenant_id, project_id, slug, title)
 		 SELECT tenant_id, id, $2, $3 FROM project
@@ -224,7 +198,7 @@ func (h *Monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, ki
 		projectID, claimed, host)
 }
 
-func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
 	var req struct {
 		Name     *string `json:"name"`
 		Target   *string `json:"target"`
@@ -232,7 +206,7 @@ func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		Interval *string `json:"interval"`
 		Paused   *bool   `json:"paused"`
 	}
-	// Strict (audit §14): `{"url": …}` used to 200 as a silent no-op.
+	// Strict: unknown fields must not 200 as a silent no-op.
 	if !decodeStrict(w, r, &req) {
 		return
 	}
@@ -256,10 +230,8 @@ func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	// The row as it now is. status/ssl/domain expiry live in monitor_facts, not
-	// monitor, so PatchMonitor's RETURNING cannot reach them — a hardcoded
-	// "nodata" here greyed a healthy check out on every rename until something
-	// else re-read the list. The re-read is the same query `list` uses.
+	// status/ssl/domain expiry live in monitor_facts, so PatchMonitor's
+	// RETURNING cannot reach them: re-read, the same query `list` uses.
 	full, err := h.pool.Queries().GetMonitorByPublicID(r.Context(), sqlc.GetMonitorByPublicIDParams{
 		PublicID: pubID, TenantID: tenantID,
 	})
@@ -278,22 +250,16 @@ func (h *Monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		ptrStrSafe(full.Status), full.SslExpiresAt, full.DomainExpiresAt, full.PublicID))
 }
 
-func (h *Monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
 	ctx := r.Context()
 	pubID := parseUUID(id)
-	// An open incident outlives the monitor it belongs to: incident.monitor_id
-	// is ON DELETE SET NULL, so the row survives with nothing left to close it,
-	// and the status page went on reporting "Some systems are down" for a check
-	// the owner had removed. Close it while the monitor id still resolves —
-	// after the DELETE there is no way back to it. Close reads no ClickHouse
-	// (only Open freezes a log slice), so a nil conn is the whole dependency.
+	// Close an open incident while the monitor id still resolves: monitor_id is
+	// ON DELETE SET NULL, and after the DELETE nothing can find the row.
 	if mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
 		PublicID: pubID, TenantID: tenantID,
 	}); err == nil {
 		if cerr := incident.New(h.pool, nil).Close(ctx, mon.ID, incident.ReasonMonitorDelete); cerr != nil {
-			// Deleting anyway would strand the incident in exactly the state
-			// this code exists to prevent, and nothing afterwards can find it
-			// again. A failed tidy-up fails the delete.
+			// A failed tidy-up fails the delete: nothing afterwards can find the row.
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -308,14 +274,13 @@ func (h *Monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Monitors) notFound(w http.ResponseWriter) {
+func (h *monitors) notFound(w http.ResponseWriter) {
 	writeAPIErr(w, http.StatusNotFound, "not_found")
 }
 
-// inTx runs fn against sqlc Queries bound to a fresh transaction; the tx commits
-// when fn returns nil and rolls back otherwise. Used so monitor create + its
-// schedule row land atomically.
-func (h *Monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
+// inTx runs fn on Queries bound to a fresh transaction; commits on nil, rolls
+// back otherwise. Used so monitor create + schedule row land atomically.
+func (h *monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
 	tx, err := h.pool.Raw().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
@@ -327,11 +292,8 @@ func (h *Monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error
 	return tx.Commit(ctx)
 }
 
-// scheduleRegion is the region monitors are leased in. It reads UC_NODE_REGION —
-// the SAME env var ucprobe leases with (default "default") — so the value the
-// API schedules in always matches the region the probe fleet leases from. The
-// lease query does not yet filter by region, but keeping these in step means
-// adding that filter later cannot silently break scheduling.
+// scheduleRegion reads UC_NODE_REGION, the SAME env var ucprobe leases with, so
+// a later region filter on the lease query cannot silently break scheduling.
 func scheduleRegion() string {
 	if r := os.Getenv("UC_NODE_REGION"); r != "" {
 		return r
@@ -339,12 +301,8 @@ func scheduleRegion() string {
 	return "default"
 }
 
-// --- helpers ---
-
-// monitorRowToAPI builds the front-facing Monitor shape. The interval is
-// converted from seconds to the display string ("5m"). Expiry dates are
-// formatted to the mockData convention (omitted for heartbeat monitors or when
-// no facts exist yet).
+// monitorRowToAPI builds the front-facing Monitor shape: interval as display
+// string, expiry dates omitted when no facts exist yet.
 func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 	status string, sslExp, domainExp pgtype.Timestamptz,
 	pubID pgtype.UUID) map[string]any {
@@ -361,10 +319,8 @@ func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 		m["keyword"] = keyword
 	}
 	if kind == "website" && (sslExp.Valid || domainExp.Valid) {
-		// Only the half we have a date for: "domain —" is not a fact about the
-		// domain, it is us saying we have not looked yet, and the row printed it
-		// under every check whose certificate we had already read. Zero is
-		// silence — an absent field does not render.
+		// Only the half we have a date for: "domain —" says we have not looked,
+		// so an absent field does not render at all.
 		exp := map[string]string{}
 		if sslExp.Valid {
 			exp["ssl"] = formatExpiry(sslExp, "SSL")
@@ -409,9 +365,8 @@ func intervalLabel(sec int32) string {
 }
 
 // tenantPlan reads the tenant's plan, falling back to Free. The gates and
-// GET /v1/plan must read the same row: the gates used to hardcode "Free", so
-// the picker promised a paid tenant the minute its POST then refused.
-func (h *Monitors) tenantPlan(ctx context.Context, tenantID int64) string {
+// GET /v1/plan must read the same row.
+func (h *monitors) tenantPlan(ctx context.Context, tenantID int64) string {
 	var plan string
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
@@ -421,10 +376,9 @@ func (h *Monitors) tenantPlan(ctx context.Context, tenantID int64) string {
 	return plan
 }
 
-// intervalRefusal returns the reason this plan may not run a check that often,
-// or "" when it may. Empty input means "not asked for", which is not a refusal:
-// the column's default applies.
-func (h *Monitors) intervalRefusal(ctx context.Context, plan, interval string) string {
+// intervalRefusal returns why this plan may not run that often, or "". Empty
+// input is "not asked for": the column's default applies.
+func (h *monitors) intervalRefusal(ctx context.Context, plan, interval string) string {
 	if interval == "" {
 		return ""
 	}
@@ -468,11 +422,8 @@ func ptrStrSafe(s *string) string {
 	return *s
 }
 
-// validateMonitorCreate returns the error code for a create that must be
-// refused, or "" when the request is fine.
-//
-// A heartbeat has no target of its own — we generate its ping URL — so it is
-// judged only on the kind.
+// validateMonitorCreate returns the refusal code for a create, or "". A
+// heartbeat has no target of its own (we generate its ping URL).
 func validateMonitorCreate(kind, target string) string {
 	if kind == "heartbeat" {
 		return ""
@@ -488,10 +439,8 @@ func validateMonitorCreate(kind, target string) string {
 	return ""
 }
 
-// writeAPIErr / writeAPIJSON are shared by all API handlers.
 // writeUpgradeRequired is the one shape a paid wall may take: 402 carrying
-// `upgrade.reason`, which the client routes straight into its upgrade prompt.
-// There is no other paid-wall path — no `disabled`, no muted text.
+// `upgrade.reason`, which the client routes into its upgrade prompt.
 func writeUpgradeRequired(w http.ResponseWriter, reason string) {
 	writeAPIJSON(w, http.StatusPaymentRequired, map[string]any{
 		"error": map[string]any{
@@ -509,9 +458,7 @@ func writeAPIErr(w http.ResponseWriter, code int, msg string) {
 }
 
 // writeAPIErrMsg is writeAPIErr with the human message the Error schema marks
-// required beside code — for the responses whose message the front shows as
-// the failure copy (the explain 400/429). writeAPIErr stays for the code-only
-// replies.
+// required beside code (the explain 400/429).
 func writeAPIErrMsg(w http.ResponseWriter, code int, errCode, msg string) {
 	writeAPIJSON(w, code, map[string]any{
 		"error": map[string]string{"code": errCode, "message": msg},
@@ -524,33 +471,16 @@ func writeAPIJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// parseUUID converts a hex-string public_id to pgtype.UUID (the front sends
-// "0123456789abcdef..." — our uuidStr uses %x on [16]byte so it's lowercase hex
-// without dashes).
+// parseUUID converts a hex-string public_id to pgtype.UUID: uuidStr writes
+// lowercase hex without dashes, and the front sends that back.
 func parseUUID(s string) pgtype.UUID {
 	var u pgtype.UUID
-	if len(s) != 32 {
+	if len(s) != 32 || strings.ToLower(s) != s {
 		return u
 	}
-	b := make([]byte, 16)
-	for i := 0; i < 16; i++ {
-		var byteVal byte
-		for j := 0; j < 2; j++ {
-			c := s[i*2+j]
-			var d byte
-			switch {
-			case c >= '0' && c <= '9':
-				d = c - '0'
-			case c >= 'a' && c <= 'f':
-				d = c - 'a' + 10
-			case c >= 'A' && c <= 'F':
-				d = c - 'A' + 10
-			default:
-				return u
-			}
-			byteVal = byteVal<<4 | d
-		}
-		b[i] = byteVal
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return u
 	}
 	copy(u.Bytes[:], b)
 	u.Valid = true

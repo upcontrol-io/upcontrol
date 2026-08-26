@@ -1,15 +1,7 @@
 //go:build integration
 
-// Recipient-invite coverage for the address contract (§6.8), the
-// invitation mail (Decision 16), the resend (Decision 17: the cooldown
-// answers 429, a failed send changes nothing, only pending is a target) and
-// Decision 19's server half (a pending address is no e-mail destination).
-// The invite normalises before anything is stored, so an invite under one
-// spelling and a sign-in under another cannot land in two person rows; a
-// second invite of the same address adds no second membership; the mail is
-// sent inside the write, so a send failure leaves no member row behind.
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/api/...
+// Recipient-invite coverage: normalisation, invitation mail, resend, pending
+// address. Run: UC_TEST_POSTGRES=... go test -tags=integration ./internal/api/...
 package api
 
 import (
@@ -29,11 +21,9 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// openRecipientsDB applies migrations and returns a WriteAPI over a fresh
-// tenant, ready to receive invites. The inviter is a named, active person on
-// the tenant — the way every real invite arrives, since ServeHTTP passes the
-// session's person id through to the handler.
-func openRecipientsDB(t *testing.T) (*WriteAPI, int64, int64) {
+// openRecipientsDB applies migrations and returns a writeAPI over a fresh
+// tenant, with a named active inviter as ServeHTTP would supply.
+func openRecipientsDB(t *testing.T) (*writeAPI, int64, int64) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -65,12 +55,11 @@ func openRecipientsDB(t *testing.T) (*WriteAPI, int64, int64) {
 		tenantID, inviterID); err != nil {
 		t.Fatalf("seed inviter membership: %v", err)
 	}
-	return &WriteAPI{pool: pool}, tenantID, inviterID
+	return &writeAPI{pool: pool}, tenantID, inviterID
 }
 
-// inviteMailer records the invitation, and can fail it the way an email agent
-// that is down does. SendCode is here only because WriteAPI.mailer is the
-// auth.Mailer the whole API shares; this path never calls it.
+// inviteMailer records the invitation and can fail it as a down agent does.
+// SendCode exists only to satisfy auth.Mailer; this path never calls it.
 type inviteMailer struct {
 	calls     int
 	to        string
@@ -88,12 +77,8 @@ func (m *inviteMailer) SendInvite(_ context.Context, to, code, project, invitedB
 	return m.err
 }
 
-// withFreshIP stamps a unique X-Forwarded-For on a synthesized request.
-// IssueLoginCode meters a per-IP window shared with the sign-in door, and
-// every httptest request would otherwise arrive from the same 192.0.2.1 —
-// not only would two runs of this suite inside five minutes start failing
-// as rate_limited, so would two resends in one test, for a reason no test
-// here means to touch.
+// withFreshIP stamps a unique X-Forwarded-For: IssueLoginCode meters a per-IP
+// window, and every httptest request would otherwise share one address.
 var inviteSeq int64
 
 func withFreshIP(t *testing.T, r *http.Request) *http.Request {
@@ -111,10 +96,8 @@ func inviteRequest(t *testing.T, email string) *http.Request {
 	return withFreshIP(t, r)
 }
 
-// An invite under mixed case must land as the one lower-case spelling: the
-// person is found by the normalised address (the same lookup the sign-in doors
-// use), exactly one row exists for it, and the account is named from the local
-// part instead of the empty string the INSERT used to bake in.
+// An invite under mixed case lands as the one lower-case spelling, exactly
+// one person row, named from the local part.
 func TestCreateRecipient_NormalisedAddressIsOnePerson(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 
@@ -139,9 +122,8 @@ func TestCreateRecipient_NormalisedAddressIsOnePerson(t *testing.T) {
 	}
 }
 
-// The same address invited twice — the second invite under a different
-// spelling, which is the case normalisation exists for — finds the person and
-// adds no second membership row.
+// The same address invited twice under different spellings finds the person
+// and adds no second membership row.
 func TestCreateRecipient_SecondInviteAddsNoMembership(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 
@@ -182,11 +164,8 @@ func TestCreateRecipient_BadEmailIsRefused(t *testing.T) {
 	}
 }
 
-// §4: the e-mail channel leaves with the person. A removed member's address
-// stops being a destination, not just a login — the delete would otherwise
-// leave a channel that keeps mailing somebody the project just evicted. The
-// bystander row (another address, same tenant) proves the match is by the
-// person's own e-mail, not a blanket sweep of the tenant's e-mail channels.
+// The e-mail channel leaves with the person: a removed member's address stops
+// being a destination. The bystander row proves the match is by address.
 func TestDeleteRecipient_EmailChannelLeavesWithThePerson(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 
@@ -201,8 +180,7 @@ func TestDeleteRecipient_EmailChannelLeavesWithThePerson(t *testing.T) {
 		`SELECT id FROM person WHERE email = 'gone@example.com'`).Scan(&personID); err != nil {
 		t.Fatalf("find the invited person: %v", err)
 	}
-	// The channel rows go in by SQL: the API's create path would only repeat
-	// what the invite already proved, and the row under test is the delete's
+	// The channel rows go in by SQL: the row under test is the delete's
 	// input, not its output.
 	for _, addr := range []string{"gone@example.com", "stays@example.com"} {
 		if _, err := h.pool.Raw().Exec(ctx,
@@ -233,18 +211,14 @@ func TestDeleteRecipient_EmailChannelLeavesWithThePerson(t *testing.T) {
 	}
 }
 
-// Decision 16: the invite sends the mail inside the write. A fresh invite
-// calls SendInvite exactly once, with the normalised address, the inviter's
-// person.name, and the tenant's own name as the project (this tenant has no
-// project, so Decision 15's fallback must name it). Dev mode echoes the very
-// code the mailer was handed.
+// A fresh invite calls SendInvite exactly once with the normalised address,
+// the inviter's name, the tenant as project. Dev mode echoes the code.
 func TestCreateRecipient_SendsOneInvitation(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	h.mailer = &inviteMailer{}
 	h.devMode = true
-	// A unique address per run: the database holds earlier runs' codes, and
-	// the 60-second cooldown would otherwise turn the second run's "fresh"
-	// invite into the no-mail branch this test must not take.
+	// A unique address per run: the 60-second cooldown would otherwise turn
+	// this "fresh" invite into the no-mail branch.
 	local := fmt.Sprintf("kira%d", time.Now().UnixNano())
 
 	w := httptest.NewRecorder()
@@ -294,14 +268,13 @@ func TestCreateRecipient_SendsOneInvitation(t *testing.T) {
 	}
 }
 
-// Decision 16's error table: a send failure rolls the whole write back and
-// answers 503, so nobody is added. The person row goes with the membership —
-// the rollback undoes the transaction, not just its last statement.
+// A send failure rolls the whole write back and answers 503: the person row
+// goes with the membership, not just the last statement.
 func TestCreateRecipient_FailingMailerRollsBack(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	h.mailer = &inviteMailer{err: errors.New("agent down")}
-	// Unique per run, same reason as the fresh-invite test: a stale code from
-	// an earlier run would take the cooldown branch and never reach the mailer.
+	// Unique per run: a stale code from an earlier run would take the cooldown
+	// branch and never reach the mailer.
 	addr := fmt.Sprintf("lost%d@example.com", time.Now().UnixNano())
 
 	w := httptest.NewRecorder()
@@ -377,12 +350,9 @@ func TestCreateRecipient_ActiveMemberShortCircuits(t *testing.T) {
 	}
 }
 
-// seedMember plants a person + membership directly, the way the invite would
-// have: role 'notify' is what its INSERT writes, status is the caller's. The
-// resend tests need a row with no live code, which the invite path cannot
-// give — it mints one on the way in, and the 60-second cooldown would then
-// swallow the resend under test.
-func seedMember(t *testing.T, h *WriteAPI, tenantID int64, status string) (int64, string) {
+// seedMember plants a person + membership directly with no live code (the
+// invite path mints one, and its cooldown would swallow the resend).
+func seedMember(t *testing.T, h *writeAPI, tenantID int64, status string) (int64, string) {
 	t.Helper()
 	addr := fmt.Sprintf("%s%d@example.com", status, time.Now().UnixNano())
 	var personID int64
@@ -399,18 +369,16 @@ func seedMember(t *testing.T, h *WriteAPI, tenantID int64, status string) (int64
 	return personID, addr
 }
 
-// resendRequest builds the Decision-17 request for personID. The fresh IP is
-// withFreshIP's own reason: the shared per-IP window must stay out of the
-// way so the address cooldown is the only limiter these tests exercise.
+// resendRequest builds the resend request for personID, with a fresh IP so
+// the per-IP window stays out of the way.
 func resendRequest(t *testing.T, personID int64) *http.Request {
 	t.Helper()
 	return withFreshIP(t, httptest.NewRequest(http.MethodPost,
 		"/v1/recipients/"+strconv.FormatInt(personID, 10)+"/resend", nil))
 }
 
-// Decision 17's error table on the resend: a failed send answers 503 and the
-// membership is still pending — a resend inserts nothing, so there is also
-// nothing to roll back; the failed mail is the only thing that changed.
+// A failed resend answers 503 and the membership stays pending: a resend
+// inserts nothing, so the failed mail is the only change.
 func TestResendInvite_FailingMailerKeepsPending(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	h.mailer = &inviteMailer{err: errors.New("agent down")}
@@ -433,9 +401,8 @@ func TestResendInvite_FailingMailerKeepsPending(t *testing.T) {
 	}
 }
 
-// Only a pending membership is a resend target: an active member accepted
-// their invitation, and a second one is noise. The 404 is the same code the
-// patch and delete arms use for a stranger's id.
+// Only a pending membership is a resend target; an active member gets the 404
+// the patch and delete arms use for a stranger's id.
 func TestResendInvite_ActiveMemberIsNotATarget(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	h.mailer = &inviteMailer{}
@@ -454,10 +421,8 @@ func TestResendInvite_ActiveMemberIsNotATarget(t *testing.T) {
 	}
 }
 
-// Decision 17: a resend inside the 60-second address cooldown answers 429
-// rate_limited, never a 202 — a 202 would show "Sent!" while no second mail
-// can go out. Each request carries its own IP so only the cooldown fires,
-// and exactly one mail left.
+// A resend inside the 60-second cooldown answers 429, never a 202: exactly
+// one mail left, and each request carries its own IP.
 func TestResendInvite_CooldownAnswers429(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	h.mailer = &inviteMailer{}
@@ -481,10 +446,8 @@ func TestResendInvite_CooldownAnswers429(t *testing.T) {
 	}
 }
 
-// Decision 19's server half: an e-mail channel may only address an ACTIVE
-// member — a pending person has not signed in, so their address is unproven
-// and answers the same 400 unknown_recipient a stranger's does. The active
-// member beside them proves the refusal is the status, not the query.
+// An e-mail channel may only address an ACTIVE member: a pending address
+// answers the same 400 a stranger's does; the active member proves it's status.
 func TestCreateChannel_PendingAddressIsUnknownRecipient(t *testing.T) {
 	h, tenantID, _ := openRecipientsDB(t)
 	_, pendingAddr := seedMember(t, h, tenantID, "pending")

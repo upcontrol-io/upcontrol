@@ -1,6 +1,5 @@
-// Tests for EmailChannel: the wire contract with the email agent's /send, captured at
-// the HTTP boundary (method, path, bearer, JSON body) plus the status
-// conventions ClassifyError feeds on.
+// Tests for EmailChannel: the wire contract with the agent's /send, captured
+// at the HTTP boundary, plus the status conventions classifyError feeds on.
 
 package deliver
 
@@ -65,8 +64,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		t.Errorf("to = %v, want ops@example.com", body["to"])
 	}
 	// The agent renders: the wire carries facts and a template name, never a
-	// finished subject or body. A regression back to ready-made content would
-	// silently drop the HTML part from every alert and nothing else would fail.
+	// finished subject or body.
 	if body["template"] != "alert" {
 		t.Errorf("template = %v, want alert", body["template"])
 	}
@@ -81,8 +79,7 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 		t.Fatalf("vars missing from %v", body)
 	}
 	// incident_id is what the mail's button is built from: without it the
-	// reader is sent to the dashboard to go looking for what they were just
-	// written to about.
+	// reader is sent to the dashboard to go looking.
 	for _, c := range [][2]string{
 		{"class", "page"}, {"status", "down"}, {"title", "Test title"},
 		{"to", "ops@example.com"}, {"app_url", "https://x.test/app"},
@@ -92,9 +89,8 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 			t.Errorf("vars[%s] = %v, want %q", c[0], vars[c[0]], c[1])
 		}
 	}
-	// The monitor leads the fact table, then whatever the detector attached,
-	// then the incident. The ORDER is the assertion: it is the whole reason
-	// Fields is a slice and not a map.
+	// The monitor leads the fact table, then the detector's fields, then the
+	// incident. The ORDER is the assertion: it is why Fields is a slice.
 	fields, _ := vars["fields"].([]any)
 	want := [][3]any{
 		{"Monitor", "example.com/checkout", false},
@@ -112,10 +108,8 @@ func TestEmailChannelPostsNotificationToSend(t *testing.T) {
 	}
 }
 
-// The order a map would not have kept. Go randomizes map iteration, so the
-// same alert used to list its facts differently on each render — and on the
-// channels that send one line per field, two identical alerts compared as
-// different text.
+// The order a map would not have kept: Go randomizes map iteration, so the
+// same alert used to list its facts differently on each render.
 func TestFormatEmailKeepsFieldOrder(t *testing.T) {
 	p := AlertPayload{
 		Title: "T",
@@ -175,7 +169,7 @@ func TestSMTPChannelSendsSubjectAndBody(t *testing.T) {
 
 func TestSMTPChannelSendFailureReturnsZero(t *testing.T) {
 	// Same convention as the network-failure case of doPost: (0, err) is the
-	// retryable outcome ClassifyError expects.
+	// retryable outcome classifyError expects.
 	rec := &recordingSender{err: context.DeadlineExceeded}
 	code, err := (&SMTPChannel{Mailer: rec}).Send(context.Background(), "ops@example.com", AlertPayload{Title: "t", Status: "down"})
 	if code != 0 || err == nil {
@@ -207,9 +201,8 @@ func TestEmailChannelNoBearerWhenKeyEmpty(t *testing.T) {
 }
 
 func TestEmailChannelNon2xxReturnsStatusWithNilError(t *testing.T) {
-	// Package convention (doPost and worker.processItem): a non-2xx leaves
-	// err nil and hands the raw status to ClassifyError; only network
-	// failures return an error.
+	// Package convention: a non-2xx leaves err nil and hands the raw status to
+	// classifyError; only network failures return an error.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -220,14 +213,14 @@ func TestEmailChannelNon2xxReturnsStatusWithNilError(t *testing.T) {
 	if code != 500 || err != nil {
 		t.Fatalf("Send = (%d, %v), want (500, nil)", code, err)
 	}
-	if got := ClassifyError(code); got != OutcomeRetryable {
-		t.Errorf("ClassifyError(500) = %q, want %q", got, OutcomeRetryable)
+	if got := classifyError(code); got != outcomeRetryable {
+		t.Errorf("classifyError(500) = %q, want %q", got, outcomeRetryable)
 	}
 }
 
 func TestEmailChannelNetworkErrorReturnsZero(t *testing.T) {
 	// A closed listener is a refused connection: the channel must report a
-	// network failure as status 0 (ClassifyError's retryable case).
+	// network failure as status 0 (classifyError's retryable case).
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close()

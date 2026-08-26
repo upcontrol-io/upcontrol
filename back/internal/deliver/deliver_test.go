@@ -15,53 +15,53 @@ func TestBackoffSchedule(t *testing.T) {
 	// The base delays should be 1/2/4/8/16s. Jitter makes them slightly larger
 	// but never smaller (jitter is [0, base/2)).
 	for attempt := 0; attempt < 5; attempt++ {
-		d := Backoff(attempt)
+		d := backoff(attempt)
 		base := time.Duration(1<<attempt) * time.Second
 		if d < base {
-			t.Errorf("Backoff(%d) = %v, want >= %v (base)", attempt, d, base)
+			t.Errorf("backoff(%d) = %v, want >= %v (base)", attempt, d, base)
 		}
 		if d > base+base/2 {
-			t.Errorf("Backoff(%d) = %v, want <= %v (base + jitter)", attempt, d, base+base/2)
+			t.Errorf("backoff(%d) = %v, want <= %v (base + jitter)", attempt, d, base+base/2)
 		}
 	}
 }
 
 func TestBackoffCaps(t *testing.T) {
 	// Attempt 10 should still cap at the 16s base (attempt index 4).
-	d := Backoff(10)
+	d := backoff(10)
 	if d < 16*time.Second {
-		t.Errorf("Backoff(10) = %v, want >= 16s", d)
+		t.Errorf("backoff(10) = %v, want >= 16s", d)
 	}
 	if d > 24*time.Second {
-		t.Errorf("Backoff(10) = %v, want <= 24s (16s + 8s jitter)", d)
+		t.Errorf("backoff(10) = %v, want <= 24s (16s + 8s jitter)", d)
 	}
 }
 
 func TestClassifyError(t *testing.T) {
 	cases := []struct {
 		code int
-		want Outcome
+		want outcome
 	}{
-		{0, OutcomeRetryable},   // network
-		{200, OutcomeOK},        // success
-		{400, OutcomeFatal},     // bad request
-		{403, OutcomeFatal},     // bot blocked
-		{404, OutcomeFatal},     // not found
-		{429, OutcomeRetryable}, // rate limited
-		{500, OutcomeRetryable}, // server error
-		{502, OutcomeRetryable}, // bad gateway
-		{503, OutcomeRetryable}, // unavailable
+		{0, outcomeRetryable},   // network
+		{200, outcomeOK},        // success
+		{400, outcomeFatal},     // bad request
+		{403, outcomeFatal},     // bot blocked
+		{404, outcomeFatal},     // not found
+		{429, outcomeRetryable}, // rate limited
+		{500, outcomeRetryable}, // server error
+		{502, outcomeRetryable}, // bad gateway
+		{503, outcomeRetryable}, // unavailable
 	}
 	for _, c := range cases {
-		if got := ClassifyError(c.code); got != c.want {
-			t.Errorf("ClassifyError(%d) = %q, want %q", c.code, got, c.want)
+		if got := classifyError(c.code); got != c.want {
+			t.Errorf("classifyError(%d) = %q, want %q", c.code, got, c.want)
 		}
 	}
 }
 
 func TestNextTryAtFatal(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(1, OutcomeFatal, now)
+	got := nextTryAt(1, outcomeFatal, now)
 	if !got.IsZero() {
 		t.Error("fatal should return zero time (DLQ)")
 	}
@@ -69,7 +69,7 @@ func TestNextTryAtFatal(t *testing.T) {
 
 func TestNextTryAtOK(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(1, OutcomeOK, now)
+	got := nextTryAt(1, outcomeOK, now)
 	if !got.IsZero() {
 		t.Error("ok should return zero time (no retry)")
 	}
@@ -77,7 +77,7 @@ func TestNextTryAtOK(t *testing.T) {
 
 func TestNextTryAtRetryable(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(0, OutcomeRetryable, now)
+	got := nextTryAt(0, outcomeRetryable, now)
 	if got.IsZero() {
 		t.Fatal("retryable should return a future time")
 	}
@@ -88,14 +88,14 @@ func TestNextTryAtRetryable(t *testing.T) {
 
 func TestNextTryAtMaxAttempts(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(MaxAttempts, OutcomeRetryable, now)
+	got := nextTryAt(maxAttempts, outcomeRetryable, now)
 	if !got.IsZero() {
 		t.Error("max attempts should return zero time (DLQ)")
 	}
 }
 
 func TestBreakerOpensAfter5Min(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	// No failures → breaker closed.
 	if b.IsOpen(start) {
@@ -107,54 +107,52 @@ func TestBreakerOpensAfter5Min(t *testing.T) {
 		t.Error("breaker should be closed immediately after first failure")
 	}
 	// After 5 minutes, breaker opens.
-	if !b.IsOpen(start.Add(BreakerTimeout)) {
-		t.Error("breaker should open after BreakerTimeout")
+	if !b.IsOpen(start.Add(breakerTimeout)) {
+		t.Error("breaker should open after breakerTimeout")
 	}
 }
 
 func TestBreakerClosesOnSuccess(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	b.RecordFailure(start)
 	b.RecordFailure(start.Add(time.Minute))
 	// Success closes it.
 	b.RecordSuccess()
-	if b.IsOpen(start.Add(BreakerTimeout + time.Minute)) {
+	if b.IsOpen(start.Add(breakerTimeout + time.Minute)) {
 		t.Error("breaker should be closed after success")
 	}
 }
 
 func TestBreakerFailover(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	b.RecordFailure(start)
-	// Breaker open → failover.
-	if !b.ShouldFailover(start.Add(BreakerTimeout)) {
+	// breaker open → failover.
+	if !b.IsOpen(start.Add(breakerTimeout)) {
 		t.Error("should failover when breaker is open")
 	}
 	b.RecordSuccess()
-	if b.ShouldFailover(start.Add(BreakerTimeout)) {
+	if b.IsOpen(start.Add(breakerTimeout)) {
 		t.Error("should NOT failover when breaker is closed")
 	}
 }
 
 func TestBreakerStreakExtendsNotResets(t *testing.T) {
-	var b Breaker
+	var b breaker
 	t0 := time.Now()
 	b.RecordFailure(t0)
 	// Another failure at t0+1m should NOT reset the streak start.
 	b.RecordFailure(t0.Add(time.Minute))
 	// The breaker should open at t0+5m, not t0+1m+5m.
-	if !b.IsOpen(t0.Add(BreakerTimeout)) {
+	if !b.IsOpen(t0.Add(breakerTimeout)) {
 		t.Error("breaker should open based on first failure, not extended streak")
 	}
 }
 
 func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
-	// The Telegram message IS the product on a phone (§4.7): what broke, the
-	// facts, the raw lines, and a link into the incident — a message that
-	// arrives without its way in makes the reader open a laptop, which is the
-	// thing the positioning is against.
+	// The Telegram message IS the product on a phone: what broke, the facts,
+	// the raw lines, and a link into the incident.
 	got := formatTelegram(AlertPayload{
 		Status:     "down",
 		Title:      "Checkout is down",
@@ -166,7 +164,7 @@ func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
 			{Label: "Down since", Value: "14:02 UTC"},
 		},
 		Lines:   []string{"HTTP/1.1 503 Service Unavailable"},
-		Actions: []ActionButton{{Label: "Runbook", URL: "https://acme.test/runbook"}},
+		Actions: []actionButton{{Label: "Runbook", URL: "https://acme.test/runbook"}},
 	}, "https://upcontrol.io/app")
 	for _, want := range []string{
 		"🔴 <b>Checkout is down</b>",
@@ -189,17 +187,15 @@ func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
 }
 
 func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
-	// A log-alert title IS an error message. The old renderer interpolated it
-	// raw, and one '<' in it — any generic type, any JSX fragment — made the
-	// Bot API reject the whole sendMessage as malformed HTML: an alert that
-	// failed to deliver BECAUSE of what it was alerting about.
+	// A log-alert title IS an error message: one '<' in it and the Bot API
+	// rejects the whole sendMessage as malformed HTML.
 	got := formatTelegram(AlertPayload{
 		Status:  "check",
 		Title:   "Error in api: Promise<Map<string, T>> rejected",
 		Summary: "escape <b>me</b>",
 		Fields:  []Field{{Label: "<i>k</i>", Value: "a && b < c", Mono: true}},
 		Lines:   []string{`<img src=x onerror="boom">`},
-		Actions: []ActionButton{{Label: "a<b>c", URL: "https://x.test/?a=1&b=2"}},
+		Actions: []actionButton{{Label: "a<b>c", URL: "https://x.test/?a=1&b=2"}},
 	}, "https://upcontrol.io/app")
 	for _, banned := range []string{
 		"Promise<Map", "<i>k</i>", "<img src=x", "<b>me</b>", "a<b>c",
@@ -221,9 +217,8 @@ func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
 }
 
 func TestFormatTelegram_StatusIsShapePlusWords(t *testing.T) {
-	// Colour is never the only channel (the product's status rule, kept on a
-	// surface with no CSS): each status gets its emoji, and the words beside
-	// it carry the same fact.
+	// Colour is never the only channel: each status gets its emoji, and the
+	// words beside it carry the same fact.
 	for status, emoji := range map[string]string{"down": "🔴", "check": "🟠", "ok": "🟢"} {
 		got := formatTelegram(AlertPayload{Status: status, Title: "t"}, "")
 		if !strings.HasPrefix(got, emoji+" ") {
@@ -286,17 +281,13 @@ func TestDownForLine_StaysHonestUnderAMinute(t *testing.T) {
 	}
 }
 
-// The button invariant (Decision 8): an alert's inline buttons carry the
-// actions everywhere — a press is authorised by WHO pressed it (the bot
-// resolves from.id to a member of the chat's tenant), not by the chat — while
-// the web_app row is personal-only, because the Bot API refuses web_app
-// buttons outside private chats. Captured at the HTTP boundary: whatever
-// crosses the wire to Telegram is what the worker actually sends.
+// The button invariant: actions go everywhere, authorised by WHO pressed;
+// the web_app row is personal-only. Captured at the HTTP boundary.
 func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
-	restore := HTTPClient
-	HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	restore := httpClient
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var v map[string]any
 		_ = json.NewDecoder(req.Body).Decode(&v)
 		mu.Lock()
@@ -304,7 +295,7 @@ func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 		mu.Unlock()
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok")), Header: http.Header{}}, nil
 	})}
-	defer func() { HTTPClient = restore }()
+	defer func() { httpClient = restore }()
 
 	ch := &TelegramChannel{Token: func(context.Context) string { return "t" }}
 	payload := AlertPayload{Title: "down", Status: "down", IncidentID: "abc123"}
@@ -347,8 +338,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 
 func TestStatusColor_IsStatusNotSeverity(t *testing.T) {
 	// Discord renders the colour, so it must follow the same three states the
-	// rest of the product uses — a "check" that came out green would say the
-	// opposite of the text beside it.
+	// rest of the product uses.
 	if statusColor("down") == statusColor("check") || statusColor("check") == statusColor("ok") {
 		t.Fatal("down / check / ok must be three distinct colours")
 	}
@@ -358,9 +348,7 @@ func TestStatusColor_IsStatusNotSeverity(t *testing.T) {
 }
 
 // keyboardDesc flattens a keyboard to "label=target | label=target" in row
-// order. Comparing whole strings pins the buttons, their order AND everything
-// absent in one assertion — and keeps the JSON encoder out of the assertion
-// path, where it escapes "&" and tests itself rather than the URL.
+// order; whole strings pin the buttons, their order and everything absent.
 func keyboardDesc(kb [][]map[string]any) string {
 	var out []string
 	for _, row := range kb {
@@ -411,19 +399,16 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
 		},
 		{
-			// A group keeps Acknowledge/Resolve (a press is authorised by who
-			// pressed it) but drops the web_app row: the Bot API refuses
-			// web_app buttons outside private chats (Decision 8), and the
-			// message already carries the same link as text.
+			// A group keeps Acknowledge/Resolve but drops the web_app row: the
+			// Bot API refuses web_app buttons outside private chats.
 			name:    "a group page is acknowledged or resolved",
 			payload: groupPage,
 			appURL:  app,
 			want:    "Acknowledge=ack:abc123 | Resolve=resolve:abc123",
 		},
 		{
-			// Same rule as the private detector case (no Resolve — a detector
-			// closes its own incidents) minus the Explain web_app button a
-			// group cannot carry.
+			// Same rule as the private detector case (no Resolve; a detector
+			// closes its own incidents) minus the Explain button.
 			name:    "a group detector spike is acknowledged only",
 			payload: groupDetect,
 			appURL:  app,

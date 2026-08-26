@@ -16,26 +16,20 @@ import (
 	"unicode/utf8"
 )
 
-// OpenAISettings is one resolution of the three operator knobs: the endpoint
-// (OpenAI itself or any proxy/gateway speaking the same wire format), the
-// model name, and the key. All three can arrive from the environment at boot
-// or from the Settings screen at runtime (instance_setting) — the resolver,
-// not this client, decides precedence.
+// OpenAISettings is one resolution of endpoint, model and key; they can come
+// from the environment at boot or Settings at runtime.
 type OpenAISettings struct {
 	BaseURL string // e.g. https://api.openai.com/v1
 	Model   string
 	Key     string // empty = not configured; the value is never logged
 }
 
-// OpenAIClient talks to any OpenAI-compatible chat-completions endpoint.
-// Settings resolve per call, so a model, base URL or key pasted into the
-// Settings screen takes effect on the next question — no restart. An empty
-// key means Explain is not configured: Complete answers ErrNotConfigured,
-// never a guessed fallback.
+// OpenAIClient talks to any OpenAI-compatible endpoint. Settings resolve per
+// call, so a Settings change applies without restart; no key = ErrNotConfigured.
 type OpenAIClient struct {
 	Settings   func(ctx context.Context) OpenAISettings
 	Timeout    time.Duration
-	HTTPClient *http.Client // injectable for tests; Timeout rides the context either way
+	httpClient *http.Client // injectable for tests; Timeout rides the context either way
 	// LogPrompt echoes the exact system+user bytes of every call to the log
 	// (the prompt-editing loop: see it, edit scenario.go, see it again).
 	LogPrompt bool
@@ -48,52 +42,32 @@ func (c *OpenAIClient) settings(ctx context.Context) OpenAISettings {
 	return c.Settings(ctx)
 }
 
-// Configured reports whether a key resolves right now — the Accountant asks
-// before spending anything, and the explain preview turns it into the
-// front's "is the feature on" fact.
+// Configured reports whether a key resolves right now; the Accountant asks
+// before spending anything.
 func (c *OpenAIClient) Configured(ctx context.Context) bool {
 	return c.settings(ctx).Key != ""
 }
 
-// maxConsecutiveGarbage is how many unparseable data lines in a row the
-// reader tolerates before declaring the endpoint broken; maxSkippedChunks is
-// the same bound on the total, whatever the spacing — a gateway alternating
-// one valid-but-empty chunk with one garbage line never trips the run cap
-// and assembles no content (so MaxOutputBytes cannot trip either), and
-// without the total the only stop is the deadline.
+// maxConsecutiveGarbage bounds unparseable lines in a row; maxSkippedChunks
+// bounds the total, or spaced garbage would only stop at the deadline.
 const (
 	maxConsecutiveGarbage = 16
 	maxSkippedChunks      = 64
 )
 
-// ID names the answering brain for the cache hash (Decision 7). The model is
-// the operator-configured one, not a name streamed by the provider — the
-// stream must not steer the cache identity — and the base URL rides along
-// because one model name behind two gateways is two different brains:
-// gpt-4o-mini on OpenAI, on an Azure deployment and behind a LiteLLM proxy
-// answer differently under one name. The URL is operator config, never
-// provider input, so it is safe to hash; the trailing slash is trimmed the
-// way the request path trims it, so the same gateway spelled both ways stays
-// one brain. Resolved per call: changing the model in Settings IS changing
-// the brain, and the cache splits with it.
+// ID names the answering brain for the cache hash: configured model and base
+// URL, never a provider-streamed name. Trimmed of the trailing slash.
 func (c *OpenAIClient) ID(ctx context.Context) string {
 	s := c.settings(ctx)
 	return "openai:" + strings.TrimRight(s.BaseURL, "/") + ":" + s.Model
 }
 
-// modelCap bounds the streamed model name before it reaches ai_call.model:
-// the column is unbounded text and the name is provider-controlled input —
-// a label for the ledger, not a value to store whole.
+// modelCap bounds the provider-streamed model name before it reaches the
+// ai_call.model column.
 const modelCap = 128
 
-// paramQuirk records which OpenAI-spec parameter spellings THIS gateway
-// refuses. "All OpenAI-compatible" endpoints disagree exactly here: OpenAI's
-// newer models reject max_tokens (use max_completion_tokens), older gateways
-// reject or ignore max_completion_tokens, reasoning models reject a
-// temperature, and the models that are not reasoning models reject the
-// reasoning_effort a scenario asks for. Learned from the provider's own 400,
-// remembered per brain for the life of the process — the first call after a
-// boot pays one extra round trip, nothing else does.
+// paramQuirk records which OpenAI-spec parameter spellings this gateway
+// refuses, learned from its own 400s and kept per brain for the process life.
 type paramQuirk struct {
 	dropMaxTokens           bool
 	dropMaxCompletionTokens bool
@@ -101,14 +75,11 @@ type paramQuirk struct {
 	dropReasoningEffort     bool
 }
 
-// paramQuirks maps LLM.ID() → paramQuirk.
+// paramQuirks maps llm.ID() → paramQuirk.
 var paramQuirks sync.Map
 
-// adapt inspects a provider refusal and returns the quirk that would avoid
-// it, with ok=false when the error does not name a parameter this client
-// sends (a real error, not a spelling disagreement). Order matters: OpenAI's
-// own refusal names BOTH spellings ("'max_tokens' is not supported ... use
-// 'max_completion_tokens'"), so the redirect form is matched first.
+// adapt maps a provider refusal to the quirk that avoids it; ok=false when
+// the error names no parameter we send. The redirect form is matched first.
 func (q paramQuirk) adapt(err error) (paramQuirk, bool) {
 	msg := strings.ToLower(err.Error())
 	if !strings.Contains(msg, "provider http 4") {
@@ -134,11 +105,8 @@ func (q paramQuirk) adapt(err error) (paramQuirk, bool) {
 		q.dropMaxTokens = true
 	case !q.dropTemperature && refused("temperature"):
 		q.dropTemperature = true
-	// The mirror of the temperature case: a scenario names an effort, and a
-	// model that does no reasoning refuses to be asked for one. gpt-4o-mini
-	// answers "Unrecognized request argument supplied: reasoning_effort" and
-	// nothing here caught it, so the retry re-sent the same argument and the
-	// reader got a 500 from a provider that was working perfectly.
+	// Mirror of the temperature case: a non-reasoning model refuses to be
+	// asked for an effort.
 	case !q.dropReasoningEffort && refused("reasoning_effort"):
 		q.dropReasoningEffort = true
 	default:
@@ -147,11 +115,8 @@ func (q paramQuirk) adapt(err error) (paramQuirk, bool) {
 	return q, true
 }
 
-// Complete streams one chat completion, adapting the request to the
-// gateway's OpenAI dialect: a 400 that names a parameter spelling is
-// answered by re-sending without it (at most once per parameter), and the
-// learned quirk sticks for the process. Everything else is completeOnce's
-// contract, unchanged.
+// Complete streams one chat completion, retrying once per parameter a 400
+// names; the learned quirk sticks for the process. See completeOnce.
 func (c *OpenAIClient) Complete(ctx context.Context, sc Scenario, input Input) (Completion, error) {
 	brain := c.ID(ctx)
 	q := paramQuirk{}
@@ -175,15 +140,8 @@ func (c *OpenAIClient) Complete(ctx context.Context, sc Scenario, input Input) (
 	}
 }
 
-// completeOnce sends one chat completion and returns the assembled answer
-// with the usage numbers the provider reported on the final chunk. Tokens
-// stay -1 (unknown) when the stream carried no usage; an error object pushed
-// mid-stream and any finish reason but "stop" are errors, never answers — a
-// truncation error still carries the model and usage out with it, because
-// the provider was paid either way. Unparseable data lines are skipped and
-// counted (a run of maxConsecutiveGarbage in a row fails the call); when
-// nothing contentful arrived, the skip count and the first malformed line
-// travel with the returned error instead of a generic "no content".
+// completeOnce sends one chat completion and assembles the answer. Any finish
+// reason but "stop" is an error that still carries model and usage out.
 func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Input, q paramQuirk) (Completion, error) {
 	s := c.settings(ctx)
 	if s.Key == "" {
@@ -224,16 +182,13 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 			"system", sc.SystemPrompt, "user", input.UserMessage())
 	}
 
-	hc := c.HTTPClient
+	hc := c.httpClient
 	if hc == nil {
 		hc = &http.Client{}
 	}
 
-	// The timeout rides the context, not http.Client.Timeout, so it binds the
-	// call no matter who supplied the client (an injected client ignores the
-	// field). Returning from Complete — normally, or on the byte-cap abort
-	// below — runs the deferred cancel and the deferred body close, so a
-	// runaway model is cut off mid-stream, never drained to its end.
+	// The timeout rides the context, not http.Client.Timeout, so it also
+	// binds an injected client; a runaway model is cut mid-stream.
 	var streamCtx context.Context
 	var cancel context.CancelFunc
 	if c.Timeout > 0 {
@@ -270,19 +225,13 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 	var model string
 	// -1 = the stream never said; a false 0 would read as a free call.
 	promptTokens, completionTokens := -1, -1
-	// Garbage accounting: one broken line in an otherwise healthy stream is
-	// the provider's glitch — skipped, counted, and named once after the
-	// loop — but a run of them is a broken endpoint, bounded below; without
-	// the bound, a garbage-only stream would read and log one warn per line
-	// until the deadline (MaxOutputBytes counts assembled content, and
-	// garbage assembles none).
+	// Garbage accounting: broken lines are skipped and counted; a run of
+	// them fails the call below instead of logging until the deadline.
 	skipped, consecutive := 0, 0
 	var firstBadLine string
 	var firstParseErr error
-	// Any finish reason but "stop" means the assembled text is not the whole
-	// answer ("length" = cut at max_tokens); charging it as one would be a
-	// lie. The stream is still drained past it: the usage chunk that follows
-	// carries the spend out with the error.
+	// Any finish reason but "stop" means the text is not the whole answer;
+	// the stream still drains so the usage chunk carries the spend out.
 	var badFinish string
 	scanner := bufio.NewScanner(resp.Body)
 	// One SSE line carries one whole JSON chunk; 1 MiB is far past any honest
@@ -361,17 +310,15 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 		model = s.Model
 	}
 	if badFinish != "" {
-		// The spend is real, so the model name and the usage travel out with
-		// the error. RawJSON deliberately stays nil: a truncated answer must
-		// never be parsed or served.
+		// Model and usage travel out with the error; RawJSON stays nil so a
+		// truncated answer is never parsed or served.
 		return Completion{Model: model, PromptTokens: promptTokens, CompletionTokens: completionTokens},
 			fmt.Errorf("ai: provider finish_reason %q, answer incomplete", badFinish)
 	}
 	if len(content) == 0 {
 		if skipped > 0 {
-			// Nothing contentful arrived and lines were unparseable — the
-			// stream's own reason (a string-shaped error object included) is
-			// in those lines, not in a generic "no content".
+			// Nothing contentful arrived and lines were unparseable; the
+			// stream's own reason is in those lines, not "no content".
 			return Completion{}, fmt.Errorf(
 				"ai: provider stream carried no content; %d malformed chunks, first %q: %w", skipped, firstBadLine, firstParseErr)
 		}
@@ -385,22 +332,13 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 	}, nil
 }
 
-// chatRequest is the OpenAI chat-completions body. The output cap rides
-// max_completion_tokens — the current OpenAI parameter; the gpt-5 and o-series
-// families reject the legacy max_tokens outright (HTTP 400,
-// "unsupported_parameter"). A compatible gateway that only knows max_tokens
-// ignores the field, and MaxOutputBytes still aborts a runaway stream.
-// Temperature is omitted at 0 (the provider's default answers): the same
-// reasoning families reject any non-default value.
+// chatRequest is the OpenAI chat-completions body; the client-side
+// MaxOutputBytes abort bounds the stream whatever the gateway does with the cap fields.
 type chatRequest struct {
 	Model       string  `json:"model"`
 	Temperature float32 `json:"temperature,omitempty"`
-	// Both spellings of the output cap ride by default: OpenAI's newer
-	// models take max_completion_tokens (and reject max_tokens), most
-	// compatible gateways take max_tokens (and silently IGNORE the other —
-	// an uncapped call, not an error). A 400 naming either parameter
-	// teaches paramQuirks which one this gateway wants; the client-side
-	// MaxOutputBytes abort bounds the stream regardless.
+	// Both output-cap spellings ride by default; a 400 naming either teaches
+	// paramQuirks which one this gateway takes.
 	MaxTokens           int            `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
@@ -423,9 +361,8 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// chatChunk is one SSE payload: an accumulated delta plus, on the final chunk
-// before [DONE], the usage numbers. Error is set only when the provider
-// pushes an error object mid-stream instead of finishing the completion.
+// chatChunk is one SSE payload: a delta, usage on the final chunk, and an
+// error object only on a mid-stream failure.
 type chatChunk struct {
 	Model   string       `json:"model"`
 	Choices []chatChoice `json:"choices"`

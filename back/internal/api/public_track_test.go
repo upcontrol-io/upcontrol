@@ -9,10 +9,9 @@ import (
 )
 
 func TestTrackAllowsOneBatchPerSecondPerIP(t *testing.T) {
-	// The client coalesces (front queues 1.5 s / 20 events), so one batch per
-	// second is the honest reading of the 60/min budget — and a burst from a
-	// single address must not reach the recorder at that rate.
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}}
+	// The client coalesces, so one batch per second is the honest reading of
+	// the 60/min budget; a same-address burst must not reach the recorder.
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}}
 	const ip = "203.0.113.9"
 	if !h.trackAllow(ip) {
 		t.Fatal("the first track batch from an address must be allowed")
@@ -26,11 +25,9 @@ func TestTrackAllowsOneBatchPerSecondPerIP(t *testing.T) {
 }
 
 func TestPublicTrackMintsCookieOnceAndAlwaysAnswers204(t *testing.T) {
-	// The mint door: a cookieless request gets uc_vid (HttpOnly, Lax, 1y);
-	// a request that already carries one must NOT have it re-rolled, or every
-	// batch would start a new visitor. nil rec/sess is the no-op contract —
-	// the write is async and a session-less request must still be accepted.
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}, devMode: true}
+	// The mint door: a cookieless request gets uc_vid; a carried one must not
+	// be re-rolled. nil rec/sess is the no-op contract.
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}, devMode: true}
 
 	body := `{"events":[{"name":"page_view","path":"/","props":{}}]}`
 	r := httptest.NewRequest(http.MethodPost, "/public/track", strings.NewReader(body))
@@ -50,9 +47,8 @@ func TestPublicTrackMintsCookieOnceAndAlwaysAnswers204(t *testing.T) {
 		token = token[:i]
 	}
 
-	// The same visitor's next batch carries the cookie and arrives from a
-	// different address (mobile handover, VPN, carrier NAT): no re-mint, and
-	// the cookie — not the IP — is what ties the batch to the visitor.
+	// The next batch carries the cookie from a different address: no re-mint;
+	// the cookie, not the IP, ties the batch to the visitor.
 	r2 := httptest.NewRequest(http.MethodPost, "/public/track", strings.NewReader(body))
 	r2.RemoteAddr = "198.51.100.7:47000"
 	r2.AddCookie(&http.Cookie{Name: "uc_vid", Value: token})

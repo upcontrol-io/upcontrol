@@ -13,14 +13,14 @@ import (
 	"go.upcontrol.io/back/internal/storage/ch"
 )
 
-// fakeStore records every VisitorStore call; VisitorIDByToken hands out
+// fakeStore records every visitorStore call; VisitorIDByToken hands out
 // sequential ids per distinct token hash, like the bigserial would.
 type fakeStore struct {
 	mu        sync.Mutex
 	nextID    int64
 	ids       map[string]int64
-	firstSeen []FirstTouch
-	upserts   []FirstTouch   // every VisitorIDByToken call, in order
+	firstSeen []firstTouch
+	upserts   []firstTouch   // every VisitorIDByToken call, in order
 	isBot     map[int64]bool // the row's is_bot, applying the SQL conflict clause
 	resolves  int
 	emails    []string
@@ -40,7 +40,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{ids: map[string]int64{}, isBot: map[int64]bool{}, errOn: map[string]error{}}
 }
 
-func (f *fakeStore) VisitorIDByToken(_ context.Context, tokenHash []byte, first FirstTouch, _ time.Time) (int64, error) {
+func (f *fakeStore) VisitorIDByToken(_ context.Context, tokenHash []byte, first firstTouch, _ time.Time) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.errOn["resolve"]; err != nil {
@@ -49,8 +49,7 @@ func (f *fakeStore) VisitorIDByToken(_ context.Context, tokenHash []byte, first 
 	key := string(tokenHash)
 	f.upserts = append(f.upserts, first)
 	if id, ok := f.ids[key]; ok {
-		// The conflict branch of UpsertWebVisitorFirst (§Decision 14):
-		// is_bot = web_visitor.is_bot AND EXCLUDED.is_bot — a human event
+		// The conflict branch: is_bot = old AND new; a human event
 		// un-flags a previously-bot-flagged row.
 		f.isBot[id] = f.isBot[id] && first.IsBot
 		return id, nil
@@ -134,7 +133,7 @@ func scopedCtx(token string) context.Context {
 	// 8.8.8.8 resolves in the country database (US); the TEST-NET ranges do
 	// not, and the country assertions below need a real hit.
 	ip := "8.8.8.8"
-	return WithScope(context.Background(), &Scope{
+	return WithScope(context.Background(), &scope{
 		Token: token, IP: ip,
 		UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 	})
@@ -144,7 +143,7 @@ func TestRecorderTrackResolvesVisitorAndWritesRows(t *testing.T) {
 	r, store, sink := newTestRecorder(t)
 	r.Start()
 
-	events := []Event{
+	events := []event{
 		{Name: "page_view", Path: "/", Referrer: "https://news.ycombinator.com/", UTMSource: "hn"},
 		{Name: "cta_click", Path: "/", Props: map[string]string{"which": "header"}},
 	}
@@ -189,7 +188,7 @@ func TestRecorderTrackResolvesVisitorAndWritesRows(t *testing.T) {
 func TestRecorderTrackStampsPersonFromSession(t *testing.T) {
 	r, _, sink := newTestRecorder(t)
 	r.Start()
-	r.Track(scopedCtx(MintVisitorToken()), []Event{{Name: "page_view", Path: "/app"}}, 7, 11)
+	r.Track(scopedCtx(MintVisitorToken()), []event{{Name: "page_view", Path: "/app"}}, 7, 11)
 	rows := waitBatch(t, sink)
 	if rows[0].PersonID != 7 || rows[0].TenantID != 11 {
 		t.Errorf("person/tenant not stamped: %+v", rows[0])
@@ -202,7 +201,7 @@ func TestRecorderServerEventWithoutCookieIsVisitorZero(t *testing.T) {
 
 	// No cookie on the scope: the event still lands, with visitor_id 0, and
 	// nothing is resolved or linked in Postgres.
-	r.ServerEvent(WithScope(context.Background(), &Scope{IP: "8.8.8.8", UA: "curl/8.8.0"}),
+	r.ServerEvent(WithScope(context.Background(), &scope{IP: "8.8.8.8", UA: "curl/8.8.0"}),
 		"public_check_run", 0, 0, map[string]string{"host": "example.com", "cached": "false"})
 
 	rows := waitBatch(t, sink)
@@ -227,7 +226,7 @@ func TestRecorderLinkEmailAndPersonApplyToTheVisitorRow(t *testing.T) {
 	r.Start()
 	tok := MintVisitorToken()
 
-	r.Track(scopedCtx(tok), []Event{{Name: "watch_modal_open", Path: "/"}}, 0, 0)
+	r.Track(scopedCtx(tok), []event{{Name: "watch_modal_open", Path: "/"}}, 0, 0)
 	r.ServerEvent(scopedCtx(tok), "watch_signup", 0, 0, map[string]string{"host": "example.com"})
 	r.LinkEmail(scopedCtx(tok), "founder@example.com")
 	waitBatch(t, sink)
@@ -250,11 +249,10 @@ func TestRecorderFlushMergesFirstTouchAcrossTracks(t *testing.T) {
 	r.Start()
 	tok := MintVisitorToken()
 
-	// The link arrives BEFORE the first page_view (server event won the race).
-	// The one-shot first-touch insert must still see the page's attribution:
-	// flush merges per token before resolving.
+	// The link arrives BEFORE the first page_view; the one-shot first-touch
+	// insert must still see the page's attribution.
 	r.LinkEmail(scopedCtx(tok), "founder@example.com")
-	r.Track(scopedCtx(tok), []Event{{Name: "page_view", Path: "/", Referrer: "https://producthunt.com/", UTMMedium: "referral"}}, 0, 0)
+	r.Track(scopedCtx(tok), []event{{Name: "page_view", Path: "/", Referrer: "https://producthunt.com/", UTMMedium: "referral"}}, 0, 0)
 
 	waitBatch(t, sink)
 	store.mu.Lock()
@@ -267,8 +265,8 @@ func TestRecorderFlushMergesFirstTouchAcrossTracks(t *testing.T) {
 func TestRecorderBotIsFlaggedOnFirstTouch(t *testing.T) {
 	r, store, sink := newTestRecorder(t)
 	r.Start()
-	ctx := WithScope(context.Background(), &Scope{Token: MintVisitorToken(), IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
-	r.Track(ctx, []Event{{Name: "page_view", Path: "/"}}, 0, 0)
+	ctx := WithScope(context.Background(), &scope{Token: MintVisitorToken(), IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+	r.Track(ctx, []event{{Name: "page_view", Path: "/"}}, 0, 0)
 	rows := waitBatch(t, sink)
 	if rows[0].Device != "bot" {
 		t.Errorf("device = %q, want bot", rows[0].Device)
@@ -286,14 +284,13 @@ func TestRecorderHumanEventUnFlagsBotVisitor(t *testing.T) {
 	tok := MintVisitorToken()
 
 	// Flush 1: the crawler creates the row with is_bot=true.
-	botCtx := WithScope(context.Background(), &Scope{Token: tok, IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
-	r.Track(botCtx, []Event{{Name: "page_view", Path: "/"}}, 0, 0)
+	botCtx := WithScope(context.Background(), &scope{Token: tok, IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+	r.Track(botCtx, []event{{Name: "page_view", Path: "/"}}, 0, 0)
 	waitBatch(t, sink)
 
-	// Flush 2: the same cookie on a human browser. The upsert's EXCLUDED
-	// side carries is_bot=false and the sticky-AND conflict branch flips the
-	// row to is_bot=false (§Decision 14: one human event un-flags).
-	r.Track(scopedCtx(tok), []Event{{Name: "page_view", Path: "/app"}}, 0, 0)
+	// Flush 2: the same cookie on a human browser; the sticky-AND conflict
+	// branch flips the row to is_bot=false.
+	r.Track(scopedCtx(tok), []event{{Name: "page_view", Path: "/app"}}, 0, 0)
 	waitBatch(t, sink)
 
 	store.mu.Lock()
@@ -310,10 +307,8 @@ func TestRecorderHumanEventUnFlagsBotVisitor(t *testing.T) {
 	}
 }
 
-// The fake above emulates the sticky-AND conflict clause; this test pins
-// the SQL itself (§Decision 14). The back side has no SQL-execution harness
-// for upserts, so without it reverting analytics.sql to sticky-OR while
-// leaving the fake's emulation would keep every recorder test green.
+// The fake emulates the sticky-AND clause; this test pins the SQL itself, so
+// reverting analytics.sql to sticky-OR would fail here even with the fake.
 func TestUpsertFirstTouchStickyAndClauseIsInTheSQL(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "internal", "storage", "pg", "queries", "analytics.sql"))
 	if err != nil {
@@ -330,13 +325,12 @@ func TestUpsertFirstTouchStickyAndClauseIsInTheSQL(t *testing.T) {
 func TestRecorderBotOnlyBatchSkipsLastSeenTouch(t *testing.T) {
 	r, store, sink := newTestRecorder(t)
 	r.Start()
-	ctx := WithScope(context.Background(), &Scope{Token: MintVisitorToken(), IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
-	r.Track(ctx, []Event{{Name: "page_view", Path: "/"}, {Name: "page_view", Path: "/pricing"}}, 0, 0)
+	ctx := WithScope(context.Background(), &scope{Token: MintVisitorToken(), IP: "8.8.8.8", UA: "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+	r.Track(ctx, []event{{Name: "page_view", Path: "/"}, {Name: "page_view", Path: "/pricing"}}, 0, 0)
 	rows := waitBatch(t, sink)
 
-	// Bot events still land in ClickHouse under the resolved visitor id and
-	// still create the directory row (is_bot=true); only the touch is
-	// skipped so last_seen_at / events_count never advance on bot traffic.
+	// Bot events still land in ClickHouse and create the directory row; only
+	// the touch is skipped, so last_seen never advances on bot traffic.
 	if len(rows) != 2 || rows[0].VisitorID != 1 {
 		t.Fatalf("rows = %+v, want 2 bot rows under visitor 1", rows)
 	}
@@ -355,9 +349,9 @@ func TestRecorderResolvesOncePerTokenPerFlush(t *testing.T) {
 	r.Start()
 	tok := MintVisitorToken()
 	// Three same-visitor batches inside one flush window: one resolve.
-	r.Track(scopedCtx(tok), []Event{{Name: "a"}}, 0, 0)
-	r.Track(scopedCtx(tok), []Event{{Name: "b"}}, 0, 0)
-	r.Track(scopedCtx(tok), []Event{{Name: "c"}}, 0, 0)
+	r.Track(scopedCtx(tok), []event{{Name: "a"}}, 0, 0)
+	r.Track(scopedCtx(tok), []event{{Name: "b"}}, 0, 0)
+	r.Track(scopedCtx(tok), []event{{Name: "c"}}, 0, 0)
 
 	rows := waitBatch(t, sink)
 	if len(rows) != 3 {
@@ -379,9 +373,9 @@ func TestRecorderFlushesAtHundredRows(t *testing.T) {
 	// 10 batches of 10 events: the 10th crosses flushRows and the batch goes
 	// out without waiting for the ticker or a Stop.
 	for i := 0; i < 10; i++ {
-		batch := make([]Event, 10)
+		batch := make([]event, 10)
 		for j := range batch {
-			batch[j] = Event{Name: "evt"}
+			batch[j] = event{Name: "evt"}
 		}
 		r.Track(scopedCtx(MintVisitorToken()), batch, 0, 0)
 	}
@@ -395,7 +389,7 @@ func TestRecorderStopDrainsPending(t *testing.T) {
 	store, sink := newFakeStore(), newFakeSink()
 	r := NewRecorder(store, sink, nil)
 	r.Start()
-	r.Track(scopedCtx(MintVisitorToken()), []Event{{Name: "page_view", Path: "/"}}, 0, 0)
+	r.Track(scopedCtx(MintVisitorToken()), []event{{Name: "page_view", Path: "/"}}, 0, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.Stop(ctx); err != nil {
@@ -416,7 +410,7 @@ func TestRecorderResolveFailureKeepsEventsAtVisitorZero(t *testing.T) {
 	r, store, sink := newTestRecorder(t)
 	store.errOn["resolve"] = errors.New("pg down")
 	r.Start()
-	r.Track(scopedCtx(MintVisitorToken()), []Event{{Name: "page_view"}}, 0, 0)
+	r.Track(scopedCtx(MintVisitorToken()), []event{{Name: "page_view"}}, 0, 0)
 	rows := waitBatch(t, sink)
 	if len(rows) != 1 || rows[0].VisitorID != 0 {
 		t.Fatalf("rows = %+v, want the event at visitor_id 0", rows)
@@ -429,7 +423,7 @@ func TestRecorderDropsWhenBufferFull(t *testing.T) {
 	// Deliberately NOT started: nothing drains, the buffer fills, and every
 	// batch past bufferSize is dropped and counted — the WARN-line contract.
 	for i := 0; i < bufferSize+50; i++ {
-		r.Track(context.Background(), []Event{{Name: "page_view"}}, 0, 0)
+		r.Track(context.Background(), []event{{Name: "page_view"}}, 0, 0)
 	}
 	if n := r.dropped.Load(); n != 50 {
 		t.Errorf("dropped = %d, want 50", n)
@@ -440,7 +434,7 @@ func TestRecorderCountsInvalidEvents(t *testing.T) {
 	r, _, sink := newTestRecorder(t)
 	r.Start()
 	r.CountInvalid(3)
-	r.Track(scopedCtx(MintVisitorToken()), []Event{{Name: "page_view"}}, 0, 0) // forces a flush
+	r.Track(scopedCtx(MintVisitorToken()), []event{{Name: "page_view"}}, 0, 0) // forces a flush
 	waitBatch(t, sink)
 	// The flush swaps the counter back to zero after logging it.
 	if n := r.invalid.Load(); n != 0 {
@@ -453,7 +447,7 @@ func TestNilRecorderIsANoOp(t *testing.T) {
 	// Recorder: every entry point must return, none may panic.
 	var r *Recorder
 	r.Start()
-	r.Track(context.Background(), []Event{{Name: "page_view"}}, 0, 0)
+	r.Track(context.Background(), []event{{Name: "page_view"}}, 0, 0)
 	r.ServerEvent(context.Background(), "signed_in", 1, 1, nil)
 	r.LinkEmail(context.Background(), "a@b.c")
 	r.LinkPerson(context.Background(), 1, 1)

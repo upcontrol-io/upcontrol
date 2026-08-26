@@ -1,29 +1,20 @@
 /* Design tokens — the single source of truth for every value in the UI.
-   Never hardcode a colour, radius or duration in a component; add a token here.
-   Dark is the default theme, light overrides via html[data-theme="light"]. */
+   Never hardcode a colour, radius or duration in a component; add a token here. */
 
 :root {
-  /* --- Surfaces & lines (achromatic — the whole product chrome) ---------- */
+  /* Surfaces and lines are achromatic: product chrome carries no colour. */
   --bg-base: #16181b;
   --bg-raised: #1c1f23;
   --bg-sunken: #121417;
   --bg-hover: #22262b;
   --line: #2a2f35;
   --line-strong: #3a4048;
-  /* The border of a thing you can operate — a button, an icon button, an input.
-     Separate from --line-strong because the two answer to different rules:
-     --line divides surfaces and answers to nobody, while a control's boundary
-     is held to 3:1 against its neighbours (WCAG 2.2 SC 1.4.11). --line-strong
-     measured 1.70:1 on --bg-base and 1.58:1 on --bg-raised here, so every
-     bordered control in the app was under half the required contrast. This
-     value clears it on all four surfaces it ever sits on: 3.45 on --bg-base,
-     3.21 on --bg-raised, 3.58 on --bg-sunken. Use it ONLY on interactive
-     borders; a card or a table rule still takes --line. */
+  /* Interactive borders only: held to 3:1 against neighbours (WCAG 2.2 SC
+     1.4.11), which --line-strong misses. Cards and table rules take --line. */
   --control-edge: #676e78;
   --scroll-thumb: #3a4048;
   --scroll-thumb-hover: #4c535c;
 
-  /* --- Text ------------------------------------------------------------- */
   --text-primary: #e7e9eb;
   --text-body: #c2c7cd;
   --text-muted: #878e97;
@@ -31,28 +22,15 @@
   --inverse: #16181b;
   --focus: #8fa9d8;
 
-  /* --- Reference accent -------------------------------------------------
-     A second, deliberate exception to the achromatic rule, added after the
-     brief was written (§1 allows saturation for status only).
-
-     It means exactly one thing: a machine-readable token — a keyword, a
-     string, an endpoint, a key, a link you can follow. Status keeps its own
-     monopoly on green/amber/red, so this sits on the cool axis around
-     --focus, which the brief already calls the only cool accent. Every value
-     here is at least 57° of hue from the nearest status colour and clears
-     4.5:1 on --bg-sunken in both themes.
-
-     Note what is NOT here: orange. That is where docs.x.ai puts its accent,
-     and it lands on --check amber — it would make "degraded" mean "keyword". */
+  /* Reference accent: a machine-readable token (keyword, string, endpoint,
+     key, link). Cool axis only; status keeps its monopoly on green/amber/red. */
   --accent: #8fa9d8;
   --code-string: #b9a6dc;
   --code-number: #9bb6c9;
-  /* Achromatic, and quieter than the code around it — but still text somebody
-     reads, so it clears 4.5:1 on --bg-sunken. --text-faint reaches 3.1:1 at
-     best and was never a legitimate colour for a comment. */
+  /* Achromatic but still read: clears 4.5:1 on --bg-sunken. */
   --code-comment: #7a828c;
 
-  /* --- Status (the ONLY saturated pixels allowed on screen) -------------- */
+  /* Status: the only saturated pixels allowed on screen. */
   --ok: #35c46b;
   --ok-bg: rgba(53, 196, 107, 0.12);
   --check: #e0a33a;
@@ -61,42 +39,20 @@
   --down-bg: rgba(229, 72, 77, 0.12);
   --nodata: #6b7178;
 
-  /* Chart mass, not a status dot. A volume histogram is mostly ordinary traffic,
-     so its healthy bulk is a damped --ok and its warnings a damped --check: at
-     full strength the strip floods with colour and the red segments stop meaning
-     anything. In the stacked histogram errors keep --down at full strength —
-     they are the alarm. Damped toward the dark surface here; the light theme
-     re-anchors them downward instead (mixing toward paper only bleached them
-     out). */
+  /* Chart mass, not status: healthy bulk is a damped --ok, warnings a damped
+     --check; errors keep --down at full strength. */
   --ok-fill: color-mix(in srgb, var(--ok) 52%, var(--bg-sunken));
   --check-fill: color-mix(in srgb, var(--check) 72%, var(--bg-sunken));
 
-  /* --- Log timeline ------------------------------------------------------
-     The volume strip is drivable now — pan, zoom, drag-select — so it needs
-     three surfaces the static histogram never had: the band under the cursor,
-     the hairline on it, and the drag selection.
-
-     Two of them are achromatic, as chrome must be. The selection is the one
-     that is not, and it spends --accent rather than opening a fourth exception:
-     "a thing you are operating" is exactly what that token already means in the
-     code blocks and on the Explain button. Status keeps green/amber/red, so a
-     selection can never be mistaken for a reading. */
+  /* Timeline surfaces: hover band and crosshair are achromatic chrome; the
+     drag selection spends --accent so it can never read as a status. */
   --timeline-hover: color-mix(in srgb, var(--text-primary) 9%, transparent);
   --timeline-crosshair: var(--line-strong);
   --timeline-select: color-mix(in srgb, var(--accent) 18%, transparent);
   --timeline-select-edge: var(--accent);
 
-  /* --- Hero surface — the landing's station and truth bands ---------------
-     Renamed from --night-* (Aug 14, 2026, user decision — docs/plans/
-     hero-theme-motion.md). The hero used to be theme-independent by design, so
-     every value in it was a pinned hex and switching the theme changed nothing
-     above the fold except the toggle's own icon. It answers the theme now,
-     which means the whole surface travels as tokens: sky, ink, lines, the
-     station art, the check field and the one filled control.
-
-     Two surfaces deliberately do NOT follow the theme and are not in here: the
-     installer terminal and the alert phone. Those are *depicted* UIs, and a
-     terminal does not repaint itself because a website changed its skin. */
+  /* Hero surface: the landing's bands travel as theme tokens. The installer
+     terminal and the alert phone stay pinned: depicted UIs do not reskin. */
   --hero-top: #0c0e11;
   --hero-mid: #14171c;
   --hero-edge: #1a1f27;
@@ -121,18 +77,11 @@
   --hero-fill: #e7e9eb;
   --hero-fill-ink: #16181b;
 
-  /* Scene decoration: the drifting grid and the periodic scan. One veil token
-     per theme — the profile's shape (an eight-stop eased falloff) is geometry
-     and lives in Landing.module.css. --hero-glint is the halo amplitude: it is
-     a token rather than a keyframe value because the keyframes have to stay
-     var()-free to composite (docs/plans/hero-scan.md). */
+  /* Scene decoration: the drifting grid and the periodic scan. --hero-glint
+     is a token because the keyframes must stay var()-free to composite. */
   --hero-grid: rgba(231, 233, 235, 0.055);
-  /* Dropped 30% three times at the user's direction, Aug 15 2026 (0.1 -> 0.07
-     -> 0.049 -> 0.034, and the edge 0.2 -> 0.14 -> 0.098 -> 0.069): the beam
-     kept pulling the eye off the headline. The veil and its edge move together,
-     or the line stays as loud as it was against a quieter veil. The lume and
-     the halos are NOT part of this: they are what the scan reveals, not the
-     scan — which is why they now carry most of what is visible. */
+  /* Quiet on purpose: the beam must not pull the eye off the headline; the
+     veil and its edge move together. */
   --hero-scan: rgba(231, 233, 235, 0.034);
   --hero-scan-edge: rgba(231, 233, 235, 0.069);
   --hero-grid-glow: rgba(231, 233, 235, 0.16);
@@ -147,44 +96,24 @@
   --hero-art-box: rgba(231, 233, 235, 0.34);
   --hero-art-edge: rgba(231, 233, 235, 0.42);
   --hero-art-body: rgba(12, 14, 17, 0.9);
-  /* The relay: a packet in flight, and the plate a delivered channel lights.
-     The packet sits above --hero-art-box, because a moving thing is the one the
-     eye is meant to follow; the plate sits below it, because five of them fire
-     at once (docs/plans/hero-relay.md). */
+  /* The relay: the packet rides above --hero-art-box (the thing the eye
+     follows); the wink plate sits below it. */
   --hero-art-packet: rgba(231, 233, 235, 0.62);
   --hero-art-wink: rgba(231, 233, 235, 0.16);
 
-  /* --- Aurora — the one coloured light on the page -----------------------
-     A third named exception to the achromatic rule (after --accent and the
-     nav's current-item marker), Aug 14, 2026 at the user's request: the large
-     monochrome bands were reading as one flat sheet and the page needed depth
-     that is not another 1px divider.
-
-     It sits on the SAME cool axis as --accent and never on the status axis.
-     Green, amber and red mean exactly one thing in this product, and a green
-     wash behind a status strip would be the palette contradicting the data.
-     The alphas are single digits on purpose: this is light, not a gradient. */
+  /* Aurora: the one coloured light on the page, on the same cool axis as
+     --accent, never the status axis; single-digit alphas, light not gradient. */
   --aurora-1: rgba(143, 169, 216, 0.14);
   --aurora-2: rgba(185, 166, 220, 0.1);
   --aurora-3: rgba(143, 169, 216, 0.07);
 
-  /* --- Elevation — floating elements only (tooltip, modal, menu) --------- */
+  /* Elevation: floating elements only (tooltip, modal, menu). */
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 
-  /* --- Glass — the floating mobile chrome only --------------------------
-     A web approximation of Apple's Liquid Glass, not the material itself:
-     Apple's is a platform API that genuinely refracts what is behind it, and
-     there is no CSS equivalent. What CSS can do is blur + saturate the backdrop,
-     put a specular sheen on the top edge and a bright rim around it, which
-     reads as glass as long as something is actually moving underneath.
-     That is the whole reason it is scoped to the tab bar, the More sheet and
-     the phone header: they are the only surfaces content scrolls beneath.
-     Every value is neutral, so the achromatic rule (brief §1) still holds —
-     glass changes the material, never the palette. */
-  /* Opaque enough to carry its own contrast. `backdrop-filter` is the one part
-     of this that some engines skip (and headless Chrome does), so the tint has
-     to hold the labels on its own: at 0.62 a log line behind the bar read
-     straight through the tab labels when the blur was absent. */
+  /* Glass: a web approximation of Liquid Glass (blur + sheen + rim), scoped
+     to the floating mobile chrome, the only surfaces content scrolls beneath. */
+  /* Opaque enough on its own: some engines skip `backdrop-filter`, and the
+     tint alone must hold the labels readable. */
   --glass-tint: rgba(28, 31, 35, 0.76);
   --glass-stroke: rgba(231, 233, 235, 0.14);
   /* The specular top edge. Brighter than the rim, and only ~40% down the face. */
@@ -194,15 +123,12 @@
   --glass-blur: 22px;
   --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.44);
 
-  /* --- Type ------------------------------------------------------------- */
   --font-display: 'Bricolage Grotesque', 'Geist', sans-serif;
   --font-body: 'Geist', system-ui, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, monospace;
 
   --text-h1: 1.75rem;
-  /* A docs or guides page title. Both sections carried it as a raw px value —
-     30px in one, 32px in the other under a comment claiming 30 — so the two
-     could not agree by construction. */
+  /* A docs or guides page title. */
   --text-page-title: 1.875rem;
   --text-h2: 1.375rem;
   --text-h3: 1.125rem;
@@ -212,11 +138,8 @@
   --text-xs: 0.75rem;
   --text-2xs: 0.6875rem;
 
-  /* Reading measures. Declared in rem, never `ch`: `ch` is the width of "0",
-     which in this face runs ~1.5× the average character, so a `70ch` cap read
-     as ~103 characters per line. 40rem lands at 75-80, which is what the eye
-     wants. They live here rather than on a section's own shell because /docs
-     and /guides share one prose layer and both have to resolve them. */
+  /* Reading measures in rem, never `ch`: in this face `ch` is the width of
+     "0" and a `70ch` cap reads as ~103 characters per line. */
   --doc-measure: 40rem;
   /* Secondary prose runs at 14px, where the same length would hold ~92
      characters. A shorter line keeps the count where the body text sits. */
@@ -228,7 +151,7 @@
 
   --leading-body: 1.65;
 
-  /* --- Space — 4px base scale ------------------------------------------- */
+  /* Space: a 4px base scale. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -241,47 +164,37 @@
   --space-16: 64px;
   --space-24: 96px;
 
-  /* --- Content measures — how wide a screen's column runs ----------------
-     Three widths, not ten. Every page used to carry its own px literal and the
-     eight shell screens between them spent 640, 680, 820, 900 and 1100, so
-     walking Monitors -> Sources -> Settings -> Status moved the right edge four
-     times. A screen picks the one that fits what it holds: a form reads at
-     form width whatever the monitor is, a log stream wants the room.
-     PublicStatus is deliberately NOT in here — it is the public surface, sized
-     for a stranger's first look rather than for the operator's shell. */
+  /* Content measures: three widths, one per kind of screen. PublicStatus is
+     not in here: the public surface is sized for a stranger's first look. */
   --measure-form: 640px;
   --measure-page: 900px;
   --measure-wide: 1100px;
 
-  /* --- Radius — pick from this set only, never mix ----------------------- */
+  /* Radius: pick from this set only, never mix. */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-pill: 999px;
 
-  /* --- Motion — one curve everywhere ------------------------------------ */
+  /* Motion: one curve everywhere. */
   --ease: cubic-bezier(0.2, 0, 0, 1);
   --duration-hover: 120ms;
   --duration-disclosure: 180ms;
   --duration-page: 240ms;
 
-  /* --- Control heights --------------------------------------------------- */
   --control-sm: 32px;
   --control-md: 40px;
   --control-lg: 48px;
-  /* Minimum touch target (Apple HIG 44pt; WCAG 2.5.8 floors at 24). The three
-     control heights above are cursor sizes and every one of them is under it,
-     which is why the phone tier raises them rather than reusing them. */
+  /* Minimum touch target (Apple HIG 44pt; WCAG 2.5.8 floors at 24): the
+     cursor heights above are all under it, so the phone tier raises them. */
   --tap-min: 44px;
 
-  /* --- App chrome --------------------------------------------------------- */
   /* Sticky app/docs header: 32px control + 12px×2 padding + 1px border. */
   --header-h: 57px;
   /* Mobile bottom tab bar height, excluding env(safe-area-inset-bottom). */
   --tabbar-h: 56px;
-  /* How far the floating tab bar clears the bottom edge. Read by the bar itself
-     and by the content column, which has to reserve height + gap so the last
-     row of a page is not parked under the glass. */
+  /* How far the floating tab bar clears the bottom edge; the content column
+     reserves height + gap so the last row is not parked under the glass. */
   --tabbar-gap: 10px;
 
   color-scheme: dark;
@@ -294,9 +207,8 @@ html[data-theme='light'] {
   --bg-hover: #e6e6e0;
   --line: #deded7;
   --line-strong: #c9c9c0;
-  /* 3.36 on --bg-base, 3.64 on --bg-raised, 3.12 on --bg-sunken, 3.01 on
-     --bg-hover. The value it replaces on controls, --line-strong, measured
-     1.49:1 against the page. */
+  /* Light-theme control edge: clears 3:1 on every surface; --line-strong
+     measured 1.49:1 against the page. */
   --control-edge: #84847c;
   --scroll-thumb: #c9c9c0;
   --scroll-thumb-hover: #adada3;
@@ -308,9 +220,8 @@ html[data-theme='light'] {
   --inverse: #fbfbf9;
   --focus: #3e5c96;
 
-  /* Bar fills carry the same weight as in the dark theme, but get there by
-     deepening rather than lightening — a mix toward bone paper washed the
-     healthy mass out to a pastel that the red no longer stood apart from. */
+  /* Bar fills reach dark-theme weight by deepening, not lightening: a mix
+     toward paper washed the healthy mass out to a pastel. */
   --ok-fill: color-mix(in srgb, var(--ok) 88%, var(--text-primary));
   --check-fill: color-mix(in srgb, var(--check) 92%, var(--text-primary));
 
@@ -320,15 +231,8 @@ html[data-theme='light'] {
   --code-number: #3f6274;
   --code-comment: #63696f;
 
-  /* Status, re-anchored the same way (Aug 14, 2026): the dark values are tuned
-     for dark surfaces, and on bone paper they read as candy — a neon-mint ok
-     (2.1:1 on the raised card), a salmon down, an amber that bleaches toward
-     mustard. Same hues, deepened; the tints drop alpha too, because 12% over
-     near-white is a highlighter, not a background.
-     These now reach the landing's hero and truth bands too: those bands used to
-     pin the dark values back locally because their palette never inverted, and
-     as of the hero-theme pass it does — a deepened green is exactly right on
-     the day sky, and the pin would have kept a neon one there. */
+  /* Status re-anchored for bone paper: same hues, deepened, tints at lower
+     alpha (12% over near-white is a highlighter, not a background). */
   --ok: #1f9d52;
   --ok-bg: rgba(31, 157, 82, 0.09);
   --check: #b17f1e;
@@ -338,15 +242,10 @@ html[data-theme='light'] {
 
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
 
-  /* The day sky: the same geometry re-inked, never the dark values inverted.
-     The gradient runs light at the top to paper at the bottom so its lower edge
-     meets --bg-sunken (the figures band beneath it) without a seam, where the
-     old always-night hero cliff-edged from #1a1f27 straight into #eaeae5. */
-  /* The bottom stop lands one step ABOVE --bg-sunken rather than on it: an
-     exact match made the hero and the figures band read as one surface, which
-     is the "everything blends together" complaint in miniature. A soft step
-     down separates them; the hard cliff the old night hero made did too, but
-     by shouting. */
+  /* The day sky: the same geometry re-inked, never the dark values inverted;
+     the bottom stop meets --bg-sunken without a seam. */
+  /* The bottom stop lands one step ABOVE --bg-sunken: an exact match made
+     the hero and the figures band read as one surface. */
   --hero-top: #f8f8f5;
   --hero-mid: #f2f2ee;
   --hero-edge: #eeeeea;
@@ -368,19 +267,11 @@ html[data-theme='light'] {
   --hero-fill: #191b1d;
   --hero-fill-ink: #fbfbf9;
 
-  /* The day scan is an ink veil, not a light. A brightening pass over #f2f2ee
-     is below threshold at any alpha that would not also wash the copy, so in
-     light the beam is a shadow crossing paper and the grid lume is what it
-     reveals; the old 0.022/0.04 pair was invisible rather than subtle.
-     --hero-glint is declared for block parity and goes unused: a day sky has no
-     stars to flare, and the halo layers are hidden in light by visibility. */
+  /* The day scan is an ink veil, not a light: the beam is a shadow crossing
+     paper. --hero-glint is parity only and unused in light. */
   --hero-grid: rgba(25, 27, 29, 0.05);
-  /* The same three 30% drops as the dark block, and this is where they land:
-     0.024 is BELOW the 0.022 that the first light rendition was rejected for
-     reading as nothing on #f2f2ee. On paper the veil is now effectively absent
-     and the grid lume carries the scan alone. Kept in step with dark
-     deliberately — one line, one loudness — but this is the number to raise
-     first if the day sky reads as having no scan at all. */
+  /* Kept in step with dark (one line, one loudness), though on paper the
+     veil is nearly absent and the grid lume carries the scan alone. */
   --hero-scan: rgba(25, 27, 29, 0.024);
   --hero-scan-edge: rgba(25, 27, 29, 0.055);
   --hero-grid-glow: rgba(25, 27, 29, 0.13);
@@ -398,16 +289,14 @@ html[data-theme='light'] {
   --hero-art-packet: rgba(25, 27, 29, 0.58);
   --hero-art-wink: rgba(25, 27, 29, 0.11);
 
-  /* Same hues as the dark aurora, deepened for paper and quieter: a wash that
-     reads as light on a near-black ground reads as a stain on a near-white one
-     at the same alpha. */
+  /* Same hues as the dark aurora, deepened: a wash that reads as light on a
+     near-black ground reads as a stain on a near-white one. */
   --aurora-1: rgba(62, 92, 150, 0.13);
   --aurora-2: rgba(107, 78, 158, 0.09);
   --aurora-3: rgba(62, 92, 150, 0.07);
 
-  /* Glass on bone paper is a *lighter* pane, not a darker one: the dark theme's
-     recipe inverted here turned the bar into a grey smudge. The rim carries the
-     separation instead of the fill, so the bar stays legible over white cards. */
+  /* Glass on bone paper is a lighter pane: the rim carries the separation
+     instead of the fill, keeping the bar legible over white cards. */
   --glass-tint: rgba(251, 251, 249, 0.82);
   --glass-stroke: rgba(25, 27, 29, 0.1);
   --glass-sheen: rgba(255, 255, 255, 0.55);

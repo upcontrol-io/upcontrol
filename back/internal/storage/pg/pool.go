@@ -1,8 +1,5 @@
-// Package pg is the Postgres storage layer: the api_key resolver (ingest auth),
-// the seq-block leaser adapter for ring/seq, and the ingest-batch idempotency
-// store. It wraps a pgxpool and the sqlc-generated Queries. Every query is
-// tenant-scoped by construction (the key's tenant_id), and invariant 3 holds at
-// the SQL level.
+// Package pg is the Postgres storage layer: the api_key resolver, the
+// seq-block leaser adapter for ring/seq, and the ingest-batch idempotency store.
 package pg
 
 import (
@@ -47,15 +44,9 @@ func (p *Pool) Ping(ctx context.Context) error { return p.db.Ping(ctx) }
 // Close releases the pool.
 func (p *Pool) Close() { p.db.Close() }
 
-// Queries exposes the sqlc-generated query interface. Callers reach the pool's
-// raw Conn via the generated db.go's WithTx; for advisory locks use Exec below.
+// Queries exposes the sqlc-generated query interface. Callers reach the pool's raw
+// Conn via WithTx in the generated db.go; locks borrow one via Raw().Acquire.
 func (p *Pool) Queries() *sqlc.Queries { return p.q }
-
-// Exec runs a raw SQL statement (for advisory locks and other non-query SQL).
-func (p *Pool) Exec(ctx context.Context, sql string, args ...any) error {
-	_, err := p.db.Exec(ctx, sql, args...)
-	return err
-}
 
 // Raw exposes the underlying pool for code that needs direct pgx access.
 func (p *Pool) Raw() *pgxpool.Pool { return p.db }

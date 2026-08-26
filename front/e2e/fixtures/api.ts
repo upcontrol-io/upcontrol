@@ -1,15 +1,7 @@
 import type { Page, Route } from "@playwright/test";
 
-/**
- * A stand-in backend for the OSS app's specs. The values are deliberately the
- * ones the specs assert on — change a fixture and the assertion that names it
- * fails, which is the point. Shapes match `back/api/openapi.yaml`.
- *
- * Two auth modes: `stubApi` answers /v1/me —
- * the UC_AUTH=none posture every screen spec runs in — and `stubSignedOut`
- * refuses it with 401 until the magic-link redeem flips the fixture to
- * authenticated, which is the SignIn spec's whole story.
- */
+/** A stand-in backend for the specs: the values are the ones they assert on,
+ *  so changing a fixture fails the test that names it. Shapes: openapi.yaml. */
 
 export const EMAIL = "anna@example.com";
 export const DOMAIN = "example.com";
@@ -42,8 +34,8 @@ const ME = {
 	project: { id: "prj_1", domain: DOMAIN, createdAt: "2026-06-01T09:00:00Z" },
 };
 
-// Website only: the OSS create form offers URL checks and nothing else
-// (Decision 20), and the fixture list must not smuggle a Heartbeat back in.
+// Website only: the OSS create form offers URL checks and nothing else;
+// the fixture list must not smuggle a Heartbeat back in.
 const MONITORS = [
 	{
 		id: "mon_1",
@@ -52,12 +44,8 @@ const MONITORS = [
 		target: `https://${DOMAIN}`,
 		status: "ok",
 		interval: "5m",
-		// The list row and the detail page have rendered `keyword` and `expiry`
-		// all along (MonitorList.tsx, MonitorDetail.tsx), but no fixture monitor
-		// carried either — so that rendering was never once exercised. mon_2
-		// deliberately carries neither: the contract says an absent half means
-		// "not looked yet", and the two rows side by side are what proves the
-		// screen omits it rather than printing a placeholder.
+		// mon_2 carries neither half: an absent half means "not looked yet",
+		// and beside mon_1 that proves the screen omits it, not placeholders it.
 		keyword: "Checkout",
 		expiry: { ssl: "SSL Nov 2, in 84 days", domain: "domain Mar 14, in 217 days" },
 	},
@@ -76,10 +64,8 @@ const bars = (n: number) => Array.from({ length: n }, () => "ok" as const);
 const SOURCES = {
 	sources: [
 		{
-			// The marks are the backend's, verbatim (read_api.go). They used to be
-			// "UC" and "LG", which SourceIcon maps to nothing — so both cards fell
-			// back to the generic puzzle piece under every spec and an icon
-			// regression could not fail a test.
+			// The marks are the backend's, verbatim (read_api.go), so SourceIcon
+			// resolves them and an icon regression can fail a test.
 			id: "src_checks",
 			mark: "URL",
 			name: "Site checks",
@@ -107,7 +93,7 @@ const SOURCES = {
 	],
 };
 
-export const CHANNELS_BASE = {
+const CHANNELS_BASE = {
 	channels: [{ id: "ch_mail", kind: "email", target: EMAIL }],
 	connectableChannels: [
 		{
@@ -132,11 +118,8 @@ const INCIDENTS = { items: [] as unknown[] };
 
 const LOGS = { lines: [], volume: [], total: 0, services: [] };
 
-/**
- * Serve the app's reads, signed in (the UC_AUTH=none posture). Routes are
- * per-page state: a write survives the re-read that follows it, so the specs
- * test the round trip and not optimistic rendering.
- */
+/** Serve the app's reads, signed in. Routes are per-page state: a write
+ *  survives the re-read that follows, so specs test the round trip. */
 export async function stubApi(page: Page, opts?: { monitors?: Record<string, unknown>[] }) {
 	const monitors = (opts?.monitors ?? MONITORS).map((m) => ({ ...m })) as Record<string, unknown>[];
 	const channels = CHANNELS_BASE.channels.map((c) => ({ ...c }) as Record<string, unknown>);
@@ -213,9 +196,8 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 		}
 		return json(route, channels.find((c) => c.id === id) ?? {});
 	});
-	// Send test queues a real delivery; the outcome is polled from
-	// /v1/deliveries/{id}. The default fixture answers `dead` with the same
-	// reason a stack without a mailer produces — the honesty the spec pins.
+	// Send test queues a real delivery; the default fixture answers `dead`
+	// with the reason a stack without a mailer produces.
 	await page.route("**/v1/channels/*/test", (route) =>
 		json(route, { id: "dlv_test_1", state: "pending" }, 202),
 	);
@@ -285,11 +267,8 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 	});
 }
 
-/**
- * The signed-out posture for the SignIn spec: /v1/me answers 401, the
- * magic-link request hands back a dev token, and the redeem flips the fixture
- * to authenticated — after which /v1/me answers and the app opens.
- */
+/** The signed-out posture for the SignIn spec: /v1/me answers 401 until the
+ *  magic-link redeem flips the fixture to authenticated. */
 export async function stubSignedOut(page: Page) {
 	let authenticated = false;
 	await page.route("**/v1/**", (route) => json(route, { error: { message: "not stubbed" } }, 404));

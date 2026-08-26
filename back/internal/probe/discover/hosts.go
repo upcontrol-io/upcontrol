@@ -8,40 +8,23 @@ import (
 	"sync"
 )
 
-// Resolver is the DNS lookup this package needs, so tests can answer without a
+// resolver is the DNS lookup this package needs, so tests can answer without a
 // network and without depending on what some real domain happens to publish.
-type Resolver interface {
+type resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
-// conventionalHosts are the names a product puts its moving parts on. They are
-// asked for by DNS, which costs about a millisecond and sends NOTHING to the
-// customer's servers — only names that answer get an HTTP probe.
-//
-// This is why the list may exist at all. Enumerating subdomains from
-// certificate-transparency logs was rejected (an external dependency, and
-// thousands of guesses); six conventional names resolved locally is a different
-// mechanism with a different cost. And it is the only one that works: harpa.ai's
-// homepage does not mention api.harpa.ai anywhere, its certificate is a wildcard
-// so the SANs list nothing, and the call that reveals it happens in JavaScript
-// we do not execute. DNS finds it in one lookup.
-//
-// `admin` is deliberately absent: suggesting that someone's admin panel be
-// watched reads as reconnaissance, whatever our intent.
+// conventionalHosts are asked for by DNS, which sends nothing to the customer.
+// `admin` is deliberately absent: suggesting it reads as reconnaissance.
 var conventionalHosts = []string{"api", "app", "docs", "status", "dashboard", "auth"}
 
 // hostsWanted caps how many hosts reach the shortlist, and therefore how many
 // HTTP probes this costs on top of the DNS lookups.
 const hostsWanted = 3
 
-// findHosts discovers the site's other hosts: the conventional names that
-// resolve, plus any subdomain the sitemap or the homepage already pointed at.
-//
-// An api. or app. host is its own failure domain — separate DNS, separate
-// certificate, usually a separate deploy — so it can be down while the marketing
-// site is perfectly healthy. That is exactly the outage a status page built from
-// one URL misses, which is why this is worth a lookup.
-func findHosts(ctx context.Context, p Prober, dns Resolver, base string, seen []candidate) []Page {
+// findHosts discovers the site's other hosts: conventional names that resolve,
+// plus any subdomain the site itself pointed at.
+func findHosts(ctx context.Context, p prober, dns resolver, base string, seen []candidate) []Page {
 	root, err := url.Parse(base)
 	if err != nil || dns == nil {
 		return nil
@@ -109,10 +92,8 @@ func findHosts(ctx context.Context, p Prober, dns Resolver, base string, seen []
 	return probePages(ctx, p, cands)
 }
 
-// hostTier ranks a host by what its name says it carries. Deliberately NOT the
-// path vocabulary (valuableSection): /docs is a section worth watching on a
-// site, but docs.example.com going down costs nobody money, while api. and auth.
-// take the whole product with them.
+// hostTier ranks a host by what its name says it carries: docs.example.com
+// down costs nobody money, api. takes the whole product with it.
 var hostTier = map[string]int{
 	"api": 60, "app": 60, "auth": 60, "dashboard": 60, "checkout": 60, "pay": 60,
 	"docs": 30, "status": 30, "cdn": 30, "static": 30, "assets": 30,

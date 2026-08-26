@@ -6,17 +6,15 @@ import (
 	"strings"
 )
 
-// robots is what /robots.txt told us. A host without one, or one we could not
-// read, yields the zero value — which allows everything, because a missing
-// robots.txt means "no restrictions stated", not "stay out".
+// robots is what /robots.txt told us. The zero value allows everything: a
+// missing robots.txt means "no restrictions stated", not "stay out".
 type robots struct {
 	sitemaps []string
 	disallow []string
 }
 
-// Groups are matched for "*" and for our own token. A record naming us
-// specifically wins over the wildcard, which is what the convention says and
-// also the only reading under which an operator can single us out.
+// Groups are matched for "*" and for our own token; a record naming us
+// specifically wins over the wildcard.
 const robotsUAToken = "upcontrol"
 
 const (
@@ -24,10 +22,9 @@ const (
 	robotsMaxSitemaps = 3
 )
 
-// fetchRobots reads /robots.txt. It is the first thing this package asks for,
-// because from the moment we request site pages we are a crawler, and a crawler
-// that has not read robots.txt is just a scraper.
-func fetchRobots(ctx context.Context, p Prober, base string) robots {
+// fetchRobots reads /robots.txt: from the moment we request site pages we are
+// a crawler, and a crawler that has not read robots.txt is a scraper.
+func fetchRobots(ctx context.Context, p prober, base string) robots {
 	res := p.Execute(ctx, CheckSpec{
 		URL: base + "/robots.txt", Method: http.MethodGet,
 		TimeoutMs:    uint32(perRequestTimeout.Milliseconds()),
@@ -41,11 +38,8 @@ func fetchRobots(ctx context.Context, p Prober, base string) robots {
 	return parseRobots(string(res.Body))
 }
 
-// parseRobots is deliberately a small subset: Sitemap directives (which are
-// global, not per-group) and Disallow paths for the groups that apply to us.
-// Allow, Crawl-delay and wildcard patterns are not honoured because this package
-// fetches at most five pages once per host per cache window — the cases those
-// rules exist for cannot arise here.
+// parseRobots honours a small subset: Sitemap directives and the Disallow
+// paths of the groups that apply to us; at most five pages once per host.
 func parseRobots(body string) robots {
 	var r robots
 	// applies tracks whether the group being read is one of ours. Until the
@@ -82,8 +76,8 @@ func parseRobots(body string) robots {
 				applies = agent == "*" && !specific
 			}
 		case "disallow":
-			// "Disallow:" with an empty value means "nothing is disallowed" and
-			// must not be stored as a prefix, or it would match every path.
+			// "Disallow:" with an empty value means "nothing is disallowed";
+			// storing it as a prefix would match every path.
 			if applies && value != "" {
 				r.disallow = append(r.disallow, value)
 			}

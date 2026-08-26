@@ -1,8 +1,5 @@
-// @upcontrol/sdk - the push library (cli/SPEC.md §5). The public surface is
-// minimal and frozen: track() and flush(), plus the two logger bridges the
-// skill's recipes reference. Configuration is environment-only:
-// UPCONTROL_API_KEY and UPCONTROL_ENDPOINT. track() never throws, never blocks,
-// and without a key it is a warned no-op.
+// @upcontrol/sdk - the push library. Public surface: track(), flush(), and the logger bridges.
+// Configuration is environment-only; track() never throws and without a key is a warned no-op.
 
 import { hostname } from 'node:os';
 import { Client, scrubFields, type Attrs } from './client.js';
@@ -21,11 +18,7 @@ function safeHostname(): string {
   }
 }
 
-/**
- * track sends one event or log line. `event` is either a canonical name from
- * the upcontrol dictionary (`npx upcontrol skills dictionary`) or any free
- * name, which lands as an ordinary log line. Never throws, never blocks.
- */
+/** track sends one event or log line (a canonical or free name). Never throws, never blocks. */
 export function track(event: string, attrs?: Attrs): void {
   try {
     const fields: Record<string, unknown> = {
@@ -47,11 +40,7 @@ export function flush(): Promise<void> {
   return client.flush();
 }
 
-/**
- * upcontrolLine mirrors one log line from an existing logger. `level` is the
- * logger's level name; `msg` and `extra` are whatever the logger got - objects
- * are serialized, message strings pass through.
- */
+/** upcontrolLine mirrors one log line from an existing logger: level plus msg/extra. */
 export function upcontrolLine(level: string, msg: unknown, extra?: unknown): void {
   try {
     const fields: Record<string, unknown> = {
@@ -75,10 +64,7 @@ export function upcontrolLine(level: string, msg: unknown, extra?: unknown): voi
   }
 }
 
-/**
- * mirrorConsole tees console.log/warn/error into upcontrol. The original
- * console output is untouched. Calling it twice is a no-op.
- */
+/** mirrorConsole tees console.log/warn/error into upcontrol; original output is untouched. */
 export function mirrorConsole(): void {
   const c = console as Console & { __upcontrol?: boolean };
   if (c.__upcontrol) return;
@@ -136,9 +122,4 @@ function safeJson(v: unknown): string {
   } catch {
     return String(v);
   }
-}
-
-// Internal seam for the auto entry - not part of the public surface.
-export function _internals(): { client: Client } {
-  return { client };
 }

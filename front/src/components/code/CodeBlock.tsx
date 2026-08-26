@@ -2,17 +2,13 @@ import type { ReactNode } from 'react';
 import { CopyButton } from './CopyButton';
 import styles from './CodeBlock.module.css';
 
-export interface CodeBlockProps {
+interface CodeBlockProps {
   code: string;
   language?: string;
   showLineNumbers?: boolean;
-  highlightLines?: number[];
   className?: string;
-  /**
-   * Rendered inside a container that already draws the frame and carries its own
-   * copy button — CodeTabs, where the language picker and Copy share one header
-   * bar above the code (02-copy-and-code.dc.html).
-   */
+  /** Rendered inside a container that already draws the frame and carries its
+   *  own copy button (CodeTabs' shared header bar). */
   embedded?: boolean;
 }
 
@@ -23,14 +19,9 @@ interface Grammar {
 }
 
 // Muted, grammar-aware highlighting: comments faint, strings recede, keywords
-// weighted, the key and endpoint marked as the two things that matter.
-// Port of the highlight() logic in 02-copy-and-code.dc.html — achromatic on purpose.
+// weighted; achromatic on purpose: saturated color is reserved for status.
 const GRAMMARS: Record<string, Grammar> = {
   cURL: { comment: /#.*/, string: /"[^"]*"|'[^']*'/, kw: /\b(curl|export|if|then|fi|echo|set)\b/ },
-  JavaScript: { comment: /\/\/.*/, string: /"[^"]*"|'[^']*'|`[^`]*`/, kw: /\b(export|async|function|await|try|catch|const|let|return|method|new)\b/ },
-  Python: { comment: /#.*/, string: /"[^"]*"|'[^']*'/, kw: /\b(import|def|try|except|Exception|pass|return|None|True|False)\b/ },
-  PHP: { comment: /\/\/.*|#.*/, string: /'[^']*'|"[^"]*"/, kw: /\b(function|return|true|false|null|array)\b|<\?php/ },
-  Docker: { comment: /#.*/, string: /"[^"]*"|'[^']*'/, kw: /^\s*[A-Za-z_][\w.-]*(?=:)/ },
 };
 
 const KEY_RE = /uc_live_[A-Za-z0-9]+|<YOUR_KEY>|https?:\/\/[^\s"'\\]+/;
@@ -78,12 +69,11 @@ function highlightLine(line: string, grammar: Grammar): ReactNode[] {
   return out;
 }
 
-/** Achromatic grammar highlighting — never a rainbow; saturated color is reserved for status (brief §2.2). */
+/** Achromatic grammar highlighting: saturated color is reserved for status. */
 export function CodeBlock({
   code,
   language,
   showLineNumbers = true,
-  highlightLines = [],
   className,
   embedded = false,
 }: CodeBlockProps) {
@@ -105,7 +95,7 @@ export function CodeBlock({
           {lines.map((line, index) => {
             const tokens = highlightLine(line, grammar);
             return (
-              <div key={index} className={[styles.line, highlightLines.includes(index + 1) && styles.highlighted].filter(Boolean).join(' ')}>
+              <div key={index} className={styles.line}>
                 {tokens.length ? tokens : ' '}
               </div>
             );

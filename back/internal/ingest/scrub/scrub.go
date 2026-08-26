@@ -1,18 +1,5 @@
-// Package scrub strips secrets from a log line or event before it is written to
-// the wire or persisted. The plan (§5.3, cli/SPEC.md §6.1) is explicit that this
-// is a HAND-WRITTEN scanner, not a regex library: regex is 10× costlier on
-// log-volume text and catastrophic on pathological input. Redaction replaces the
-// secret with a marker `[redacted:TYPE:LEN]` (type + length, never the value),
-// and a per-type counter rides in the ingest receipt.
-//
-// This is defense in depth: the SDK scrubs too, but the server re-scrubs. A
-// regression here is a security incident, so every category carries a test vector.
-//
-// Performance: the scan is O(n) per line. A first-byte dispatch table routes each
-// position to only the matchers whose anchor can begin on that byte (most bytes
-// have zero candidates), and the generic-shape matchers (jwt, card, email) only
-// fire at a token boundary, so a non-matching line costs one byte-dispatch per
-// position with no forward scanning.
+// Package scrub strips secrets from a log line, marking each [redacted:TYPE:LEN].
+// Hand-written scanner, not regex; the server re-scrubs what the SDK already scrubbed.
 package scrub
 
 import (
@@ -81,9 +68,8 @@ var matchers = []matcher{
 	{name: "email", fn: emailMatcher, starts: isEmailLocal},
 }
 
-// dispatch maps a first byte to the matcher indices that could begin on it. Most
-// bytes (space, punctuation, uppercase not in any anchor) map to nothing, so the
-// common position is a single array lookup and no matcher calls.
+// dispatch maps a first byte to the matcher indices that could begin on it;
+// most bytes map to nothing, so the common position is one lookup, no calls.
 var dispatch [256][]int
 
 func init() {
@@ -106,16 +92,9 @@ func matchAt(s string, i int) (match, bool) {
 	return match{}, false
 }
 
-func hasPrefix(s, prefix string, i int) bool {
-	if i+len(prefix) > len(s) {
-		return false
-	}
-	return s[i:i+len(prefix)] == prefix
-}
-
 func pemMatcher(s string, i int) (int, bool) {
 	const begin = "-----BEGIN "
-	if !hasPrefix(s, begin, i) {
+	if !strings.HasPrefix(s[i:], begin) {
 		return 0, false
 	}
 	hdr := s[i:]
@@ -140,7 +119,7 @@ func pemMatcher(s string, i int) (int, bool) {
 
 func bearerMatcher(s string, i int) (int, bool) {
 	const p = "Bearer "
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)
@@ -155,7 +134,7 @@ func bearerMatcher(s string, i int) (int, bool) {
 
 func prefixTokenFn(prefix string, minTail int) func(string, int) (int, bool) {
 	return func(s string, i int) (int, bool) {
-		if !hasPrefix(s, prefix, i) {
+		if !strings.HasPrefix(s[i:], prefix) {
 			return 0, false
 		}
 		j := i + len(prefix)
@@ -176,7 +155,7 @@ func isTokenByte(c byte) bool {
 
 func githubAnyMatcher(s string, i int) (int, bool) {
 	for _, p := range []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"} {
-		if hasPrefix(s, p, i) {
+		if strings.HasPrefix(s[i:], p) {
 			j := i + len(p)
 			for j < len(s) && isTokenByte(s[j]) {
 				j++
@@ -191,7 +170,7 @@ func githubAnyMatcher(s string, i int) (int, bool) {
 
 func slackAnyMatcher(s string, i int) (int, bool) {
 	for _, p := range []string{"xoxp-", "xoxb-", "xoxa-", "xoxs-"} {
-		if hasPrefix(s, p, i) {
+		if strings.HasPrefix(s[i:], p) {
 			j := i + len(p)
 			for j < len(s) && (isTokenByte(s[j]) || s[j] == '.') {
 				j++
@@ -246,7 +225,7 @@ func isB64(c byte) bool {
 
 func connStrMatcher(s string, i int) (int, bool) {
 	for _, sch := range []string{"postgres://", "postgresql://", "mysql://", "mongodb://", "redis://"} {
-		if hasPrefix(s, sch, i) {
+		if strings.HasPrefix(s[i:], sch) {
 			rest := s[i+len(sch):]
 			colon := strings.IndexByte(rest, ':')
 			if colon < 0 {
@@ -264,7 +243,7 @@ func connStrMatcher(s string, i int) (int, bool) {
 
 func sessionEqMatcher(s string, i int) (int, bool) {
 	const p = "session="
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)
@@ -279,7 +258,7 @@ func sessionEqMatcher(s string, i int) (int, bool) {
 
 func cookieSetMatcher(s string, i int) (int, bool) {
 	const p = "Set-Cookie: "
-	if !hasPrefix(s, p, i) {
+	if !strings.HasPrefix(s[i:], p) {
 		return 0, false
 	}
 	j := i + len(p)

@@ -88,13 +88,8 @@
   margin: var(--space-1) 0;
 }
 
-/* ---- Phone tier: the menu is a bottom sheet ------------------------------
-   Not a style choice. As a dropdown this control was unreachable below 700px:
-   `right: 0` put a 200px menu at x = -11 on a 390px screen, and the logs
-   panel's `overflow: hidden` clipped the rest, so a tap on a row hit the page
-   behind it. The sheet is portalled to the body, which leaves every clipping
-   ancestor behind, and it arrives under the thumb. Same shape and the same
-   z-index band as MoreSheet — one bottom-sheet idiom in this product. */
+/* Phone tier: the menu is a bottom sheet. A dropdown was unreachable below
+   700px (clipped by ancestors); the portal to body leaves them behind. */
 .overlay {
   position: fixed;
   inset: 0;
@@ -132,9 +127,8 @@
   color: var(--text-muted);
 }
 
-/* The sheet lives outside `.uc-app`, so global.css's phone touch floor never
-   reaches it — and a row here is a <label>, which that rule does not target
-   anyway. Stated locally, or the rows stay at their cursor size. */
+/* The sheet lives outside .uc-app and its rows are <label>s, so the phone
+   touch floor never reaches them; stated locally or rows stay cursor-sized. */
 .sheet .row {
   min-height: var(--tap-min);
   align-items: center;

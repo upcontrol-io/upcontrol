@@ -25,12 +25,8 @@ func TestShutdownAllFinish(t *testing.T) {
 
 func TestShutdownUnfinishedReported(t *testing.T) {
 	c := New(nil)
-	// `slow` is genuinely stuck: it does not even observe the deadline, so it
-	// cannot have reported by the time Shutdown snapshots. (A task that returns
-	// the moment ctx fires DID report — whether such a straggler counts as
-	// finished is a coin the select flips, and this test must not flip coins.)
-	// The channel is closed after Shutdown returns so the abandoned goroutine
-	// can exit; its late result lands in the buffered channel, unread.
+	// `slow` is genuinely stuck: it does not observe the deadline, so it
+	// cannot have reported when Shutdown snapshots; released lets it exit after.
 	released := make(chan struct{})
 	c.Register(Task{"slow", func(context.Context) error {
 		<-released

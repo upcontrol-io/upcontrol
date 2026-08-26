@@ -1,13 +1,8 @@
-// Package normalize maps a client event name to its canonical tier in the closed
-// 24-event dictionary (plan §4.3, cli/SPEC §4). The dictionary is frozen: field
-// additions are a major version. Everything outside it is T4 — an ordinary log
-// line, shown in the window/slice, never the trigger of anything.
-//
-// The reserved prefix "uc.*" belongs to upcontrol itself: client-sent events
-// with it are dropped and a `reserved_prefix` warning rides the receipt (the
-// receipt's closed code list). Classify never errors — it returns a tier and a
-// reserved flag, and the caller decides what to do.
+// Package normalize maps a client event name to its canonical tier in the frozen
+// 24-event dictionary; outside it is T4 (ordinary log line), and "uc.*" is reserved.
 package normalize
+
+import "strings"
 
 // Tier is the event's place in the alerting/correlation ladder.
 type Tier uint8
@@ -29,9 +24,8 @@ const (
 // ReservedPrefix is the namespace upcontrol owns; clients may not send it.
 const ReservedPrefix = "uc."
 
-// canonical is the frozen 24-name dictionary → tier. Lookup is case-insensitive
-// on the canonical snake_case form; the returned Name is always the canonical
-// spelling so a tenant who sends "Payment_Succeeded" stores "payment_succeeded".
+// canonical is the frozen 24-name dictionary → tier; lookup is lowercase,
+// the returned Name is the canonical spelling ("Payment_Succeeded" → payment_succeeded).
 var canonical = map[string]struct {
 	tier Tier
 	name string
@@ -74,13 +68,8 @@ type Event struct {
 	Tier Tier
 }
 
-// Classify maps a client event name to its tier. It never errors:
-//   - "uc." prefix → Tier5 (reserved); caller drops + warns reserved_prefix.
-//   - one of the 24 → Tier1-T3 with the canonical Name.
-//   - anything else → Tier4 (ordinary line).
-//
-// Lookup is case-insensitive and ignores leading/trailing whitespace, so a
-// tenant's "  Payment_Failed  " stores as "payment_failed".
+// Classify maps a client event name to its tier and never errors: "uc." →
+// Tier5 (reserved), one of the 24 → its tier with canonical Name, else Tier4.
 func Classify(name string) Event {
 	n := trimLower(name)
 	if n == "" {
@@ -88,7 +77,7 @@ func Classify(name string) Event {
 	}
 	// Reserved prefix check first: a client cannot claim the upcontrol namespace
 	// even if (somehow) it collides with a canonical name.
-	if hasReservedPrefix(n) {
+	if strings.HasPrefix(n, ReservedPrefix) {
 		return Event{Tier: Tier5}
 	}
 	if e, ok := canonical[n]; ok {
@@ -97,13 +86,9 @@ func Classify(name string) Event {
 	return Event{Tier: Tier4}
 }
 
-func hasReservedPrefix(n string) bool {
-	return len(n) >= len(ReservedPrefix) && n[:len(ReservedPrefix)] == ReservedPrefix
-}
-
 func trimLower(s string) string {
-	// Manual trim+lower to avoid pulling strings (keeps the hot path alloc-free
-	// for the common T4 path where we only need to lowercase before lookup).
+	// Manual trim+lower (keeps the hot path alloc-free; strings already serves
+	// HasPrefix, but this stays allocation-free).
 	start, end := 0, len(s)
 	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
 		start++

@@ -8,9 +8,8 @@ import (
 	detector "go.upcontrol.io/back/internal/detect/detectors"
 )
 
-// decide is pure and every branch reachable state must be pinned — including
-// combinations the live loop cannot produce (dedup always suppresses a fire
-// while an incident is open), because decide itself must not care.
+// decide is pure and every branch must be pinned, including combinations the
+// live loop cannot produce (dedup suppresses a fire while an incident is open).
 func TestDecide(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -69,11 +68,8 @@ func TestBaselineBounds(t *testing.T) {
 	}
 }
 
-// The alert quotes the baseline only when there was one. A project younger
-// than a week gets (0, 0) from ErrorRateBaseline and fires on the detector's
-// flat 10% rule instead — printing "the weekly baseline is 0.0%" there would
-// assert a measurement nobody made, which is the one lie this product may not
-// tell.
+// The alert quotes the baseline only when there was one: a young project
+// fires on the flat 10% rule, and "weekly baseline is 0.0%" asserts a lie.
 func TestErrorRateSummary_QuotesOnlyAMeasuredBaseline(t *testing.T) {
 	const window = "in the last 5 minutes"
 

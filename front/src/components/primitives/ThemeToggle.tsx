@@ -2,7 +2,7 @@ import { useTheme } from '@/lib/theme';
 import { MoonIcon, SunIcon } from '@/icons';
 import { IconButton } from './IconButton';
 
-/** Header icon-only toggle, no text label (brief §1.7). */
+/** Header icon-only toggle, no text label. */
 export function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
   return (

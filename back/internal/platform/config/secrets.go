@@ -1,8 +1,5 @@
 // Package config also validates the at-rest encryption key for secret-bearing
-// columns (instance_setting.value_enc; alert_channel.secret_enc and
-// source_connection.token_enc stay reserved in the schema). The key is 32
-// raw bytes (AES-256) supplied as hex via UC_SECRET_KEY_HEX; when set, a
-// malformed value fails at startup (§1.2), not on first use.
+// columns: 32 raw bytes (AES-256) as hex; malformed values fail at startup.
 package config
 
 import (
@@ -18,9 +15,8 @@ const SecretKeySize = 32 // AES-256
 // SecretKey is an AES-256 key ready to construct an AEAD.
 type SecretKey [SecretKeySize]byte
 
-// SecretKeyFromHex decodes a 64-char hex string into a SecretKey. It rejects
-// the wrong length and any non-hex input so a truncated or pasted-wrong value
-// is caught at boot, not on the first encrypt.
+// SecretKeyFromHex decodes a 64-char hex string into a SecretKey; wrong
+// length or non-hex input is caught at boot, not on the first encrypt.
 func SecretKeyFromHex(s string) (SecretKey, error) {
 	var k SecretKey
 	raw, err := hex.DecodeString(s)
@@ -34,9 +30,8 @@ func SecretKeyFromHex(s string) (SecretKey, error) {
 	return k, nil
 }
 
-// Seal encrypts a secret for an at-rest column: AES-256-GCM with a random
-// nonce prepended to the ciphertext. The stored bytes are useless without
-// UC_SECRET_KEY_HEX, which never lands in the database.
+// Seal encrypts a secret for an at-rest column: AES-256-GCM, random nonce
+// prepended. The stored bytes are useless without UC_SECRET_KEY_HEX.
 func (k SecretKey) Seal(plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(k[:])
 	if err != nil {

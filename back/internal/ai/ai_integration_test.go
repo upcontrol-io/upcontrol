@@ -1,18 +1,7 @@
 //go:build integration
 
-// The Accountant's money paths against a real Postgres: a real call writes
-// one ai_call row and adds its tokens to ai_usage (Decision 9 + Review 1's
-// dead-columns guard), a cache hit charges nothing and never re-calls the
-// model, an answer that fails ParseAnswer twice still lands its burned
-// tokens in the ledger while the quota's used count never moves, and every
-// brain's parsed answer writes its ledger row — zero-token ones included.
-// The quota itself is atomic (Decision 4): a race for the last slot answers
-// exactly one request — while still recording the loser's paid provider call
-// (Review 23) — the accounting survives a client disconnect after the model
-// answered (Decision 5), and an unreadable counter fails closed instead of
-// granting quota (Decision 3).
-//
-// UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/ai/...
+// The Accountant's money paths against a real Postgres: cache, quota, ledger.
+// Run: UC_TEST_POSTGRES=postgres://... go test -tags=integration ./internal/ai/...
 package ai
 
 import (
@@ -41,6 +30,22 @@ func (s *stubLLM) Complete(_ context.Context, _ Scenario, _ Input) (Completion, 
 }
 
 func (s *stubLLM) ID(context.Context) string { return "stub" }
+
+// fakeLLM is a canned-JSON test double with a fixed brain identity, driving
+// the Accountant's production path (cache, quota, ledger) without a network.
+type fakeLLM struct {
+	id  string
+	raw string
+}
+
+// fakeAnswerJSON passes parseAnswer's strict gate: non-empty problem and
+// cause, a legal confidence, one investigate step.
+const fakeAnswerJSON = `{"problem":"test problem","cause":"test cause","confidence":"low","investigate":[{"step":"look"}]}`
+
+func (f fakeLLM) Complete(_ context.Context, _ Scenario, _ Input) (Completion, error) {
+	return Completion{RawJSON: []byte(f.raw), Model: f.id}, nil
+}
+func (f fakeLLM) ID(context.Context) string { return f.id }
 
 const validAnswer = `{"problem":"the dependency refused the connection","cause":"the downstream is down or not listening on the expected port","confidence":"medium","fix":null,"investigate":[{"step":"Check the dependency is up and that the host:port in config match it.","command":null}]}`
 
@@ -107,7 +112,7 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 	acct := New(pool, model, Prices{})
 	cachedRows := func(input Input) int64 {
 		var n int64
-		h := HashInput(ExplainLogs, model.ID(ctx), input)
+		h := hashInput(ExplainLogs, model.ID(ctx), input)
 		if err := pool.Raw().QueryRow(ctx,
 			`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,
 			tenantID, h[:]).Scan(&n); err != nil {
@@ -139,10 +144,8 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 		t.Fatalf("cache rows for the input = %d, want 1", n)
 	}
 
-	// 2. A cache hit charges nothing: same input, and a limit of 1 that the
-	// quota gate would refuse — only the cache check sitting in front of it
-	// can let this through. The model must not be called again, and the
-	// counters are the real ones, not 0/0 (Decision 6).
+	// 2. A cache hit charges nothing: a limit of 1 the gate would refuse
+	// passes only because the cache sits in front; counters stay real.
 	res, err = acct.Explain(ctx, tenantID, ExplainLogs, first, limitPtr(1))
 	if err != nil {
 		t.Fatalf("cached explain: %v", err)
@@ -163,14 +166,12 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 		t.Fatalf("ai_call after a cache hit = %d rows, %d/%d tokens, want unchanged 1/120/45", rows, prompt, completion)
 	}
 
-	// 3. Invalid model JSON retries once, then fails: the provider is called
-	// twice for this input (plus section 1's call = 3 total), each attempt's
-	// spend goes to the ledger with its raw token counts, but the quota's
-	// `used` never moves and nothing is cached (no answer was delivered).
+	// 3. Invalid model JSON retries once, then fails: spend lands in the
+	// ledger, `used` never moves, nothing is cached.
 	broken := Input{Lines: []string{"write: no space left on device"}}
 	model.comp = Completion{RawJSON: []byte(`{"problem": "trunc`), Model: "gpt-test"}
 	if _, err := acct.Explain(ctx, tenantID, ExplainLogs, broken, limitPtr(5)); err == nil {
-		t.Fatal("an answer that fails ParseAnswer twice must fail the explain")
+		t.Fatal("an answer that fails parseAnswer twice must fail the explain")
 	}
 	if model.calls != 3 {
 		t.Fatalf("the model was called %d times, want 3 — one real call plus two attempts on the broken answer", model.calls)
@@ -185,10 +186,8 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 		t.Fatalf("cache rows for the broken input = %d, want 0", n)
 	}
 
-	// 4. A second brain (different ID) is a different cache identity, its
-	// call bumps the count quota, and every parsed answer writes its ledger
-	// row — zero-token brains included, so an unknown-usage gateway is still
-	// visible in the ledger.
+	// 4. A second brain is a different cache identity; its zero-token row
+	// still lands in the ledger.
 	fake := fakeLLM{id: "fake", raw: fakeAnswerJSON}
 	res, err = New(pool, fake, Prices{}).Explain(ctx, tenantID, ExplainLogs,
 		Input{Lines: []string{"FATAL: out of memory (oom-kill)"}}, limitPtr(5))
@@ -217,10 +216,8 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 	}
 }
 
-// barrierLLM holds every caller inside Complete until both racers have
-// arrived, then releases them together: both are past the quota fast path
-// (step 2) before either reaches the guarded increment, so the outcome is
-// decided by the guard the race test exists for, not by goroutine scheduling.
+// barrierLLM holds every caller inside Complete until both racers arrive, so
+// the outcome is decided by the guard, not goroutine scheduling.
 type barrierLLM struct {
 	gate *sync.WaitGroup
 	comp Completion
@@ -234,11 +231,8 @@ func (b barrierLLM) Complete(_ context.Context, _ Scenario, _ Input) (Completion
 	return b.comp, nil
 }
 
-// TestExplain_LastSlotRace pins the atomic gate (Decision 4): two explains
-// racing at used = limit-1 take exactly one slot — one answer, one 402 — the
-// counter never overshoots the limit, the loser's paid provider call is still
-// on the books (tokens and ledger; Review 23), its answer is NOT cached, and
-// its own retry is refused again rather than answered for free.
+// Two explains racing at used = limit-1 take exactly one slot: one answer,
+// one 402. The loser's paid call is booked, not cached, and its retry refuses.
 func TestExplain_LastSlotRace(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -250,9 +244,7 @@ func TestExplain_LastSlotRace(t *testing.T) {
 	}
 
 	// Two explains over different lines (the cache deduplicates identical
-	// inputs, so the gate is the only thing that can separate them) racing
-	// for the last slot, held at the model call until both are through the
-	// fast path.
+	// inputs), held at the model call until both pass the fast path.
 	inputs := []Input{
 		{Lines: []string{"worker 0: write: no space left on device"}},
 		{Lines: []string{"worker 1: write: no space left on device"}},
@@ -262,7 +254,7 @@ func TestExplain_LastSlotRace(t *testing.T) {
 	racer := barrierLLM{gate: gate, comp: gptCompletion()}
 	type outcome struct {
 		idx int
-		res *ExplainResult
+		res *explainResult
 		err error
 	}
 	out := make(chan outcome, 2)
@@ -292,11 +284,8 @@ func TestExplain_LastSlotRace(t *testing.T) {
 		t.Fatalf("race at the last slot: %d answered, %d refused — want exactly one 200 and one 402 (the increment must be atomic)", answered, refused)
 	}
 
-	// The loser reached step 4 (past the model, into the accounting) — the
-	// barrier guarantees it — so its spend must be on the books even though
-	// its answer is not: warm-up + winner + loser tokens in ai_usage, one
-	// ledger row each. A loser refused at the fast path would leave 240/90
-	// and 2 rows; this is what tells the two refusals apart.
+	// The loser reached the accounting, so its spend is booked: warm-up +
+	// winner + loser tokens, one ledger row each.
 	var used, prompt, completion int64
 	var ledgerRows int64
 	if err := pool.Raw().QueryRow(ctx,
@@ -320,7 +309,7 @@ func TestExplain_LastSlotRace(t *testing.T) {
 		if i == refusedIdx {
 			want = 0
 		}
-		h := HashInput(ExplainLogs, racer.ID(ctx), in)
+		h := hashInput(ExplainLogs, racer.ID(ctx), in)
 		if err := pool.Raw().QueryRow(ctx,
 			`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,
 			tenantID, h[:]).Scan(&n); err != nil {
@@ -342,8 +331,8 @@ func TestExplain_LastSlotRace(t *testing.T) {
 	}
 }
 
-// cancellingLLM answers validly but cancels the request context first: the
-// model has answered, so the accounting writes must still land (Decision 5).
+// cancellingLLM cancels the request context before answering: the accounting
+// writes must still land.
 type cancellingLLM struct{ cancel context.CancelFunc }
 
 func (cancellingLLM) ID(context.Context) string { return "cancelling" }
@@ -380,8 +369,8 @@ func TestExplain_AccountingSurvivesClientDisconnect(t *testing.T) {
 	}
 }
 
-// TestExplain_QuotaReadFailsClosed pins Decision 3: a quota counter that
-// cannot be read fails the explain — it must never silently grant quota.
+// A quota counter that cannot be read fails the explain; it must never
+// silently grant quota.
 func TestExplain_QuotaReadFailsClosed(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -401,8 +390,8 @@ func TestExplain_QuotaReadFailsClosed(t *testing.T) {
 	}
 }
 
-// poolKillingLLM answers validly but closes the pool first: the model has
-// answered, and the metering writes are about to run against a dead database.
+// poolKillingLLM closes the pool before answering: the metering writes then
+// run against a dead database.
 type poolKillingLLM struct{ pool *pg.Pool }
 
 func (poolKillingLLM) ID(context.Context) string { return "pool-killing" }
@@ -412,12 +401,8 @@ func (p poolKillingLLM) Complete(context.Context, Scenario, Input) (Completion, 
 	return gptCompletion(), nil
 }
 
-// TestExplain_IncrementFailsAfterAnswer pins the branch where the increment
-// fails for a real reason (not the guard) after the model answered: the call
-// fails closed — a paid-for answer that cannot be metered is an error, not a
-// free one — and nothing lands. In particular the answer is not cached: a
-// cached-but-unmetered answer would serve free on retry and never count
-// against the quota (Review 23).
+// An increment that fails after the model answered fails closed: nothing
+// lands and the answer is not cached.
 func TestExplain_IncrementFailsAfterAnswer(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	// A second pool to the same database: the first dies mid-call, the
@@ -439,7 +424,7 @@ func TestExplain_IncrementFailsAfterAnswer(t *testing.T) {
 		t.Fatalf("a dead database is a 500-path error, not a quota refusal: %v", err)
 	}
 
-	h := HashInput(ExplainLogs, model.ID(ctx), in)
+	h := hashInput(ExplainLogs, model.ID(ctx), in)
 	var usageRows, ledgerRows, cacheRows int64
 	if err := verify.Raw().QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM ai_usage WHERE tenant_id = $1),
@@ -453,9 +438,8 @@ func TestExplain_IncrementFailsAfterAnswer(t *testing.T) {
 	}
 }
 
-// failingLLM mimics a provider call that burned tokens and then failed — the
-// shape Complete returns for a stream cut at max_tokens: model and usage
-// carried out with the error, no answer bytes.
+// failingLLM mimics a stream cut at max_tokens: model and usage carried out
+// with the error, no answer bytes.
 type failingLLM struct{}
 
 func (failingLLM) ID(context.Context) string { return "failing" }
@@ -465,10 +449,8 @@ func (failingLLM) Complete(_ context.Context, _ Scenario, _ Input) (Completion, 
 		errors.New(`ai: provider finish_reason "length", answer incomplete`)
 }
 
-// TestExplain_FailedProviderCallStillRecordsSpend pins Review 25's truncation
-// finding: a stream cut at max_tokens burns a full prompt plus the output
-// cap, so the ledger row, the token totals and the cost line are written
-// even though nothing comes back — no answer, no slot, no cache row.
+// A stream cut at max_tokens still burns tokens: ledger row and token totals
+// written, no answer, no slot, no cache row.
 func TestExplain_FailedProviderCallStillRecordsSpend(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -496,7 +478,7 @@ func TestExplain_FailedProviderCallStillRecordsSpend(t *testing.T) {
 	if ledgerRows != 1 {
 		t.Fatalf("ai_call rows = %d, want 1 — the paid call must be on the books even when it failed", ledgerRows)
 	}
-	h := HashInput(ExplainLogs, model.ID(ctx), in)
+	h := hashInput(ExplainLogs, model.ID(ctx), in)
 	var cacheRows int64
 	if err := pool.Raw().QueryRow(ctx,
 		`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,
@@ -508,10 +490,8 @@ func TestExplain_FailedProviderCallStillRecordsSpend(t *testing.T) {
 	}
 }
 
-// deadLLM mimics a provider call that never reached a chunk — the shape every
-// openai.go error path but truncation returns: the zero Completion, whose
-// token fields are 0, not the -1 sentinel (a connection refusal, a non-2xx, a
-// contentless stream, the garbage caps).
+// deadLLM mimics a call that never reached a chunk: the zero Completion,
+// token fields 0, not the -1 sentinel.
 type deadLLM struct{}
 
 func (deadLLM) ID(context.Context) string { return "dead" }
@@ -520,13 +500,8 @@ func (deadLLM) Complete(_ context.Context, _ Scenario, _ Input) (Completion, err
 	return Completion{}, errors.New("ai: provider request: dial tcp: connection refused")
 }
 
-// TestExplain_ConnectionFailureRecordsNothing pins the phantom-row guard: a
-// call that never reached a chunk holds no spend signal, so a down gateway
-// must record nothing — no $0 ledger row, no ai_usage row for a month with no
-// usage. The guard compares <= 0 precisely because the zero Completion carries
-// 0s; testing for the -1 sentinel (as an earlier version did) never fired and
-// a dead provider grew one phantom row per attempt, up to the throttle's
-// 6/min/tenant.
+// A call that never reached a chunk records nothing: no $0 ledger row, no
+// ai_usage row. The guard compares <= 0 because the zero Completion carries 0s.
 func TestExplain_ConnectionFailureRecordsNothing(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -548,10 +523,8 @@ func TestExplain_ConnectionFailureRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestExplain_UnknownTokensNeverDecrementTheTotals pins the -1 sentinel end
-// to end through the real SQL: a gateway that never sends usage must leave
-// the additive monthly totals at zero — not at -1, decrementing spend —
-// while the ledger row keeps -1/-1 so the unknown stays visible.
+// A gateway that never sends usage leaves the additive totals at zero, while
+// the ledger row keeps -1/-1 so the unknown stays visible.
 func TestExplain_UnknownTokensNeverDecrementTheTotals(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -583,11 +556,8 @@ func TestExplain_UnknownTokensNeverDecrementTheTotals(t *testing.T) {
 	}
 }
 
-// TestExplain_StreamedModelNameDoesNotSteerTheLedger pins Review 25's
-// impersonation finding, which outlives the heuristic it was found against:
-// the model string arrives on the provider's stream and must never steer an
-// internal gate — a stream naming itself anything at all has still spent
-// real tokens and still writes its row.
+// The provider-streamed model string must never steer a gate: a stream
+// naming itself anything still spent real tokens and still writes its row.
 func TestExplain_StreamedModelNameDoesNotSteerTheLedger(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -610,12 +580,8 @@ func TestExplain_StreamedModelNameDoesNotSteerTheLedger(t *testing.T) {
 	}
 }
 
-// TestExplain_CacheRowExpiresAfterAnHour pins the bound that makes Decision
-// 7's split honest: the volatile context shapes the answer but sits outside
-// the hash, so a cached row must stop being served after an hour — otherwise
-// an answer written while an incident was open keeps asserting it as current
-// forever. A flap cycle is minutes, so the hour keeps the flap immunity the
-// split exists for; the fresh answer re-stamps the row on overwrite.
+// Volatile context sits outside the hash, so a cached row stops serving after
+// an hour; the fresh answer re-stamps the row on overwrite.
 func TestExplain_CacheRowExpiresAfterAnHour(t *testing.T) {
 	pool, tenantID := openAccountantDB(t)
 	ctx := context.Background()
@@ -646,9 +612,8 @@ func TestExplain_CacheRowExpiresAfterAnHour(t *testing.T) {
 		t.Fatalf("model calls after expiry = %d, want 2 — the provider must be re-consulted", model.calls)
 	}
 
-	// The upsert that re-cached the expired row must also have re-stamped it:
-	// with created_at left at the first write, the fresh answer would itself
-	// already be expired and never serve.
+	// The upsert must re-stamp created_at, or the fresh answer would itself
+	// already be expired.
 	if res, err := acct.Explain(ctx, tenantID, ExplainLogs, in, limitPtr(5)); err != nil || !res.Cached {
 		t.Fatalf("the re-written row must serve again: cached = %v, err = %v — the upsert must refresh created_at", res.Cached, err)
 	}

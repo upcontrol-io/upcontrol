@@ -1,12 +1,5 @@
-// Package query builds the ONLY SQL path to the ClickHouse logs table (plan
-// invariant 4: "every query to logs goes through internal/ring.QueryBuilder").
-// The depguard rule `logs-only-via-ring` enforces this at lint time — no other
-// package may import storage/ch/logs. QueryBuilder appends `seq >= cutoff_seq`
-// to every query so the ring displacement is transparent to the caller.
-//
-// The caller (internal/api, internal/incident) constructs a Query, the builder
-// produces a parameterized SQL string + args, and the ClickHouse connection runs
-// it. The caller never sees raw `logs` — only the builder's typed result.
+// Package query is the only SQL path to the ClickHouse logs table (depguard's
+// `logs-only-via-ring` enforces it); every query appends `seq >= cutoff_seq`.
 package query
 
 import (
@@ -15,9 +8,8 @@ import (
 	"time"
 )
 
-// QueryBuilder is the single entry point to the logs table. It carries the
-// project_window's cutoff_seq so every query is automatically scoped to the
-// visible window.
+// QueryBuilder is the single entry point to the logs table; it carries the
+// project's cutoff_seq so every query is scoped to the visible window.
 type QueryBuilder struct {
 	cutoffSeq int64
 	projectID int64
@@ -39,15 +31,8 @@ type LogQuery struct {
 	Args []any
 }
 
-// Range optionally bounds a query to a slice of time, half-open [From, To). A
-// zero time leaves that side at the ring's own edge, so the zero Range means
-// "the whole visible window" and every caller that has no range keeps its
-// meaning unchanged.
-//
-// This is NOT the cutoff and never replaces it. The cutoff is what the plan
-// still stores and is not negotiable; a Range is only what the reader is
-// currently looking at. Widening a Range past the ring therefore narrows
-// nothing, which is the honest answer — the lines outside it were never kept.
+// Range optionally bounds a query to a half-open [From, To) time slice; a zero
+// side is the ring's edge. A Range never widens past the cutoff.
 type Range struct {
 	From time.Time
 	To   time.Time
@@ -56,9 +41,8 @@ type Range struct {
 // Bounded reports whether either side of the range is set.
 func (r Range) Bounded() bool { return !r.From.IsZero() || !r.To.IsZero() }
 
-// appendRangeFilter binds the range's ends. Resolved to time.Time here for the
-// same reason WindowCount's cutoff is: ClickHouse cannot take a bound parameter
-// inside an INTERVAL, so nothing about the range reaches the engine as text.
+// appendRangeFilter binds the range's ends as parameters: ClickHouse cannot
+// take a bound parameter inside an INTERVAL, so no range text reaches the engine.
 func appendRangeFilter(conditions []string, args []any, within Range) ([]string, []any) {
 	if !within.From.IsZero() {
 		conditions = append(conditions, "ts >= ?")
@@ -71,14 +55,8 @@ func appendRangeFilter(conditions []string, args []any, within Range) ([]string,
 	return conditions, args
 }
 
-// Stream returns the latest N log lines within the visible window, optionally
-// filtered by levels/services/text and bounded to an instant range. This is what
-// GET /v1/logs uses. Empty slices mean "no filter" — a reader who picked nothing
-// asked for everything — and the zero Range means the whole window.
-//
-// The range matters more than it looks: without it the panel could only ever
-// hold the newest `limit` lines, so panning the timeline anywhere but the live
-// edge showed volume with an empty stream underneath it.
+// Stream is the latest N lines of the visible window (GET /v1/logs): empty
+// slices mean no filter, the zero Range the whole window (panning needs it).
 func (q *QueryBuilder) Stream(limit int, levels, services []string, search string, within Range) LogQuery {
 	var conditions []string
 	var args []any
@@ -100,21 +78,8 @@ func (q *QueryBuilder) Stream(limit int, levels, services []string, search strin
 	return LogQuery{SQL: sql, Args: args}
 }
 
-// Evidence is the incident slice's read: the same bounded window Stream uses,
-// ordered so error and warning lines fill the budget first and ordinary traffic
-// only tops up whatever is left.
-//
-// The slice is both what the card shows and what the AI read is given, so its
-// composition is the ceiling on both. `ORDER BY seq DESC LIMIT n` returns the
-// tail of the stream whatever it happens to hold: on a busy project that is n
-// lines of healthy traffic surrounding one failure, which is evidence in name
-// only. Errors first keeps the failing lines whatever the ratio is.
-//
-// The top-up is not a nicety. An availability incident on a project that ships
-// only info lines has no error level at all, and a bare filter would freeze an
-// empty slice — the card drops the whole pane when the slice is empty, so the
-// reader would lose the context they have today to gain evidence that does not
-// exist.
+// Evidence is the incident slice's read: error and warn lines fill the budget
+// first, ordinary traffic tops up the rest (info-only projects still get context).
 func (q *QueryBuilder) Evidence(limit int) LogQuery {
 	sql := fmt.Sprintf("SELECT seq, ts, level, service, message FROM logs "+
 		"WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
@@ -122,11 +87,8 @@ func (q *QueryBuilder) Evidence(limit int) LogQuery {
 	return LogQuery{SQL: sql, Args: []any{q.tenantID, q.projectID, q.cutoffSeq}}
 }
 
-// appendLevelFilter narrows to the picked level buckets. The API's `info`
-// bucket is "neither an error nor a warning" — it covers debug and anything
-// else a collector labels a line with, so the three buckets always partition
-// the stream. Unknown values are dropped here rather than matched literally,
-// so a crafted level can never widen or invert the predicate.
+// appendLevelFilter narrows to the picked buckets: `info` means "not error
+// nor warn", and unknown values are dropped so a crafted level cannot invert this.
 func appendLevelFilter(conditions []string, args []any, levels []string) ([]string, []any) {
 	var parts []string
 	for _, level := range levels {
@@ -143,9 +105,8 @@ func appendLevelFilter(conditions []string, args []any, levels []string) ([]stri
 	return append(conditions, "("+strings.Join(parts, " OR ")+")"), args
 }
 
-// appendServiceFilter narrows to lines from any of the named services. The
-// empty string is a real name — the unlabelled service — so it binds like any
-// other value rather than meaning "no filter" (that is the empty slice's job).
+// appendServiceFilter narrows to the named services; the empty string is a
+// real name (the unlabelled service), while the empty slice means no filter.
 func appendServiceFilter(conditions []string, args []any, services []string) ([]string, []any) {
 	if len(services) == 0 {
 		return conditions, args
@@ -158,11 +119,8 @@ func appendServiceFilter(conditions []string, args []any, services []string) ([]
 	return conditions, args
 }
 
-// WindowCount counts the lines the window holds before the stream limit, with
-// the SAME filters, cutoff and range as Stream — a different predicate here
-// would make GET /v1/logs's `total` a lie, and "showing 200 of 4,000" is a
-// sentence about two counts of one question. The zero Range means the whole
-// visible ring.
+// WindowCount counts the window before the stream limit with the SAME filters,
+// cutoff and range as Stream; a different predicate would make `total` a lie.
 func (q *QueryBuilder) WindowCount(within Range, levels, services []string, search string) LogQuery {
 	var conditions []string
 	var args []any
@@ -184,13 +142,8 @@ func (q *QueryBuilder) WindowCount(within Range, levels, services []string, sear
 	}
 }
 
-// Services lists the services present in the window with their line counts —
-// what the logs panel builds its picker from. window <= 0 means the whole
-// visible ring.
-//
-// Deliberately NOT filtered by service: the list has to describe the window,
-// not the reader's current choice, or picking one service leaves a picker
-// holding a single option and no way back to the rest.
+// Services lists services present in the window with line counts; window <= 0
+// means the whole ring. Not service-filtered: the picker must describe the window.
 func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
 	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
@@ -206,15 +159,8 @@ func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 	}
 }
 
-// Volume returns per-minute line counts for the histogram on the logs panel.
-// It takes the same filters as Stream for the same reason WindowCount does:
-// the strip sits directly above the lines it describes, and an unfiltered
-// chart over a filtered list is two counts of two different things, side by
-// side.
-// The bucket width is not a parameter: it is a minute, and was a minute even
-// when this took one, because every caller passed 1 and the SQL never read it.
-// A finer strip is VolumeDetail's job, bounded to a range — this one covers the
-// whole ring and cannot be allowed to return a row per second across it.
+// Volume returns per-minute line counts for the histogram, taking Stream's
+// filters (the strip describes the lines below it). The bucket is a minute.
 func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
 	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
 	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
@@ -228,26 +174,16 @@ func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
 	}
 }
 
-// detailBuckets are the resolutions VolumeDetail will answer at, finest first.
-// A reader zooming into a burst is choosing between these, so they are the same
-// ladder the strip draws with; anything else would let the client ask for a
-// width it cannot render.
+// detailBuckets are the resolutions VolumeDetail answers at, finest first;
+// the same ladder the strip draws with.
 var detailBuckets = []int{1, 2, 5, 10, 15, 30, 60}
 
-// maxDetailBuckets caps one answer. At the finest resolution this is ten
-// minutes of wall clock, which is more than a reader zoomed to seconds is
-// looking at, and it keeps a wide range from asking ClickHouse to group a whole
-// ring one second at a time.
+// maxDetailBuckets caps one answer; it keeps a wide range from grouping a
+// whole ring one second at a time.
 const maxDetailBuckets = 600
 
-// DetailBucketSeconds picks the resolution a detail read will actually use, or
-// 0 when there is no detail worth reading.
-//
-// Zero means "the per-minute map already answers this": either the caller asked
-// for nothing, or the range is wide enough that every allowed bucket would be
-// coarser than the minute Volume already returns. Detail exists to say what one
-// minute is made of — offering it at minute resolution would be the same
-// numbers under a second name.
+// DetailBucketSeconds picks the resolution a detail read uses; 0 means "the
+// per-minute map already answers this" (no detail finer than a minute exists).
 func DetailBucketSeconds(requested int, within Range) int {
 	if requested <= 0 || within.From.IsZero() || within.To.IsZero() {
 		return 0
@@ -267,17 +203,8 @@ func DetailBucketSeconds(requested int, within Range) int {
 	return 0
 }
 
-// VolumeDetail counts lines inside the range, bucketed at bucketSeconds: the
-// fine-grained companion to Volume, not a replacement for it. Volume stays the
-// whole-ring map for the reason its own comment gives, and this answers the
-// other half — what a single minute of it is made of, once the reader has
-// picked one.
-//
-// bucketSeconds is written into the SQL rather than bound, for the reason
-// appendRangeFilter gives: ClickHouse takes no bound parameter inside an
-// INTERVAL. It still never reaches the engine as caller text — the value is
-// snapped to one of detailBuckets first, so only an integer this package chose
-// can get there, and an unsnappable request yields no query at all.
+// VolumeDetail counts lines inside the range at bucketSeconds, the fine-grained
+// companion to Volume; size is snapped to detailBuckets, never caller text.
 func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, services []string) LogQuery {
 	size := DetailBucketSeconds(bucketSeconds, within)
 	if size == 0 {
@@ -297,8 +224,7 @@ func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, ser
 	}
 }
 
-// Slice returns log lines in a [from, to) seq range for the incident's frozen
-// 2-phase slice (plan §5.8: Phase 1 at opened_at, Phase 2 at +15m).
+// Slice returns log lines in a [from, to) seq range for the incident's frozen slice.
 func (q *QueryBuilder) Slice(fromSeq, toSeq int64, limit int) LogQuery {
 	return LogQuery{
 		SQL: fmt.Sprintf(
@@ -309,11 +235,8 @@ func (q *QueryBuilder) Slice(fromSeq, toSeq int64, limit int) LogQuery {
 	}
 }
 
-// Summary returns how many lines are inside the visible window and when the
-// last one arrived. It exists so the rest of the app can ask "is this project
-// sending anything, and is it still sending?" without reaching into the logs
-// table itself: invariant 4 makes this builder the only door, and the ledger
-// that would answer it from Postgres is not written yet.
+// Summary returns how many lines the window holds and when the last arrived:
+// "is this project sending anything, and is it still sending?"
 func (q *QueryBuilder) Summary() LogQuery {
 	return LogQuery{
 		SQL: "SELECT count() AS lines, max(ts) AS last_ts FROM logs " +
@@ -322,8 +245,8 @@ func (q *QueryBuilder) Summary() LogQuery {
 	}
 }
 
-// BeyondErrors counts errors with seq < cutoff (displaced by the ring) — the
-// "zero is silence" rule (§5.1): the field is absent when the count is 0.
+// BeyondErrors counts errors with seq < cutoff (displaced by the ring); the
+// field is absent when 0 (zero is silence).
 func (q *QueryBuilder) BeyondErrors(retainSeq int64) LogQuery {
 	return LogQuery{
 		SQL: "SELECT count() AS errors, " +
@@ -334,12 +257,8 @@ func (q *QueryBuilder) BeyondErrors(retainSeq int64) LogQuery {
 	}
 }
 
-// ErrorGroups aggregates recent error lines by fingerprint for the
-// notification scanner (docs/plans/channel-notify-settings.md): per
-// fingerprint, how often it fired since `since`, a sample message and the last
-// time it was seen. Aggregates, not raw rows (invariant 2), still behind the
-// cutoff (invariant 4) — a line the ring already displaced must not page
-// anybody.
+// ErrorGroups aggregates recent error lines by fingerprint (count, sample,
+// last seen) for the notification scanner; still behind the cutoff.
 func (q *QueryBuilder) ErrorGroups(since time.Time) LogQuery {
 	return LogQuery{
 		SQL: "SELECT fingerprint, count() AS lines, anyLast(service) AS service, " +
@@ -350,11 +269,8 @@ func (q *QueryBuilder) ErrorGroups(since time.Time) LogQuery {
 	}
 }
 
-// EventSeen reports whether a named event has arrived inside the visible
-// window: how many times, first and last arrival. GET /v1/install/status asks
-// it about install_verified — the chain proof the SDK sends once; an event the
-// ring has displaced no longer counts, which is why the CLI's verify also
-// reads the summary before declaring failure.
+// EventSeen reports how many times a named event arrived inside the window;
+// an event the ring displaced no longer counts.
 func (q *QueryBuilder) EventSeen(name string) LogQuery {
 	return LogQuery{
 		SQL: "SELECT count() AS times, min(ts) AS first_ts, max(ts) AS last_ts " +
@@ -363,9 +279,8 @@ func (q *QueryBuilder) EventSeen(name string) LogQuery {
 	}
 }
 
-// RecentEvents groups the trailing window's lines by message — what verify
-// prints as "arriving now", so a name drifted off the dictionary shows up next
-// to the ones that were expected.
+// RecentEvents groups the trailing window's lines by message, so a name
+// drifted off the dictionary shows up next to the expected ones.
 func (q *QueryBuilder) RecentEvents(window time.Duration, limit int) LogQuery {
 	return LogQuery{
 		SQL: fmt.Sprintf("SELECT message, count() AS times, max(ts) AS last_ts "+

@@ -8,10 +8,8 @@ import (
 	"strings"
 )
 
-// hrefRe pulls href values out of HTML. A regex rather than a parser because the
-// job is "find the obvious internal links on a homepage", not "understand this
-// document" — and a parser would be a dependency and a new class of input bug
-// for a fallback that only runs when the site has no sitemap.
+// hrefRe pulls href values out of HTML; a regex, not a parser, because the job
+// is "find the obvious internal links", and a parser is a dependency.
 var hrefRe = regexp.MustCompile(`(?i)<a\s[^>]*href\s*=\s*["']([^"'#][^"']*)["']`)
 
 // linksFrom extracts same-host page links from a body we already hold. Costs no
@@ -35,10 +33,8 @@ func linksFrom(base string, body []byte) []candidate {
 		if abs.Scheme != "http" && abs.Scheme != "https" {
 			continue // mailto:, tel:, javascript:
 		}
-		// An outbound link is not this site's page. A subdomain of it is — and
-		// this is the cheapest place in the product to find one: get.harpa.ai
-		// and app.*/api.* are usually linked straight from the homepage, so they
-		// cost nothing beyond the body we already hold.
+		// An outbound link is not this site's page. A subdomain of it is, and
+		// this is the cheapest place to find one.
 		if !sameSite(root.Host, abs.Host) {
 			continue
 		}
@@ -60,11 +56,8 @@ var assetExt = []string{
 	".pdf", ".zip", ".gz", ".mp4", ".webm", ".woff", ".woff2", ".ttf", ".rss",
 }
 
-// valuableSection is the vocabulary of a section whose breaking costs money or
-// blocks a customer. Matched against the FIRST path segment, whole, never as a
-// substring: matching anywhere in the path is how "/guides/api-connections" and
-// "/grid/grid-rest-api-reference" scored as API endpoints and pushed the site's
-// real sections off a five-row shortlist.
+// valuableSection is a section whose breaking costs money; matched against
+// the FIRST path segment, whole, never as a substring.
 var valuableSection = map[string]bool{
 	"checkout": true, "payment": true, "payments": true, "billing": true,
 	"pricing": true, "plans": true, "login": true, "signin": true, "sign-in": true,
@@ -72,22 +65,15 @@ var valuableSection = map[string]bool{
 	"account": true, "app": true, "api": true, "docs": true, "status": true,
 }
 
-// boilerplateSection is a page that exists on every site and that nobody is
-// paged for at 3am. It is still a section, so it is not dropped — it just loses
-// its slot to anything with a customer behind it.
+// boilerplateSection is a page that exists on every site and nobody is paged
+// for at 3am; not dropped, just outranked.
 var boilerplateSection = map[string]bool{
 	"terms": true, "privacy": true, "legal": true, "cookies": true,
 	"imprint": true, "impressum": true, "tos": true,
 }
 
-// rank turns raw candidates into the shortlist. Pure: no network, no clock, so
-// its ordering is a table test rather than a guess about a live site.
-//
-// The host root is dropped on purpose — the Live probe row already reports it,
-// and offering the same URL twice would spend one of three free checks on a
-// duplicate.
-// The shortlist is capped at PagesWanted, which is also the promise
-// discover.MaxRequests keeps: the cap is the package's, not the caller's.
+// rank turns raw candidates into the shortlist, capped at pagesWanted. Pure:
+// no network, no clock. The host root is dropped (the Live row has it).
 func rank(base string, cands []candidate, r robots) []candidate {
 	root, err := url.Parse(base)
 	if err != nil {
@@ -106,19 +92,16 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			continue
 		}
-		// A sitemap is attacker-controlled input: it can name other domains, and
-		// an internal address behind one. The guard would refuse the request,
-		// but not making it at all is cheaper and keeps our logs honest.
+		// A sitemap is attacker-controlled input: it can name other domains;
+		// not making the request at all is cheaper than the guard refusing it.
 		if !sameSite(root.Host, u.Host) {
 			continue
 		}
-		// Another host is a different failure domain, not a page of this one.
-		// findHosts gives it its own budget, so letting it compete here would
-		// cost the site two slots for one thing.
+		// Another host is a different failure domain; findHosts gives it its
+		// own budget, so competing here would cost the site two slots.
 		if u.Host != root.Host {
 			continue
 		}
-		const isSubdomain = false
 		u.Fragment = ""
 		u.RawQuery = "" // ?utm_source=… is the same page
 		path := u.Path
@@ -129,12 +112,11 @@ func rank(base string, cands []candidate, r robots) []candidate {
 			path = strings.TrimRight(path, "/")
 			u.Path = path
 		}
-		// The Live probe row covers THIS host's root. A subdomain's root is a
-		// different host with its own DNS and certificate, so it stays.
-		if path == "/" && !isSubdomain {
+		// The Live probe row covers THIS host's root.
+		if path == "/" {
 			continue
 		}
-		if isAsset(path) || (!isSubdomain && !r.allowed(path)) {
+		if isAsset(path) || !r.allowed(path) {
 			continue
 		}
 		clean := u.String()
@@ -144,7 +126,7 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		seen[clean] = true
 
 		c.URL = clean
-		list = append(list, scored{c: c, score: scoreOf(path, isSubdomain, c), order: i})
+		list = append(list, scored{c: c, score: scoreOf(path, c), order: i})
 	}
 
 	sort.SliceStable(list, func(a, b int) bool {
@@ -153,8 +135,8 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		}
 		return list[a].order < list[b].order // stable: document order breaks ties
 	})
-	if len(list) > PagesWanted {
-		list = list[:PagesWanted]
+	if len(list) > pagesWanted {
+		list = list[:pagesWanted]
 	}
 	out := make([]candidate, 0, len(list))
 	for _, s := range list {
@@ -163,13 +145,9 @@ func rank(base string, cands []candidate, r robots) []candidate {
 	return out
 }
 
-// scoreOf ranks by what a monitoring product should watch: entry points, not
-// articles. A section index and an article under it are served by the same
-// renderer and the same database, so watching the article buys almost nothing
-// the section does not already tell you — and a sitemap is mostly articles, so
-// without this the shortlist fills with them and the site's own front doors
-// never appear.
-func scoreOf(path string, isSubdomain bool, c candidate) int {
+// scoreOf ranks by entry points, not articles: a sitemap is mostly articles,
+// and without the depth penalty the site's front doors never appear.
+func scoreOf(path string, c candidate) int {
 	score := 0
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	depth := len(segments)
@@ -182,11 +160,6 @@ func scoreOf(path string, isSubdomain bool, c candidate) int {
 	}
 
 	switch {
-	case isSubdomain && depth == 0:
-		// Its own host: separate DNS, separate certificate, often a separate
-		// deploy. An api. or app. subdomain can be down while the marketing site
-		// is perfectly fine, which is exactly the outage a status page misses.
-		score += 60
 	case depth == 1:
 		score += 40 // a section: the site's own front doors
 	case depth >= 2:
@@ -222,19 +195,8 @@ func isAsset(path string) bool {
 	return false
 }
 
-// sameSite reports whether host is the requested host or one of its subdomains.
-//
-// Suffix-matched against "."+root, so it can only ever widen to a name the
-// requested domain owns: "api.harpa.ai" passes for "harpa.ai", while
-// "harpa.ai.evil.com" and "notharpa.ai" do not. That is the whole point of
-// matching the dot as well — without it, any host ending in the same letters
-// would qualify.
-//
-// Subdomains are in scope because they are the entry points people actually
-// need watched (an api. or app. host can be down while the marketing site is
-// fine) and because we find them for free, in links we already hold. That is a
-// different mechanism from certificate-transparency enumeration, which stays
-// out: no external dependency, no guessing at names nobody published.
+// sameSite reports whether host is the requested host or one of its subdomains;
+// suffix-matched against "."+root so it can only widen to a name the domain owns.
 func sameSite(root, host string) bool {
 	return host == root || strings.HasSuffix(host, "."+root)
 }

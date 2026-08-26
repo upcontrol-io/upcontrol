@@ -1,14 +1,5 @@
-// Package availability is the detector that turns a stream of check results
-// (ok/fail) into incident state transitions. The rule (plan §5.7) is simple:
-// N consecutive failures open an incident; the first success after an open
-// incident closes it with reason "recovered". Nothing fires on a single failure
-// — the plan's "temporary confirmation" IS the consecutive count, which at a
-// 1-minute interval means N minutes of confirmed downtime.
-//
-// The detector is a pure state machine: it takes the current State + one check
-// result and returns the new State + an Outcome (open/close incident). It holds
-// no timers, no goroutines, no database — the monitor scheduler feeds it one
-// result at a time and acts on the Outcome.
+// Package availability turns check results into incident transitions: N
+// consecutive failures open, the first success after closes ("recovered").
 package availability
 
 import "time"
@@ -21,10 +12,8 @@ const (
 	StatusDown   = "down"
 )
 
-// DefaultThreshold is the number of consecutive failures needed to open an
-// incident. 3 at a 1-minute interval = 3 minutes of confirmed downtime before
-// the alert fires — long enough to ride out a single blip, short enough that a
-// real outage reaches the customer before they notice.
+// DefaultThreshold is the consecutive failures needed to open: 3 at a
+// 1-minute interval rides out a blip without holding a real outage back.
 const DefaultThreshold = 3
 
 // State is the per-monitor detector state, persisted in monitor_facts.
@@ -103,6 +92,3 @@ func (d *Detector) processFail(s *State) Outcome {
 	s.Status = StatusCheck
 	return Outcome{}
 }
-
-// Threshold returns the configured consecutive-failure threshold.
-func (d *Detector) Threshold() int { return d.threshold }

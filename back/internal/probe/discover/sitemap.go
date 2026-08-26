@@ -8,19 +8,17 @@ import (
 )
 
 const (
-	// A sitemap is somebody else's file and can name 50 000 URLs. We keep the
-	// first sitemapMaxURLs and stop: everything past the ranking's top five is
-	// read and thrown away, so reading more only spends memory.
+	// A sitemap can name 50 000 URLs; we keep the first sitemapMaxURLs:
+	// past the ranking's top five, reading more only spends memory.
 	sitemapMaxURLs  = 500
 	sitemapMaxBytes = 512 << 10
-	// One nested level: index → child sitemaps. Deeper is legal and rare, and
-	// each level multiplies requests against a host that never asked us here.
+	// One nested level (index → child); deeper multiplies requests against a
+	// host that never asked us here.
 	sitemapMaxChildren = 2
 )
 
-// sitemapDoc parses both shapes with one struct: <urlset><url> and
-// <sitemapindex><sitemap>. Both carry <loc>, which is the only field that
-// decides what happens next.
+// sitemapDoc parses both shapes with one struct; <loc> is the only field
+// that decides what happens next.
 type sitemapDoc struct {
 	XMLName  xml.Name       `xml:"-"`
 	URLs     []sitemapEntry `xml:"url"`
@@ -32,9 +30,8 @@ type sitemapEntry struct {
 	Priority string `xml:"priority"`
 }
 
-// candidate is a URL worth considering, with where it came from. Source ends up
-// on the row, because "in sitemap.xml" and "linked from the homepage" are
-// different levels of the site's own endorsement.
+// candidate is a URL worth considering, with where it came from: different
+// sources are different levels of the site's own endorsement.
 type candidate struct {
 	URL      string
 	Source   string
@@ -43,7 +40,7 @@ type candidate struct {
 
 // fetchSitemapURLs returns the sitemap's URLs, or nil when the host has no
 // sitemap we can read. Costs at most sitemapMaxChildren+1 requests.
-func fetchSitemapURLs(ctx context.Context, p Prober, base string, r robots) []candidate {
+func fetchSitemapURLs(ctx context.Context, p prober, base string, r robots) []candidate {
 	locations := r.sitemaps
 	if len(locations) == 0 {
 		// The convention, tried only when robots.txt named nothing.
@@ -95,10 +92,9 @@ func fetchSitemapURLs(ctx context.Context, p Prober, base string, r robots) []ca
 	return out
 }
 
-// fetchSitemapDoc gets and parses one sitemap. A .xml.gz map is NOT handled:
-// Go's client transparently decodes Content-Encoding, but a gzipped *file* is
-// content, and the decode belongs with the next round of this work.
-func fetchSitemapDoc(ctx context.Context, p Prober, loc string) *sitemapDoc {
+// fetchSitemapDoc gets and parses one sitemap; a gzipped sitemap FILE is not
+// handled (that is content, not Content-Encoding).
+func fetchSitemapDoc(ctx context.Context, p prober, loc string) *sitemapDoc {
 	res := p.Execute(ctx, CheckSpec{
 		URL: loc, Method: http.MethodGet,
 		TimeoutMs:    uint32(perRequestTimeout.Milliseconds()),

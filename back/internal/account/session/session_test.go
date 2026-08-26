@@ -10,8 +10,8 @@ import (
 )
 
 func TestFromRequest_FixedIdentity(t *testing.T) {
-	// Single-user mode (Decision 16): a cookieless request carries the boot
-	// identity; without WithFixedIdentity the same request is refused.
+	// Single-user mode: a cookieless request carries the boot identity;
+	// without WithFixedIdentity the same request is refused.
 	m := New(nil, 0, nil).WithFixedIdentity(7, 9)
 	s, err := m.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil))
 	if err != nil {
@@ -22,15 +22,14 @@ func TestFromRequest_FixedIdentity(t *testing.T) {
 	}
 
 	plain := New(nil, 0, nil)
-	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, ErrNoSession) {
-		t.Fatalf("without fixed identity a cookieless request must be ErrNoSession, got %v", err)
+	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, errNoSession) {
+		t.Fatalf("without fixed identity a cookieless request must be errNoSession, got %v", err)
 	}
 }
 
 func TestSetCookie_Shape(t *testing.T) {
-	// The session cookie is the auth boundary: it must be HttpOnly, Secure,
-	// SameSite=Lax, Path=/, and carry the raw token (the table stores only the
-	// hash). A regression here is a real auth risk, not a style nit.
+	// The session cookie is the auth boundary: HttpOnly, Secure, SameSite=Lax,
+	// Path=/, raw token value. A regression here is a real auth risk.
 	rec := httptest.NewRecorder()
 	SetCookie(rec, "rawtoken", 30*time.Minute, true)
 	resp := rec.Result()

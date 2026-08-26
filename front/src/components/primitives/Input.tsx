@@ -1,7 +1,7 @@
 import { forwardRef, useId, type InputHTMLAttributes } from 'react';
 import styles from './Field.module.css';
 
-export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
 }

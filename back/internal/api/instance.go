@@ -1,16 +1,5 @@
-// The self-host UI's instance-settings door: the AI API key and the Telegram
-// bot (token + username) can be pasted into Settings instead of secret files
-// (owner decision, 2026-08-20 — the same day the heuristic fallback died).
-// Values are sealed (AES-256-GCM under UC_SECRET_KEY_HEX) before they land in
-// instance_setting, and never travel back out: presence is read through the
-// explain preview's `model` field and the channels screen's telegram surface,
-// never a GET that could echo a secret.
-//
-// The door only exists on a self-host: the hosted cloud's keys are secret
-// files owned by the operator, and an instance-level knob writable from a
-// tenant session on a multi-tenant deployment would let any tenant steer
-// everyone's brain — so off a self-host the answer is 404, the same "this
-// door does not exist" the anonymous mint gives (Decision 22's shape).
+// The self-host UI's instance-settings door: pasted keys are sealed under
+// UC_SECRET_KEY_HEX and never read back. Self-host only; elsewhere 404.
 
 package api
 
@@ -27,22 +16,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// validRelayHost reports whether s is a bare hostname we would be willing to
-// hand to a mail dialer: dot-separated labels, each 1-63 characters of letters,
-// digits and inner hyphens. No scheme, no port, no path, no empty labels.
-//
-// It exists because the first version of this check only refused whitespace and
-// slashes, so "bad..host..name" was stored as a relay and the UI reported it
-// saved — the contract listed invalid_host as a refusal that nothing could
-// actually trigger (rehearsal #3, 2026-08-20). Nothing else on the SMTP form
-// can catch this: the dialer only finds out at the first send, hours later,
-// with the sign-in mail nobody received.
-//
-// Deliberately permissive in two directions. A bare "localhost" passes: on a
-// self-host the relay is often on the same box. An IPv4 literal passes on the
-// label rules alone, which is the right answer for a relay on a private
-// network. Unicode is rejected — a relay hostname reaches the wire as ASCII,
-// and refusing here beats a punycode surprise at send time.
+// validRelayHost reports whether s is a bare hostname a mail dialer accepts:
+// dot-separated ASCII labels, letters/digits/inner hyphens, no scheme or port.
 func validRelayHost(s string) bool {
 	if s == "" || len(s) > 255 {
 		return false
@@ -79,21 +54,20 @@ const (
 	smtpFromSetting   = "smtp_from"
 )
 
-type InstanceSettings struct {
+type instanceSettings struct {
 	pool       *pg.Pool
 	sess       *session.Manager
 	selfHosted bool
-	// seal encrypts a value for instance_setting.value_enc; nil means
-	// UC_SECRET_KEY_HEX is absent and the door refuses rather than storing
-	// a secret in plaintext.
+	// seal encrypts for instance_setting.value_enc; nil means no
+	// UC_SECRET_KEY_HEX, and the door refuses rather than store plaintext.
 	seal func([]byte) ([]byte, error)
 }
 
-func NewInstanceSettings(pool *pg.Pool, sm *session.Manager, selfHosted bool, seal func([]byte) ([]byte, error)) *InstanceSettings {
-	return &InstanceSettings{pool: pool, sess: sm, selfHosted: selfHosted, seal: seal}
+func NewInstanceSettings(pool *pg.Pool, sm *session.Manager, selfHosted bool, seal func([]byte) ([]byte, error)) *instanceSettings {
+	return &instanceSettings{pool: pool, sess: sm, selfHosted: selfHosted, seal: seal}
 }
 
-func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.selfHosted {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
@@ -112,9 +86,8 @@ func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.URL.Path == "/v1/instance/ai" && r.Method == http.MethodPut:
-		// All three knobs of the OpenAI-compatible client, each optional so a
-		// model change never demands re-pasting the key. Only what is sent
-		// (non-empty) is stored; DELETE resets the lot to env config.
+		// All three knobs optional, so a model change never demands re-pasting
+		// the key; DELETE resets the lot to env config.
 		var req struct {
 			Key     string `json:"key"`
 			Model   string `json:"model"`
@@ -187,9 +160,8 @@ func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.remove(w, ctx, tgTokenSetting, tgUsernameSetting)
 
 	case r.URL.Path == "/v1/instance/smtp" && r.Method == http.MethodPut:
-		// The relay for sign-in mail and email alerts. Each field optional (the
-		// AI door's shape) so changing the password never demands re-typing the
-		// host; DELETE resets the lot to env config (UC_SMTP_*).
+		// The relay for sign-in mail and alerts. Each field optional, as the
+		// AI door; DELETE resets the lot to UC_SMTP_*.
 		var req struct {
 			Host     string `json:"host"`
 			Port     string `json:"port"`
@@ -258,7 +230,7 @@ func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // store seals and upserts each setting; one refusal covers the lot because a
 // half-written pair (a token without its username) is a broken deep link.
-func (h *InstanceSettings) store(w http.ResponseWriter, ctx context.Context, values map[string]string) {
+func (h *instanceSettings) store(w http.ResponseWriter, ctx context.Context, values map[string]string) {
 	if h.seal == nil {
 		writeAPIErrMsg(w, http.StatusServiceUnavailable, "secret_key_missing",
 			"This instance has no UC_SECRET_KEY_HEX, so it cannot store secrets encrypted. Set it (install.sh generates one) and retry.")
@@ -278,7 +250,7 @@ func (h *InstanceSettings) store(w http.ResponseWriter, ctx context.Context, val
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *InstanceSettings) remove(w http.ResponseWriter, ctx context.Context, keys ...string) {
+func (h *instanceSettings) remove(w http.ResponseWriter, ctx context.Context, keys ...string) {
 	for _, key := range keys {
 		if err := h.pool.Queries().DeleteInstanceSetting(ctx, key); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")

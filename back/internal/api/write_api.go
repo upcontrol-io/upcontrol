@@ -1,6 +1,5 @@
 // Write API: channels, recipients, sources CRUD + public endpoints. All
-// session-scoped (tenant_id from the cookie), all returning shapes that match
-// mockData.ts so the front needs no component changes.
+// session-scoped (tenant_id from the cookie), matching mockData.ts shapes.
 
 package api
 
@@ -38,43 +37,33 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// WriteAPI handles all the POST/PATCH/DELETE + public endpoints.
-type WriteAPI struct {
+// writeAPI handles all the POST/PATCH/DELETE + public endpoints.
+type writeAPI struct {
 	pool *pg.Pool
 	ch   *ch.Conn
 	sess *session.Manager
 	exec *executor.Executor
 	acct *ai.Accountant
 	// selfHosted (UC_SELF_HOSTED=1): the anonymous watch door provisions
-	// 'Self-hosted' tenants, same as the sign-in door (Decision 7).
+	// 'Self-hosted' tenants, same as the sign-in door.
 	selfHosted bool
-	// One mutex for the three in-memory per-replica maps below. Per-replica is
-	// the honest MVP bound — two replicas give 2× each limit, documented here
-	// once so it's not a surprise.
-	//   - checkSeenAt: anonymous /public/check + watch cooldowns (plan §6.1:
-	//     the public prober is unauthenticated and must be rate-limited per IP
-	//     and per host), keyed "bucket:ip"
-	//   - checkCache: those checks' answers, keyed by host
-	//   - explainSeenAt: the authenticated explain throttle, keyed by tenant
+	// One mutex for the three in-memory per-replica maps below: two replicas
+	// give 2× each limit. Keys: "bucket:ip", host, tenant.
 	checkMu     sync.Mutex
 	checkSeenAt map[string]time.Time
-	// Answers already computed, keyed by host. A check costs up to
-	// discover.MaxRequests outbound requests, so serving a fresh one twice is
-	// spending somebody else's bandwidth to say the same thing.
+	// Answers already computed, keyed by host. A check spends up to
+	// discover.MaxRequests of somebody else's bandwidth.
 	checkCache map[string]cachedCheck
-	// Per-tenant throttle for POST /v1/logs/explain: the endpoint spends
-	// provider money, so one tenant may not hammer it. Same per-replica
-	// pattern as checkSeenAt above — two replicas admit 2× the limit.
+	// Per-tenant throttle for POST /v1/logs/explain: it spends provider money.
+	// Per-replica like checkSeenAt: two replicas admit 2× the limit.
 	explainSeenAt map[int64][]time.Time
 	// Dev relaxation, and the only one: the anonymous watch echoes the login
 	// code it issued. Never true in prod — see publicWatch.
 	devMode bool
 	// Async analytics recorder. nil (tests, unwired deployments) is a no-op.
 	rec *analytics.Recorder
-	// The watch door hands a first-time visitor their login code. In prod it
-	// goes by e-mail (the same mailer the sign-in door uses); nil means no
-	// mailer configured, in which case prod stores the code unsent — the
-	// visitor still owns the account and can sign in by requesting a fresh link.
+	// Sends the watch door's login code by e-mail. nil means no mailer: prod
+	// stores the code unsent; a fresh link still signs the visitor in.
 	mailer auth.Mailer
 }
 
@@ -82,16 +71,8 @@ type WriteAPI struct {
 // fix, long enough that a link doing the rounds does not re-probe per visitor.
 const checkCacheTTL = 10 * time.Minute
 
-// The explain throttle: a sliding one-minute window admitting at most six
-// requests per tenant. A human reading logs clicks Explain a handful of times;
-// a script does not. It is the BURST gate only — the monthly bound is
-// plan_entitlement.ai_explains, finite on every plan since migration 020
-// (5/50/200/400, the owner's decision; the row that names them is
-// Pricing.tsx). It used to be the only cap on three of the four plans, which
-// is what made 6/min worth this paragraph: 8 640 explains per tenant per day
-// per replica, each up to the 32 KiB input cap, with an idempotency hash over
-// the raw lines that a caller varying one byte per request misses every time.
-// Per-replica and in-memory by design, no config (Decision 13).
+// The explain throttle: a sliding one-minute window of six requests per
+// tenant. Burst gate only: the monthly bound is plan_entitlement.ai_explains.
 const (
 	explainBurst  = 6
 	explainWindow = time.Minute
@@ -102,11 +83,11 @@ type cachedCheck struct {
 	at   time.Time
 }
 
-func NewWriteAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, acct *ai.Accountant, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *WriteAPI {
-	return &WriteAPI{pool: p, ch: chConn, sess: sm, exec: executor.New(), acct: acct, checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, explainSeenAt: map[int64][]time.Time{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
+func NewWriteAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, acct *ai.Accountant, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
+	return &writeAPI{pool: p, ch: chConn, sess: sm, exec: executor.New(), acct: acct, checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, explainSeenAt: map[int64][]time.Time{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
 }
 
-func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Public endpoints don't need a session.
 	if strings.HasPrefix(r.URL.Path, "/public/") {
 		h.public(w, r)
@@ -119,11 +100,8 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// §7.4 / design D6: notify members read (deliveries, status-page, logs,
-	// incidents, export are GETs below); every mutation is a settings act and
-	// needs login. Explain is the one POST that is a read: a Member may spend
-	// the quota on it (Decision 9), and the quota is the plan's, not the role's.
-	// The Mini App and the web answer to the same gate.
+	// Notify members read (GETs below); every mutation needs login. Explain is
+	// the one POST that is a read: the quota is the plan's, not the role's.
 	if r.Method != http.MethodGet && !explainPath(r.URL.Path) && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
@@ -131,7 +109,6 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tenantID := s.TenantID
 
 	switch {
-	// Channels
 	case r.URL.Path == "/v1/channels" && r.Method == http.MethodPost:
 		h.createChannel(w, r, tenantID)
 	case strings.HasPrefix(r.URL.Path, "/v1/channels/") && r.Method == http.MethodDelete:
@@ -143,13 +120,11 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/v1/deliveries/") && r.Method == http.MethodGet:
 		h.getDelivery(w, r, tenantID)
 
-	// Recipients. The invite carries the caller's person id: the mail names
-	// the inviter (Decision 15), and the session is where it comes from.
+	// The invite carries the session's person id: the mail names the inviter.
 	case r.URL.Path == "/v1/recipients" && r.Method == http.MethodPost:
 		h.createRecipient(w, r, tenantID, s.PersonID)
-	// Resend (Decision 17) is matched before the patch/delete arms and by
-	// its suffix, not pathLast: the id sits one segment above /resend, and
-	// those arms would otherwise read "resend" as the person id.
+	// Resend is matched before the patch/delete arms and by its suffix, not
+	// pathLast: those arms would read "resend" as the person id.
 	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && strings.HasSuffix(r.URL.Path, "/resend") && r.Method == http.MethodPost:
 		h.resendInvite(w, r, tenantID, s.PersonID)
 	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && r.Method == http.MethodPatch:
@@ -157,13 +132,11 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/v1/recipients/") && r.Method == http.MethodDelete:
 		h.deleteRecipient(w, r, tenantID)
 
-	// Sources
 	case strings.Contains(r.URL.Path, "/connect") && r.Method == http.MethodPost:
 		h.connectSource(w, r, tenantID)
 	case strings.HasPrefix(r.URL.Path, "/v1/sources/") && r.Method == http.MethodDelete:
 		h.deleteSource(w, r, tenantID)
 
-	// Status page
 	case r.URL.Path == "/v1/status-page":
 		switch r.Method {
 		case http.MethodGet:
@@ -174,7 +147,6 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeAPIErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}
 
-	// Logs
 	case r.URL.Path == "/v1/export" && r.Method == http.MethodGet:
 		h.exportAll(w, r, tenantID)
 
@@ -191,13 +163,11 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/logs/explain/preview" && r.Method == http.MethodPost:
 		h.previewExplain(w, r, tenantID)
 
-	// Incident explain: the server assembles the evidence, the caller sends
-	// only the id. The suffix check keeps this arm disjoint from the GET
-	// below (different method, and the GET's pathLast would read "explain").
+	// Incident explain: the caller sends only the id. The suffix check keeps
+	// this arm disjoint from the GET below, whose pathLast is "explain".
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && strings.HasSuffix(r.URL.Path, "/explain") && r.Method == http.MethodPost:
 		h.explainIncident(w, r, tenantID)
 
-	// Incident detail
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)
 
@@ -206,30 +176,20 @@ func (h *WriteAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// explainPath answers whether p is one of the three Explain endpoints
-// (Decision 9): /v1/incidents/{id}/explain, /v1/logs/explain,
-// /v1/logs/explain/preview. They are POSTs on the wire but reads in substance,
-// which is why the role gate above exempts exactly them and nothing else.
+// explainPath reports whether p is an Explain endpoint: POSTs on the wire
+// but reads in substance, which is why the role gate exempts exactly them.
 func explainPath(p string) bool {
 	return strings.HasSuffix(p, "/explain") || strings.HasSuffix(p, "/explain/preview")
 }
 
-// --- Channels ---
-
-func (h *WriteAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	var req struct {
 		Kind   string `json:"kind"`
 		Target string `json:"target"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	// An e-mail channel may only address someone already on this workspace's
-	// People list. Any address at all would make us a free mailer: type a
-	// stranger's address, press Send test, and we deliver to somebody who never
-	// asked us for anything. The screen offers a dropdown of exactly these
-	// people; this is the same rule where it cannot be bypassed by posting.
-	// Active members only (Decision 19): a pending person has not signed in
-	// yet, so their address is unproven — it answers the same refusal as a
-	// stranger's, which is also what makes "no test mail can reach them" true.
+	// An e-mail channel may only address an active member of this workspace:
+	// anything else makes us a free mailer to strangers.
 	if req.Kind == "email" {
 		var known bool
 		_ = h.pool.Raw().QueryRow(r.Context(),
@@ -243,9 +203,8 @@ func (h *WriteAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 			return
 		}
 	}
-	// Returns the SAME id shape GET /v1/channels hands out (public_id hex), not
-	// the row number: two id shapes for one entity is how delete and test ended
-	// up parsing a uuid as an integer and silently doing nothing.
+	// Returns the SAME id shape GET /v1/channels hands out (public_id hex):
+	// two id shapes for one entity is how callers parsed a uuid as an integer.
 	var pubID pgtype.UUID
 	_ = h.pool.Raw().QueryRow(r.Context(),
 		`INSERT INTO alert_channel (public_id, tenant_id, kind, target) VALUES (gen_random_uuid()::text::uuid, $1, $2, $3) RETURNING public_id`,
@@ -257,16 +216,9 @@ func (h *WriteAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 	})
 }
 
-// channelRowID resolves whichever id the caller is holding to the row's own.
-//
-// GET /v1/channels hands out `public_id` as 32 hex chars, POST /v1/channels used
-// to answer with the numeric one, and both delete and test parsed the id as an
-// integer — so every channel that came from the LIST parsed to 0 and the DELETE
-// matched nothing while still answering 204. On screen that was "I cannot remove
-// my only e-mail address": the row went away optimistically and came back on the
-// next read. Returns 0 when nothing matches, which callers must treat as "not
-// yours", never as "deleted".
-func (h *WriteAPI) channelRowID(ctx context.Context, tenantID int64, raw string) int64 {
+// channelRowID resolves a public_id or numeric id to the row's own id.
+// Returns 0 when nothing matches: "not yours", never "deleted".
+func (h *writeAPI) channelRowID(ctx context.Context, tenantID int64, raw string) int64 {
 	if n := parseID(raw); n > 0 {
 		var id int64
 		_ = h.pool.Raw().QueryRow(ctx,
@@ -280,10 +232,9 @@ func (h *WriteAPI) channelRowID(ctx context.Context, tenantID int64, raw string)
 	return id
 }
 
-func (h *WriteAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	// Deleting the last e-mail channel is allowed. Nobody has to be reachable by
-	// mail — Telegram, Discord and a webhook are all destinations, and a product
-	// that refuses to stop e-mailing you is a product you cannot leave.
+func (h *writeAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	// Deleting the last e-mail channel is allowed: nobody has to be reachable
+	// by mail.
 	id := h.channelRowID(r.Context(), tenantID, pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
@@ -294,13 +245,9 @@ func (h *WriteAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantI
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// patchChannel changes what the channel is notified about
-// (docs/plans/channel-notify-settings.md). The only PATCHable thing is
-// `notify`: the destination itself stays immutable — delete and re-add is the
-// honest way to change where a message lands. The one exception is `muted`
-// (§5): a /mute window set from the chat is lifted here, never set — the
-// screen owns one word on the window, and it is "stop".
-func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// patchChannel changes what the channel is notified about: only `notify`
+// is patchable; a chat-set mute window is lifted here, never set.
+func (h *writeAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	id := h.channelRowID(r.Context(), tenantID, pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
@@ -313,20 +260,14 @@ func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID
 	if !decodeStrict(w, r, &req) {
 		return
 	}
-	// Muting from the screen is refused outright: the window is the reader's
-	// own act in the chat ("/mute 30m"), with its own duration to choose, and
-	// a screen that offered it would be a second, weaker copy of the chat's
-	// command. Only lifting travels this path.
+	// Muting is the reader's act in the chat; only lifting travels this path.
 	if req.Muted != nil {
 		if *req.Muted {
 			writeAPIErr(w, http.StatusBadRequest, "bad_request")
 			return
 		}
-		// The unmute CTE the bot runs for /unmute, keyed by the row instead of
-		// the person/target predicate (the id is already resolved and owned by
-		// this tenant): snapshot the windows, clear them, then pull only what
-		// those windows parked back to now. The bot keeps its own copy — the two
-		// callers share the invariant, not the code path.
+		// The unmute CTE the bot's /unmute runs, keyed by the resolved row:
+		// clear the window, release what it parked. The bot keeps its own copy.
 		if _, err := h.pool.Raw().Exec(r.Context(),
 			`WITH muted AS (
 			   SELECT id, muted_until FROM alert_channel
@@ -348,10 +289,8 @@ func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID
 			return
 		}
 	}
-	// PAID ONLY: the 15-minute resolve follow-up is on every paid plan. Turning
-	// it on from Free answers 402 in the exact upgrade shape the client reads — the
-	// screen's own gate (the toggle opens the modal client-side) is a courtesy,
-	// this is the gate.
+	// PAID ONLY: the resolve follow-up answers 402 in the upgrade shape the
+	// client reads. The screen's gate is a courtesy; this is the gate.
 	if req.Notify.ResolveFollowUp != nil && *req.Notify.ResolveFollowUp {
 		if plan, _ := h.pool.Queries().GetTenantPlan(r.Context(), tenantID); plan == "" || plan == "Free" {
 			writeAPIJSON(w, http.StatusPaymentRequired, map[string]any{
@@ -365,9 +304,7 @@ func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID
 		}
 	}
 	// Merge onto the row's CURRENT settings: pointer fields tell "not sent"
-	// apart from "sent as false", so toggling one checkbox never resets the
-	// other four. The resolved (never sparse) object is what gets stored and
-	// returned.
+	// apart from "sent as false". The resolved object is stored and returned.
 	var pubID pgtype.UUID
 	var kind, target string
 	var raw []byte
@@ -385,7 +322,7 @@ func (h *WriteAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID
 	})
 }
 
-func (h *WriteAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	// Queue a test delivery through the production path.
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 4 {
@@ -397,12 +334,8 @@ func (h *WriteAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID 
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
 		return
 	}
-	// The delivery's id travels back so the caller can poll the OUTCOME
-	// (audit §3): "queued" is the only honest synchronous answer — whether the
-	// message left is a fact the delivery pipeline owns, reported by
-	// GET /v1/deliveries/{id} as sent/dead. A UI that answered `sent` here was
-	// reporting a delivery that had not happened yet (and on a stack with no
-	// mailer, never would).
+	// The delivery's id travels back so the caller can poll the outcome via
+	// GET /v1/deliveries/{id}: "queued" is the only honest synchronous answer.
 	var deliveryID int64
 	if err := h.pool.Raw().QueryRow(r.Context(),
 		`INSERT INTO delivery_queue (tenant_id, channel_id, idem_key, class, payload)
@@ -418,12 +351,9 @@ func (h *WriteAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID 
 	})
 }
 
-// getDelivery answers GET /v1/deliveries/{id} — one queue row's outcome,
-// tenant-scoped. This is where "Send test" gets its truth from: the state is
-// the queue's own vocabulary (pending/sent/dead), never a guess, and a dead
-// row carries the reason it died so the owner learns WHY their alert did not
-// arrive instead of learning nothing.
-func (h *WriteAPI) getDelivery(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// getDelivery answers GET /v1/deliveries/{id}: the queue's own vocabulary
+// (pending/sent/dead); a dead row carries the reason it died.
+func (h *writeAPI) getDelivery(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	id := parseID(pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusBadRequest, "bad_id")
@@ -444,25 +374,16 @@ func (h *WriteAPI) getDelivery(w http.ResponseWriter, r *http.Request, tenantID 
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 
-// --- Recipients ---
-
-// createRecipient invites one address to the tenant (Decision 16): person and
-// pending membership go in inside a transaction, the sign-in door's own code
-// is minted, the invitation mail is sent, and only then does the transaction
-// commit — a send failure rolls the whole write back and answers 503, so the
-// front's "The invite was not sent. Nobody was added." is the truth. An
-// address that is already an active member short-circuits: nothing is minted,
-// nothing is sent, the row answers the status it already has.
-func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
+// createRecipient invites one address: membership and invitation mail go in
+// one transaction, so a send failure rolls the whole write back (503).
+func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
 	var req struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	// The one spelling before anything is stored (§6.8): person.email is
-	// UNIQUE and byte-exact, so an invite under "Bob@Example.com" and a
-	// sign-in under "bob@example.com" would otherwise be two people with two
-	// memberships. auth.NormalizeEmail is the same fold the sign-in doors use.
+	// One spelling before storing: person.email is UNIQUE and byte-exact, and
+	// NormalizeEmail is the same fold the sign-in doors use.
 	req.Email = auth.NormalizeEmail(req.Email)
 	if req.Email == "" || !strings.Contains(req.Email, "@") {
 		writeAPIErr(w, http.StatusBadRequest, "bad_email")
@@ -489,9 +410,8 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 	_, _ = tx.Exec(ctx,
 		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'pending')
 		 ON CONFLICT DO NOTHING`, tenantID, personID, req.Role)
-	// Read the status inside the same transaction: the invitee who already
-	// signed in needs no mail and no code — a second invitation to somebody
-	// who accepted would be noise dressed as work.
+	// Read the status inside the same transaction: an already-active invitee
+	// needs no mail and no code.
 	var status string
 	if err := tx.QueryRow(ctx,
 		`SELECT status FROM tenant_member WHERE tenant_id = $1 AND person_id = $2`,
@@ -513,12 +433,8 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIJSON(w, http.StatusCreated, body)
 		return
 	}
-	// The sign-in code is the sign-in door's own, minted on the POOL, not this
-	// transaction: IssueLoginCode manages its own writes (the shared per-IP
-	// window and the magic_link_code row) on tables this transaction never
-	// touches, so the two never contend. Its fate follows the mail's, not the
-	// membership's — a rollback leaves a stored-but-unsent code, exactly what
-	// the watch door already leaves behind routinely.
+	// Minted on the POOL, not this transaction: IssueLoginCode owns its own
+	// writes. A rollback leaves a stored-but-unsent code.
 	code, err := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrRateLimited):
@@ -527,9 +443,8 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	case errors.Is(err, auth.ErrCodeCooldown):
-		// A code went out to this address moments ago and is still live: the
-		// invitation is already in their inbox, so the invite lands (Resend
-		// covers a lost one) and no second mail is sent.
+		// A live code went out moments ago: the invite lands, no second mail
+		// is sent.
 		if err := tx.Commit(ctx); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
@@ -540,11 +455,6 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Decision 15's mail vars: `project` names the tenant's first project by
-	// its domain, falling back to the tenant's own name when the domain is
-	// empty (a tenant whose checks have not named a project yet still gets a
-	// subject that says which workspace is calling); `invited_by` is the
-	// inviter's person.name, or their e-mail when the name is empty.
 	var project, invitedBy string
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
@@ -554,24 +464,18 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
 		inviterID).Scan(&invitedBy)
-	// A mailer whose relay arrives at runtime (Settings-set SMTP) reports
-	// emptiness through the optional Configured interface — the ai.Configured
-	// idiom — and an empty one takes the same path as no mailer at all. The
-	// same check the magic-link door makes.
+	// A mailer whose relay arrives at runtime reports emptiness through the
+	// optional Configured interface; empty takes the no-mailer path.
 	mail := h.mailer
 	if c, ok := mail.(interface{ Configured(context.Context) bool }); ok && !c.Configured(ctx) {
 		mail = nil
 	}
 	if mail == nil {
-		// Decision 16: the ONE deliberate exception to "never log the code" —
-		// with no mailer configured, the operator's log is the only way in
-		// (the same one the magic-link door makes). The HTTP response still
-		// never carries it outside dev mode.
+		// The deliberate exception to "never log the code": with no mailer the
+		// operator's log is the only way in. The response never carries it.
 		slog.Warn("invite: no mailer; sign-in code", "email", req.Email, "code", code)
 	} else if err := mail.SendInvite(ctx, req.Email, code, project, invitedBy); err != nil {
-		// The mail did not leave: the invite rolls back with it. Half of an
-		// invitation — a member row nobody was told about — is the state the
-		// 503 exists to prevent.
+		// The mail did not leave: the invite rolls back with it, answering 503.
 		writeAPIErr(w, http.StatusServiceUnavailable, "email_unavailable")
 		return
 	}
@@ -579,34 +483,27 @@ func (h *WriteAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Dev-only relaxation (Decision 16), the same one POST /v1/auth/magic-link
-	// makes: the code rides the response so e2e can accept an invitation with
-	// no inbox. Never in prod.
+	// Dev-only relaxation: the code rides the response so e2e can accept an
+	// invite with no inbox. Never in prod.
 	if h.devMode {
 		body["dev_token"] = code
 	}
 	writeAPIJSON(w, http.StatusCreated, body)
 }
 
-// resendInvite is Decision 17: the invitation mail, again, for a membership
-// that is already pending. No insert anywhere — person, membership and role
-// all exist, so there is nothing to roll back and no transaction: a failed
-// send leaves exactly the state it found. The mint-and-send half is
-// createRecipient's (Decision 16), error for error, with the writes left out.
-func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
+// resendInvite sends the invitation mail again for a pending membership: no
+// writes, so a failed send leaves exactly the state it found.
+func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
 	ctx := r.Context()
 	// The id is one segment up from /resend; pathLast alone would read
-	// "resend". Resolution is the patch/delete arms' own: public id or row id,
-	// tenant-scoped.
+	// "resend". Resolution is the patch/delete arms' own: public or row id.
 	personID := h.personRowID(ctx, tenantID, pathLast(strings.TrimSuffix(r.URL.Path, "/resend")))
 	if personID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
-	// Only a pending membership is a resend target. An active member accepted
-	// their invitation — a second one is noise — and anything else (no row,
-	// another tenant's) is not this caller's business. Both answer the same
-	// 404, the same code the patch and delete arms use for it.
+	// Only a pending membership is a resend target; anything else answers the
+	// 404 the patch and delete arms use.
 	var email, status string
 	if err := h.pool.Raw().QueryRow(ctx,
 		`SELECT p.email, tm.status FROM person p JOIN tenant_member tm ON tm.person_id = p.id
@@ -614,9 +511,8 @@ func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
-	// createRecipient's mint-and-send sequence, on the pool: IssueLoginCode
-	// owns its tables (the per-IP window, the code row), and with no
-	// transaction around it there is nothing for those writes to contend with.
+	// createRecipient's mint-and-send on the pool: IssueLoginCode owns its
+	// tables, and no transaction is held to contend with them.
 	code, err := auth.IssueLoginCode(ctx, h.pool, email, analytics.ClientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrRateLimited):
@@ -625,16 +521,14 @@ func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	case errors.Is(err, auth.ErrCodeCooldown):
-		// Decision 17: a resend inside the cooldown answers 429, because a 202
-		// here would show "Sent!" while no second mail can go out — the front's
-		// "A link went out moments ago" line exists for exactly this answer.
+		// A resend inside the cooldown answers 429: a 202 would claim "Sent!"
+		// while no second mail can go out.
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	case err != nil:
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Decision 15's mail vars, resolved by the same queries the invite uses.
 	var project, invitedBy string
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
@@ -651,18 +545,15 @@ func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 		mail = nil
 	}
 	if mail == nil {
-		// Decision 16's deliberate exception, the same one: with no mailer the
-		// operator's log is the only inbox this code will ever reach.
+		// The deliberate exception: with no mailer the operator's log is the
+		// only inbox this code will ever reach.
 		slog.Warn("invite: no mailer; sign-in code", "email", email, "code", code)
 	} else if err := mail.SendInvite(ctx, email, code, project, invitedBy); err != nil {
 		writeAPIErr(w, http.StatusServiceUnavailable, "email_unavailable")
 		return
 	}
-	// 202 and an empty body: the row does not change (still pending), so the
-	// answer is a fact about the mail, not a row to re-read. Dev mode adds the
-	// code to the body, the same relaxation the invite makes — outside the
-	// contract, and only on paths that minted (the cooldown branch minted
-	// nothing and answered already).
+	// 202 and an empty body: the row does not change, so the answer is a fact
+	// about the mail. Dev mode adds the code, only on paths that minted.
 	if h.devMode {
 		writeAPIJSON(w, http.StatusAccepted, map[string]any{"dev_token": code})
 		return
@@ -670,11 +561,9 @@ func (h *WriteAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// personRowID is channelRowID for People: GET /v1/recipients hands out the
-// person's public_id, and these two handlers parsed it as an integer — so a role
-// change and a removal both matched nothing and answered success. Same defect,
-// same fix; the optimistic row simply came back on the next read.
-func (h *WriteAPI) personRowID(ctx context.Context, tenantID int64, raw string) int64 {
+// personRowID is channelRowID for People: it accepts the public_id that
+// GET /v1/recipients hands out as well as the numeric row id.
+func (h *writeAPI) personRowID(ctx context.Context, tenantID int64, raw string) int64 {
 	var id int64
 	if n := parseID(raw); n > 0 {
 		_ = h.pool.Raw().QueryRow(ctx,
@@ -689,7 +578,7 @@ func (h *WriteAPI) personRowID(ctx context.Context, tenantID int64, raw string) 
 	return id
 }
 
-func (h *WriteAPI) patchRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) patchRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	idStr := pathLast(r.URL.Path)
 	var req struct {
 		Role string `json:"role"`
@@ -708,20 +597,14 @@ func (h *WriteAPI) patchRecipient(w http.ResponseWriter, r *http.Request, tenant
 	writeAPIJSON(w, http.StatusOK, map[string]any{"id": idStr, "role": req.Role})
 }
 
-func (h *WriteAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	personID := h.personRowID(r.Context(), tenantID, pathLast(r.URL.Path))
 	if personID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
-	// Full revocation, one transaction (design D7): the member goes, their
-	// telegram destinations go (the next alert must not reach that chat),
-	// their e-mail channel goes with them (§4 — leaving means the address
-	// stops being a destination, not just a login; it is matched by address,
-	// not recipient, because an e-mail channel is keyed by its target), their
-	// unused invites burn, and their sessions die — so a removed member loses
-	// alerts AND the Mini App at once, with nothing left to race. The person
-	// row itself stays: the Telegram account exists even unlinked.
+	// Full revocation, one transaction: membership, destinations, unused
+	// invites and sessions die together. The person row stays.
 	tx, err := h.pool.Raw().Begin(r.Context())
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -732,9 +615,8 @@ func (h *WriteAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenan
 		`DELETE FROM tenant_member WHERE person_id = $1 AND tenant_id = $2`,
 		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'telegram' AND recipient_person_id = $1`,
 		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'email' AND lower(target) = (SELECT lower(email) FROM person WHERE id = $1)`,
-		// Both directions of the person-bound invite: invites they minted AND
-		// invites minted to link their own Telegram — either one, redeemed after
-		// the removal, would attach a chat to a person who is no longer here.
+		// Both invite directions: either redeemed after removal would attach a
+		// chat to a person no longer here.
 		`UPDATE telegram_invite SET expires_at = now()
 		  WHERE tenant_id = $2 AND (invited_by = $1 OR person_id = $1) AND redeemed_at IS NULL`,
 		`DELETE FROM session WHERE person_id = $1 AND tenant_id = $2`,
@@ -751,13 +633,9 @@ func (h *WriteAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenan
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- Account data ---
-
-// GET /v1/export — everything this account owns, as one JSON document. Taking
-// your data out is not a feature to earn: it is the answer to "what happens if
-// we leave", and a product that cannot answer it is a trap. Secrets are not
-// included — an export is a copy of the record, not of the credentials.
-func (h *WriteAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// GET /v1/export: everything this account owns, one JSON document. Secrets
+// are not included: an export copies the record, not the credentials.
+func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	out := map[string]any{
 		"exportedAt": time.Now().UTC().Format(time.RFC3339),
@@ -818,11 +696,9 @@ func (h *WriteAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID in
 	writeAPIJSON(w, http.StatusOK, out)
 }
 
-// DELETE /v1/project — delete the tenant and everything under it. Every table
-// hangs off tenant/project with ON DELETE CASCADE, so one delete is the whole
-// account; the session goes with it, because the person who pressed this must
-// not land back on a dashboard reading someone's leftovers.
-func (h *WriteAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// DELETE /v1/project: cascades to the tenant and everything under it; the
+// session cookie goes too, so the caller does not land on a dead dashboard.
+func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	if _, err := h.pool.Raw().Exec(r.Context(), `DELETE FROM tenant WHERE id = $1`, tenantID); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -831,23 +707,17 @@ func (h *WriteAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- Sources ---
-
-func (h *WriteAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	// Persist the connection. A per-kind OAuth/token exchange is out of scope
-	// for this pass; this records the source_connection row (status ok, not
-	// paused) and returns its id so the front's source list reflects it (was a
-	// static stub that created a row but returned a fake id).
+func (h *writeAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	// Persist the connection: records the source_connection row and returns
+	// its id so the front's source list reflects it.
 	ctx := r.Context()
 	parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
 	kind := ""
 	if len(parts) >= 2 {
 		kind = parts[len(parts)-2]
 	}
-	// `activate` is the copy button speaking (looking creates nothing): the
-	// panel fetches the URL with a plain connect (draft stays hidden), and the
-	// moment the reader copies it the same endpoint promotes the draft into
-	// the visible card — still "waiting…" until the first event proves it.
+	// `activate` is the copy button: a plain connect keeps the draft hidden;
+	// copying promotes it to the visible card.
 	var body struct {
 		Activate bool `json:"activate"`
 	}
@@ -859,24 +729,8 @@ func (h *WriteAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantI
 	var paused bool
 	var lastSignal pgtype.Timestamptz
 	var hookToken string
-	// 'draft', not 'waiting' (looking creates nothing — user decision, Aug 14,
-	// 2026): opening the hook panel calls this endpoint to get the URL, and
-	// browsing must not leave a connection card behind. A draft row is the
-	// token's storage and nothing else — the source list hides it until the
-	// first event arrives on the hook, which is when the feed has proven it is
-	// a feed (the token route promotes it to 'ok' and sets last_signal_at).
-	//
-	// Connecting is idempotent: one connection per kind, so a second press has
-	// nothing new to record — it used to insert a second row and the screen
-	// grew a duplicate "Deploy hooks" card per click. ON CONFLICT returns the
-	// row that already exists and changes nothing about it (a DO UPDATE that
-	// reset `paused` would silently resume a feed the owner had paused, one
-	// that re-rolled hook_token would break every URL already pasted somewhere,
-	// and one that reset `status` would demote a proven connection to a draft).
-	//
-	// The hook token is the connection's own inbound URL (universal hooks,
-	// docs/plans/universal-hooks.md): POST /hooks/{token} attributes events to
-	// this tenant and project, whoever the poster is.
+	// 'draft' hides the row until an arriving event promotes it; ON CONFLICT
+	// returns the existing row unchanged (paused, token, status never reset).
 	_ = h.pool.Raw().QueryRow(ctx,
 		`INSERT INTO source_connection (tenant_id, project_id, kind, status, hook_token) VALUES ($1, $2, $3, 'draft', $4)
 		 ON CONFLICT (project_id, kind) DO UPDATE SET kind = source_connection.kind
@@ -906,16 +760,15 @@ func (h *WriteAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantI
 	})
 }
 
-// newHookToken mints the per-connection inbound-hook credential: 16 bytes of
-// crypto/rand as hex. The URL carrying it is the whole auth for a write-only
-// event sink, so it must be unguessable; it is revoked by disconnecting.
+// newHookToken mints the per-connection inbound-hook credential. The URL
+// carrying it is the whole auth for the event sink: it must be unguessable.
 func newHookToken() string {
 	b := make([]byte, 16)
 	_, _ = cryptorand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-func (h *WriteAPI) deleteSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) deleteSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	id := sourceID(pathLast(r.URL.Path))
 	if id == 0 {
 		// src_checks and src_logs are facts, not connections: there is no row to
@@ -930,7 +783,7 @@ func (h *WriteAPI) deleteSource(w http.ResponseWriter, r *http.Request, tenantID
 
 // PATCH /v1/sources/{id} — pause or resume a connected source. Pausing keeps the
 // row: it means "stop reading this for now", not "forget it".
-func (h *WriteAPI) patchSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) patchSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	id := sourceID(pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusBadRequest, "not_pausable")
@@ -957,13 +810,9 @@ func sourceID(s string) int64 {
 	return parseID(strings.TrimPrefix(s, "src_"))
 }
 
-// --- Status page ---
-
-// GET /v1/status-page — what this tenant publishes. The components ARE the
-// tenant's checks: a status page whose components were a separate hand-kept list
-// is a second source of truth that drifts from the monitors it describes, and
-// the uptime on each row is measured, not typed in.
-func (h *WriteAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// GET /v1/status-page: what this tenant publishes. The components ARE the
+// tenant's checks, and each row's uptime is measured, not typed in.
+func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	cfg := h.statusConfig(ctx, tenantID)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -978,10 +827,9 @@ func (h *WriteAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	})
 }
 
-// PUT /v1/status-page — persist the settings. The components themselves are not
-// stored: they are the monitors, and only the decision to publish each one is
-// the owner's to keep.
-func (h *WriteAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// PUT /v1/status-page: persist the settings. Components are not stored: they
+// are the monitors; only the choice to publish is kept.
+func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	var req struct {
 		Title         string          `json:"title"`
@@ -1016,9 +864,8 @@ func (h *WriteAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	var projectDomain string
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT id, domain FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID, &projectDomain)
-	// First save of a page that has never existed: name it after the project's
-	// own domain rather than its id. Safe precisely because there is no page yet,
-	// so no link to it has been handed out; an existing slug is never rewritten.
+	// First save of a page that never existed: name it after the domain, not
+	// the id. An existing slug is never rewritten.
 	if cfg.Slug == "prj-"+strconv.FormatInt(projectID, 10) {
 		if claimed := h.claimSlug(ctx, projectDomain, projectID); claimed != "" {
 			cfg.Slug = claimed
@@ -1058,7 +905,7 @@ type statusPageConfig struct {
 
 // statusConfig loads the saved settings, defaulting a page that has never been
 // configured to "publish everything" — the page exists to be public.
-func (h *WriteAPI) statusConfig(ctx context.Context, tenantID int64) statusPageConfig {
+func (h *writeAPI) statusConfig(ctx context.Context, tenantID int64) statusPageConfig {
 	cfg := statusPageConfig{ShowNetwork: true, ShowIncidents: true, ShowPoweredBy: true, Shown: map[string]bool{}}
 	var projectID int64
 	var domain, title, slug *string
@@ -1070,9 +917,8 @@ func (h *WriteAPI) statusConfig(ctx context.Context, tenantID int64) statusPageC
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
-	// The stored slug is the address the owner has already handed out, so it
-	// wins over anything in the body and over the id-shaped default. A project
-	// with no page yet still resolves by "prj-N" (publicStatus accepts both).
+	// The stored slug is the address already handed out: it wins over the body
+	// and the id-shaped default ("prj-N", which publicStatus also accepts).
 	cfg.Slug = "prj-" + strconv.FormatInt(projectID, 10)
 	if slug != nil && *slug != "" {
 		cfg.Slug = *slug
@@ -1093,19 +939,15 @@ func (h *WriteAPI) statusConfig(ctx context.Context, tenantID int64) statusPageC
 // checks table keeps 7 days, so drawing 60 would be drawing 53 days we never saw.
 const statusBars = 7
 
-// A day is the wrong bucket for an account that started this morning: its check
-// has been running for minutes, so six of the seven bars would read `nodata` for
-// a week and the page would look broken on exactly the day somebody was shown
-// it. Until there is a day of history, one bar is one check — the row fills as
-// the fleet works, which is what a new owner is actually watching for.
+// Until an account has a day of history, one bar is one check: seven daily
+// bars would read `nodata` for a week on a brand-new account.
 const (
 	statusIntervalBars = 12             // one per check, so the strip is the last 12 runs
 	statusDayThreshold = 24 * time.Hour // older history than this and days win
 )
 
-// barSpanFor decides the bucket for one monitor: a day, or its own check
-// interval. `oldest` is the first check we still hold (zero when there are none
-// at all — a monitor created a minute ago, which is the case this exists for).
+// barSpanFor picks the bucket for one monitor: a day, or its own interval.
+// `oldest` is the first check held (zero when there are none).
 func barSpanFor(oldest time.Time, intervalSec int32, now time.Time) time.Duration {
 	if !oldest.IsZero() && now.Sub(oldest) >= statusDayThreshold {
 		return 24 * time.Hour
@@ -1117,10 +959,9 @@ func barSpanFor(oldest time.Time, intervalSec int32, now time.Time) time.Duratio
 	return span
 }
 
-// statusComponents renders one component per monitor, with uptime and the daily
-// bars measured from the checks table. `publicOnly` drops the ones the owner has
-// unpublished.
-func (h *WriteAPI) statusComponents(ctx context.Context, tenantID int64, cfg statusPageConfig, publicOnly bool) []map[string]any {
+// statusComponents renders one component per monitor with measured uptime and
+// bars. `publicOnly` drops the owner's unpublished ones.
+func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg statusPageConfig, publicOnly bool) []map[string]any {
 	type monRow struct {
 		id          int64
 		key         string
@@ -1147,9 +988,8 @@ func (h *WriteAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 
 	now := time.Now().UTC()
 
-	// One query for every monitor's daily ok/total over the retained window, plus
-	// the first check we still hold — which is what decides whether a day is a
-	// bucket this account can fill at all.
+	// One query for every monitor's daily ok/total over the retained window
+	// plus the first check held, which decides the bucket size.
 	type day struct{ ok, total uint64 }
 	daily := map[int64]map[int64]day{}
 	oldest := map[int64]time.Time{}
@@ -1196,10 +1036,8 @@ func (h *WriteAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 		}
 	}
 
-	// Per-check buckets, counted BACKWARDS from now rather than aligned to the
-	// clock: a probe running every 5 minutes is not aligned to :00/:05, so a
-	// wall-clock bucket would sometimes hold two checks and its neighbour none —
-	// drawing a gap into a row where nothing was ever missed.
+	// Per-check buckets counted BACKWARDS from now: a 5-minute probe is not
+	// clock-aligned, and wall-clock buckets would draw false gaps.
 	recent := map[int64]map[int]day{}
 	if h.ch != nil && !rawFrom.IsZero() {
 		chRows, cerr := h.ch.Raw().Query(ctx, `
@@ -1289,17 +1127,9 @@ func (h *WriteAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 // pctLabelAPI is read_api's pctLabel — same rendering, same "—" for no data.
 func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 
-// statusNetwork is the "Network" section of a status page: the phases of the
-// request the fleet already times on every probe (dns_ms, connect_ms, tls_ms,
-// total_ms in the checks table), as medians over the retained window.
-//
-// It used to be `networkChecks` from mockData, rendered only when the backend
-// was unreachable — so the owner's own switch ("Show the Network section") could
-// not do anything on a live page, and turning it on showed nothing at all. The
-// same rule as the landing's probe strip: this is measured or it is absent, and
-// a phase that never ran (no TLS on a plaintext host) produces no tile rather
-// than a zero.
-func (h *WriteAPI) statusNetwork(ctx context.Context, tenantID int64) []map[string]any {
+// statusNetwork renders the probe phases as medians over the retained window.
+// A phase that never ran (no TLS on a plaintext host) produces no tile.
+func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[string]any {
 	if h.ch == nil {
 		return []map[string]any{}
 	}
@@ -1336,9 +1166,8 @@ func (h *WriteAPI) statusNetwork(ctx context.Context, tenantID int64) []map[stri
 			"label": r.label,
 			"value": msLabel(r.ms),
 			"note":  r.note,
-			// Green is a claim about health, and a timing is not one. These tiles
-			// report what the request cost; whether the site is up is the
-			// components section's job, measured and displayed there.
+			// Green is a claim about health, and a timing is not one: whether the
+			// site is up is the components section's job.
 			"status": "ok",
 		})
 	}
@@ -1354,13 +1183,9 @@ func msLabel(ms float64) string {
 	return fmt.Sprintf("%d ms", int(ms+0.5))
 }
 
-// --- Logs ---
-
-// logQueryBuilder resolves the tenant's project and ring cutoff into the ONLY
-// permitted path to the logs table (invariant 4): the window is whatever
-// project_window.cutoff_seq currently is — queries below it are displaced by
-// the ring and not served.
-func (h *WriteAPI) logQueryBuilder(ctx context.Context, tenantID int64) *query.QueryBuilder {
+// logQueryBuilder binds the tenant's ring cutoff: the window is whatever
+// project_window.cutoff_seq is; below it is displaced, not served.
+func (h *writeAPI) logQueryBuilder(ctx context.Context, tenantID int64) *query.QueryBuilder {
 	var projectID, cutoffSeq int64
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, COALESCE(pw.cutoff_seq, 0)
@@ -1369,23 +1194,18 @@ func (h *WriteAPI) logQueryBuilder(ctx context.Context, tenantID int64) *query.Q
 	return query.New(tenantID, projectID, cutoffSeq)
 }
 
-func (h *WriteAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	qb := h.logQueryBuilder(ctx, tenantID)
 	q := r.URL.Query()
-	// The spec's window enum, honoured. Absent or unrecognised means the whole
-	// ring — the ring is a line count, not a time range (backend-from-new-plan.md
-	// §0.3), so a bad value must not invent a narrower window than was asked for.
+	// Absent or unrecognised window means the whole ring: a bad value must not
+	// invent a narrower window than was asked for.
 	window := parseLogWindow(q.Get("window"))
-	// The range the reader dragged on the timeline. It bounds the lines and the
-	// count beside them, and deliberately NOT the volume: the strip is the map
-	// the range was picked on, and narrowing it to the chosen range would leave
-	// the reader zoomed in with nothing left to navigate by.
+	// The dragged range bounds the lines and count, deliberately NOT the
+	// volume: the strip is the map the range was picked on.
 	within := parseLogRange(q)
-	// Both filters are repeatable (?service=api&service=web&level=error). A
-	// service value may be the empty string — the unlabelled service is a real
-	// row and has to be pickable — so presence, not non-emptiness, is what
-	// distinguishes "filtered" from "everything".
+	// Both filters are repeatable. A service value may be empty (the
+	// unlabelled service is a real row): presence means "filtered".
 	levels := parseLogLevels(q["level"])
 	services := q["service"]
 	lines := h.runLogRows(ctx, qb.Stream(streamLines, levels, services, q.Get("q"), within))
@@ -1403,32 +1223,23 @@ func (h *WriteAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int6
 		// is what fits on screen.
 		"total": total,
 	}
-	// Sub-minute resolution for the range the reader is holding, and only for
-	// that range. `volume` above stays the whole-ring map on purpose, so this
-	// cannot replace it: it says what one of its minutes is made of. Absent
-	// unless it adds something — DetailBucketSeconds answers 0 for a range wide
-	// enough that every bucket it could offer is coarser than the minute the map
-	// already draws, and the same numbers under a second name would be a claim
-	// about precision nobody measured.
+	// Sub-minute detail for the held range only; `volume` above stays the
+	// whole-ring map. Absent when it adds nothing finer than that map.
 	if size := query.DetailBucketSeconds(parseBucketSeconds(q.Get("bucketSeconds")), within); size > 0 {
 		if rows := h.runBucketRows(ctx, qb.VolumeDetail(size, within, levels, services), "bucket"); rows != nil {
 			body["detail"] = map[string]any{"bucketSeconds": size, "buckets": rows}
 		}
 	}
-	// What the window holds, whatever is being read from it: the picker is built
-	// from this, so narrowing it by the service already picked would leave the
-	// reader holding their own choice. Absent when there is nothing to list
-	// ("zero is silence") — one service is still sent, and the panel draws no
-	// picker for it.
+	// The window's services, unfiltered: the picker is built from this. Absent
+	// when empty; one service is still sent.
 	if services := h.runServiceRows(ctx, qb.Services(window)); len(services) > 0 {
 		body["services"] = services
 	}
 	writeAPIJSON(w, http.StatusOK, body)
 }
 
-// parseLogLevels keeps the spec's enum (error, warn, info), deduplicated. All
-// three buckets partition the stream, so picking every one is the same as
-// picking none — normalised to nil here so the builder skips the predicate.
+// parseLogLevels keeps the enum deduplicated; picking all three is normalised
+// to nil so the builder skips the predicate.
 func parseLogLevels(raw []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -1447,23 +1258,12 @@ func parseLogLevels(raw []string) []string {
 	return out
 }
 
-// How many lines one read of /v1/logs returns. The ring holds far more, and
-// `total` beside them says so — this is the cap on one answer, not on the
-// window. Raised from 200 when the timeline learned to ask for a range: with
-// bounds on the wire a read is a slice of the ring rather than its newest tail,
-// and 200 truncated a busy five minutes. Kept where the stream can still be
-// rendered in one pass — the list is not virtualised, so this number is also a
-// budget of DOM nodes.
+// Lines per read of /v1/logs: a cap on one answer, not the window (`total`
+// says so), and a DOM budget: the list is not virtualised.
 const streamLines = 1000
 
-// parseLogRange reads the timeline's `from`/`to` bounds off the query. Either
-// may be sent alone. Anything unparseable is dropped rather than defaulted, for
-// the same reason parseLogWindow drops an unknown enum: a bad timestamp must
-// not invent a narrower window than the reader asked for.
-// parseBucketSeconds reads the detail resolution the reader is asking for. A
-// value that is not a positive number is not an error worth refusing the whole
-// read over — it means no detail, and the strip falls back to its minutes,
-// which is what a client that never asked also gets.
+// parseLogRange reads the `from`/`to` bounds; either may come alone. Anything
+// unparseable is dropped, never defaulted: a bad value must not narrow the ask.
 func parseBucketSeconds(raw string) int {
 	if raw == "" {
 		return 0
@@ -1491,10 +1291,8 @@ func parseLogRange(q url.Values) query.Range {
 	return out
 }
 
-// countRange picks what `total` is counted over. The `window` enum predates the
-// timeline and still answers on its own; an explicit range always wins, because
-// the two are the same question asked twice and honouring both would count a
-// slice of a slice.
+// countRange picks what `total` is counted over: an explicit range always
+// wins over the `window` enum; honouring both counts a slice of a slice.
 func countRange(window time.Duration, within query.Range) query.Range {
 	if within.Bounded() {
 		return within
@@ -1526,10 +1324,9 @@ func parseLogWindow(s string) time.Duration {
 	}
 }
 
-// runWindowCount counts the window's lines before the stream limit, so the
-// panel can say how much of the window it is showing. Same filters as Stream,
-// same cutoff — a different predicate here would make the number a lie.
-func (h *WriteAPI) runWindowCount(ctx context.Context, qb *query.QueryBuilder, within query.Range, levels, services []string, search string) int {
+// runWindowCount counts the window's lines before the stream limit. Same
+// filters and cutoff as Stream: a different predicate would make it a lie.
+func (h *writeAPI) runWindowCount(ctx context.Context, qb *query.QueryBuilder, within query.Range, levels, services []string, search string) int {
 	if h.ch == nil {
 		return 0
 	}
@@ -1552,10 +1349,9 @@ func (h *WriteAPI) runWindowCount(ctx context.Context, qb *query.QueryBuilder, w
 	return 0
 }
 
-// runLogRows executes a QueryBuilder stream query against ClickHouse and maps
-// the rows to the front's log-line shape. Returns nil on any error so the
-// caller can substitute an empty array.
-func (h *WriteAPI) runLogRows(ctx context.Context, lq query.LogQuery) []map[string]any {
+// runLogRows executes a stream query and maps rows to the front's log-line
+// shape; nil on error, so the caller substitutes an empty array.
+func (h *writeAPI) runLogRows(ctx context.Context, lq query.LogQuery) []map[string]any {
 	if h.ch == nil {
 		return nil
 	}
@@ -1584,7 +1380,7 @@ func (h *WriteAPI) runLogRows(ctx context.Context, lq query.LogQuery) []map[stri
 }
 
 // runServiceRows executes the window's service tally — the picker's options.
-func (h *WriteAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[string]any {
+func (h *writeAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[string]any {
 	if h.ch == nil {
 		return nil
 	}
@@ -1607,12 +1403,9 @@ func (h *WriteAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[
 	return out
 }
 
-// runBucketRows executes a histogram query — the per-minute map or the
-// range-bounded detail — and names the timestamp column what that answer calls
-// it. The two differ by one word on the wire because they measure different
-// widths, and calling a five-second count `minute` is the kind of name that
-// outlives the person who knew better.
-func (h *WriteAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key string) []map[string]any {
+// runBucketRows executes a histogram query and names the timestamp column for
+// the answer (`minute` vs `bucket`): the two measure different widths.
+func (h *writeAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key string) []map[string]any {
 	if h.ch == nil || lq.SQL == "" {
 		return nil
 	}
@@ -1638,12 +1431,9 @@ func (h *WriteAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key str
 	return out
 }
 
-func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	// Real path through internal/ai: idempotent by input hash (scenario key +
-	// version + brain + meta line + lines, Decision 7), cached by fingerprint,
-	// metered against the plan's monthly quota (402 on exhaustion, not 403).
-	// No key anywhere (env or the Settings-set one) = 503 ai_not_configured —
-	// Explain is off, never a canned fallback.
+func (h *writeAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	// Idempotent by input hash, cached by fingerprint, metered against the
+	// plan's quota (402). No key configured = 503, never a canned fallback.
 	ctx := r.Context()
 	var req struct {
 		Lines []string `json:"lines"`
@@ -1654,88 +1444,29 @@ func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 		writeAPIErr(w, http.StatusBadRequest, "missing_lines")
 		return
 	}
-	// The registry owns the caps: over-cap input is rejected, never trimmed,
-	// and the message quotes the caps so it cannot drift from them.
-	sc := ai.ExplainLogs
-	total, over := 0, len(req.Lines) > sc.MaxInputLines
-	for _, line := range req.Lines {
-		if len(line) > sc.MaxLineBytes {
-			over = true
-		}
-		total += len(line)
-	}
-	if over || total > sc.MaxInputBytes {
-		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
-			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+	if !h.explainInputOK(w, req.Lines) {
 		return
 	}
-	// Per-tenant throttle, standing between validation and the first read.
-	// Anything that passes validation spends a batch of reads (plan,
-	// entitlement, explain context) whether it ends in a cached answer, a 402
-	// or a fresh one, so each burns a slot; a validation failure above spends
-	// nothing and must not. Retry-After tells machine callers what the message
-	// tells the human — the window releases on its own.
-	if ok, retryAfter := h.explainAllow(tenantID); !ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
-		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
+	ent, ok := h.explainGate(ctx, w, tenantID)
+	if !ok {
 		return
 	}
-	// Quota gate, fail closed: a plan or entitlement read that fails is a 500,
-	// never a silent 0 = "unlimited". NULL ai_explains (paid plans) is the
-	// only thing that means unlimited.
-	plan, perr := tenantPlan(ctx, h.pool, tenantID)
-	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	if errors.Is(eerr, pgx.ErrNoRows) {
-		// tenant.plan is free text with no FK to plan_entitlement, and the
-		// other entitlement readers tolerate a miss (read_api, monitors). An
-		// unknown tier — rename, legacy row, unshipped billing plan — must
-		// not 500 this endpoint forever: the most restrictive seeded row is
-		// the fail-closed answer for a plan with no row of its own.
-		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
-		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
-	}
-	if eerr != nil {
-		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	// The meta line is the stable half of the explain context: it changes only
-	// when the installer re-uploads the spec, so it is the one context entry
-	// the cache hash covers (Decision 7) — everything explainContext gathers
-	// below is volatile and rides along unhashed.
+	// The meta line is the stable half of the context: the one entry the cache
+	// hash covers. Everything explainContext gathers is volatile, unhashed.
 	metaLine := ""
 	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			// The meta line is a hashed part, so a transient read failure does
-			// not just narrow the prompt — it silently re-keys the tenant's
-			// cache (a guaranteed miss, a billable provider call, and a second
-			// permanent row under the no-meta key). The operator must see why.
+			// A failed meta read re-keys the cache (a guaranteed miss and a
+			// billable call). The operator must see why.
 			slog.Warn("ai explain: project meta read failed", "err", err, "tenant_id", tenantID)
 		}
 	} else if len(meta) > 0 {
 		metaLine = projectMetaLine(meta)
 	}
-	res, err := h.acct.Explain(ctx, tenantID, sc,
+	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainLogs,
 		ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, tenantID)}, ent.AiExplains)
 	if err != nil {
-		if errors.Is(err, ai.ErrNotConfigured) {
-			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				h.aiNotConfiguredMsg())
-			return
-		}
-		if errors.Is(err, ai.ErrOverQuota) {
-			writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
-			return
-		}
-		// The underlying cause must be traceable server-side — a revoked
-		// provider key used to be a bare 500 with no trace.
-		slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		h.explainError(w, err, tenantID)
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -1747,55 +1478,36 @@ func (h *WriteAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 		"cached":      res.Cached,
 		"used":        res.Used,
 		"limit":       res.Limit,
-		// Dev observability (the prompt-editing loop): the exact user message
-		// the model received. Empty string on a cache hit. The system prompt is
-		// static and lives in scenario.go — printing it per response would be
-		// noise; docker logs carry it when UC_AI_LOG_PROMPT=1.
+		// Dev observability: the exact user message, empty on a cache hit. The
+		// system prompt is static in scenario.go.
 		"prompt": res.Prompt,
 	})
 }
 
-// previewExplain answers the prompt-editing question "what exactly is about
-// to be sent?" at the moment of dispatch, not when the model answers: the same
-// validation, the same meta line and context composition as explainLogs, and
-// NO model call, NO quota, NO throttle slot — it spends nothing, so a dev
-// tools loop can inspect the exact bytes for free. The browser console logs
-// this alongside the real call (the front fires both concurrently).
-func (h *WriteAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// previewExplain returns the exact bytes about to be sent: same validation
+// and context as explainLogs, but no model call, quota or throttle slot.
+func (h *writeAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	var req struct {
 		Lines []string `json:"lines"`
 	}
-	// Unlike explainLogs, an empty `lines` is a legitimate call here: Settings
-	// reads `model` off this endpoint to learn the wired brain's identity
-	// without composing a real explanation (client.ts's explainPreview([])).
-	// Only a malformed body is rejected.
+	// Unlike explainLogs, empty `lines` is legitimate: Settings reads `model`
+	// here without composing an explanation. Only malformed bodies are refused.
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeAPIErr(w, http.StatusBadRequest, "bad_json")
 		return
 	}
-	sc := ai.ExplainLogs
-	total, over := 0, len(req.Lines) > sc.MaxInputLines
-	for _, line := range req.Lines {
-		if len(line) > sc.MaxLineBytes {
-			over = true
-		}
-		total += len(line)
-	}
-	if over || total > sc.MaxInputBytes {
-		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
-			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+	if !h.explainInputOK(w, req.Lines) {
 		return
 	}
+	sc := ai.ExplainLogs
 	metaLine := ""
 	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err == nil && len(meta) > 0 {
 		metaLine = projectMetaLine(meta)
 	}
 	input := ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, tenantID)}
-	// The brain's identity and the generation knobs, so the console shows
-	// everything the provider request carries, not only the messages. A null
-	// model is the front's "Explain is off" fact: no key resolves anywhere
-	// (env or the Settings-set instance key), so there is no brain.
+	// The brain's identity and the generation knobs. A null model means no key
+	// resolves anywhere: the front's "Explain is off" fact.
 	var model any
 	if h.acct.Configured(ctx) {
 		model = h.acct.BrainID(ctx)
@@ -1809,20 +1521,12 @@ func (h *WriteAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenant
 	})
 }
 
-// explainIncident is the incident's own explain: the server owns the
-// evidence (the incident's facts, its timeline, the log slice frozen when it
-// fired), so the request carries no body — only the id in the path. Same
-// money path as explainLogs (throttle, monthly quota, 402 shape), new
-// scenario key (ai.ExplainIncident) whose answer adds severity and area.
-func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// explainIncident: the server owns the evidence, so only the id is sent.
+// Same money path as explainLogs; ai.ExplainIncident adds severity and area.
+func (h *writeAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	// pathLast cannot work here (the path ends in /explain), so the id comes
-	// from the {id} segment the 1.22 mux binds. It is the PUBLIC id — the
-	// only one that ever leaves this process, because `incidentToAPI` sends
-	// `uuidStr(row.PublicID)` and the row's serial `id` appears in no
-	// response. Reading it with parseID answered 404 for every real click:
-	// a uuid parses to 0, and no row owns 0. The internal id comes back from
-	// this same lookup, because the evidence queries below are keyed by it.
+	// The {id} is the PUBLIC uuid (the serial id never leaves this process);
+	// the same lookup returns the internal id the queries below key on.
 	pubID := parseUUID(r.PathValue("id"))
 	var id int64
 	var title, status string
@@ -1830,9 +1534,8 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	if err := h.pool.Raw().QueryRow(ctx,
 		`SELECT id, title, status, detected_at, resolved_at FROM incident WHERE public_id = $1 AND tenant_id = $2`,
 		pubID, tenantID).Scan(&id, &title, &status, &detectedAt, &resolvedAt); err != nil {
-		// Only a row this tenant does not own is a 404 — a dead pool or a
-		// timeout must fail closed as a 500, never "not found" for an
-		// incident that exists.
+		// Only a row this tenant does not own is a 404: a dead pool fails
+		// closed as a 500, never "not found" for an incident that exists.
 		if !errors.Is(err, pgx.ErrNoRows) {
 			slog.Error("ai explain: read incident failed", "err", err, "tenant_id", tenantID)
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -1841,46 +1544,12 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	// Per-tenant throttle, shared with the logs explain: an incident explain
-	// spends the same reads and the same provider money, so it burns the same
-	// slots. Retry-After tells machine callers what the message tells the
-	// human — the window releases on its own.
-	if ok, retryAfter := h.explainAllow(tenantID); !ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
-		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
+	ent, ok := h.explainGate(ctx, w, tenantID)
+	if !ok {
 		return
 	}
-	// Quota gate, fail closed: a plan or entitlement read that fails is a 500,
-	// never a silent 0 = "unlimited". NULL ai_explains (paid plans) is the
-	// only thing that means unlimited.
-	plan, perr := tenantPlan(ctx, h.pool, tenantID)
-	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	if errors.Is(eerr, pgx.ErrNoRows) {
-		// tenant.plan is free text with no FK to plan_entitlement, and the
-		// other entitlement readers tolerate a miss (read_api, monitors). An
-		// unknown tier — rename, legacy row, unshipped billing plan — must
-		// not 500 this endpoint forever: the most restrictive seeded row is
-		// the fail-closed answer for a plan with no row of its own.
-		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
-		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
-	}
-	if eerr != nil {
-		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	// Evidence: the same queries incidentWithEvidence builds the card from
-	// (read_api.go). The slice is the lines; the timeline (lifecycle rows +
-	// the tenant's events around the break) rides as context. An empty slice
-	// is not an error — the timeline is the evidence then, so the read runs.
-	// But the incident's OWN records are load-bearing on this paid path: a
-	// failed read is a logged 500 before anything is charged, never a
-	// silently narrowed prompt.
+	// Evidence, as the card builds it. A failed read here is a logged 500
+	// before anything is charged; an empty slice is not an error.
 	rows, serr := h.pool.Queries().ListIncidentSlice(ctx, id)
 	if serr != nil {
 		slog.Error("ai explain: read incident slice failed", "err", serr, "incident_id", id, "tenant_id", tenantID)
@@ -1915,19 +1584,15 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		}
 		lifecycle = append(lifecycle, entry)
 	}
-	// The window the card cares about: 30 minutes before the open through the
-	// close (or now), events nearest the break first among equals. h.ch nil in
-	// tests — the lifecycle alone is still a timeline. Best-effort, exactly
-	// like the card renderer tolerates it (read_api.go): these events are
-	// enrichment around the break, not the incident's own record.
+	// 30 minutes before the open through the close, best-effort like the card
+	// renderer: enrichment, never load-bearing.
 	var events []ch.EventRow
 	if h.ch != nil && detectedAt.Valid {
 		events, _ = h.ch.EventsAround(ctx, tenantID,
 			detectedAt.Time.Add(-30*time.Minute), end, detectedAt.Time, 50)
 	}
-	// Fact lines first — what the incident IS — then the timeline oldest
-	// first (mergeTimeline orders both halves), then the room the logs explain
-	// already sends (services, monitors, open incidents).
+	// Fact lines first, then the timeline oldest-first (mergeTimeline orders
+	// both), then the room the logs explain sends.
 	open := "closed"
 	if status == "down" || status == "check" {
 		open = "open"
@@ -1944,9 +1609,8 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 		inputCtx = append(inputCtx, fmt.Sprintf("%v %v", entry["time"], entry["text"]))
 	}
 	inputCtx = append(inputCtx, h.explainContext(ctx, tenantID)...)
-	// The meta line is the stable half of the explain context — the one
-	// context entry the cache hash covers; everything explainContext gathers
-	// above is volatile and rides along unhashed.
+	// The meta line is the stable half of the context: the one entry the cache
+	// hash covers. Everything explainContext gathers is volatile, unhashed.
 	metaLine := ""
 	if meta, merr := h.pool.Queries().GetProjectMeta(ctx, tenantID); merr != nil {
 		if !errors.Is(merr, pgx.ErrNoRows) {
@@ -1958,17 +1622,7 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainIncident,
 		ai.Input{Lines: lines, MetaLine: metaLine, Context: inputCtx}, ent.AiExplains)
 	if err != nil {
-		if errors.Is(err, ai.ErrNotConfigured) {
-			writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-				h.aiNotConfiguredMsg())
-			return
-		}
-		if errors.Is(err, ai.ErrOverQuota) {
-			writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
-			return
-		}
-		slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		h.explainError(w, err, tenantID)
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -1988,32 +1642,89 @@ func (h *WriteAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	})
 }
 
-// aiNotConfiguredMsg answers the 503 with an instruction the caller can act
-// on, which is not the same sentence in both deployments.
-//
-// On a self-host the operator IS the person reading this, and the Settings
-// door accepts a key (see InstanceSettings), so naming it is the whole help.
-// On a hosted instance that door answers 404 to every tenant on purpose: an
-// instance-level knob writable from a tenant session would let one customer
-// steer everyone's brain. Sending a tenant there would be a control that
-// cannot act — so the hosted sentence states the fact and asks for nothing.
-// The key is the operator's to place, and their being without one is not a
-// task the caller can be handed.
-func (h *WriteAPI) aiNotConfiguredMsg() string {
+// explainInputOK enforces the shared input caps; false means the
+// input_too_large response is already written.
+func (h *writeAPI) explainInputOK(w http.ResponseWriter, lines []string) bool {
+	// The registry owns the caps: over-cap input is rejected, never trimmed,
+	// and the message quotes the caps so it cannot drift from them.
+	sc := ai.ExplainLogs
+	total, over := 0, len(lines) > sc.MaxInputLines
+	for _, line := range lines {
+		if len(line) > sc.MaxLineBytes {
+			over = true
+		}
+		total += len(line)
+	}
+	if over || total > sc.MaxInputBytes {
+		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
+			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
+		return false
+	}
+	return true
+}
+
+// explainGate runs the shared throttle then the fail-closed quota read;
+// false means the 429 or 500 response is already written.
+func (h *writeAPI) explainGate(ctx context.Context, w http.ResponseWriter,
+	tenantID int64) (sqlc.PlanEntitlement, bool) {
+	// The throttle stands between validation and the first read: anything
+	// validated burns a slot even on a cached or 402 answer.
+	if ok, retryAfter := h.explainAllow(tenantID); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
+		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
+		return sqlc.PlanEntitlement{}, false
+	}
+	// Quota gate, fail closed: a failed read is a 500, never a silent 0 =
+	// "unlimited". Only NULL ai_explains means unlimited.
+	plan, perr := tenantPlan(ctx, h.pool, tenantID)
+	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return sqlc.PlanEntitlement{}, false
+	}
+	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
+	if errors.Is(eerr, pgx.ErrNoRows) {
+		// tenant.plan is free text with no FK to plan_entitlement: an unknown
+		// tier falls back to the Free row, the fail-closed answer.
+		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
+		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
+	}
+	if eerr != nil {
+		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return sqlc.PlanEntitlement{}, false
+	}
+	return ent, true
+}
+
+// explainError maps one acct.Explain error to its response and writes it.
+func (h *writeAPI) explainError(w http.ResponseWriter, err error, tenantID int64) {
+	if errors.Is(err, ai.ErrNotConfigured) {
+		writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
+			h.aiNotConfiguredMsg())
+		return
+	}
+	if errors.Is(err, ai.ErrOverQuota) {
+		writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
+		return
+	}
+	// The underlying cause must be traceable server-side.
+	slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
+	writeAPIErr(w, http.StatusInternalServerError, "internal")
+}
+
+// aiNotConfiguredMsg: on a self-host the Settings door accepts a key, so the
+// message names it; hosted tenants get no door that would answer them 404.
+func (h *writeAPI) aiNotConfiguredMsg() string {
 	if h.selfHosted {
 		return "AI is not configured on this instance. Add an OpenAI-compatible API key in Settings."
 	}
 	return "AI explains are not available on this instance."
 }
 
-// explainContext gathers the volatile server-known facts the prompt receives
-// beside the lines (Decision 15a): what is in the window, what is watched,
-// whether an incident is open. None of it is hashed (Decision 7) — it is
-// sent to the model but changes with the room, so hashing it would bust the
-// cache on every incident flap; the stable project-meta line travels
-// separately as Input.MetaLine. Every source is best-effort — a context
-// read that fails narrows the prompt, it never fails the read.
-func (h *WriteAPI) explainContext(ctx context.Context, tenantID int64) []string {
+// explainContext gathers the volatile room facts (services, monitors, open
+// incident). Unhashed on purpose; every source is best-effort.
+func (h *writeAPI) explainContext(ctx context.Context, tenantID int64) []string {
 	var out []string
 	// Services over the whole visible ring — the selection may come from any
 	// of it — capped because service names are customer-named and unbounded.
@@ -2041,8 +1752,8 @@ func (h *WriteAPI) explainContext(ctx context.Context, tenantID int64) []string 
 	return out
 }
 
-// projectMetaLine renders the installer-collected spec (Decision 15b) as one
-// context entry, omitting fields the spec did not carry.
+// projectMetaLine renders the installer-collected spec as one context entry,
+// omitting fields the spec did not carry.
 func projectMetaLine(meta []byte) string {
 	var spec struct {
 		Name        string `json:"name"`
@@ -2085,15 +1796,10 @@ func tenantPlan(ctx context.Context, pool *pg.Pool, tenantID int64) (string, err
 	return plan, err
 }
 
-// --- Incident detail ---
-
-func (h *WriteAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	idStr := pathLast(r.URL.Path)
-	// The public id, same as POST /v1/incidents/{id}/explain: `incidentToAPI`
-	// only ever sends `uuidStr(row.PublicID)`, so the serial `id` this used to
-	// parse never reaches a caller. Reading it with parseID matched nothing
-	// and, because the error was discarded, answered 200 with an empty title
-	// and status instead of saying so.
+	// The public id, like the explain endpoint: `incidentToAPI` only ever
+	// sends the uuid; the serial id never reaches a caller.
 	var title, status string
 	var affected int
 	if err := h.pool.Raw().QueryRow(r.Context(),
@@ -2118,9 +1824,7 @@ func (h *WriteAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID 
 	})
 }
 
-// --- Public ---
-
-func (h *WriteAPI) public(w http.ResponseWriter, r *http.Request) {
+func (h *writeAPI) public(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/public/check" && r.Method == http.MethodPost:
 		h.publicCheck(w, r)
@@ -2135,7 +1839,7 @@ func (h *WriteAPI) public(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
+func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	// The scope (uc_vid cookie + IP + UA) rides the context so the analytics
 	// event fired below resolves the same visitor the request carried.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
@@ -2151,10 +1855,8 @@ func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(host, "://") {
 		host = "https://" + host
 	}
-	// A fresh answer for this host is served to everyone, which is what keeps a
-	// link doing the rounds from re-probing the site once per visitor. Checked
-	// before the IP cooldown on purpose: a cached answer costs the far side
-	// nothing, so there is nothing to throttle.
+	// A fresh answer is served to everyone. Checked before the IP cooldown:
+	// a cached answer costs the far side nothing.
 	if cached, ok := h.cachedCheck(host); ok {
 		h.rec.ServerEvent(ctx, "public_check_run", 0, 0, map[string]string{
 			"host": bareHost(host), "cached": "true",
@@ -2162,19 +1864,14 @@ func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 		writeAPIJSON(w, http.StatusOK, cached)
 		return
 	}
-	// Anonymous endpoint: throttle per source-IP (plan §6.1). Per-replica is the
-	// honest MVP bound — two ucapi replicas admit up to 2× the cooldown.
+	// Anonymous endpoint: throttled per source-IP, per-replica (two replicas
+	// admit 2× the cooldown).
 	if !h.checkAllow(analytics.ClientIP(r), host) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	// Real probe BEHIND the SSRF guard: the executor refuses internal ranges
-	// (169.254/16, loopback, RFC1918…) and reports error_class=blocked_target.
-	// That is exactly what makes a metadata-IP probe return blocked_target, not
-	// the metadata body.
-	// CollectBody so page discovery can read this homepage's links when the host
-	// has no sitemap — the fallback costs no request precisely because the body
-	// comes from here.
+	// Real probe behind the SSRF guard: internal ranges answer
+	// error_class=blocked_target. CollectBody feeds page discovery's fallback.
 	res := h.exec.Execute(ctx, executor.CheckSpec{
 		URL: host, Method: "GET", TimeoutMs: 8000, MaxRedirects: 3,
 		CollectExpiry: true, CollectBody: true,
@@ -2198,28 +1895,22 @@ func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	facts := discover.Run(r.Context(), h.exec, net.DefaultResolver, host, res)
 	network := append(networkRowsFrom(res, status), discoveredRows(facts)...)
 
-	// Every pickable row's id IS its URL, so the watch request can send the ids
-	// back as targets with no lookup table in between. That includes this one:
-	// it used to be the literal "live", which no target list could name.
+	// Every pickable row's id IS its URL, so the watch request can send the
+	// ids back as targets with no lookup table in between.
 	groups := []map[string]any{
 		{"title": "Live probe", "source": "from a real request", "rows": []map[string]any{
 			{"id": host, "name": host, "meta": meta, "status": status, "recommended": res.OK},
 		}},
 	}
-	// Reading order, widest first: the address they typed, then its other hosts,
-	// then its pages. Hosts sits above Pages because an api. or auth. host is its
-	// own failure domain — separate DNS, separate certificate, usually a separate
-	// deploy — so it can be down while the marketing site is perfectly healthy,
-	// and that is the outage a status page built from one URL never sees.
+	// Reading order, widest first: the typed address, then its other hosts,
+	// then pages (an api. host is its own failure domain).
 	if rows := pageRows(facts.Hosts); len(rows) > 0 {
 		groups = append(groups, map[string]any{
 			"title": "Hosts", "source": facts.Hosts[0].Source, "rows": rows,
 		})
 	}
-	// The API belongs with the things that carry a checkbox, not in the read-only
-	// facts strip: a subdomain API (api.example.com) is already pickable under
-	// Hosts, and the path-based one is the same thing on a site that routes
-	// instead of subdomaining. Leaving it unpickable made the two inconsistent.
+	// The API carries a checkbox like Hosts' rows: a path-based API is the
+	// same thing on a site that routes instead of subdomaining.
 	if row := apiRow(host, facts.API); row != nil {
 		groups = append(groups, map[string]any{
 			"title": "API", "source": facts.API.Source, "rows": []map[string]any{row},
@@ -2245,9 +1936,8 @@ func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	if stages := stagesFrom(res); len(stages) > 0 {
 		body["stages"] = stages
 	}
-	// How many of these rows an account can actually watch. Sent by the server
-	// because the plan's numbers live in one place; a landing that hardcoded "3"
-	// would be a second source for a number Pricing already owns.
+	// How many rows an account can watch, sent by the server: the plan's
+	// numbers live in one place.
 	body["watchLimit"] = h.freeWatchLimit(r.Context())
 
 	h.cacheCheck(host, body)
@@ -2256,7 +1946,7 @@ func (h *WriteAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 
 // freeWatchLimit is what a brand-new account may watch. The anonymous flow can
 // only ever create a Free tenant, so that is the plan to ask about.
-func (h *WriteAPI) freeWatchLimit(ctx context.Context) int32 {
+func (h *writeAPI) freeWatchLimit(ctx context.Context) int32 {
 	limit, err := h.pool.Queries().GetPlanHTTPChecks(ctx, "Free")
 	if err != nil || limit <= 0 {
 		return 3
@@ -2264,19 +1954,8 @@ func (h *WriteAPI) freeWatchLimit(ctx context.Context) int32 {
 	return limit
 }
 
-// stagesFrom turns the executor's phase timings into the waterfall. A phase that
-// never ran is left out rather than sent as 0: the difference between "TLS took
-// no time" and "there was no TLS" is the whole point of the row.
-//
-// Two of the five are derived, and the reason is a trap worth naming.
-// Result.DNSMs/ConnectMs/TLSMs are durations OF their phase, but Result.TTFBMs
-// is measured from the start of the request, so it already contains all three.
-// Emitting it as a fourth bar would describe this 546 ms request as 958 ms. The
-// bar a reader wants there is what is left once the connection exists — the
-// server thinking — so `wait` is TTFB minus the phases that preceded it, and
-// `html` is the tail after the first byte (httptrace has no "body done" hook).
-// With those two derived, the bars sum to the total, which is the only property
-// that makes a waterfall readable.
+// stagesFrom turns phase timings into the waterfall. TTFBMs is measured from
+// request start and already holds dns+tcp+tls, so wait/html are derived.
 func stagesFrom(res executor.Result) []map[string]any {
 	stages := make([]map[string]any, 0, 5)
 	add := func(label string, ms uint32) {
@@ -2290,17 +1969,8 @@ func stagesFrom(res executor.Result) []map[string]any {
 	add("tcp", res.ConnectMs)
 	add("tls", res.TLSMs)
 
-	// The derived two are different: they are computed from timings we already
-	// hold, so once a response arrived they ARE measured — including when they
-	// round down to zero. A 10 KB single-page shell really does arrive in the
-	// same millisecond as its first byte, and reporting that as the no-data
-	// marker would say "we never looked" about the one phase we can always
-	// compute. Emitted at 0 rather than dropped (the spec's rule: absence means
-	// unmeasured, never "took zero").
-	//
-	// The comparisons stay guarded: a reused connection or a coarse clock can put
-	// the phases past TTFB, and an underflow on uint32 would render a bar roughly
-	// four billion milliseconds wide.
+	// The derived two ARE measured once a response arrived: emitted at 0
+	// rather than dropped. The guards prevent uint32 underflow.
 	preTTFB := res.DNSMs + res.ConnectMs + res.TLSMs
 	if res.TTFBMs >= preTTFB {
 		stages = append(stages, map[string]any{"label": "wait", "ms": res.TTFBMs - preTTFB})
@@ -2311,10 +1981,8 @@ func stagesFrom(res executor.Result) []map[string]any {
 	return stages
 }
 
-// networkRowsFrom reports one row per fact the probe actually established.
-// Facts it cannot measure yet (error page, security headers, health URL) are
-// absent, and the landing renders absence as unknown — the alternative, a
-// plausible-looking constant, is what the strip used to do.
+// networkRowsFrom reports one row per fact the probe established. Facts it
+// cannot measure yet are absent; the landing renders absence as unknown.
 func networkRowsFrom(res executor.Result, status string) []map[string]any {
 	rows := make([]map[string]any, 0, 4)
 	if res.DNSAddrs > 0 {
@@ -2337,9 +2005,7 @@ func networkRowsFrom(res executor.Result, status string) []map[string]any {
 			"label": "tls", "value": res.TLSVersion, "note": note, "status": tlsStatus,
 		})
 	}
-	// RESPONSE is the whole request as the visitor experiences it. It replaced
-	// three named cities on the landing: there is one probe region, so Frankfurt
-	// / Ashburn / Singapore were a promise the fleet could not keep.
+	// RESPONSE is the whole request as the visitor experiences it.
 	responseNote := fmt.Sprintf("HTTP %d", res.StatusCode)
 	if !res.OK {
 		responseNote = res.ErrorClass
@@ -2359,22 +2025,18 @@ func networkRowsFrom(res executor.Result, status string) []map[string]any {
 	return rows
 }
 
-// pageRows renders the discovered pages as pickable rows. `recommended` is the
-// server's opinion of a sensible default, so the landing stops keeping its own
-// list of which boxes start ticked — it had one, keyed by mock ids, and it went
-// on counting rows that were no longer on screen.
+// pageRows renders discovered pages as pickable rows; `recommended` is the
+// server's opinion, so the landing keeps no list of its own.
 func pageRows(pages []discover.Page) []map[string]any {
 	rows := make([]map[string]any, 0, len(pages))
 	for _, p := range pages {
-		// Every branch below writes meta, including the default — seeding it with
-		// the bare source only looked like a fallback.
+		// Every branch below writes meta, including the default.
 		var meta string
 		rowStatus := "ok"
 		switch {
 		case p.Status == 0 && p.Error != "":
-			// Asked, and nothing came back. For a monitoring product this is the
-			// most interesting row on the screen, not a gap: a host the site
-			// links but that does not answer is already broken.
+			// Asked, nothing came back: a linked host that does not answer is
+			// already broken, not a gap.
 			meta, rowStatus = p.Source+" · no answer ("+p.Error+")", "down"
 		case p.Status == 0:
 			// Found, never probed: the budget ran out. Not down.
@@ -2395,10 +2057,8 @@ func pageRows(pages []discover.Page) []map[string]any {
 	return rows
 }
 
-// apiRow renders the app's API as a pickable row. It returns nil when there is
-// nothing to offer — unmeasured, or measured and absent — because a group with
-// no target to watch is not a choice, and the strip's no-data marker is for
-// facts, not for things you tick.
+// apiRow renders the API as a pickable row, or nil when there is nothing to
+// offer: the no-data marker is for facts, not for things you tick.
 func apiRow(host string, a *discover.API) map[string]any {
 	if a == nil || a.Path == "" {
 		return nil
@@ -2410,9 +2070,8 @@ func apiRow(host string, a *discover.API) map[string]any {
 		// a guarded one is worth saying out loud.
 		note, rowStatus = fmt.Sprintf("%s · HTTP %d, guarded", a.Source, a.Status), "ok"
 	case !a.Confirmed:
-		// The base is real — the app calls through it — but the root itself does
-		// not answer, so a check on it would pin a permanent 404. Offer it, say
-		// so, and do NOT pre-tick it.
+		// The base is real but the root does not answer: offer it and do NOT
+		// pre-tick it.
 		note, rowStatus = fmt.Sprintf("%s · root answers %d, pick an endpoint under it", a.Source, a.Status), "check"
 	}
 	return map[string]any{
@@ -2423,9 +2082,8 @@ func apiRow(host string, a *discover.API) map[string]any {
 	}
 }
 
-// discoveredRows renders what discover established. A fact it could not measure
-// produces no row at all, and the landing shows its no-data marker there — the
-// one thing none of these may do is guess.
+// discoveredRows renders what discover established; unmeasured facts produce
+// no row at all. None of these may guess.
 func discoveredRows(f discover.Facts) []map[string]any {
 	rows := make([]map[string]any, 0, 3)
 
@@ -2490,44 +2148,27 @@ func redirectNote(n uint32) string {
 	return "followed to the final URL"
 }
 
-// checkAllow applies a per-replica cooldown per source-IP. The host is no longer
-// part of it: a second visitor asking about a popular domain gets the cached
-// answer (cachedCheck) instead of a refusal, which is both a better answer and
-// fewer requests to that domain.
-func (h *WriteAPI) checkAllow(ip, _ string) bool {
+// checkAllow applies a per-replica cooldown per source-IP. Host is not part
+// of it: repeat visitors get the cached answer instead.
+func (h *writeAPI) checkAllow(ip, _ string) bool {
 	return h.allowOnce("check", ip, 10*time.Second)
 }
 
-// watchAllow throttles the anonymous watch, in a bucket of its OWN.
-//
-// It used to share the check's: a visitor checked a site, ticked a row and
-// pressed Watch — all of it inside the check's 10 s cooldown — and got a 429.
-// The landing treats a failed watch as "no backend" and walks on to the sample
-// status page, so the conversion silently created no account at all. The two
-// endpoints also cost different things: a check spends up to discover.MaxRequests
-// against a stranger's server, a watch spends one guarded probe and some rows
-// here. One bucket could not price both.
-func (h *WriteAPI) watchAllow(ip string) bool {
+// watchAllow throttles the anonymous watch in a bucket of its OWN: a check
+// and a watch cost different things; one bucket could not price both.
+func (h *writeAPI) watchAllow(ip string) bool {
 	return h.allowOnce("watch", ip, 3*time.Second)
 }
 
-// trackAllow throttles /public/track. One batch per second per IP is the
-// honest reading of the 60 req/min/IP budget (plan: product-analytics
-// §Decision 2): the client coalesces events (front queues 1.5 s / 20 events),
-// so a compliant visitor sends far less than that. Same per-replica caveat
-// as allowOnce — two ucapi replicas admit up to 2× — accepted for the MVP
-// exactly as the check cooldown is.
-func (h *WriteAPI) trackAllow(ip string) bool {
+// trackAllow throttles /public/track: one batch per second per IP. The
+// client coalesces, so a compliant visitor sends far less.
+func (h *writeAPI) trackAllow(ip string) bool {
 	return h.allowOnce("track", ip, time.Second)
 }
 
-// publicTrack is the first-party analytics collection endpoint (plan:
-// product-analytics §Decision 2). Always 204 (429 on limit): the write is
-// asynchronous, invalid events are dropped individually, and a collector that
-// answers errors teaches clients to retry. The uc_vid cookie is minted here
-// — the ONLY door that mints — and set on the response; server-side event
-// doors (check/watch/sign-in) resolve the cookie but never create one.
-func (h *WriteAPI) publicTrack(w http.ResponseWriter, r *http.Request) {
+// publicTrack is the analytics collector: always 204 (429 on limit), and
+// the ONLY door that mints the uc_vid cookie; others resolve, never create.
+func (h *writeAPI) publicTrack(w http.ResponseWriter, r *http.Request) {
 	if !h.trackAllow(analytics.ClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
@@ -2535,18 +2176,14 @@ func (h *WriteAPI) publicTrack(w http.ResponseWriter, r *http.Request) {
 	token, ok := analytics.VisitorToken(r)
 	if !ok {
 		token = analytics.MintVisitorToken()
-		// Secure in prod, matching the session cookie's rule (!devMode, see
-		// session.SetCookie): TLS ends at the edge, never at ucapi, so r.TLS
-		// is always nil here and would never mark the cookie Secure. Dev runs
-		// plain HTTP through Caddy on :80, where a Secure cookie is silently
-		// dropped — the visitor would get a new id on every request.
+		// Secure in prod: TLS ends at the edge so r.TLS is always nil here;
+		// dev HTTP would silently drop a Secure cookie.
 		analytics.SetVisitorCookie(w, token, !h.devMode)
 	}
 	events, dropped := analytics.ParseBody(r.Body)
 	h.rec.CountInvalid(dropped)
-	// A live session stamps person/tenant onto the event rows (§Decision 4):
-	// /app traffic and anonymous traffic become one behavioural stream. Public
-	// route, so a session read failure simply means anonymous.
+	// A live session stamps person/tenant onto the event rows; a read failure
+	// simply means anonymous.
 	var personID, tenantID int64
 	if s, err := h.sess.FromRequest(r.Context(), r); err == nil {
 		personID, tenantID = s.PersonID, s.TenantID
@@ -2558,11 +2195,9 @@ func (h *WriteAPI) publicTrack(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// allowOnce is the shared per-replica cooldown: one timestamp per (bucket, ip).
-// Per-replica is the honest MVP bound — two ucapi replicas admit up to 2× — and
-// the sliding window that holds across replicas lives in Postgres for the codes
-// this door issues (magic_link_ip).
-func (h *WriteAPI) allowOnce(bucket, ip string, cooldown time.Duration) bool {
+// allowOnce is the shared per-replica cooldown: one timestamp per (bucket, ip);
+// two replicas admit 2×. Cross-replica windows live in Postgres.
+func (h *writeAPI) allowOnce(bucket, ip string, cooldown time.Duration) bool {
 	h.checkMu.Lock()
 	defer h.checkMu.Unlock()
 	now := time.Now()
@@ -2581,14 +2216,9 @@ func (h *WriteAPI) allowOnce(bucket, ip string, cooldown time.Duration) bool {
 	return true
 }
 
-// explainAllow admits one explain request for a tenant, or refuses when the
-// tenant already holds explainBurst slots inside the last minute; on refusal
-// the second return value is how long until the oldest slot ages out, for the
-// Retry-After header. A slot is recorded only when admitted, so a refused
-// burst never extends its own lockout. The map is made lazily because the
-// handler tests build WriteAPI by struct literal, which skips NewWriteAPI's
-// initialisation.
-func (h *WriteAPI) explainAllow(tenantID int64) (bool, time.Duration) {
+// explainAllow admits or refuses one explain per tenant; refusal returns the
+// Retry-After. The map is lazy: tests build writeAPI by struct literal.
+func (h *writeAPI) explainAllow(tenantID int64) (bool, time.Duration) {
 	h.checkMu.Lock()
 	defer h.checkMu.Unlock()
 	if h.explainSeenAt == nil {
@@ -2622,14 +2252,7 @@ func (h *WriteAPI) explainAllow(tenantID int64) (bool, time.Duration) {
 }
 
 // cachedCheck returns a previous answer for this host, if it is still fresh.
-//
-// This is the piece that makes discovery affordable: a check now costs up to
-// discover.MaxRequests against somebody else's server, and without a cache every
-// visitor curious about the same popular domain would spend them again. Two
-// replicas mean the ceiling is two crawls per host per TTL, which is bounded and
-// harmless — a shared table in Postgres is the right home once it is not (a
-// third replica, or a crawl that grows), and plan §6.1 asked for one.
-func (h *WriteAPI) cachedCheck(host string) (map[string]any, bool) {
+func (h *writeAPI) cachedCheck(host string) (map[string]any, bool) {
 	h.checkMu.Lock()
 	defer h.checkMu.Unlock()
 	entry, ok := h.checkCache[host]
@@ -2639,7 +2262,7 @@ func (h *WriteAPI) cachedCheck(host string) (map[string]any, bool) {
 	return entry.body, true
 }
 
-func (h *WriteAPI) cacheCheck(host string, body map[string]any) {
+func (h *writeAPI) cacheCheck(host string, body map[string]any) {
 	h.checkMu.Lock()
 	defer h.checkMu.Unlock()
 	now := time.Now()
@@ -2653,11 +2276,9 @@ func (h *WriteAPI) cacheCheck(host string, body map[string]any) {
 	}
 }
 
-func (h *WriteAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
-	// The anonymous watch is the growth loop (plan §6.2): a host typed on the
-	// landing page becomes a real account with a real check, provisioned by
-	// e-mail. It creates exactly what the magic link would — same tenant, same
-	// project, same key — so the two doors cannot produce different accounts.
+func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
+	// A host typed on the landing becomes a real account: it creates exactly
+	// what the magic link would, so the two doors agree.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 	var req struct {
 		Host    string   `json:"host"`
@@ -2687,28 +2308,24 @@ func (h *WriteAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The project is named after the site the visitor asked about, so their
-	// workspace opens on their own domain. An account that already exists keeps
-	// the name it has.
+	// The project is named after the site asked about; an existing account
+	// keeps the name it has.
 	host := bareHost(req.Host)
 	_, tenantID, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
 	if err != nil || tenantID == 0 {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The watch IS the conversion moment (plan: product-analytics §Decision 5):
-	// the event goes to ClickHouse with the host only; the e-mail — the
-	// visitor's identity — goes to the Postgres visitor row and nowhere else.
+	// The event goes to ClickHouse with the host only; the e-mail goes to the
+	// Postgres visitor row and nowhere else.
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 	h.rec.LinkEmail(ctx, req.Email)
 	var projectID int64
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
 
-	// The host itself, then whatever pages were ticked. The client's list is not
-	// trusted: every target has to resolve to the same host it asked about, or
-	// this endpoint becomes a way to make us watch — and repeatedly request —
-	// somebody else's server by posting a URL.
+	// The client's target list is not trusted: each must belong to the asked
+	// host, or this becomes a probe-enrolment service for strangers.
 	wanted := append([]string{target}, sameHostTargets(target, req.Targets)...)
 	limit := int(h.freeWatchLimit(ctx))
 	if len(wanted) > limit {
@@ -2748,11 +2365,8 @@ func (h *WriteAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	if slug == "" {
 		slug = "prj-" + strconv.FormatInt(projectID, 10)
 	}
-	// The page opens under the site's own name rather than an empty title. Its
-	// components need no seeding: they ARE the monitors created above, published
-	// unless the owner says otherwise, so the page shows exactly what was ticked.
-	// DO NOTHING, never an UPDATE: a returning visitor may have retitled it, and
-	// a slug they have already handed out must not change under them.
+	// Components ARE the monitors created above. ON CONFLICT DO NOTHING: a
+	// handed-out slug must not change under a returning visitor.
 	_, _ = h.pool.Raw().Exec(ctx,
 		`INSERT INTO status_page (tenant_id, project_id, slug, title)
 		 VALUES ($1, $2, $3, $4) ON CONFLICT (slug) DO NOTHING`,
@@ -2761,12 +2375,8 @@ func (h *WriteAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, projectID).Scan(&slug)
 
-	// A way in. The code is the sign-in door's own — one-time, expiring,
-	// attempt-capped. In prod it leaves by e-mail only, through the same mailer
-	// the sign-in door uses: handing a login token back to an anonymous caller
-	// who typed somebody else's address is account takeover, not onboarding.
-	// Dev echoes it so the flow is testable without an inbox, exactly as
-	// POST /v1/auth/magic-link does.
+	// A way in: the sign-in door's own code, e-mail only in prod (handing it
+	// back anonymously is account takeover). Dev echoes it.
 	login := map[string]any{}
 	if code, cerr := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r)); cerr == nil {
 		// Best-effort in both modes: dev never depends on an inbox, and in
@@ -2789,14 +2399,8 @@ func (h *WriteAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sameHostTargets keeps only the targets that belong to the host the visitor
-// asked about. The landing sends back row ids, which ARE urls, so this is the
-// boundary where a client-supplied URL stops being trusted: without it, posting
-// {"host":"mine.com","targets":["https://victim.example/heavy"]} would enrol a
-// stranger's endpoint into our probe schedule every 5 minutes, forever.
-//
-// The SSRF guard still runs when the check executes; this is the cheaper,
-// earlier refusal, and the one that keeps the schedule clean.
+// sameHostTargets keeps only targets belonging to the asked host: without it
+// a posted URL enrols a stranger's endpoint into the probe schedule forever.
 func sameHostTargets(base string, targets []string) []string {
 	root, err := url.Parse(base)
 	if err != nil {
@@ -2809,8 +2413,7 @@ func sameHostTargets(base string, targets []string) []string {
 		if err != nil {
 			continue
 		}
-		// The host itself or one of its subdomains — an api./app. host is a
-		// thing its owner needs watched. Suffix-matched with the dot, so
+		// The host or one of its subdomains, suffix-matched with the dot, so
 		// "harpa.ai.evil.com" cannot pass as a subdomain of "harpa.ai".
 		if u.Host != root.Host && !strings.HasSuffix(u.Host, "."+root.Host) {
 			continue
@@ -2829,14 +2432,8 @@ func sameHostTargets(base string, targets []string) []string {
 	return out
 }
 
-// slugFromHost turns a host into the status page's public address: harpa.ai
-// becomes /status/harpa-ai. The slug is the one part of this product a customer
-// hands to their own users, so it says whose page it is — "prj-20" says nothing
-// and leaks how many accounts exist.
-//
-// Formatting only. Uniqueness is the caller's job (the column is UNIQUE across
-// tenants, so the second harpa.ai has to take another one) — keeping the two
-// apart is what makes this testable without a database.
+// slugFromHost turns a host into the page's public slug (harpa.ai becomes
+// harpa-ai). Formatting only: uniqueness is the caller's job.
 func slugFromHost(host string) string {
 	var b strings.Builder
 	prevDash := true // leading dashes are never written
@@ -2859,16 +2456,14 @@ func slugFromHost(host string) string {
 	return slug
 }
 
-// claimSlug returns a free status-page slug for host, or "" to fall back to the
-// project id. The suffix is random rather than a counter: a counter tells the
-// second person to watch a host that somebody else is already watching it.
-func (h *WriteAPI) claimSlug(ctx context.Context, host string, projectID int64) string {
+// claimSlug returns a free slug for host, or "" to fall back to the project
+// id. The suffix is random: a counter would leak who watches what.
+func (h *writeAPI) claimSlug(ctx context.Context, host string, projectID int64) string {
 	return claimSlugFor(ctx, h.pool, host, projectID)
 }
 
-// claimSlugFor is the pool-level claim both doors share: the watch door claims
-// at provisioning, the sign-in door re-claims the moment its project is named
-// (audit §13 / D10).
+// claimSlugFor is the pool-level claim both doors share: the watch door at
+// provisioning, the sign-in door when its project is named.
 func claimSlugFor(ctx context.Context, pool *pg.Pool, host string, projectID int64) string {
 	base := slugFromHost(host)
 	if base == "" {
@@ -2892,11 +2487,8 @@ func claimSlugFor(ctx context.Context, pool *pg.Pool, host string, projectID int
 	return ""
 }
 
-// bareHost is what the visitor typed reduced to a domain: it names their project
-// and titles their status page, so it must carry no scheme, no path and no port.
-// The landing sends whatever was in the field ("https://mysite.io/pricing" is a
-// perfectly ordinary paste), and a workspace called "https://mysite.io/pricing"
-// is wrong on every screen that shows it.
+// bareHost reduces what the visitor typed to a bare domain: it names their
+// project and titles their status page, so no scheme, path or port may ride.
 func bareHost(raw string) string {
 	h := strings.TrimSpace(raw)
 	h = strings.TrimPrefix(strings.TrimPrefix(h, "https://"), "http://")
@@ -2906,11 +2498,8 @@ func bareHost(raw string) string {
 	return h
 }
 
-// The name comes from the TARGET, not from the address that was typed. Built the
-// other way, every subdomain the discovery found — api.harpa.ai, app.harpa.ai —
-// was labelled "harpa.ai", and a status page listing three components with one
-// name is a list nobody can read. `host` remains the fallback for a target we
-// cannot parse.
+// The name comes from the TARGET, not the typed address, so api.harpa.ai and
+// app.harpa.ai are not both labelled "harpa.ai". `host` is the fallback.
 func monitorName(host, target string) string {
 	u, err := url.Parse(target)
 	if err != nil || u.Host == "" {
@@ -2922,7 +2511,7 @@ func monitorName(host, target string) string {
 	return u.Host
 }
 
-func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
+func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	// The public page shows the same measured components as the config screen,
 	// minus the ones the owner unpublished. Nothing here is typed in by hand.
 	ctx := r.Context()
@@ -2930,11 +2519,8 @@ func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	var tenantID int64
 	if err := h.pool.Raw().QueryRow(ctx,
 		`SELECT tenant_id FROM status_page WHERE slug = $1`, slug).Scan(&tenantID); err != nil {
-		// A page nobody has configured yet still resolves by its project slug, so
-		// a fresh account can share the link before touching the settings. The
-		// parsed id is a PROJECT id and is kept apart from the tenant id: sharing
-		// one variable meant an unknown project fell through as a tenant id, and
-		// the page then published whichever tenant happened to hold that number.
+		// A page not yet configured resolves by its project slug. The parsed id
+		// is a PROJECT id, kept apart from the tenant id.
 		var projectID int64
 		if _, perr := fmt.Sscanf(slug, "prj-%d", &projectID); perr != nil || projectID == 0 {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
@@ -2954,10 +2540,8 @@ func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 		"network":    []map[string]any{},
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
 		"poweredBy":  cfg.ShowPoweredBy,
-		// Whether the SECTION is published, which is not the same question as
-		// whether it is empty. Sending only the list meant a page with incidents
-		// switched off still drew the heading with "No incidents recorded" under
-		// it — the owner hid a section and got a section saying nothing is wrong.
+		// Whether the SECTION is published, not whether it is empty: the owner
+		// who hid a section must not get a heading under it.
 		"showIncidents": cfg.ShowIncidents,
 	}
 	// The owner's switch decides whether the section is published at all; what it
@@ -2968,11 +2552,8 @@ func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.ShowIncidents {
 		incidents := []map[string]any{}
 		if rows, rerr := h.pool.Raw().Query(ctx,
-			// monitor_id IS NOT NULL drops the incidents of DELETED checks: the
-			// component is gone from the page, and a chronicle about a service
-			// the reader cannot see in the list explains nothing (owner
-			// decision, 2026-08-24). Detector incidents are project-scoped and
-			// already excluded by the detector filter.
+			// monitor_id IS NOT NULL drops incidents of DELETED checks: the
+			// component is gone from the page; the detector filter does the rest.
 			`SELECT title, status, detected_at FROM incident
 			  WHERE tenant_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
 			  ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
@@ -2993,8 +2574,6 @@ func (h *WriteAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
-
-// --- helpers ---
 
 func pathLast(path string) string {
 	parts := strings.Split(strings.TrimRight(path, "/"), "/")
@@ -3017,7 +2596,5 @@ var timeNowImpl = func() interface{ Unix() int64 } {
 type realTime struct{}
 
 func (realTime) Unix() int64 {
-	return time.Now().Unix() // real clock (was a 0 stub for compilation)
+	return time.Now().Unix()
 }
-
-var _ = context.Background

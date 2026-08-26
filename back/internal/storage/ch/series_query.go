@@ -6,10 +6,8 @@ import (
 	"time"
 )
 
-// ErrorWindow sums the 1-minute rollup over [from, to): error+fatal lines and
-// all lines, the pair the ErrorRate detector divides. series_1m is a
-// SummingMergeTree, so it is only ever read through sum() — raw rows would
-// undercount the parts not yet merged away.
+// ErrorWindow sums the 1-minute rollup over [from, to): error+fatal lines
+// and all lines. series_1m is a SummingMergeTree: only read through sum().
 func (c *Conn) ErrorWindow(ctx context.Context, tenantID, projectID int64, from, to time.Time) (errs, total uint64, err error) {
 	rows, err := c.db.Query(ctx, `
 		SELECT sumIf(lines, level IN ('error','fatal')) AS errs, sum(lines) AS total
@@ -29,14 +27,8 @@ func (c *Conn) ErrorWindow(ctx context.Context, tenantID, projectID int64, from,
 	return errs, total, rows.Err()
 }
 
-// ErrorRateBaseline computes the median and the median absolute deviation of
-// the per-5-minute error rate over [from, to) — the baseline the ErrorRate
-// detector's z-score needs. Two sequential queries (D10), no CTE tricks: the
-// median first, then the MAD with the first result bound as a parameter.
-//
-// An empty baseline is valid input, not an error: ClickHouse's quantile reports
-// it as NaN, which is normalized to the (0, 0, nil) contract here because NaN
-// would silently defeat every comparison in the detector's MAD<=0 fallback.
+// ErrorRateBaseline computes the median and MAD of the per-5-minute error
+// rate over [from, to); an empty baseline is the (0, 0, nil) contract, not NaN.
 func (c *Conn) ErrorRateBaseline(ctx context.Context, tenantID, projectID int64, from, to time.Time) (median, mad float64, err error) {
 	mRows, err := c.db.Query(ctx, `
 		SELECT quantile(0.5)(rate) FROM (

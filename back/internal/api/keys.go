@@ -1,5 +1,5 @@
-// Key management: issuance (on signup), rotation (with 24h overlap window),
-// and the GET /v1/keys response that shows the prefix + recent usage.
+// Key management: issuance on signup, rotation, and the GET /v1/keys
+// response showing prefix + recent usage.
 
 package api
 
@@ -8,8 +8,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -17,17 +17,17 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// Keys handles GET /v1/keys and POST /v1/keys/rotate.
-type Keys struct {
+// keys handles GET /v1/keys and POST /v1/keys/rotate.
+type keys struct {
 	pool *pg.Pool
 	sess *session.Manager
 }
 
-func NewKeys(p *pg.Pool, sm *session.Manager) *Keys {
-	return &Keys{pool: p, sess: sm}
+func NewKeys(p *pg.Pool, sm *session.Manager) *keys {
+	return &keys{pool: p, sess: sm}
 }
 
-func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
@@ -41,7 +41,7 @@ func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		// Rotating the key breaks every deployed SDK — a settings act (§7.4).
+		// Rotating the key breaks every deployed SDK: a settings act.
 		if !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 			writeAPIErr(w, http.StatusForbidden, "notify_role")
 			return
@@ -52,7 +52,7 @@ func (h *Keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	key, err := h.pool.Queries().GetAPIKeyForTenant(ctx, tenantID)
 	if err != nil {
@@ -77,7 +77,7 @@ func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"key": map[string]any{
-			"id":        "key_" + intToStr(key.ID),
+			"id":        "key_" + strconv.FormatInt(key.ID, 10),
 			"prefix":    "uc_live_" + key.Prefix, // identifier only — the secret is never stored, never returned here
 			"createdAt": key.CreatedAt,
 		},
@@ -85,10 +85,9 @@ func (h *Keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	})
 }
 
-func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 
-	// Generate a new key.
 	secret := randomHex() // 32 hex chars; first 12 = prefix, rest = secret
 	prefix := secret[:12]
 	fullKey := "uc_live_" + secret
@@ -105,15 +104,15 @@ func (h *Keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	}
 
 	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"id":        "key_" + intToStr(row.ID),
+		"id":        "key_" + strconv.FormatInt(row.ID, 10),
 		"prefix":    "uc_live_" + prefix, // what GET /v1/keys will list from now on
 		"value":     fullKey,             // shown exactly once
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
-// IssueKey creates an API key for a new project. Called from the signup flow.
-func IssueKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64) (fullKey string, err error) {
+// issueKey creates an API key for a new project. Called from the signup flow.
+func issueKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64) (fullKey string, err error) {
 	secret := randomHex()
 	prefix := secret[:12]
 	fullKey = "uc_live_" + secret
@@ -134,19 +133,3 @@ func randomHex() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
-func intToStr(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[pos:])
-}
-
-var _ = json.NewEncoder

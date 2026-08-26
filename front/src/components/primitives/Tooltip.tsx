@@ -2,39 +2,26 @@ import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import styles from './Tooltip.module.css';
 
-export interface TooltipProps {
+interface TooltipProps {
   content: ReactNode;
   children: ReactNode;
   /** Applied to the trigger, so a caller can hide the whole tooltip at a breakpoint. */
   className?: string;
-  /**
-   * The child already takes focus on its own (a button, a link). The wrapper
-   * then stops being a tab stop — otherwise every tooltipped button costs two
-   * presses of Tab and the first one lands on a span that announces nothing.
-   * Graphic triggers — bars, dots — leave this off and are reached through the
-   * wrapper, which is their only way to a keyboard.
-   */
+  /** The child takes focus on its own (button, link), so the wrapper stops
+   *  being a tab stop; graphic triggers keep the wrapper as their only path. */
   interactiveChild?: boolean;
 }
 
 const GAP = 8;
 
-/**
- * Custom tooltip — never the native `title` attribute (brief §2.1).
- * Fixed-position, placed below the trigger, but clamped to the viewport: on a
- * narrow screen a trigger near an edge (a health-line segment, a right-column
- * value) would otherwise push its bubble off-screen.
- */
+/** Fixed-position tooltip, clamped to the viewport: near an edge on a narrow
+ *  screen the bubble would otherwise go off-screen. */
 export function Tooltip({ content, children, className, interactiveChild = false }: TooltipProps) {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
 
-  /**
-   * Ref callbacks run in the commit phase — the bubble is in the DOM but not
-   * yet painted — so measuring and positioning here costs one paint and needs
-   * no state. Position must not be state: it would paint once at the previous
-   * trigger's coordinates before the correction landed.
-   */
+  /** Position in the ref callback, never in state: state would paint once at
+   *  the previous trigger's coordinates before the correction landed. */
   const place = useCallback((bubble: HTMLDivElement | null) => {
     if (!bubble || !triggerRef.current) return;
     const anchor = triggerRef.current.getBoundingClientRect();

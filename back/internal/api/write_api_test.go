@@ -2,9 +2,8 @@ package api
 
 import "testing"
 
-// Decision 9: exactly the three Explain endpoints leave the role gate — they
-// are POSTs on the wire, reads in substance. Every other non-GET stays behind
-// it, including paths that merely contain "explain" as a segment.
+// Exactly the three Explain endpoints leave the role gate: POSTs on the wire,
+// reads in substance. Paths that merely contain "explain" stay behind it.
 func TestExplainPath(t *testing.T) {
 	for _, p := range []string{
 		"/v1/incidents/123/explain",

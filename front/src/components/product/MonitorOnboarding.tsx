@@ -18,18 +18,15 @@ const STATUS_WORD: Record<WatchStatus, string> = {
 	nodata: 'no data',
 };
 
-/** The watch rows' dot, as the inline background/border pair the public page
- *  uses: the colour is data, not chrome. `nodata` is an outline, because
- *  nothing has been measured and a filled dot would claim a state that never
- *  ran. */
+/** The watch rows' dot: `nodata` is an outline; nothing was measured, and a
+ *  filled dot would claim a state that never ran. */
 function watchDot(status: WatchStatus): { background: string; border: string } {
 	if (status === 'nodata') return { background: 'transparent', border: '1px solid var(--nodata)' };
 	return { background: `var(--${status})`, border: 'none' };
 }
 
-/** Which rows arrive ticked: the recommended ones, in group order, capped at
- *  the check response's own watchLimit — the cap is the server's, never one
- *  invented here. */
+/** Which rows arrive ticked: recommended ones, group order, capped at the
+ *  server's own watchLimit. */
 function preTick(res: CheckResponse): Record<string, boolean> {
 	const picks: Record<string, boolean> = {};
 	let left = res.watchLimit ?? Number.POSITIVE_INFINITY;
@@ -44,11 +41,8 @@ function preTick(res: CheckResponse): Record<string, boolean> {
 	return picks;
 }
 
-/** What a zero-monitor instance sees on /monitors instead of an empty table:
- *  type an address (any spelling — upcontrol.io or https://upcontrol.io/ both work),
- *  the public discovery check scans it, and Start watching creates the
- *  ticked checks. Nothing is created — and nothing probed on a schedule —
- *  until that button is pressed. */
+/** What a zero-monitor instance sees instead of an empty table: type an
+ *  address, discovery scans it, Start watching creates the ticked checks. */
 export function MonitorOnboarding() {
 	const [host, setHost] = useState('');
 	const [phase, setPhase] = useState<'idle' | 'checking' | 'results'>('idle');
@@ -72,19 +66,16 @@ export function MonitorOnboarding() {
 				setTicked(preTick(res));
 				setPhase('results');
 			})
-			// Every failure is the same sentence. The reader cannot act on the
-			// difference from this screen, and "we could not check" is the whole
-			// of what happened either way.
+			// Every failure is the same sentence: the reader cannot act on the
+			// difference from this screen.
 			.catch(() => {
 				setCheckFailed(true);
 				setPhase('idle');
 			});
 	}
 
-	// Sequential on purpose: one refusal stops the run instead of racing the
-	// rest past it. Every exit path ends in the same broadcast, and no
-	// navigation: the monitors list flips to its table by itself when the
-	// re-read answers with a non-empty list.
+	// Sequential on purpose: one refusal stops the run; no navigation, the
+	// re-read flips the monitors list to its table by itself.
 	async function createMonitors() {
 		setCreating(true);
 		setSaveFailed(false);

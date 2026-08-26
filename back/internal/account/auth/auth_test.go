@@ -75,10 +75,8 @@ func TestValidateCode_Empty(t *testing.T) {
 }
 
 func TestValidateCode_NotAnOracle(t *testing.T) {
-	// Every failure path must look identical to a caller — there is no separate
-	// "expired" vs "wrong" signal to leak which emails exist or which codes were
-	// issued. validateCode returns only a bool, so this holds by construction; the
-	// test pins it.
+	// Every failure path must look identical: no separate "expired" vs "wrong"
+	// signal to leak which emails exist. validateCode returns only a bool.
 	correct := codeRecord{Hash: hashCode(t, "abcd1234"), Expires: future()}
 	expired := codeRecord{Hash: hashCode(t, "abcd1234"), Expires: time.Now().Add(-time.Minute)}
 	redeemed := codeRecord{Hash: hashCode(t, "abcd1234"), Expires: future(), Redeemed: true}
@@ -133,11 +131,8 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
-// The magic-link door has the same exposure the Google one does: it needs no
-// cookie from a victim because it installs one. An attacker who mails a code to
-// their OWN address can cross-site POST the redeem and leave the reader signed
-// into the attacker's tenant. The guard runs before the pool is touched, which
-// is why a nil pool is enough to test it.
+// The magic-link door installs a session, so a code mailed to the attacker's
+// own address must not be cross-site POSTable into the reader's browser.
 func TestMagicLinkRefusesACrossSitePost(t *testing.T) {
 	t.Parallel()
 	h := NewMagicLink(nil, nil, true, nil, nil, slog.New(slog.DiscardHandler))
@@ -188,9 +183,8 @@ func TestNormalizeEmailFoldsCaseAndSpace(t *testing.T) {
 func future() time.Time { return time.Now().Add(10 * time.Minute) }
 
 func TestInitials(t *testing.T) {
-	// The avatar's two letters come from whatever the account actually has: a
-	// full name, then a single word, then the address. "U" is the last resort,
-	// never a slice of an empty string (which would panic).
+	// The avatar's two letters come from whatever the account has; "U" is the
+	// last resort, never a slice of an empty string.
 	cases := []struct{ name, email, want string }{
 		{"Ada Lovelace", "ada@example.com", "AL"},
 		{"ada", "ada@example.com", "AD"},
@@ -206,9 +200,8 @@ func TestInitials(t *testing.T) {
 }
 
 func TestNameFromEmail(t *testing.T) {
-	// A new account is named from the local part; an address with no local part
-	// (or no @ at all) must come back unchanged rather than empty, or the person
-	// row is created nameless.
+	// An address with no local part (or no @) comes back unchanged rather than
+	// empty, or the person row is created nameless.
 	cases := []struct{ in, want string }{
 		{"ada@example.com", "ada"},
 		{"ada+upcontrol@example.com", "ada+upcontrol"},
@@ -223,9 +216,8 @@ func TestNameFromEmail(t *testing.T) {
 }
 
 func TestCodeRecordFrom_MapsRedeemedAndExpiry(t *testing.T) {
-	// validateCode is only as good as what it is handed: a redeemed code must
-	// arrive as Redeemed=true (pgtype validity, not the zero time), or a used
-	// magic link would pass verification a second time.
+	// A redeemed code must arrive as Redeemed=true (pgtype validity, not the
+	// zero time), or a used magic link would verify twice.
 	at := time.Now().Add(-time.Minute)
 	rec := codeRecordFrom(sqlc.MagicLinkCode{
 		CodeHash:   []byte{1, 2, 3},

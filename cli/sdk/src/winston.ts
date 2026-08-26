@@ -1,8 +1,5 @@
-// Winston bridge without a winston dependency (the SDK ships zero runtime
-// deps). Winston v3 pipes info objects into transports as object-mode
-// writables; UpcontrolTransport is a plain stream.Writable that reads the
-// info's level/message and mirrors them. It also implements log() for code
-// paths that duck-call transports directly.
+// Winston bridge with no winston dependency: a plain object-mode Writable that
+// reads each info's level/message. log() covers paths that call it directly.
 
 import { Writable } from 'node:stream';
 import { upcontrolLine } from './index.js';

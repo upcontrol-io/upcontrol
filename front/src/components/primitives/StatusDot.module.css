@@ -17,22 +17,13 @@
   background: var(--ok);
 }
 
-.check {
-  background: var(--check);
-}
-
 .down {
   background: var(--down);
 }
 
-/* nodata is never a solid color alone — hatched fill + border makes it distinct in shape, not just hue. */
+/* nodata is never color alone: hatched fill + border make it distinct in
+   shape, not just hue. */
 .nodata {
   border: 1px solid var(--nodata);
   background: repeating-linear-gradient(135deg, var(--nodata) 0 1px, transparent 1px 3px);
-}
-
-/* paused reads as a hollow ring — a distinct shape from every filled state. */
-.paused {
-  border: 1.5px solid var(--text-faint);
-  background: transparent;
 }

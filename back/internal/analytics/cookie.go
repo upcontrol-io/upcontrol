@@ -7,13 +7,11 @@ import (
 	"time"
 )
 
-// uc_vid is the first-party visitor cookie (§Decision 2): HttpOnly,
-// SameSite=Lax, Path=/, one year. It is a random token, not a fingerprint —
-// the server stores only sha256(token) and the ClickHouse rows carry the
-// resulting visitor id, so the raw value lives in the browser alone.
+// uc_vid is the first-party visitor cookie: HttpOnly, SameSite=Lax, one year.
+// A random token, not a fingerprint; the server stores only sha256(token).
 const (
-	CookieName       = "uc_vid"
-	VisitorCookieTTL = 365 * 24 * time.Hour
+	cookieName       = "uc_vid"
+	visitorCookieTTL = 365 * 24 * time.Hour
 	tokenHexLen      = 32 // 16 random bytes, hex-encoded
 )
 
@@ -26,11 +24,10 @@ func MintVisitorToken() string {
 	return hex.EncodeToString(b[:])
 }
 
-// VisitorToken returns the raw uc_vid cookie, or ok=false when absent,
-// malformed, or not exactly 32 hex chars — a corrupt cookie is treated as no
-// cookie (a new one is minted) rather than a lookup on garbage.
+// VisitorToken returns the raw uc_vid cookie, or ok=false when absent or not
+// 32 hex chars: a corrupt cookie counts as no cookie, not garbage lookup.
 func VisitorToken(r *http.Request) (string, bool) {
-	c, err := r.Cookie(CookieName)
+	c, err := r.Cookie(cookieName)
 	if err != nil || len(c.Value) != tokenHexLen {
 		return "", false
 	}
@@ -40,13 +37,12 @@ func VisitorToken(r *http.Request) (string, bool) {
 	return c.Value, true
 }
 
-// SetVisitorCookie writes the uc_vid cookie. Secure is decided by the caller
-// from the request itself (r.TLS != nil): dev runs plain HTTP through Caddy
-// on :80, and a Secure cookie there would be silently dropped.
+// SetVisitorCookie writes the uc_vid cookie; the caller decides Secure from
+// the request (dev runs plain HTTP, a Secure cookie would be dropped).
 func SetVisitorCookie(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name: CookieName, Value: token, Path: "/",
-		MaxAge: int(VisitorCookieTTL.Seconds()), HttpOnly: true,
+		Name: cookieName, Value: token, Path: "/",
+		MaxAge: int(visitorCookieTTL.Seconds()), HttpOnly: true,
 		Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
 }
