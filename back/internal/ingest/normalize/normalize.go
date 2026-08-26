@@ -87,8 +87,8 @@ func Classify(name string) Event {
 }
 
 func trimLower(s string) string {
-	// Manual trim+lower to avoid pulling strings (keeps the hot path alloc-free
-	// for the common T4 path where we only need to lowercase before lookup).
+	// Manual trim+lower (keeps the hot path alloc-free; strings already serves
+	// HasPrefix, but this stays allocation-free).
 	start, end := 0, len(s)
 	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
 		start++

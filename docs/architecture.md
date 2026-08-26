@@ -299,384 +299,81 @@ facts.
   public_id is minted lowercase via uuidStr (%x), no %X or text-id writer exists. A
   direct unit assertion of the accept set is a wave-3 item.
 
-## Wave 3 candidates
-
-Folded from the five wave-2 lane sweeps (docs/research/core-yagni-wave-2-{a..e}.md,
-since deleted). Entry format: path:line - check number - what - evidence - replacement.
-Checks: 1 dead, 2 reimplements stdlib or a dependency, 3 duplicated 20+ line logic,
-4 dead flexibility, 5 one-implementation abstraction, 6 needless export. Findings are
-recorded, not applied.
-
-### Lane A (back/internal/api + back/cmd/ucapi)
-
-Sweep evidence for the zero-finding checks: deadcode ./cmd/... silent; golangci-lint
-(unused + unparam, tagged builds on) 0 issues; no interface declaration in the zone.
-
-back/internal/api/keys.go:138 - 1 - `var _ = json.NewEncoder` is a dead blank assignment that only keeps the encoding/json import alive; json is used nowhere else in the file - `grep -n 'json\.' back/internal/api/keys.go` returns exactly one hit: `138:var _ = json.NewEncoder` - delete the var and drop `encoding/json` from keys.go imports.
-
-back/internal/api/keys.go:116 - 6 - exported func `IssueKey` used only inside package api - `grep -rn 'IssueKey(' back/ --include='*.go' | grep -v 'func IssueKey'` returns only `back/internal/api/install.go:155` and `back/internal/api/install.go:228` (same package); zero hits in cmd/, zero in tests - rename to `issueKey` (its doc comment already says "Called from the signup flow", which is package-internal).
-
-back/internal/api/wire.go:179 - 6 - exported type alias `Ingester` never named outside the package - `grep -rn 'api\.Ingester' back/ --include='*.go'` returns 0 hits; its only use is WireIngest's return type (wire.go:182); main.go consumes the value by inference (main.go:109) and names only `api.Batcher` (main.go:364) - drop the alias and let WireIngest return `*ingest.Ingester`.
-
-back/internal/api/install.go:32 - 6 - exported struct `Install` referenced only inside package api (constructor + methods); cmd wires via `api.NewInstall` with inference - `grep -rn 'api\.Install[^a-zA-Z]' back/ --include='*.go'` returns 0 hits (tests in package api do not count) - unexport to `install` if the owner wants it; purely a naming decision, zero behaviour.
-
-back/internal/api/instance.go:57 - 6 - exported struct `InstanceSettings` referenced only inside package api - `grep -rn 'api\.InstanceSettings' back/ --include='*.go'` returns 0 hits; main.go:241 uses `api.NewInstanceSettings` with inference - same as above: unexport or keep, owner call.
-
-back/internal/api/keys.go:22 - 6 - exported struct `Keys` referenced only inside package api - `grep -rn 'api\.Keys[^a-zA-Z]' back/ --include='*.go'` returns 0 hits; main.go:235 uses `api.NewKeys` with inference - same as above.
-
-back/internal/api/monitors.go:26 - 6 - exported struct `Monitors` referenced only inside package api - `grep -rn 'api\.Monitors[^a-zA-Z]' back/ --include='*.go'` returns 0 hits; main.go:218 uses `api.NewMonitors` with inference - same as above.
-
-back/internal/api/read_api.go:27 - 6 - exported struct `ReadAPI` referenced only inside package api - `grep -rn 'api\.ReadAPI' back/ --include='*.go'` returns 0 hits; main.go:227 uses `api.NewReadAPI` with inference - same as above.
-
-back/internal/api/telegram.go:23 - 6 - exported struct `Telegram` referenced only inside package api - `grep -rn 'api\.Telegram[^a-zA-Z]' back/ --include='*.go'` returns 0 hits (the auth.NewTelegramMiniApp hit is another package's own symbol); main.go:281 uses `api.NewTelegram` with inference - same as above.
-
-back/internal/api/write_api.go:41 - 6 - exported struct `WriteAPI` referenced only inside package api (handlers plus the package's own tests) - `grep -rn 'api\.WriteAPI' back/ --include='*.go'` returns 0 hits; main.go:266 uses `api.NewWriteAPI` with inference - same as above; the widest rename of the set, so the weakest win.
-
-back/internal/api/monitors.go:444 - 3 - `writeUpgradeRequired` and `writeUpgrade` (telegram.go:169) are the same 402 `plan_limit_exceeded` shape; the bodies differ only in `map[string]string{"reason": reason}` vs `map[string]any{"reason": reason}`, which marshal to identical JSON bytes - callers: `grep -rn 'writeUpgradeRequired(' back/` (non-test) gives monitors.go:104, monitors.go:111, monitors.go:221, write_api.go:1708; `grep -rn 'writeUpgrade(' back/` (non-test) gives telegram.go:77 - keep `writeUpgradeRequired`, delete `writeUpgrade`, point telegram.go:77 at it. NOTE: bodies are 10 lines each, under this check's 20-line bar; reported because the rendered bytes are provably identical, discard if the bar is strict.
-
-back/internal/api/keys.go:132 - 3 - `randomHex` (keys.go) and `newHookToken` (write_api.go:765) have identical bodies: 16 crypto/rand bytes returned as hex.EncodeToString - callers: `grep -rn 'randomHex()\|newHookToken()' back/ --include='*.go' | grep -v func` gives install.go:103, install.go:211, keys.go:92, keys.go:117, telegram.go:81, write_api.go:738 - one shared minter (e.g. keep randomHex, newHookToken call sites use it). NOTE: 4-line body, under the 20-line bar, reported for the owner to weigh.
-
-back/internal/api/instance_test.go:57 - 2 - `rep(c byte, n int)` reimplements `strings.Repeat`: builds a byte slice of n copies of c and returns string(b) - body: `b := make([]byte, n); for i := range b { b[i] = c }; return string(b)`; callers instance_test.go:46, :49, :52 - replace with `strings.Repeat(string(c), n)`.
-
-### Lane B (back/internal/{ai,account,analytics,channel,deliver,notify,probe/discover})
-
-Sweep evidence for the zero-finding checks: deadcode ./cmd/... silent; a normalized
-20-line sliding-window duplicate scan over all 29 non-test zone files found no duplicated
-block; golangci-lint 0 issues.
-
-back/internal/probe/discover/rank.go:105 - 4 - `const isSubdomain = false` makes the subdomain flexibility dead: rank's only call passes the constant, so `scoreOf`'s `case isSubdomain && depth == 0` (rank.go:165, +60 for a subdomain root) is unreachable and every other use negates it - `grep -n 'isSubdomain' back/internal/probe/discover/rank.go` shows 105 (decl), 118, 121, 131 (all `!isSubdomain` or the constant itself) and 165 (the dead case); no other file mentions it - inline the false, drop the parameter from scoreOf and delete the dead case.
-
-back/internal/deliver/deliver.go:95 - 5 - `Breaker.ShouldFailover` is a one-line alias whose body is `return b.IsOpen(now)`; production calls only the alias - `grep -rn 'ShouldFailover' back/ --include='*.go'` gives worker.go:77 (production) and deliver_test.go:132,136; `IsOpen` production callers: none of its own, only through the alias - merge the two methods into one (keep whichever name, tests move along).
-
-back/internal/deliver/worker.go:220 - 4 - `Worker.Run(ctx, every)` takes an interval every caller passes as the same single value - `grep -rn '\.Run(ctx' back/ --include='*.go'` shows one production caller: `back/cmd/ucworker/main.go:107` with `2*time.Second`; deliver_test.go never calls Run - drop the parameter, bake `2 * time.Second` in.
-
-back/internal/account/auth/auth.go:583 - 4 - `randomHexAuth(n int)` is called with one value of n everywhere - `grep -rn 'randomHexAuth' back/ --include='*.go'` returns auth.go:325 (call, `randomHexAuth(16)`) and auth.go:583 (decl) only - drop the parameter or inline the 16.
-
-back/internal/ai/openai.go:33 - 4 - `OpenAIClient.HTTPClient` is an option only tests exercise - sole setter in the tree: `back/internal/ai/openai_test.go:368` (`c.HTTPClient = &http.Client{}`); production constructor `back/cmd/ucapi/main.go:251` sets Settings/Timeout/LogPrompt only - keep as the documented test seam or unexport the field; wave-3 call.
-
-back/internal/ai/ai.go:102 - 6+5 - `LLM` interface never named outside package ai, and has exactly one production implementation - `grep -rn 'ai\.LLM' back/ --include='*.go'` gives 0 hits; implementations: `OpenAIClient` (openai.go, production) and `fakeLLM` (ai_integration_test.go:36, test) - unexport; both implementations satisfy it implicitly and `New`'s signature stays source-compatible for `ai.New(pool, openaiClient, prices)` callers.
-
-back/internal/ai/ai.go:110 - 6 - `ExplainAnswer` type never named outside package ai - `grep -rn 'ai\.ExplainAnswer' back/ --include='*.go'` gives 0 hits; in-package uses are ParseAnswer's return and the ExplainResult.Answer field; api handlers consume the value by inference - unexport the type name.
-
-back/internal/ai/ai.go:122 - 6 - `InvestigateStep` type never named outside package ai - `grep -rn 'ai\.InvestigateStep' back/ --include='*.go'` gives 0 hits; its only use is the `Investigate` field of ExplainAnswer - unexport (travels with the ExplainAnswer finding).
-
-back/internal/ai/ai.go:129 - 6 - `ParseAnswer` used only inside package ai - `grep -rn 'ParseAnswer' back/ --include='*.go'` gives ai.go:129 (decl), ai.go:204 and ai.go:243 (both in Explain), plus ai tests; zero hits outside the package - rename to `parseAnswer`.
-
-back/internal/ai/ai.go:364 - 6 - `HashInput` used only inside package ai - `grep -rn 'HashInput' back/ --include='*.go'` gives ai.go:192 (Explain's cache key), ai.go:364 (decl) and ai tests; zero hits outside the package - rename to `hashInput`.
-
-back/internal/ai/ai.go:92 - 6 - `ExplainResult` type never named outside package ai - `grep -rn 'ai\.ExplainResult' back/ --include='*.go'` gives 0 hits; Explain's return value is consumed by inference in api/write_api.go - unexport the type name; the struct fields stay exported for the handler.
-
-back/internal/account/session/session.go:24 - 6 - sentinel `ErrNoSession` is never matched outside its own package - `grep -rn 'session\.ErrNoSession' back/ --include='*.go'` gives 0 hits; every external FromRequest caller (auth Me, api read/write paths) tests `err != nil` instead of errors.Is - unexport, or keep and let callers errors.Is it (the stronger fix if wave 3 wants the sentinel used).
-
-back/internal/analytics/analytics.go:17 - 6 - `MaxEventsPerRequest` used only inside package analytics - `grep -rn 'analytics\.MaxEventsPerRequest' back/ --include='*.go'` gives 0 hits; uses are analytics.go:114-116 in ParseBody - unexport the const.
-
-back/internal/analytics/analytics.go:18 - 6 - `MaxBodyBytes` used only inside package analytics - `grep -rn 'analytics\.MaxBodyBytes' back/ --include='*.go'` gives 0 hits; sole use analytics.go:111 (ParseBody's LimitReader) - unexport the const.
-
-back/internal/analytics/analytics.go:39 - 6 - `Event` type never named outside package analytics - `grep -rn 'analytics\.Event[^A-Za-z]' back/ --include='*.go'` gives 0 hits; ParseBody's `[]Event` return is consumed by inference (api/write_api.go:2200) and Track's parameter likewise - unexport the type name.
-
-back/internal/analytics/analytics.go:103 - 6 - `Payload` type used only inside package analytics - `grep -rn 'analytics\.Payload' back/ --include='*.go'` gives 0 hits; sole use is the local decode in ParseBody (analytics.go:107) - unexport.
-
-back/internal/analytics/analytics.go:132 - 6 - `Scope` type never named outside package analytics - `grep -rn 'analytics\.Scope[^F]' back/ --include='*.go'` gives 0 hits; WithScope/ScopeFromRequest values are consumed by inference in auth and api handlers - unexport the type name.
-
-back/internal/analytics/analytics.go:147 - 6 - `ScopeFrom` used only inside package analytics - `grep -rn 'analytics\.ScopeFrom[^R]' back/ --include='*.go'` gives 0 hits; sole caller is recorder.go's baseTrack; external code pairs `WithScope(ctx, ScopeFromRequest(r))` - rename to `scopeFrom`.
-
-back/internal/analytics/cookie.go:13 - 6 - `CookieName` ("uc_vid") used only inside package analytics - `grep -rn 'analytics\.CookieName' back/ --include='*.go'` gives 0 hits; in-package uses cookie.go:30 and cookie.go:44 - unexport (the session package's CookieName is the one named cross-package).
-
-back/internal/analytics/cookie.go:14 - 6 - `VisitorCookieTTL` used only inside package analytics - `grep -rn 'analytics\.VisitorCookieTTL' back/ --include='*.go'` gives 0 hits; sole use cookie.go:45 (MaxAge) - unexport.
-
-back/internal/analytics/geo.go:16 - 6 - `Geo` type never named outside package analytics - `grep -rn 'analytics\.Geo[^o]' back/ --include='*.go'` gives 0 hits; OpenGeo's return is consumed by inference in NewRecorder - unexport the type name.
-
-back/internal/analytics/geo.go:21 - 6 - `OpenGeo` used only inside package analytics - `grep -rn 'OpenGeo' back/ --include='*.go'` gives geo.go:21 (decl) and recorder.go:129 (NewRecorder) only - rename to `openGeo`.
-
-back/internal/analytics/geo.go:48 - 6 - `IPHash` used only inside package analytics - `grep -rn 'IPHash' back/ --include='*.go' | grep -v '/gen/'` gives geo.go:48 (decl), recorder.go:203 (baseTrack), analytics tests, and ch.go:132-169 where `IPHash` is the unrelated WebEventRow column field - rename to `ipHash`.
-
-back/internal/analytics/ua.go:7 - 6 - `UA` type never named outside package analytics - `grep -rn 'analytics\.UA[^a-zA-Z]' back/ --include='*.go'` gives 0 hits; ParseUA's return is consumed by inference inside recorder.go only - unexport the type name.
-
-back/internal/analytics/ua.go:17 - 6 - `ParseUA` used only inside package analytics - `grep -rn 'ParseUA' back/ --include='*.go'` gives ua.go:17 (decl), recorder.go:204 (baseTrack) and tests only - rename to `parseUA`.
-
-back/internal/analytics/recorder.go:91 - 6 - `FirstTouch` type never named outside package analytics - `grep -rn 'analytics\.FirstTouch' back/ --include='*.go'` gives 0 hits; it is the third parameter of VisitorStore methods and a track field, all in-package - unexport (travels with the VisitorStore finding).
-
-back/internal/analytics/recorder.go:28 - 6+5 - `VisitorStore` interface never named outside package analytics and has exactly one production implementation - `grep -rn 'analytics\.VisitorStore' back/ --include='*.go'` gives 0 hits; implementations: `PoolStore` (recorder.go:44, production, constructed in cmd/ucapi/main.go) and `fakeStore` (recorder_test.go:18, test) - unexport; NewRecorder callers pass PoolStore by value either way.
-
-back/internal/analytics/recorder.go:39 - 6+5 - `EventSink` interface never named outside package analytics and has exactly one production implementation - `grep -rn 'analytics\.EventSink' back/ --include='*.go'` gives 0 hits; implementations: `*ch.Conn` (satisfies InsertWebEvents, production, passed in cmd/ucapi/main.go) and the recorder test fake - unexport; *ch.Conn satisfies it implicitly.
-
-back/internal/channel/notify/notify.go:35 - 6 - `Defaults` used only inside package notify - external surface of the package (aliased as `notifysettings` in api/detect/errorlog/incident) is exactly Settings, Resolve, Patch, FollowUpDelay per `grep -rhn -oE 'notifysettings\.[A-Za-z]+' back/ | sort -u`; `Defaults` appears only at notify.go:42 (Resolve's first line) - rename to `defaults`.
-
-back/internal/channel/telegram/bot.go:31 - 6 - `Bot` type never named outside package telegram - `grep -rn 'telegram\.Bot' back/ --include='*.go'` gives 0 hits; cmd/ucapi/main.go:336 consumes `bot.Run(ctx)` off the inferred NewBot value - unexport the type name, keep NewBot.
-
-back/internal/deliver/deliver.go:28 - 6 - `Outcome` type (and its OutcomeOK/OutcomeRetryable/OutcomeFatal consts) used only inside package deliver - `grep -rn 'deliver\.Outcome' back/ --include='*.go'` gives 0 hits; all uses live in deliver.go and worker.go (worker.go:176-195) and deliver tests - unexport the type and consts.
-
-back/internal/deliver/deliver.go:11 - 6 - `MaxAttempts` used only inside package deliver - `grep -rn 'deliver\.MaxAttempts' back/ --include='*.go'` gives 0 hits; sole use deliver.go:57 (NextTryAt) - unexport the const.
-
-back/internal/deliver/deliver.go:67 - 6 - `BreakerTimeout` used only inside package deliver - `grep -rn 'deliver\.BreakerTimeout' back/ --include='*.go'` gives 0 hits; uses: deliver.go:77 (IsOpen) and deliver tests - unexport the const.
-
-back/internal/deliver/deliver.go:15 - 6 - `Backoff` used only inside package deliver - `grep -rn 'deliver\.Backoff' back/ --include='*.go'` gives 0 hits; sole production caller deliver.go:63 (NextTryAt), plus deliver tests - rename to `backoff`.
-
-back/internal/deliver/deliver.go:37 - 6 - `ClassifyError` used only inside package deliver - `grep -rn 'ClassifyError' back/ --include='*.go'` gives deliver.go:37 (decl), worker.go:184 and channels.go comments/tests only - rename to `classifyError`.
-
-back/internal/deliver/deliver.go:56 - 6 - `NextTryAt` used only inside package deliver - `grep -rn 'NextTryAt' back/ --include='*.go' | grep -v '/gen/'` gives deliver.go:54-56 (decl + comment), worker.go:107, worker.go:190 (the call) and incident.go:181; the 107 and 181 hits are the delivery_queue row's DB column name, not the function - rename to `nextTryAt`.
-
-back/internal/deliver/deliver.go:71 - 6 - `Breaker` type never named outside package deliver - `grep -rn 'deliver\.Breaker' back/ --include='*.go'` gives 0 hits; Worker holds it as a private field (worker.go:24) - unexport the type name.
-
-back/internal/deliver/channels.go:19 - 6 - `Channel` interface used only inside package deliver (it has 4 implementations, so not check 5) - `grep -rn 'deliver\.Channel' back/ --include='*.go'` gives 0 hits; RegisterChannel's parameter is its only signature use (worker.go:34); main.go registers concrete types by inference - unexport; TelegramChannel/EmailChannel/DiscordChannel/SlackChannel/SMTPChannel satisfy it implicitly.
-
-back/internal/deliver/channels.go:58 - 6 - `ActionButton` type never named outside package deliver - `grep -rn 'deliver\.ActionButton' back/ --include='*.go'` gives 0 hits; uses are the AlertPayload.Actions field (channels.go:34) and formatTelegram (channels.go:301), both in-package - unexport the type name.
-
-back/internal/deliver/channels.go:72 - 6 - package var `HTTPClient` is exported "overridable for tests" but only deliver's own tests touch it - `grep -rn 'HTTPClient' back/ --include='*_test.go'` gives deliver_test.go:289-298 only; no production file reassigns it - unexport the var.
-
-back/internal/deliver/worker.go:19 - 6 - `Worker` type never named outside package deliver - `grep -rn 'deliver\.Worker' back/ --include='*.go'` gives 0 hits; ucworker/main.go:68 uses `dw := deliver.NewWorker(...)` by inference - unexport the type name, keep NewWorker.
-
-back/internal/deliver/smtp.go:10 - 5 - `mailSender` interface has exactly one production implementation - implementations: `mailer.Dynamic` (dynamic.go:31 Send, production, injected at ucworker/main.go:105) and the capturing fake in deliver tests - documented test seam ("an interface so the test can capture the message"); wave-3 decides whether the seam stays.
-
-back/internal/notify/mailer/agent.go:18 - 6 - `Agent` type never named outside package mailer - `grep -rn 'mailer\.Agent' back/ --include='*.go'` gives 0 hits; cmd/ucapi/main.go:185 uses `a, err := mailer.NewAgent(...)` by inference - unexport the type name, keep NewAgent.
-
-back/internal/notify/mailer/dynamic.go:12 - 6 - `Dynamic` type never named outside package mailer - `grep -rn 'mailer\.Dynamic' back/ --include='*.go'` gives 0 hits; ucworker/main.go:105 passes `mailer.NewDynamic(...)` inline as the SMTPChannel field value - unexport the type name, keep NewDynamic.
-
-back/internal/notify/mailer/mailer.go:23 - 6 - `RenderCode` used only inside package mailer - `grep -rn 'RenderCode' back/ --include='*.go'` gives mailer.go:23 (decl), dynamic.go:36 (Dynamic.SendCode) and mailer_test.go:9; test hit is in-package, so the export is still needless - rename to `renderCode`.
-
-back/internal/notify/mailer/mailer.go:41 - 6 - `RenderInvite` used only inside package mailer - `grep -rn 'RenderInvite' back/ --include='*.go'` gives mailer.go:41 (decl) and dynamic.go:46 (Dynamic.SendInvite) only - rename to `renderInvite`.
-
-back/internal/notify/mailer/smtp.go:11 - 6 - `SMTP` type never named outside package mailer - `grep -rn 'mailer\.SMTP' back/ --include='*.go'` gives one comment hit (deliver/smtp.go:8); sole construction is dynamic.go:69 `&SMTP{cfg: cfg, log: d.log}` - unexport the type name (unexported constructor-return, same class as Agent/Dynamic).
-
-back/internal/probe/discover/discover.go:16 - 6+5 - `Prober` interface never named outside package discover; single production implementation - `grep -rn 'discover\.Prober' back/ --include='*.go'` gives 0 hits; the one production implementer/pass-in is `h.exec` (*executor.Executor, api/write_api.go:45 and :1912, passed to discover.Run by inference); the other implementations are discover's own test fakes - unexport; *executor.Executor satisfies it implicitly.
-
-back/internal/probe/discover/hosts.go:13 - 6+5 - `Resolver` interface never named outside package discover; single production implementation - `grep -rn 'discover\.Resolver' back/ --include='*.go'` gives 0 hits; the one production pass-in is `net.DefaultResolver` (write_api.go:1912); the other implementations are discover's own test fakes - unexport; *net.Resolver satisfies it implicitly.
-
-back/internal/probe/discover/pages.go:13 - 6 - `PagesWanted` used only inside package discover - `grep -rn 'PagesWanted' back/ --include='*.go'` gives pages.go:13 (decl), pages.go:51 (comment), rank.go:75 (comment) and rank.go:140-141 (the cap) only - unexport the const.
-
-back/internal/account/auth/auth.go:45 - 6 - `MagicLink` type never named outside package auth (exported constructor returns it) - `grep -rn 'auth\.MagicLink' back/ --include='*.go'` gives 0 hits; cmd/ucapi/main.go:203 wires `auth.NewMagicLink(...).WithSelfHosted(...)` by inference - unexport the type name, keep NewMagicLink.
-
-back/internal/account/auth/auth.go:385 - 6 - `Me` type never named outside package auth - `grep -rn 'auth\.Me' back/ --include='*.go'` gives 0 hits; main.go mounts `auth.NewMe(...)` by inference - unexport the type name, keep NewMe.
-
-back/internal/account/auth/auth.go:441 - 6 - `Logout` type never named outside package auth - `grep -rn 'auth\.Logout' back/ --include='*.go'` gives 0 hits; main.go mounts `auth.NewLogout(...)` by inference - unexport the type name, keep NewLogout.
-
-back/internal/account/auth/auth.go:455 - 6 - `NotImplemented` type and `NewNotImplemented` (auth.go:457) used only inside package auth - `grep -rn 'NewNotImplemented\|NotImplemented' back/ --include='*.go' | grep -v auth/` gives 0 hits; sole caller telegram.go:44 - unexport both.
-
-back/internal/account/auth/google.go:35 - 6 - `Google` type never named outside package auth - `grep -rn 'auth\.Google' back/ --include='*.go'` gives 0 hits; main.go wires `auth.NewGoogle(...).WithSelfHosted(...)` by inference - unexport the type name, keep NewGoogle.
-
-back/internal/account/auth/telegram.go:29 - 6 - `TelegramMiniApp` type never named outside package auth - `grep -rn 'auth\.TelegramMiniApp' back/ --include='*.go'` gives 0 hits; main.go mounts `auth.NewTelegramMiniApp(...)` by inference - unexport the type name, keep NewTelegramMiniApp.
-
-back/internal/account/auth/telegram.go:102 - 6 - `VerifyInitData` used only inside package auth - `grep -rn 'VerifyInitData' back/ --include='*.go'` gives telegram.go:54 (sole caller, same file) and telegram.go:102 (decl) - rename to `verifyInitData`.
-
-### Lane C (worker/probe/storage zone)
-
-Dead-confirmation basis: deadcode ./cmd/... silent plus grep across back/ including test
-files (RTA conservatism hides interface-flow methods from deadcode).
-
-- back/internal/ingest/batcher/batcher.go:185 - 1 - Batcher.Pending() has no caller - grep '\.Pending()' across back/: zero hits (not even batcher_test.go); deadcode misses it because *Batcher flows into the ingest.BatchSink interface (RTA conservatism) - delete the method
-- back/internal/ingest/batcher/batcher.go:27 - 4 - Options.FlushCallback is an option nobody ever sets - grep FlushCallback across back/: only the declaration plus 3 nil-guarded call sites in batcher.go; the sole production constructor api/wire.go:190 passes batcher.Options{} and no test sets it - delete the field and the three guards
-- back/internal/ingest/normalize/normalize.go:87 - 2 - hasReservedPrefix reimplements strings.HasPrefix - body is len(n) >= len(p) && n[:len(p)] == p, byte-identical semantics to strings.HasPrefix(n, ReservedPrefix); single caller normalize.go:78 - call strings.HasPrefix directly (costs one import in an import-free file)
-- back/internal/ingest/scrub/scrub.go:95 - 2 - hasPrefix(s, prefix, i) reimplements strings.HasPrefix on a slice - hasPrefix(s,p,i) == strings.HasPrefix(s[i:], p) (a string slice header, no copy); 9 uses in this file - delete the helper, call the stdlib at each site
-- back/internal/ring/seq/seq.go:80 - 6 - Allocator.Remaining is exported but used only by its own package's tests - callers: internal/ring/seq/seq_test.go:42,43,57,58 only; its own doc says "For tests and observability" and no observability path reads it - unexport or delete
-- back/internal/detect/availability/availability.go:97 - 1 - Detector.Threshold() has no caller - grep '\.Threshold()' across back/: zero hits; availability_test.go only uses New/Process; rpc builds the Detector with availability.New(DefaultThreshold) - delete the accessor
-- back/internal/incident/incident.go:358 - 1 - Lifecycle.MarkNotified has no caller - grep MarkNotified across back/: only the definition; notifyChannels already calls q.TouchIncidentNotified directly at the two places that need it - delete the method
-- back/internal/incident/incident.go:33-36 - 1 - close-reason constants ReasonMaintenance, ReasonAbsorbed, ReasonDetectorOff are never referenced - grep each across back/: only the const block at incident.go:31-36; used ones are ReasonRecovered (detect.go:211, probeservice.go:187), ReasonMonitorDelete (monitors.go:260), ReasonByHuman (telegram/bot.go:807) - delete the three, or wire the maintenance/detector-off close paths they were named for
-- back/internal/incident/triage/triage.go:32 - 4 - Build's deploy parameter is always nil at its only production call site - callers: rpc/probeservice.go:266 passes nil (grep 'triage\.' -> one hit); DeployContext is constructed only by triage_test.go; Verdict.Hypothesis and Verdict.Command are read only by tests - drop the param and the Hypothesis/Command/DeployContext surface (title path is all the product uses), or wire the real deploy join
-- back/internal/rpc/probeservice.go:200 - 1 - ProbeService.ReportBlind has no caller in the tree - grep ReportBlind across back/: only probeservice.go:200-211; ucprobe's loop only calls Lease and SubmitResults; MarkProbeBlind and ClearLeasesForNode queries exist solely for this handler - wave-3 question: remove from the proto (gen/ change) or add the probe-side blind report; the handler cannot just be deleted while the generated service interface requires it
-- back/internal/platform/config/config.go:18 - 1 - Config.RPCAddr is loaded but never read - grep '\.RPCAddr' across back/: zero hits outside config.go:117 (the getenv that fills it); comment says "kept separate for tests" but no test reads it either - delete field and load
-- back/internal/platform/config/config.go:170-172 - 1 - BatchBytes, BatchAge, MinFlushPerSec env knobs are loaded but never read - grep '\.BatchBytes|\.BatchAge|\.MinFlushPerSec' outside config.go: zero hits (batcher.go hits are its own Option fields); api/wire.go:190 builds batcher.Options{} zero-value, so UC_BATCH_BYTES etc silently do nothing while the batcher's internal defaults mirror them - pass Config into WireIngest or delete the three knobs
-- back/internal/platform/config/config.go:169 - 1 - WALFsyncEvery is loaded but never read - grep '\.WALFsyncEvery' across back/: zero hits; the WAL API has no group-fsync (walAdapter.AppendSync fsyncs every batch) - delete field and load
-- back/internal/platform/config/config.go:168 - 1 - SpoolMaxBytes is loaded but never read - grep '\.SpoolMaxBytes' across back/: zero hits; api/wire.go's dirSpoolFiller hardcodes max: 1 << 30, duplicating the config default as a literal - thread the value through WireIngest or delete the knob
-- back/internal/storage/pg/pool.go:52 - 6 - Pool.Exec is exported but its only caller is a build-tagged test - grep 'pool.Exec(' across back/: only back/test/ha/ha_test.go (tag ha); production advisory locks use Raw().Acquire on one connection (cmd/ucworker/main.go:172-184) and channel/telegram/bot.go:59's comment explains why pool.Exec is NOT used (borrows an idle conn per statement) - move the helper into the ha test or delete it
-- back/internal/platform/logging/logging.go:19 - 4 - Options.Extra and the multiHandler exist for a second sink no caller ever passes - grep 'logging.Options|logging.New(' across back/: one constructor, app.go:42, passing Level+Format only; Extra is nil everywhere, so multiHandler (30 lines incl. panic recovery) is unreachable in production - delete Extra + multiHandler, or wire the intended second sink
-- back/internal/source/webhook/webhook.go:544 - 1 - "var _ = bytes.NewReader" dummy keeps an unused import alive - last two lines of the file: comment "bytes is otherwise unused in this file." plus the blank identifier assignment; no other use of bytes in webhook.go - delete the import and the dummy
-- back/internal/source/webhook/webhook.go:490 - 4 - toUnix's int64 and int arms are unreachable dead flexibility - its own comment: "a JSON number (always float64 after encoding/json)"; the only input is raw map[string]any from json.Unmarshal (parseEventRaw), which never yields int64 or int - reduce the switch to the float64 case
-- back/internal/probe/guard/guard.go:99 - 5 - AllowedRedirectURL is a pure rename wrapper over CheckURL - body is exactly "return CheckURL(rawURL)"; one caller, executor.go's CheckRedirect hook - call CheckURL directly and delete the alias
-- back/internal/ring/cutoff/cutoff.go:36 - 4 - Result.BeyondErrors is a field that is always nil - Recompute's only return site writes BeyondErrors: nil (comment: "computed separately by QueryBuilder.BeyondErrors"); cmd/ucworker/main.go:230-233 copies the always-nil pointer into UpsertProjectWindow - delete the field and the copy-through block (the real displaced-error count comes from the query builder)
-- back/internal/ingest/wal/wal.go:92,123,131,177 - 6 - the WAL recovery API (Checkpoint, CheckpointOffset, Replay, Truncate) has no production caller - grep across back/: only wal_test.go calls them; the sole production user is api/wire.go's walAdapter (Append+Sync only); the package doc's "recovery replays past the checkpoint" is not wired anywhere - wave-3 question: wire a recovery pass at startup (the WALAppender seam has no reader) or shrink the package to Append/Sync/Close
-- back/internal/ingest/wal/wal.go:57 - 4 - Append's offset and length returns are discarded by the only caller - api/wire.go:131 reads "if _, _, err := a.w.Append(payload); err != nil"; no other call site exists - return only error
-- back/internal/ingest/decode/decode.go:85 - 6 - Sniff is exported but used only inside its own package - grep 'decode.Sniff' across back/: zero hits; Decode calls it internally and decode_test.go exercises it directly - unexport
-- back/internal/ingest/decode/decode.go:578,603 - 2 - parseLokiTS and parseUnixNano hand-roll digit parsing that strconv.ParseInt covers - both loops are ParseInt(s, 10, 64) with an error fallback; caveat for wave 3: ParseInt errors on 20+ digit inputs (Loki ns is 19) where the manual loop silently overflows, so the swap changes edge behaviour and needs the cutoff decision named - replace loops with strconv.ParseInt after deciding the overflow edge
-- back/cmd/ucprobe/main.go:150 - 5 - local getenv is a private copy of env-with-default sugar - body is os.Getenv + empty check; config.getenv (config.go) is the same unexported helper in another package; only UC_API_ADDR, UC_NODE_ID, UC_NODE_REGION use it - inline os.LookupEnv at the three sites or export one helper
-
-### Lane D (front/src + front/e2e)
-
-front/src/lib/client.ts:186 - 1 - `instance.deleteTelegramBot` endpoint wrapper
-has zero callers anywhere - evidence: knip exit 0 (object property, knip blind
-spot); `grep -rn "deleteTelegramBot" front/src front/e2e` matches only the
-declaration at client.ts:186 - delete the method; a Telegram-remove UI would
-re-add it beside its handler.
-
-front/src/styles/global.css:104 - 1 - `.uc-no-press` press-opt-out class has
-zero users - evidence: `grep -rn "uc-no-press" front/src front/e2e
-front/index.html` matches only its own comment (global.css:95) and rule
-(global.css:104) - delete the rule; cloud caveat (comment says full-bleed
-surfaces).
-
-## Check 4 - dead flexibility
-
-front/src/components/primitives/Button.tsx:12 - 4 - `loading` prop (spinner
-span + aria-busy) never passed - evidence: grep `loading` as a JSX attr across
-src/*.tsx hits only useApiData state reads (WiringCard.tsx:29,
-IncidentCard.tsx:77/192, LiveLogsPanel.tsx:388, PublicStatus.tsx:82); zero
-callers pass it to Button - drop the prop, the spinner span and the
-Button.module.css spinner rule.
-
-front/src/components/primitives/Button.tsx:9 (also LinkButton.tsx:8) - 4 -
-size value `lg` never passed - evidence: `grep -rho 'size="[a-z]*"' src
---include='*.tsx' | sort | uniq -c` = `28 size="sm"` and nothing else; every
-other caller takes the `md` default; Button.module.css:29 `.lg` matches no
-caller - drop `lg` from ButtonSize and `.lg` from the CSS.
-
-front/src/components/primitives/LinkButton.tsx:10-14 - 4 - `iconLeft`,
-`iconRight` and `href` never passed; the whole `<a href>` fallback branch is
-unreachable - evidence: `grep -rn "<LinkButton" src` = exactly two call sites,
-LiveLogsPanel.tsx:457 (`to="/settings"`) and Incidents.tsx:38
-(`to="/monitors"`), neither passes href or an icon - drop the two icon props
-and the anchor branch; keep the `<Link>` path only.
-
-front/src/components/primitives/Modal.tsx:13 - 4 - `width` prop never passed -
-evidence: `grep -rn "<Modal" src -A3 | grep width` = empty; sole call site is
-the rotate dialog in Settings.tsx with no width - hardcode maxWidth 480.
-
-front/src/components/primitives/ConfirmPanel.tsx:9 - 4 - `typedConfirmation`
-branch never used; only the 4-digit PIN path runs - evidence: `grep -rn
-"typedConfirmation" src` matches ConfirmPanel.tsx itself only; sole caller
-ActionBar.tsx:46 passes no typedConfirmation - drop the prop and its
-label/inputMode/maxLength ternaries.
-
-front/src/components/code/CodeBlock.tsx:9 - 4 - `highlightLines` prop never
-passed - evidence: sole call site ExplainAnswer.tsx:147 passes
-language/showLineNumbers/className only - drop the prop and the highlighted
-class logic.
-
-front/src/components/code/CodeBlock.tsx:13 - 4 - `embedded` prop never passed;
-the comment names a "CodeTabs" shared header that does not exist in this tree -
-evidence: same single call site; `grep -rn "CodeTabs" front` = empty - drop the
-prop and `styles.embedded`; cloud caveat.
-
-front/src/components/code/CodeBlock.tsx:24 - 4 - GRAMMARS entries
-JavaScript/Python/PHP/Docker unreachable: `language` is only ever "cURL" -
-evidence: `grep -rn 'language="' src` = 1 match (ExplainAnswer.tsx:149,
-language="cURL") - keep the cURL grammar only, or keep all five if installer
-docs snippets are planned; cloud caveat.
-
-front/src/components/primitives/Badge.tsx:4 - 4 - tone values `new`, `beta`,
-`deprecated`, `plan` never passed - evidence: `grep -rho 'tone="[a-z]*"' src |
-sort | uniq -c` = `10 tone="danger"`, `2 tone="note"`; the dynamic tones yield
-ok/check/neutral (ExplainAnswer.tsx:107 CONFIDENCE_TONES) and
-down/check/neutral (IncidentCard.tsx:47 SEVERITY_TONE); Badge.module.css
-.new/.beta/.deprecated/.plan match no value - trim the union and the CSS;
-cloud caveat (LevelBadge feature-tier tags live in the cloud product).
-
-front/src/components/primitives/Badge.tsx:8 - 4 - shape value `pill` never
-passed - evidence: `grep -rn "shape=" src` = empty; only the `rect` default
-runs; Badge.module.css .pill matches no caller - drop the shape prop and
-.rect/.pill CSS; cloud caveat.
-
-front/src/components/primitives/Callout.tsx:4 - 4 - tone values `tip`,
-`warning` never passed - evidence: tone grep above = danger and note only;
-Callout.module.css .tip/.warning match no caller - trim the union and the CSS.
-
-front/src/components/primitives/StatusDot.tsx:3 - 4 - status values `check`,
-`paused` never passed - evidence: `grep -rho '<StatusDot status="[a-z]*"' src`
-= ok x3, down x1, nodata x1; the one dynamic call is WiringCard.tsx:55
-`status={on ? 'ok' : 'nodata'}` - trim the type, DEFAULT_LABEL and CSS; cloud
-caveat.
-
-front/src/components/product/MonitorList.tsx:63 - 4 - `userEdited` state is
-never set, always false; the effect guard is a no-op - evidence: `grep -n
-"userEdited" MonitorList.tsx` = lines 63 (decl), 65 (read), 68 (dep array);
-no setter call exists - delete the state, keep the unconditional sync effect.
-
-front/src/lib/useApiData.ts:25 - 4 - `useDegradation` no-args form (the "any
-key anywhere" branch) has zero callers; the variadic rest only ever receives
-exactly one key - evidence: `grep -rn "useDegradation" src` = one call site,
-PublicStatus.tsx:63 with one key; the "shell banner" the doc comment names
-does not exist in this tree - require one key and drop the keys.length===0
-branch; cloud caveat (the cloud shell banner).
-
-front/e2e/fixtures/api.ts:123 - 4 - `stubApi` opts.monitors parameter never
-passed by any spec - evidence: `grep -rn "stubApi(page" front/e2e` = 9 calls,
-every one bare `stubApi(page)` - drop the opts param (specs that need their
-own list already re-route **/v1/monitors, e.g. monitors.spec.ts:52).
-
-## Check 6 - needless export (used only inside its own file)
-
-Evidence pattern for all ten: token scan over the 79 files finds the name in
-zero files other than its own; knip stays silent because each type is
-reachable through its component's exported signature. Replacement in every
-case: drop the `export` keyword, keep the local declaration.
-
-front/src/components/code/CodeBlock.tsx:5 - 6 - CodeBlockProps
-front/src/components/code/CopyButton.tsx:5 - 6 - CopyButtonProps
-front/src/components/code/CopyField.tsx:4 - 6 - CopyFieldProps
-front/src/components/layout/PageHeader.tsx:5 - 6 - PageHeaderProps
-front/src/components/layout/Wordmark.tsx:6 - 6 - WordmarkProps
-front/src/components/primitives/Tooltip.tsx:5 - 6 - TooltipProps
-front/src/components/product/ExplainAnswer.tsx:7 - 6 - ExplainAnswerProps
-front/src/components/product/LogTimeline.tsx:35 - 6 - LogTimelineProps
-front/src/lib/theme.ts:4 - 6 - Theme (setTheme is documented "for external
-theme sources (Telegram Mini App sync)" but no external caller exists in this
-tree; an external caller would import the type)
-front/src/lib/useApiData.ts:118 - 6 - ApiDataResult (used by useApiData's own
-overloads only)
-
-## Checks 2, 3, 5 - no findings
-
-- Check 2 (reimplements stdlib/dependency): normalizeTarget/normalizeHost are
-  not `new URL` drop-ins (bare-domain input, no scheme; URL throws there);
-  validEmail is a definition, not a wrapper; count()/LogTimeline already use
-  Intl; no utility dependency is installed that anything reimplements.
-- Check 3 (20+ line duplicate): the Settings five-handler duplication was the
-  zone's one real instance and is executed as D1. The remaining repeats (the
-  3-line server-message-or-fallback ternary in Channels.writeError,
-  IncidentDetail's explain catch, LiveLogsPanel's explain catch; the ~10-line
-  inline-confirm strips) are each under the 20-line bar and differ in copy,
-  classes and semantics.
-- Check 5 (one-implementation abstraction): no wrapper/factory builds exactly
-  one thing; fetchJSON, sourceNow, foldRows each have many or two real
-  callers; ThemeProvider is the standard React context shape.
-
-### Lane E (cli/sdk, cli/installer, cli/e2e)
-
-cli/sdk/src/index.ts:128 - 1 - `_internals()` accessor, comment claims "Internal seam for the auto entry" - grep `_internals` across cli/ + front/ (ts/tsx/md): only the definition line itself; `auto.ts` imports only `track, flush` from './index.js'; not in package.json exports docs, no md reference - delete the function; nothing uses the seam
-
-cli/installer/src/net.ts:18 - 1 - `MintResult.projectId` field, parsed from mint response and returned - grep `projectId` across cli/: net.ts:18 (declaration), net.ts:35 (body type), net.ts:37 (assignment) and mock-server fixtures in init.test.ts:30 / meta.test.ts:51; main.ts reads `mint.ok/.key/.claimUrl/.status` only, never `.projectId` - drop the field, the body type entry and the assignment
-
-cli/installer/src/net.ts:19 - 1 - `MintResult.error` field ('mint_refused'/'mint_malformed'/'unreachable'), written by mintAnonymousProject - grep `mint\.` in main.ts: only `mint.ok && mint.key` (150), `mint.claimUrl` (155), `mint.status === 429` (157); `.error` never read on the mint result anywhere (`redeemed.error` at main.ts:135 and `last.error` at main.ts:336 are the other results) - drop the field; the refusal detail it carried is unreachable today
-
-cli/installer/src/net.ts:45 - 1 - `RedeemResult.status` field, written on refusal (`{ ok: false, status: res.status, error: 'refused' }`) - grep `redeemed\.` in main.ts: `.ok` (129), `.key` (129,131,132), `.error` (135) - `.status` never read; tests assert on `key.note` text, not the field - drop the field from the interface and the refusal return
-
-cli/installer/src/net.ts:98 - 1 - `putProjectMeta` returns `Promise<boolean>` ("the return value says whether the spec landed") but no caller reads it - grep `putProjectMeta` across cli/: main.ts:188 `await putProjectMeta(endpoint, metaKey, spec);` and main.ts:217 `await putProjectMeta(endpoint, metaKey, spec);` - both fire-and-forget, no assignment; tests assert via the mock server's recorded requests, not the return - return `Promise<void>`; drop `return res.ok`
-
-cli/installer/src/detect.ts:11 - 1 - 6 of 10 `ALIASES` entries are identity mappings (`'claude-code': 'claude-code'`, cursor, codex-cli, gemini-cli, github-copilot, windsurf) and can never change behavior - node check over the literal table: exactly claude-code/cursor/codex-cli/gemini-cli/github-copilot/windsurf satisfy `ALIASES[k] === k`; `detect` uses `ALIASES[explicit] ?? explicit`, whose fallback returns the identical string - keep only the 4 non-identity entries (claude, codex, gemini, copilot)
-
-cli/sdk/src/winston.ts:26 - 1 (CAVEATED - likely keep, recorded for completeness) - `UpcontrolTransport.log(info, cb?)` has zero in-tree callers - grep `\.log(` across cli/ + front/ ts/tsx: no hits; grep `new UpcontrolTransport`: only `cli/plugin/references/logs.md:43` `logger.add(new UpcontrolTransport())`, where winston itself invokes `transport.log` - the caller is the winston library, outside the tree, and the method's own comment says it covers direct-call paths - nothing; cannot be deleted (external-library contract), evidence line kept so wave 3 does not rediscover it as "dead"
-
-cli/installer/src/main.ts:35 - 2 (CAVEATED - engines) - `parseArgs` hand-rolls option parsing that `util.parseArgs` provides - ~40-line switch over `--key/--token/--endpoint/--copilot/--no-key/--no-meta/--json/--timeout/--help/--version` plus positional rest; `node -e "const {parseArgs}=require('util')"` on this machine: `function`; caveat: `util.parseArgs` landed in Node 18.3.0 (stable 22.2.0/20.17.0) while package.json engines say `>=18` - nodes 18.0-18.2 would break - `util.parseArgs(argv: { options: {...}, strict: false, tokens: true })` with the positional cmd/args taken from token list, IF the owner accepts the 18.3 floor
-
-cli/installer/test/init.test.ts:51 - 3 (CAVEATED - below the 20-line bar) - `runCli` helper plus the `execFileP`/`here`/`cli`/`KEY` consts duplicated verbatim in meta.test.ts - diff of init.test.ts:44-62 vs meta.test.ts:25-43: byte-identical `runCli` body (12 lines) + 4 identical const lines~16 lines - under the check's 20-line threshold, so not a formal finding - a shared `test/helpers.ts` with runCli/cli/KEY would dedupe the two spawn-based suites (wave-3 candidate at the owner's taste)
-
-cli/installer/src/net.ts:22 - 3 (CAVEATED - below the 20-line bar) - `mintAnonymousProject` and `redeemInstallToken` share one skeleton: POST JSON -> `if (!res.ok) return {ok:false,status,error:X}` -> parseJSON -> `if (!body?.key) return malformed` -> `return {ok:true,key}` -> `catch unreachable` - mint body spans 20 lines (22-41), redeem 16 (52-67) with interleaved differences (path, payload, error strings, extra mint fields) - the common block is not 20+ verbatim lines in both, so not a formal finding - a `postForKey(url, body)` helper would collapse both to ~5 lines each (wave-3 candidate)
-
-cli/sdk/src/scrub.ts:4 - 6 - `ScrubResult` interface exported but never imported by name - grep `ScrubResult` across cli/ + front/: scrub.ts:4 (declaration) and scrub.ts:63 (return type of `scrub`) only; `scrub.ts` is not a package.json exports-map entry (sdk exports only `.`, `./auto`, `./winston`), so no external consumer either - drop the `export` keyword; `scrub`'s signature keeps the type structurally
-
-cli/installer/src/files.ts:48 - 6 - `SkillResult` interface exported but never imported by name - grep `SkillResult` across cli/: files.ts:48 (declaration), files.ts:53 (return type of `installSkill`) only; installer is a bin package, not a library - drop the `export` keyword
-
-cli/installer/src/files.ts:75 - 6 - `DepResult` interface exported but never imported by name - grep `DepResult` across cli/: files.ts:75 (declaration), files.ts:82 (return type of `pinSdkDependency`) only - drop the `export` keyword
-
-cli/installer/src/files.ts:102 - 6 - `KeySource` type exported but never imported by name - grep `KeySource` across cli/: files.ts:102 (declaration), files.ts:104 (return type of `findKey`) only; main.ts uses the value strings, never the type - drop the `export` keyword
-
-cli/installer/src/files.ts:123 - 6 - `GitignoreResult` interface exported but never imported by name - grep `GitignoreResult` across cli/: files.ts:123 (declaration), files.ts:130 (return type of `ensureEnvIgnored`) only - drop the `export` keyword
-
-cli/installer/src/net.ts:13 - 6 - `MintResult` interface exported but never imported by name - grep `MintResult` across cli/: net.ts:13 (declaration), net.ts:22 (return type) only; main.ts infers the result, tests never name it - drop the `export` keyword
-
-cli/installer/src/net.ts:43 - 6 - `RedeemResult` interface exported but never imported by name - grep `RedeemResult` across cli/: net.ts:43 (declaration), net.ts:52 (return type) only - drop the `export` keyword
-
-cli/installer/src/net.ts:68 - 6 - `InstallStatus` interface exported but never imported by name - grep `InstallStatus` across cli/: net.ts:68 (declaration), net.ts:78 (return type), net.ts:84 (Omit<InstallStatus,...>) - all in-file; main.ts uses `Awaited<ReturnType<typeof fetchInstallStatus>>` (inference, not the name) - drop the `export` keyword
-
-cli/sdk/src/index.ts:8 - 6 (CAVEATED - published surface) - `SDK_VERSION` re-exported from the package root, zero in-tree importers - grep `SDK_VERSION` across cli/ + front/ ts/tsx: client.ts:6 (const), client.ts:151/181 (internal uses in client.ts), index.ts:8 (the re-export) - no importer anywhere; grep in cli/**/*.md (README, SPEC, plugin): no mention; caveat: version constants on a published npm package are conventional public API and semver-visible - removing the re-export (and then the `export` on client.ts:6, whose only external consumer the re-export is) is an owner call about the public surface, not a mechanical trim
-
-cli/sdk/src/index.ts:7 - 6 (CAVEATED - published surface) - `Attrs` type re-exported from the package root, zero in-tree importers - grep `Attrs` across cli/ + front/ ts/tsx: client.ts:15 (declaration), index.ts:5 (type-only import feeding `track`'s signature), index.ts:7 (the re-export) - no consumer imports it from the package root (index.ts:5 is internal plumbing feeding track's signature); callers pass object literals (structural); caveat: it is the documented parameter type of `track()` in the published typings - owner call: keep as public typing surface or drop the re-export line
-
-## Checks with zero findings
-
-- Check 4 (dead flexibility): none. Every parameter/option is exercised with varying values by
-  production callers or tests: `request(url, init, timeoutMs)` gets 3000 once vs default 10s
-  (net.ts:94/107); `detect(env, ttyOut?)` is varied both ways in files.test.ts:93-99 while
-  main.ts passes neither; `Client(env)` gets objects in tests, default in index.ts;
-  `installSkill(cwd, copilot)` both flags; `upcontrolLine(level, msg, extra?)` - `extra` is the
-  documented pino pattern in plugin/references/logs.md:32.
-- Check 5 (one-implementation abstraction): none. No interface with exactly one implementation
-  and no wrapper/factory types in the zone; every interface in the zone is a data shape.
+## Applied in wave 2.5
+
+The wave-2 sweep's findings were re-verified and the surviving ones applied inside
+PR #19's branch. Every application was re-proven (grep caller lists) by the lane,
+then independently re-verified by a fresh-context reviewer; every reviewer finding
+was fixed or recorded before commit. No behaviour change; counters before -> after:
+api zone 8384 -> 8373; account/ai/deliver zone 11074 -> 11063; worker/storage zone
+11337 -> 10805; front 13382 -> 13274; cli 2622 -> 2607.
+
+- api: dead encoding/json blank-import var, dead context.Background blank var,
+  issueKey + seven handler structs unexported (Keys, Install, InstanceSettings,
+  Monitors, ReadAPI, Telegram, WriteAPI), the api.Ingester alias dropped
+  (api.Batcher kept: cmd/ucapi names it), rep -> strings.Repeat in tests.
+- ai/account/analytics/channel/deliver/notify/discover: 55 of 57 findings - the
+  option and constant unexports (httpClient test seam preserved, ShouldFailover
+  merged into IsOpen, Run bakes its 2s ticker, randomHexAuth bakes 16,
+  isSubdomain const-false inlined with its dead +60 case), the six interface
+  unexports (llm, visitorStore, eventSink, firstTouch, prober, resolver - legal
+  as params of exported constructors, callers pass concrete types), handler
+  structs and types unexported across auth/session/analytics/mailer/telegram.
+  Forced ripple: cmd/ucworker main.go Run(ctx) bake (single line).
+- worker/storage: 22 of 25 - dead config knobs (RPCAddr, SpoolMaxBytes,
+  WALFsyncEvery, BatchBytes, BatchAge, MinFlushPerSec) and their getenv lines;
+  the WAL recovery API (Replay/Checkpoint/CheckpointOffset/Truncate plus the
+  machinery only it used - it never had a production caller); Batcher.Pending,
+  Detector.Threshold, MarkNotified + 3 dead reason consts, the always-nil triage
+  deploy param, Options.FlushCallback + guards, logging Options.Extra +
+  multiHandler, Pool.Exec (ha test moved to pool.Raw().Exec), guard
+  AllowedRedirectURL alias, cutoff Result.BeyondErrors, Sniff unexport,
+  InsertMetrics folded into insert[T] (a wave-2 leftover, 5th caller).
+- front: 15 - deleteTelegramBot, Button loading + spinner CSS, size lg,
+  LinkButton iconLeft/iconRight/href + anchor branch (to now required),
+  Modal width hardcoded 480, ConfirmPanel typedConfirmation, CodeBlock
+  highlightLines, the four unused grammars (cURL kept), Badge tones trimmed to
+  neutral|ok|check|down and the shape prop dropped, Callout trimmed to
+  note|danger, StatusDot check/paused cut, MonitorList userEdited state,
+  useDegradation one-key signature, ten needless type exports dropped.
+  Cloud-caveat cuts were adjudicated on seam grounds: the commercial front is a
+  fork importing nothing from core, so in-tree evidence decides.
+- cli: 14 - the six identity ALIASES entries (absence is result-identical: the
+  lookup falls through to the same string), _internals (no exports-map entry),
+  mint/redeem dead fields (projectId, error, status - read-scope proven),
+  putProjectMeta void, eight needless type exports dropped (sdk + installer).
+- deadcode ./cmd/... on the merged tree reports only the four ring/query
+  QueryBuilder rows (CutoffSeq, Slice, BeyondErrors, LatestExplain), which
+  pre-dated this wave (verified at base f93713b); no new rows.
+
+## Wave 3 candidates (remaining)
+
+Items checked and deliberately NOT applied, with reasons. Do not re-litigate
+without new facts.
+
+- writeUpgradeRequired/writeUpgrade (api) and randomHex/newHookToken: below the
+  20-line duplication bar; merge only if the pair annoys.
+- deliver mailSender interface: the documented test seam (captures the message);
+  removal deletes the seam.
+- auth VerifyInitData export: unexporting trips a false unparam positive (the
+  production caller rides http.Handler dispatch; unparam sees only tests).
+- ReportBlind RPC: uncalled, but removal needs a proto change.
+- parseLokiTS/parseUnixNano -> strconv: differ on 20+-digit overflow edges;
+  stored-string behaviour change.
+- wal.go magic const (referenced nowhere; its comment is false - Append frames
+  len+data+crc, no magic) and syncedTo (write-only since base): delete in a
+  batch with the next wal touch.
+- Verdict.Facts/.Status (triage): production reads only .Title; test-only-read
+  surface, same RTA-blind shape as earlier deletions.
+- e2e stubApi opts.monitors: never passed (9 bare calls), but front/e2e was
+  untouchable this round.
+- .uc-no-press (global.css), CodeBlock embedded + styles.embedded, e2e-fixture
+  caveats: cloud-fork convenience, kept for cherry-pick ease.
+- UpcontrolTransport.log (winston contract), parseArgs vs util.parseArgs
+  (engines >=18 floor), SDK_VERSION + Attrs re-exports (published surface):
+  owner-taste calls.
+- runCli test helper + postForKey (installer): below the bar; owner taste.
+- watchDot border token (nodata vs line-strong) in MonitorOnboarding vs
+  PublicStatus: may be drift; open question for the owner.
+- MonitorList monitors type/variable shadow in api/read_api.go: legal Go,
+  behaviour-neutral; rename is taste.

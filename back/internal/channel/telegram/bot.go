@@ -56,8 +56,8 @@ func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *sl
 // Run polls getUpdates under an advisory lock until ctx is cancelled; the
 // session-level lock auto-releases if the holder crashes.
 func (b *bot) Run(ctx context.Context) error {
-	// The lock must sit on a DEDICATED connection: pool.Exec borrows an idle
-	// connection the pool may close, silently releasing the lock.
+	// The lock must sit on a dedicated connection: a borrowed idle
+	// connection the pool may close would silently release the lock.
 	const lockKey = 0x75637467 // "uctg" — stable, unique per bot
 	lockConn, err := b.pool.Raw().Acquire(ctx)
 	if err != nil {
