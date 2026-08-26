@@ -9,7 +9,7 @@ import (
 func TestWatchIsNotThrottledByTheCheckThatPrecededIt(t *testing.T) {
 	// The landing flow (check, tick, watch) sits inside the check's cooldown:
 	// the two must throttle independently, or the watch dies as "no backend".
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}}
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}}
 	const ip = "203.0.113.9"
 	if !h.checkAllow(ip, "example.com") {
 		t.Fatal("the first check from an address must be allowed")

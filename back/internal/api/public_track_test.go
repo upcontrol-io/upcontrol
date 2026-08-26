@@ -11,7 +11,7 @@ import (
 func TestTrackAllowsOneBatchPerSecondPerIP(t *testing.T) {
 	// The client coalesces, so one batch per second is the honest reading of
 	// the 60/min budget; a same-address burst must not reach the recorder.
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}}
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}}
 	const ip = "203.0.113.9"
 	if !h.trackAllow(ip) {
 		t.Fatal("the first track batch from an address must be allowed")
@@ -27,7 +27,7 @@ func TestTrackAllowsOneBatchPerSecondPerIP(t *testing.T) {
 func TestPublicTrackMintsCookieOnceAndAlwaysAnswers204(t *testing.T) {
 	// The mint door: a cookieless request gets uc_vid; a carried one must not
 	// be re-rolled. nil rec/sess is the no-op contract.
-	h := &WriteAPI{checkSeenAt: map[string]time.Time{}, devMode: true}
+	h := &writeAPI{checkSeenAt: map[string]time.Time{}, devMode: true}
 
 	body := `{"events":[{"name":"page_view","path":"/","props":{}}]}`
 	r := httptest.NewRequest(http.MethodPost, "/public/track", strings.NewReader(body))

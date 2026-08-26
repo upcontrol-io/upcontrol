@@ -28,8 +28,8 @@ import (
 // per-replica: two replicas mean at worst two mints per IP per window.
 const anonCooldown = 30 * time.Second
 
-// Install carries the three handlers' dependencies.
-type Install struct {
+// install carries the three handlers' dependencies.
+type install struct {
 	pool         *pg.Pool
 	chc          *ch.Conn
 	keys         *pg.KeyResolver
@@ -44,8 +44,8 @@ type Install struct {
 	last map[string]time.Time
 }
 
-func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin string, selfHosted bool) *Install {
-	return &Install{
+func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin string, selfHosted bool) *install {
+	return &install{
 		pool:         pool,
 		chc:          chc,
 		keys:         pg.NewKeyResolver(pool, nil),
@@ -56,7 +56,7 @@ func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin s
 	}
 }
 
-func (h *Install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/projects/anonymous" && r.Method == http.MethodPost:
 		// A self-host has no use-before-signup story: an anonymous tenant there
@@ -87,7 +87,7 @@ const installTokenTTL = 10 * time.Minute
 
 // issueToken mints the one-time token for `npx upcontrol init --token`. A
 // bare signed-out init would mint an anonymous project and bypass this account.
-func (h *Install) issueToken(w http.ResponseWriter, r *http.Request) {
+func (h *install) issueToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
@@ -132,7 +132,7 @@ type redeemReq struct {
 
 // redeem burns the token and issues an ADDITIONAL api_key, once. Not a
 // rotation: the atomic UPDATE makes a replay answer the same 404 (no oracle).
-func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
+func (h *install) redeem(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !h.allow("redeem:" + installClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
@@ -152,7 +152,7 @@ func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusNotFound, "invalid_token")
 		return
 	}
-	key, err := IssueKey(ctx, h.pool, tenantID, projectID)
+	key, err := issueKey(ctx, h.pool, tenantID, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -162,7 +162,7 @@ func (h *Install) redeem(w http.ResponseWriter, r *http.Request) {
 
 // allow throttles by (bucket:ip) key. Mint and redeem are separate buckets:
 // a cooldown that refuses the second half of one flow is not a safeguard.
-func (h *Install) allow(ip string) bool {
+func (h *install) allow(ip string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
@@ -189,7 +189,7 @@ type anonymousReq struct {
 	Arch         string `json:"arch"`
 }
 
-func (h *Install) anonymous(w http.ResponseWriter, r *http.Request) {
+func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !h.allow("mint:" + installClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
@@ -225,7 +225,7 @@ func (h *Install) anonymous(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = raw.Exec(ctx,
 		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID)
-	key, err := IssueKey(ctx, h.pool, tenantID, projectID)
+	key, err := issueKey(ctx, h.pool, tenantID, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -243,7 +243,7 @@ type claimReq struct {
 	ClaimToken string `json:"claimToken"`
 }
 
-func (h *Install) claim(w http.ResponseWriter, r *http.Request) {
+func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
@@ -287,7 +287,7 @@ func requestKey(r *http.Request) string {
 	return key
 }
 
-func (h *Install) status(w http.ResponseWriter, r *http.Request) {
+func (h *install) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := requestKey(r)
 	if key == "" {
@@ -406,7 +406,7 @@ func metaPayload(body []byte, now time.Time) ([]byte, *metaError) {
 
 // setMeta is PUT /v1/project/meta, key-authenticated like install status;
 // nothing is stored before the whitelist, cap and scrubber have all passed.
-func (h *Install) setMeta(w http.ResponseWriter, r *http.Request) {
+func (h *install) setMeta(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := requestKey(r)
 	if key == "" {

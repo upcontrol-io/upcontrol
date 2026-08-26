@@ -54,7 +54,7 @@ const (
 	smtpFromSetting   = "smtp_from"
 )
 
-type InstanceSettings struct {
+type instanceSettings struct {
 	pool       *pg.Pool
 	sess       *session.Manager
 	selfHosted bool
@@ -63,11 +63,11 @@ type InstanceSettings struct {
 	seal func([]byte) ([]byte, error)
 }
 
-func NewInstanceSettings(pool *pg.Pool, sm *session.Manager, selfHosted bool, seal func([]byte) ([]byte, error)) *InstanceSettings {
-	return &InstanceSettings{pool: pool, sess: sm, selfHosted: selfHosted, seal: seal}
+func NewInstanceSettings(pool *pg.Pool, sm *session.Manager, selfHosted bool, seal func([]byte) ([]byte, error)) *instanceSettings {
+	return &instanceSettings{pool: pool, sess: sm, selfHosted: selfHosted, seal: seal}
 }
 
-func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.selfHosted {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
@@ -230,7 +230,7 @@ func (h *InstanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // store seals and upserts each setting; one refusal covers the lot because a
 // half-written pair (a token without its username) is a broken deep link.
-func (h *InstanceSettings) store(w http.ResponseWriter, ctx context.Context, values map[string]string) {
+func (h *instanceSettings) store(w http.ResponseWriter, ctx context.Context, values map[string]string) {
 	if h.seal == nil {
 		writeAPIErrMsg(w, http.StatusServiceUnavailable, "secret_key_missing",
 			"This instance has no UC_SECRET_KEY_HEX, so it cannot store secrets encrypted. Set it (install.sh generates one) and retry.")
@@ -250,7 +250,7 @@ func (h *InstanceSettings) store(w http.ResponseWriter, ctx context.Context, val
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *InstanceSettings) remove(w http.ResponseWriter, ctx context.Context, keys ...string) {
+func (h *instanceSettings) remove(w http.ResponseWriter, ctx context.Context, keys ...string) {
 	for _, key := range keys {
 		if err := h.pool.Queries().DeleteInstanceSetting(ctx, key); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")

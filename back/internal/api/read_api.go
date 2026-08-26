@@ -23,8 +23,8 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-// ReadAPI serves all the GET endpoints that don't need their own file.
-type ReadAPI struct {
+// readAPI serves all the GET endpoints that don't need their own file.
+type readAPI struct {
 	pool *pg.Pool
 	ch   *ch.Conn
 	sess *session.Manager
@@ -33,11 +33,11 @@ type ReadAPI struct {
 	botUsername func(context.Context) string
 }
 
-func NewReadAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, botUsername func(context.Context) string) *ReadAPI {
-	return &ReadAPI{pool: p, ch: chConn, sess: sm, botUsername: botUsername}
+func NewReadAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, botUsername func(context.Context) string) *readAPI {
+	return &readAPI{pool: p, ch: chConn, sess: sm, botUsername: botUsername}
 }
 
-func (h *ReadAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *readAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
@@ -64,7 +64,7 @@ func (h *ReadAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /v1/plan — the plan numbers (single-sourced with Pricing.tsx).
-func (h *ReadAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	var plan string
 	_ = h.pool.Raw().QueryRow(ctx, `SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
@@ -97,7 +97,7 @@ func (h *ReadAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 }
 
 // GET /v1/channels — connected channels + what is still connectable.
-func (h *ReadAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	rows, _ := h.pool.Queries().ListChannelsByTenant(r.Context(), tenantID)
 	channels := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
@@ -140,7 +140,7 @@ func (h *ReadAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int6
 }
 
 // GET /v1/recipients — people (e-mail + Telegram members) + pending invite links.
-func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	rows, _ := h.pool.Queries().ListRecipientsByTenant(r.Context(), tenantID)
 	recs := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
@@ -202,7 +202,7 @@ func (h *ReadAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 }
 
 // GET /v1/incidents — incident history (newest first).
-func (h *ReadAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	rows, _ := h.pool.Queries().ListIncidentsByTenant(r.Context(),
 		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, Limit: 20})
 	items := make([]map[string]any, 0, len(rows))
@@ -213,7 +213,7 @@ func (h *ReadAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int
 }
 
 // GET /v1/keys — the active API key + recent usage.
-func (h *ReadAPI) keys(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) keys(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	key, err := h.pool.Queries().GetAPIKeyForTenant(ctx, tenantID)
 	if err != nil {
@@ -247,7 +247,7 @@ func (h *ReadAPI) keys(w http.ResponseWriter, r *http.Request, tenantID int64) {
 }
 
 // GET /v1/sources — connected sources + what is still connectable.
-func (h *ReadAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	// The connectable list is a constant on purpose: it describes what CAN be
 	// connected, not what this tenant has. What the tenant has is read below.
 	connectable := []map[string]any{
@@ -266,7 +266,7 @@ func (h *ReadAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64
 }
 
 // GET /v1/overview — the Dashboard aggregate.
-func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	monRows, _ := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID)
 	monitors := make([]map[string]any, 0, len(monRows))
@@ -316,7 +316,7 @@ func (h *ReadAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 
 // logSummary reads "is this project sending lines, and when was the last one"
 // through ring.QueryBuilder, the only permitted path to the logs table.
-func (h *ReadAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantSignalsRow) (uint64, time.Time) {
+func (h *readAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantSignalsRow) (uint64, time.Time) {
 	if h.ch == nil || s.ProjectID == 0 {
 		return 0, time.Time{}
 	}
@@ -338,7 +338,7 @@ const (
 
 // availability computes the uptime tile and the 7-day health line from the
 // checks table; nil/empty when nothing has been checked.
-func (h *ReadAPI) availability(ctx context.Context, tenantID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
+func (h *readAPI) availability(ctx context.Context, tenantID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
 	// The product tiles are the events pipeline's output, read from
 	// ClickHouse; under 7 days of history produces no tile.
 	metrics = []map[string]any{}
@@ -597,7 +597,7 @@ func agoLabel(t time.Time) string {
 
 // incidentWithEvidence is incidentToAPI plus the timeline and the frozen log
 // slice. The timeline folds in the tenant's events around the break.
-func (h *ReadAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListIncidentsByTenantRow) map[string]any {
+func (h *readAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListIncidentsByTenantRow) map[string]any {
 	inc := incidentToAPI(row)
 
 	var lifecycle []map[string]any

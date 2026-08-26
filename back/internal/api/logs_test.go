@@ -43,7 +43,7 @@ func TestExplainThrottleContract(t *testing.T) {
 // explainAllow's mechanics, exercised by pre-seeding the map: aged-out slots
 // drop first, refusals write nothing, the window is per tenant, GC >512.
 func TestExplainAllow(t *testing.T) {
-	h := &WriteAPI{}
+	h := &writeAPI{}
 	now := time.Now()
 	// slots builds a window oldest-first (the append order explainAllow
 	// itself maintains) from ages given in seconds.
@@ -123,7 +123,7 @@ func TestExplainAllow(t *testing.T) {
 // The handler's gate placement. The nil pool makes any slip panic, so the 429
 // proves the throttle precedes any read; the 400s precede it and burn no slot.
 func TestExplainLogs_Throttle(t *testing.T) {
-	h := &WriteAPI{}
+	h := &writeAPI{}
 	explain := func(body string, tenantID int64) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		h.explainLogs(w, httptest.NewRequest(http.MethodPost, "/v1/logs/explain", strings.NewReader(body)), tenantID)

@@ -36,8 +36,8 @@ func (s *stubExplainLLM) Complete(_ context.Context, _ ai.Scenario, _ ai.Input) 
 }
 
 // openExplainDB applies migrations and returns a pool, a tenant on the given
-// plan and the stub model wired into a WriteAPI.
-func openExplainDB(t *testing.T, plan string) (*WriteAPI, int64, *stubExplainLLM) {
+// plan and the stub model wired into a writeAPI.
+func openExplainDB(t *testing.T, plan string) (*writeAPI, int64, *stubExplainLLM) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
@@ -59,7 +59,7 @@ func openExplainDB(t *testing.T, plan string) (*WriteAPI, int64, *stubExplainLLM
 		t.Fatalf("seed tenant: %v", err)
 	}
 	model := &stubExplainLLM{}
-	return &WriteAPI{pool: pool, acct: ai.New(pool, model, ai.Prices{})}, tenantID, model
+	return &writeAPI{pool: pool, acct: ai.New(pool, model, ai.Prices{})}, tenantID, model
 }
 
 func explainRequest(t *testing.T, line string) *http.Request {

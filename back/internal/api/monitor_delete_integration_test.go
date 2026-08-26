@@ -122,7 +122,7 @@ func (f *orphanFixture) publicIncidentTitles(t *testing.T) []string {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/public/status/prj-%d", f.projectID), nil)
 	w := httptest.NewRecorder()
-	(&WriteAPI{pool: f.pool}).public(w, r)
+	(&writeAPI{pool: f.pool}).public(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /public/status/prj-%d = %d (%s), want 200", f.projectID, w.Code, w.Body.String())
 	}
