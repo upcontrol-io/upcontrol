@@ -1,5 +1,5 @@
-// Channel is the interface every alert delivery channel implements; Send
-// returns the HTTP status (0 for a network error) for ClassifyError.
+// channel is the interface every alert delivery channel implements; Send
+// returns the HTTP status (0 for a network error) for classifyError.
 
 package deliver
 
@@ -15,12 +15,12 @@ import (
 	"time"
 )
 
-// Channel sends one alert to one target.
-type Channel interface {
+// channel sends one alert to one target.
+type channel interface {
 	// Kind returns the channel type: telegram|email|discord|slack.
 	Kind() string
 	// Send delivers the payload to the target. statusCode is 0 for network
-	// errors; the caller uses ClassifyError to decide retry vs DLQ.
+	// errors; the caller uses classifyError to decide retry vs DLQ.
 	Send(ctx context.Context, target string, payload AlertPayload) (statusCode int, err error)
 }
 
@@ -31,7 +31,7 @@ type AlertPayload struct {
 	Status      string         `json:"status"` // down|check|ok
 	IncidentID  string         `json:"incident_id"`
 	MonitorName string         `json:"monitor_name"`
-	Actions     []ActionButton `json:"actions,omitempty"`
+	Actions     []actionButton `json:"actions,omitempty"`
 	Fields      []Field        `json:"fields,omitempty"`
 	// Summary is the one sentence under the title, and only a measured one;
 	// no renderer invents a line to fill the gap.
@@ -54,8 +54,8 @@ type AlertPayload struct {
 	Group bool `json:"group,omitempty"`
 }
 
-// ActionButton is an inline button (Telegram) or link (email/discord/slack).
-type ActionButton struct {
+// actionButton is an inline button (Telegram) or link (email/discord/slack).
+type actionButton struct {
 	Label string `json:"label"`
 	URL   string `json:"url,omitempty"`
 }
@@ -68,8 +68,8 @@ type Field struct {
 	Mono  bool   `json:"mono,omitempty"`
 }
 
-// HTTPClient is overridable for tests.
-var HTTPClient = &http.Client{Timeout: 10 * time.Second}
+// httpClient is overridable for tests.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // TelegramChannel sends alerts via the Bot API. The token resolves per send
 // (env at boot or Settings at runtime); empty fails with a named error.
@@ -248,7 +248,7 @@ func doPost(ctx context.Context, url, bearer string, body []byte) (int, error) {
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := HTTPClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -298,9 +298,9 @@ func formatTelegram(p AlertPayload, appURL string) string {
 	}
 	// The class link joins the payload's own actions so one loop writes every
 	// anchor. Copied first: an append must not scribble on the payload.
-	links := append([]ActionButton(nil), p.Actions...)
+	links := append([]actionButton(nil), p.Actions...)
 	if href, label := alertLink(p, appURL); href != "" {
-		links = append(links, ActionButton{Label: label, URL: href})
+		links = append(links, actionButton{Label: label, URL: href})
 	}
 	for _, a := range links {
 		if a.URL != "" {

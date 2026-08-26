@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
-	subject, body := RenderCode("ada@example.com", "1ece76e3", "https://upcontrol.io")
+	subject, body := renderCode("ada@example.com", "1ece76e3", "https://upcontrol.io")
 	if subject == "" {
 		t.Fatal("subject is empty")
 	}
@@ -23,7 +23,7 @@ func TestRenderCodeCarriesAWorkingLink(t *testing.T) {
 }
 
 func TestRenderInvitePinsTheDecision15Bytes(t *testing.T) {
-	subject, body := RenderInvite("kira@example.com", "1ece76e3", "https://upcontrol.io", "acme.io", "Ada")
+	subject, body := renderInvite("kira@example.com", "1ece76e3", "https://upcontrol.io", "acme.io", "Ada")
 	// The subject is a sentence the invitee reads in their inbox list, so it
 	// carries no trailing period.
 	wantSubject := "Ada invited you to acme.io on UpControl"

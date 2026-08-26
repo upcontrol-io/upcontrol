@@ -18,9 +18,9 @@ type Config struct {
 	FromName string
 }
 
-// RenderCode builds the message, pure so the link format is testable. Both
+// renderCode builds the message, pure so the link format is testable. Both
 // forms travel: the link, and the bare code for the client that mangles it.
-func RenderCode(to, code, signInBase string) (subject, body string) {
+func renderCode(to, code, signInBase string) (subject, body string) {
 	link := fmt.Sprintf("%s/sign-in?email=%s&token=%s",
 		signInBase, url.QueryEscape(to), url.QueryEscape(code))
 	subject = "Your UpControl sign-in link"
@@ -36,9 +36,9 @@ this message — nobody can sign in without it.
 	return subject, body
 }
 
-// RenderInvite builds the invitation, same shape as RenderCode. The bytes
+// renderInvite builds the invitation, same shape as renderCode. The bytes
 // are a contract: email/src/templates.ts pins the same text part.
-func RenderInvite(to, code, signInBase, project, invitedBy string) (subject, body string) {
+func renderInvite(to, code, signInBase, project, invitedBy string) (subject, body string) {
 	link := fmt.Sprintf("%s/sign-in?email=%s&token=%s",
 		signInBase, url.QueryEscape(to), url.QueryEscape(code))
 	subject = fmt.Sprintf("%s invited you to %s on UpControl", invitedBy, project)

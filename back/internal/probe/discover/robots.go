@@ -24,7 +24,7 @@ const (
 
 // fetchRobots reads /robots.txt: from the moment we request site pages we are
 // a crawler, and a crawler that has not read robots.txt is a scraper.
-func fetchRobots(ctx context.Context, p Prober, base string) robots {
+func fetchRobots(ctx context.Context, p prober, base string) robots {
 	res := p.Execute(ctx, CheckSpec{
 		URL: base + "/robots.txt", Method: http.MethodGet,
 		TimeoutMs:    uint32(perRequestTimeout.Milliseconds()),

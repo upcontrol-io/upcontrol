@@ -11,24 +11,24 @@ import (
 //go:embed geoip/dbip-country-lite.mmdb
 var mmdbBytes []byte
 
-// Geo resolves an IP to an ISO country code. A nil *Geo is valid and answers
+// geo resolves an IP to an ISO country code. A nil *geo is valid and answers
 // "": a missing database degrades to "country unknown".
-type Geo struct {
+type geo struct {
 	db *geoip2.Reader
 }
 
-// OpenGeo parses the embedded database.
-func OpenGeo() (*Geo, error) {
+// openGeo parses the embedded database.
+func openGeo() (*geo, error) {
 	db, err := geoip2.FromBytes(mmdbBytes)
 	if err != nil {
 		return nil, err
 	}
-	return &Geo{db: db}, nil
+	return &geo{db: db}, nil
 }
 
 // Country returns the ISO 3166-1 alpha-2 code for ip, or "" when unknown;
 // the return value is the only thing kept from the raw IP.
-func (g *Geo) Country(ip string) string {
+func (g *geo) Country(ip string) string {
 	if g == nil || g.db == nil || ip == "" {
 		return ""
 	}
@@ -43,9 +43,9 @@ func (g *Geo) Country(ip string) string {
 	return rec.Country.IsoCode
 }
 
-// IPHash is the grouping key for a client IP: the first 8 bytes of sha256.
+// ipHash is the grouping key for a client IP: the first 8 bytes of sha256.
 // Truncated on purpose: grouping, not brute-forcing the IP back.
-func IPHash(ip string) [8]byte {
+func ipHash(ip string) [8]byte {
 	h := sha256.Sum256([]byte(ip))
 	var out [8]byte
 	copy(out[:], h[:8])

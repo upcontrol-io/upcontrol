@@ -30,16 +30,16 @@ type Settings struct {
 	ResolveFollowUp bool `json:"resolveFollowUp"`
 }
 
-// Defaults is the behaviour a channel has before anyone opens the settings —
+// defaults is the behaviour a channel has before anyone opens the settings:
 // exactly what the product did before the settings existed.
-func Defaults() Settings {
+func defaults() Settings {
 	return Settings{WebsiteDown: true, RepeatWindowMin: 5}
 }
 
 // Resolve parses the sparse jsonb column; absent keys keep defaults, the
 // window clamps so a hand-posted 0 or 10000 breaks nothing.
 func Resolve(raw []byte) Settings {
-	s := Defaults()
+	s := defaults()
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &s)
 	}

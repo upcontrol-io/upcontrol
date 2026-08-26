@@ -31,8 +31,8 @@ var googleIssuers = map[string]bool{
 	"https://accounts.google.com": true,
 }
 
-// Google handles POST /v1/auth/google.
-type Google struct {
+// google handles POST /v1/auth/google.
+type google struct {
 	pool       *pg.Pool
 	sess       *session.Manager
 	rec        *analytics.Recorder
@@ -52,7 +52,7 @@ type Google struct {
 
 // NewGoogle builds the handler. An empty clientID or clientSecret leaves it
 // unconfigured, which answers 503, never a 200 that reads as a login.
-func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, redirects []string, devMode bool, rec *analytics.Recorder, log *slog.Logger) *Google {
+func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, redirects []string, devMode bool, rec *analytics.Recorder, log *slog.Logger) *google {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -62,7 +62,7 @@ func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, r
 			clean = append(clean, r)
 		}
 	}
-	return &Google{
+	return &google{
 		pool: p, sess: sm, rec: rec, log: log, devMode: devMode,
 		clientID: clientID, clientSecret: clientSecret, redirects: clean,
 		tokenURL: googleTokenURL,
@@ -70,12 +70,12 @@ func NewGoogle(p *pg.Pool, sm *session.Manager, clientID, clientSecret string, r
 	}
 }
 
-// WithSelfHosted mirrors MagicLink's: a tenant created through this door lands
+// WithSelfHosted mirrors magicLink's: a tenant created through this door lands
 // on the same plan a tenant created through that one does.
-func (h *Google) WithSelfHosted(v bool) *Google { h.selfHosted = v; return h }
+func (h *google) WithSelfHosted(v bool) *google { h.selfHosted = v; return h }
 
 // Configured reports whether this deployment can complete a Google sign-in.
-func (h *Google) Configured() bool {
+func (h *google) Configured() bool {
 	return h != nil && h.clientID != "" && h.clientSecret != "" && len(h.redirects) > 0
 }
 
@@ -85,7 +85,7 @@ type googleReq struct {
 	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
-func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
 	// This door installs a session, so it needs no victim cookie: a code
@@ -140,7 +140,7 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Normalised, or the same person through the two doors lands in two
 	// accounts: the email column is UNIQUE and byte-exact.
 	email := NormalizeEmail(claims.Email)
-	door := &MagicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}
+	door := &magicLink{pool: h.pool, rec: h.rec, selfHosted: h.selfHosted}
 	person, err := door.ensurePerson(ctx, email)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
@@ -160,7 +160,7 @@ func (h *Google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeAccount(w, person)
 }
 
-func (h *Google) allowedRedirect(uri string) bool {
+func (h *google) allowedRedirect(uri string) bool {
 	for _, allowed := range h.redirects {
 		if uri == allowed {
 			return true
@@ -171,7 +171,7 @@ func (h *Google) allowedRedirect(uri string) bool {
 
 // exchange trades the one-time code for Google's token response and returns the
 // raw id_token. The client secret leaves the process here and nowhere else.
-func (h *Google) exchange(ctx context.Context, req googleReq) (string, error) {
+func (h *google) exchange(ctx context.Context, req googleReq) (string, error) {
 	form := url.Values{
 		"code":          {req.Code},
 		"client_id":     {h.clientID},
@@ -231,7 +231,7 @@ type googleClaims struct {
 
 // verify checks an id_token received directly from Google's token endpoint over
 // TLS. The signature is not checked (the channel authenticates it); claims are.
-func (h *Google) verify(idToken string) (googleClaims, error) {
+func (h *google) verify(idToken string) (googleClaims, error) {
 	var c googleClaims
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {

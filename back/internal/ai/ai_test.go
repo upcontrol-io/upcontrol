@@ -22,27 +22,27 @@ func TestHashInput_Stable(t *testing.T) {
 	// state and must not leak between tests.
 	sc := Scenario{Key: "explain_logs", Version: 1}
 	brain := "fake"
-	a := HashInput(sc, brain, Input{Lines: []string{"x", "y"}})
-	b := HashInput(sc, brain, Input{Lines: []string{"x", "y"}})
-	c := HashInput(sc, brain, Input{Lines: []string{"x", "z"}})
+	a := hashInput(sc, brain, Input{Lines: []string{"x", "y"}})
+	b := hashInput(sc, brain, Input{Lines: []string{"x", "y"}})
+	c := hashInput(sc, brain, Input{Lines: []string{"x", "z"}})
 	if a != b {
-		t.Fatal("HashInput must be stable for the same scenario, brain and lines")
+		t.Fatal("hashInput must be stable for the same scenario, brain and lines")
 	}
 	if a == c {
-		t.Fatal("HashInput must change when the lines change (cache key)")
+		t.Fatal("hashInput must change when the lines change (cache key)")
 	}
-	if v := HashInput(Scenario{Key: sc.Key, Version: sc.Version + 1}, brain, Input{Lines: []string{"x", "y"}}); a == v {
-		t.Fatal("HashInput must change when the scenario version bumps (cache self-invalidation)")
+	if v := hashInput(Scenario{Key: sc.Key, Version: sc.Version + 1}, brain, Input{Lines: []string{"x", "y"}}); a == v {
+		t.Fatal("hashInput must change when the scenario version bumps (cache self-invalidation)")
 	}
 	// Volatile context is outside the hash: hashing it would bust the cache
 	// on every incident flap.
-	if k := HashInput(sc, brain, Input{Lines: []string{"x", "y"}, Context: []string{"services in window: api"}}); a != k {
-		t.Fatal("HashInput must NOT change when only the volatile context changes")
+	if k := hashInput(sc, brain, Input{Lines: []string{"x", "y"}, Context: []string{"services in window: api"}}); a != k {
+		t.Fatal("hashInput must NOT change when only the volatile context changes")
 	}
 	// The meta line IS covered: a different product spec is a different
 	// question, even with identical lines.
-	if m := HashInput(sc, brain, Input{Lines: []string{"x", "y"}, MetaLine: "payments api — stripe webhooks"}); a == m {
-		t.Fatal("HashInput must change when the project-meta line changes")
+	if m := hashInput(sc, brain, Input{Lines: []string{"x", "y"}, MetaLine: "payments api — stripe webhooks"}); a == m {
+		t.Fatal("hashInput must change when the project-meta line changes")
 	}
 }
 
@@ -53,24 +53,24 @@ func TestHashInput_BrainAndFraming(t *testing.T) {
 	base := Input{Lines: []string{"x", "y"}}
 
 	bg := context.Background()
-	fake := HashInput(sc, "fake", base)
-	gpt := HashInput(sc, testOpenAI("https://api.openai.com/v1", "gpt-4o-mini").ID(bg), base)
-	gptOther := HashInput(sc, testOpenAI("https://api.openai.com/v1", "gpt-4o").ID(bg), base)
+	fake := hashInput(sc, "fake", base)
+	gpt := hashInput(sc, testOpenAI("https://api.openai.com/v1", "gpt-4o-mini").ID(bg), base)
+	gptOther := hashInput(sc, testOpenAI("https://api.openai.com/v1", "gpt-4o").ID(bg), base)
 	if fake == gpt {
-		t.Fatal("HashInput must change with the answering brain — a cached answer must never be served across brains")
+		t.Fatal("hashInput must change with the answering brain — a cached answer must never be served across brains")
 	}
 	if gpt == gptOther {
-		t.Fatal("HashInput must change with the model: the same lines under a different model are a different answer")
+		t.Fatal("hashInput must change with the model: the same lines under a different model are a different answer")
 	}
 	// The same model name behind two gateways is two brains: re-pointing
 	// UC_AI_BASE_URL must not keep serving the old provider's cached answers.
-	azure := HashInput(sc, testOpenAI("https://my-dep.openai.azure.com/openai", "gpt-4o-mini").ID(bg), base)
+	azure := hashInput(sc, testOpenAI("https://my-dep.openai.azure.com/openai", "gpt-4o-mini").ID(bg), base)
 	if gpt == azure {
-		t.Fatal("HashInput must change with the base URL: one model name behind two gateways is two different brains")
+		t.Fatal("hashInput must change with the base URL: one model name behind two gateways is two different brains")
 	}
 	// ...but the same gateway spelled with and without a trailing slash is
 	// one brain, the way the request path already trims it.
-	if slash := HashInput(sc, testOpenAI("https://api.openai.com/v1/", "gpt-4o-mini").ID(bg), base); gpt != slash {
+	if slash := hashInput(sc, testOpenAI("https://api.openai.com/v1/", "gpt-4o-mini").ID(bg), base); gpt != slash {
 		t.Fatal("a trailing slash on the base URL must not split the cache identity — the ID trims it like the request path")
 	}
 	if got := testOpenAI("https://api.openai.com/v1", "gpt-4o-mini").ID(bg); got != "openai:https://api.openai.com/v1:gpt-4o-mini" {
@@ -79,14 +79,14 @@ func TestHashInput_BrainAndFraming(t *testing.T) {
 
 	// Length prefixing: with bare separators, Lines ["a","b"] and ["a\nb"]
 	// would be one colliding cache key.
-	if HashInput(sc, "fake", Input{Lines: []string{"a", "b"}}) ==
-		HashInput(sc, "fake", Input{Lines: []string{"a\nb"}}) {
+	if hashInput(sc, "fake", Input{Lines: []string{"a", "b"}}) ==
+		hashInput(sc, "fake", Input{Lines: []string{"a\nb"}}) {
 		t.Fatal("two lines and one embedded newline must not collide — parts are length-prefixed precisely so they cannot")
 	}
 	// The same ambiguity, one field over: the meta line and the first log
 	// line cannot slide into each other.
-	if HashInput(sc, "fake", Input{MetaLine: "m", Lines: []string{"a"}}) ==
-		HashInput(sc, "fake", Input{Lines: []string{"m", "a"}}) {
+	if hashInput(sc, "fake", Input{MetaLine: "m", Lines: []string{"a"}}) ==
+		hashInput(sc, "fake", Input{Lines: []string{"m", "a"}}) {
 		t.Fatal("meta line and first log line must not collide — each part is length-prefixed")
 	}
 }
@@ -260,8 +260,8 @@ func TestParseAnswer(t *testing.T) {
 		{"severe is not a severity", `,"severity":"severe"`, true},
 		{"empty string", `,"severity":""`, true},
 	} {
-		if _, err := ParseAnswer([]byte(base + tc.severity + `}`)); (err != nil) != tc.wantErr {
-			t.Fatalf("severity %s: ParseAnswer err = %v, want error = %v", tc.name, err, tc.wantErr)
+		if _, err := parseAnswer([]byte(base + tc.severity + `}`)); (err != nil) != tc.wantErr {
+			t.Fatalf("severity %s: parseAnswer err = %v, want error = %v", tc.name, err, tc.wantErr)
 		}
 	}
 }

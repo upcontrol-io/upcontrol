@@ -1,4 +1,4 @@
-// Worker is the delivery queue processor: it leases pending items, sends them
+// worker is the delivery queue processor: it leases pending items, sends them
 // through a channel, records the outcome. The wiring of the pure logic.
 
 package deliver
@@ -16,34 +16,34 @@ import (
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
-type Worker struct {
+type worker struct {
 	pool     *pg.Pool
-	channels map[string]Channel // keyed by channel kind: telegram|email|discord|slack
+	channels map[string]channel // keyed by channel kind: telegram|email|discord|slack
 	log      *slog.Logger
 	nodeID   string
-	breakers map[int64]*Breaker // per channel_id
+	breakers map[int64]*breaker // per channel_id
 }
 
 // NewWorker builds a delivery worker.
-func NewWorker(pool *pg.Pool, log *slog.Logger, nodeID string) *Worker {
-	return &Worker{
+func NewWorker(pool *pg.Pool, log *slog.Logger, nodeID string) *worker {
+	return &worker{
 		pool:     pool,
-		channels: map[string]Channel{},
+		channels: map[string]channel{},
 		log:      log,
 		nodeID:   nodeID,
-		breakers: map[int64]*Breaker{},
+		breakers: map[int64]*breaker{},
 	}
 }
 
 // RegisterChannel adds a channel implementation; each of the four kinds is
 // registered once at startup.
-func (w *Worker) RegisterChannel(c Channel) {
+func (w *worker) RegisterChannel(c channel) {
 	w.channels[c.Kind()] = c
 }
 
 // Tick processes one batch of pending deliveries; called periodically by the
 // background loop.
-func (w *Worker) Tick(ctx context.Context) error {
+func (w *worker) Tick(ctx context.Context) error {
 	q := w.pool.Queries()
 	items, err := q.LeasePendingDeliveries(ctx, sqlc.LeasePendingDeliveriesParams{
 		LeasedBy:   &w.nodeID,
@@ -60,7 +60,7 @@ func (w *Worker) Tick(ctx context.Context) error {
 	return nil
 }
 
-func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveriesRow) {
+func (w *worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveriesRow) {
 	q := w.pool.Queries()
 	queueID := item.ID
 
@@ -74,7 +74,7 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 
 	channelKind := ch.Kind
 	target := ch.Target
-	if breaker.ShouldFailover(time.Now()) && channelKind != "email" {
+	if breaker.IsOpen(time.Now()) && channelKind != "email" {
 		channelKind = "email"
 		// Fail over to the tenant's email channel; without the lookup the
 		// payload was silently dropped with the recipient lost.
@@ -157,13 +157,13 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 	statusCode, sendErr := sender.Send(ctx, target, payload)
 	now := time.Now()
 
-	var outcome Outcome
+	var outcome outcome
 	var detail string
 	if sendErr != nil {
-		outcome = OutcomeRetryable
+		outcome = outcomeRetryable
 		detail = sendErr.Error()
 	} else {
-		outcome = ClassifyError(statusCode)
+		outcome = classifyError(statusCode)
 		detail = fmt.Sprintf("HTTP %d", statusCode)
 	}
 
@@ -176,18 +176,18 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 	attempt := int(item.Attempts) + 1
 
 	switch outcome {
-	case OutcomeOK:
+	case outcomeOK:
 		_ = q.MarkDelivered(ctx, queueID)
 		breaker.RecordSuccess()
 
-	case OutcomeFatal:
+	case outcomeFatal:
 		// Non-repeatable: straight to DLQ.
 		w.dead(ctx, queueID, detail)
 		breaker.RecordFailure(now)
 
-	case OutcomeRetryable:
+	case outcomeRetryable:
 		breaker.RecordFailure(now)
-		nextTry := NextTryAt(attempt, outcome, now)
+		nextTry := nextTryAt(attempt, outcome, now)
 		if nextTry.IsZero() {
 			w.dead(ctx, queueID, "max retries exceeded")
 		} else {
@@ -199,7 +199,7 @@ func (w *Worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 	}
 }
 
-func (w *Worker) dead(ctx context.Context, queueID int64, reason string) {
+func (w *worker) dead(ctx context.Context, queueID int64, reason string) {
 	reasonPtr := reason
 	_ = w.pool.Queries().MarkDead(ctx, sqlc.MarkDeadParams{
 		DeadReason: &reasonPtr,
@@ -207,18 +207,18 @@ func (w *Worker) dead(ctx context.Context, queueID int64, reason string) {
 	})
 }
 
-func (w *Worker) getBreaker(channelID int64) *Breaker {
+func (w *worker) getBreaker(channelID int64) *breaker {
 	b, ok := w.breakers[channelID]
 	if !ok {
-		b = &Breaker{}
+		b = &breaker{}
 		w.breakers[channelID] = b
 	}
 	return b
 }
 
 // Run drives the worker until ctx is cancelled. Tick every 2 seconds.
-func (w *Worker) Run(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
+func (w *worker) Run(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for {
 		select {

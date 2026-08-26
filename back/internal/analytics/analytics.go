@@ -14,8 +14,8 @@ import (
 
 // Request-level caps; the per-event caps live in validate.
 const (
-	MaxEventsPerRequest = 20
-	MaxBodyBytes        = 64 << 10
+	maxEventsPerRequest = 20
+	maxBodyBytes        = 64 << 10
 )
 
 // Per-event caps: path ≤256, title ≤128, referrer ≤512, utm fields ≤128,
@@ -34,9 +34,9 @@ const (
 // 1..64 chars; anything else drops, so no arbitrary strings reach the column.
 var eventNameRe = regexp.MustCompile(`^[a-z0-9_.]{1,64}$`)
 
-// Event is one analytics event. All string fields arrive untrusted: sanitize
+// event is one analytics event. All string fields arrive untrusted: sanitize
 // strips control characters, validate enforces the caps.
-type Event struct {
+type event struct {
 	Name        string            `json:"name"`
 	Path        string            `json:"path"`
 	Title       string            `json:"title"`
@@ -59,7 +59,7 @@ func stripControl(s string) string {
 }
 
 // sanitize mutates e in place: strips control chars everywhere.
-func (e *Event) sanitize() {
+func (e *event) sanitize() {
 	e.Name = stripControl(e.Name)
 	e.Path = stripControl(e.Path)
 	e.Title = stripControl(e.Title)
@@ -78,7 +78,7 @@ func (e *Event) sanitize() {
 
 // validate reports whether the sanitized event satisfies every cap. One bad
 // field drops the whole event: a truncated string is a lie.
-func validate(e Event) bool {
+func validate(e event) bool {
 	if !eventNameRe.MatchString(e.Name) {
 		return false
 	}
@@ -99,23 +99,23 @@ func validate(e Event) bool {
 	return true
 }
 
-// Payload is the POST /public/track body shape.
-type Payload struct {
-	Events []Event `json:"events"`
+// payload is the POST /public/track body shape.
+type payload struct {
+	Events []event `json:"events"`
 }
 
 // ParseBody decodes and validates a /public/track body; it never fails: a
 // malformed body yields zero events, invalid ones drop individually.
-func ParseBody(rd io.Reader) (kept []Event, dropped int) {
-	var p Payload
-	if err := json.NewDecoder(io.LimitReader(rd, MaxBodyBytes+1)).Decode(&p); err != nil {
+func ParseBody(rd io.Reader) (kept []event, dropped int) {
+	var p payload
+	if err := json.NewDecoder(io.LimitReader(rd, maxBodyBytes+1)).Decode(&p); err != nil {
 		return nil, 0
 	}
-	if len(p.Events) > MaxEventsPerRequest {
-		dropped += len(p.Events) - MaxEventsPerRequest
-		p.Events = p.Events[:MaxEventsPerRequest]
+	if len(p.Events) > maxEventsPerRequest {
+		dropped += len(p.Events) - maxEventsPerRequest
+		p.Events = p.Events[:maxEventsPerRequest]
 	}
-	kept = make([]Event, 0, len(p.Events))
+	kept = make([]event, 0, len(p.Events))
 	for _, e := range p.Events {
 		e.sanitize()
 		if !validate(e) {
@@ -127,9 +127,9 @@ func ParseBody(rd io.Reader) (kept []Event, dropped int) {
 	return kept, dropped
 }
 
-// Scope is the request-scoped analytics context. Token is the raw uc_vid
+// scope is the request-scoped analytics context. Token is the raw uc_vid
 // (empty = anonymous); IP and UA are used once at enqueue, never stored raw.
-type Scope struct {
+type scope struct {
 	Token string
 	IP    string
 	UA    string
@@ -139,21 +139,21 @@ type scopeKey struct{}
 
 // WithScope attaches s to ctx so downstream code fires server events with the
 // originating request's visitor identity.
-func WithScope(ctx context.Context, s *Scope) context.Context {
+func WithScope(ctx context.Context, s *scope) context.Context {
 	return context.WithValue(ctx, scopeKey{}, s)
 }
 
-// ScopeFrom returns the scope attached to ctx, or nil.
-func ScopeFrom(ctx context.Context) *Scope {
-	s, _ := ctx.Value(scopeKey{}).(*Scope)
+// scopeFrom returns the scope attached to ctx, or nil.
+func scopeFrom(ctx context.Context) *scope {
+	s, _ := ctx.Value(scopeKey{}).(*scope)
 	return s
 }
 
-// ScopeFromRequest builds a Scope from the uc_vid cookie, the client IP
+// ScopeFromRequest builds a scope from the uc_vid cookie, the client IP
 // (X-Forwarded-For first) and the User-Agent.
-func ScopeFromRequest(r *http.Request) *Scope {
+func ScopeFromRequest(r *http.Request) *scope {
 	tok, _ := VisitorToken(r)
-	return &Scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}
+	return &scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}
 }
 
 // ClientIP prefers the first X-Forwarded-For entry (set by Caddy) then falls

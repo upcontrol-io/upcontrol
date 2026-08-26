@@ -72,7 +72,7 @@ var boilerplateSection = map[string]bool{
 	"imprint": true, "impressum": true, "tos": true,
 }
 
-// rank turns raw candidates into the shortlist, capped at PagesWanted. Pure:
+// rank turns raw candidates into the shortlist, capped at pagesWanted. Pure:
 // no network, no clock. The host root is dropped (the Live row has it).
 func rank(base string, cands []candidate, r robots) []candidate {
 	root, err := url.Parse(base)
@@ -102,7 +102,6 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		if u.Host != root.Host {
 			continue
 		}
-		const isSubdomain = false
 		u.Fragment = ""
 		u.RawQuery = "" // ?utm_source=… is the same page
 		path := u.Path
@@ -113,12 +112,11 @@ func rank(base string, cands []candidate, r robots) []candidate {
 			path = strings.TrimRight(path, "/")
 			u.Path = path
 		}
-		// The Live probe row covers THIS host's root. A subdomain's root is a
-		// different host, so it stays.
-		if path == "/" && !isSubdomain {
+		// The Live probe row covers THIS host's root.
+		if path == "/" {
 			continue
 		}
-		if isAsset(path) || (!isSubdomain && !r.allowed(path)) {
+		if isAsset(path) || !r.allowed(path) {
 			continue
 		}
 		clean := u.String()
@@ -128,7 +126,7 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		seen[clean] = true
 
 		c.URL = clean
-		list = append(list, scored{c: c, score: scoreOf(path, isSubdomain, c), order: i})
+		list = append(list, scored{c: c, score: scoreOf(path, c), order: i})
 	}
 
 	sort.SliceStable(list, func(a, b int) bool {
@@ -137,8 +135,8 @@ func rank(base string, cands []candidate, r robots) []candidate {
 		}
 		return list[a].order < list[b].order // stable: document order breaks ties
 	})
-	if len(list) > PagesWanted {
-		list = list[:PagesWanted]
+	if len(list) > pagesWanted {
+		list = list[:pagesWanted]
 	}
 	out := make([]candidate, 0, len(list))
 	for _, s := range list {
@@ -149,7 +147,7 @@ func rank(base string, cands []candidate, r robots) []candidate {
 
 // scoreOf ranks by entry points, not articles: a sitemap is mostly articles,
 // and without the depth penalty the site's front doors never appear.
-func scoreOf(path string, isSubdomain bool, c candidate) int {
+func scoreOf(path string, c candidate) int {
 	score := 0
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	depth := len(segments)
@@ -162,10 +160,6 @@ func scoreOf(path string, isSubdomain bool, c candidate) int {
 	}
 
 	switch {
-	case isSubdomain && depth == 0:
-		// Its own host: separate DNS, certificate, deploy. An api. subdomain
-		// down while the marketing site is fine is the outage this catches.
-		score += 60
 	case depth == 1:
 		score += 40 // a section: the site's own front doors
 	case depth >= 2:

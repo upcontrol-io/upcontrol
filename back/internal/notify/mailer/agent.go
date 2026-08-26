@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-// Agent sends through an external email-agent service: one HTTP POST per
+// agent sends through an external email-agent service: one HTTP POST per
 // message; the service owns the template, queue and provider.
-type Agent struct {
+type agent struct {
 	url    string // service base, e.g. http://mail-agent:8080, no trailing slash
 	key    string // bearer token; empty = the service runs with auth disabled
 	base   string // sign-in origin the magic link points at
 	log    *slog.Logger
-	client *http.Client // one per Agent; every send shares its timeout
+	client *http.Client // one per agent; every send shares its timeout
 }
 
 // sendRequest is the exact body the agent's /send validates: a kind, a template
@@ -34,14 +34,14 @@ type sendRequest struct {
 
 // NewAgent refuses an empty URL: a mailer pointed at nothing must fail at
 // boot, not on the first message.
-func NewAgent(url, key string, log *slog.Logger) (*Agent, error) {
+func NewAgent(url, key string, log *slog.Logger) (*agent, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, errors.New("mailer: UC_EMAIL_URL is empty")
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Agent{
+	return &agent{
 		url:    strings.TrimRight(url, "/"),
 		key:    key,
 		log:    log,
@@ -50,11 +50,11 @@ func NewAgent(url, key string, log *slog.Logger) (*Agent, error) {
 }
 
 // WithSignInBase sets the origin the magic link points at (e.g. https://upcontrol.io).
-func (a *Agent) WithSignInBase(base string) *Agent { a.base = base; return a }
+func (a *agent) WithSignInBase(base string) *agent { a.base = base; return a }
 
 // SendCode queues one magic-link with the agent. The code crosses the wire
 // but is never logged: a log line carrying it is a second place to steal from.
-func (a *Agent) SendCode(ctx context.Context, to, code string) error {
+func (a *agent) SendCode(ctx context.Context, to, code string) error {
 	if err := a.post(ctx, to, sendRequest{
 		Kind:     "transactional",
 		Template: "magic-link",
@@ -69,7 +69,7 @@ func (a *Agent) SendCode(ctx context.Context, to, code string) error {
 
 // SendInvite queues one project invitation. The code crosses the wire but is
 // never logged; `to` stays in the envelope, the agent builds the link itself.
-func (a *Agent) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
+func (a *agent) SendInvite(ctx context.Context, to, code, project, invitedBy string) error {
 	if err := a.post(ctx, to, sendRequest{
 		Kind:     "transactional",
 		Template: "invite",
@@ -89,7 +89,7 @@ func (a *Agent) SendInvite(ctx context.Context, to, code, project, invitedBy str
 
 // post delivers one request to the agent's /send and turns the HTTP outcome
 // into an error; both message types ride it.
-func (a *Agent) post(ctx context.Context, to string, req sendRequest) error {
+func (a *agent) post(ctx context.Context, to string, req sendRequest) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("mailer: encode email-agent request: %w", err)
