@@ -11,9 +11,9 @@ import (
 	"go.upcontrol.io/back/internal/probe/executor"
 )
 
-// Prober is the subset of the executor this package needs, so the tests can
+// prober is the subset of the executor this package needs, so the tests can
 // drive it without a network.
-type Prober interface {
+type prober interface {
 	Execute(ctx context.Context, spec CheckSpec) Result
 }
 
@@ -82,7 +82,7 @@ type Facts struct {
 
 // Run establishes what it can about baseURL within Budget. Empty Facts when
 // the caller's probe got no response; dns nil turns host discovery off.
-func Run(ctx context.Context, p Prober, dns Resolver, baseURL string, res Result) Facts {
+func Run(ctx context.Context, p prober, dns resolver, baseURL string, res Result) Facts {
 	if res.StatusCode == 0 || res.ErrorClass == "blocked_target" {
 		return Facts{}
 	}
@@ -127,7 +127,7 @@ func headersFrom(h http.Header) *Headers {
 	}
 }
 
-func probeErrorPage(ctx context.Context, p Prober, base string) *ErrorPage {
+func probeErrorPage(ctx context.Context, p prober, base string) *ErrorPage {
 	res := p.Execute(ctx, CheckSpec{
 		URL: base + missingPath, Method: http.MethodGet,
 		TimeoutMs: uint32(perRequestTimeout.Milliseconds()),
@@ -141,7 +141,7 @@ func probeErrorPage(ctx context.Context, p Prober, base string) *ErrorPage {
 	return &ErrorPage{Status: res.StatusCode, Correct: res.StatusCode >= 400}
 }
 
-func probeHealth(ctx context.Context, p Prober, base string) *Health {
+func probeHealth(ctx context.Context, p prober, base string) *Health {
 	for _, path := range healthPaths {
 		if ctx.Err() != nil {
 			// Out of budget with candidates left: we cannot say there is none.

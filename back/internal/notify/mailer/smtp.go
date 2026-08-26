@@ -4,24 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/smtp"
+	stdsmtp "net/smtp"
 )
 
-// SMTP sends through any relay, stdlib only: back/ carries no provider SDK.
-type SMTP struct {
+// smtp sends through any relay, stdlib only: back/ carries no provider SDK.
+type smtp struct {
 	cfg Config
 	log *slog.Logger
 }
 
 // Send delivers one plain-text message through the relay.
-func (s *SMTP) Send(_ context.Context, to, subject, text string) error {
+func (s *smtp) Send(_ context.Context, to, subject, text string) error {
 	msg := buildMessage(s.cfg.From, s.cfg.FromName, to, subject, text)
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
-	var auth smtp.Auth
+	var auth stdsmtp.Auth
 	if s.cfg.Username != "" {
-		auth = smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
+		auth = stdsmtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
 	}
-	if err := smtp.SendMail(addr, auth, s.cfg.From, []string{to}, msg); err != nil {
+	if err := stdsmtp.SendMail(addr, auth, s.cfg.From, []string{to}, msg); err != nil {
 		s.log.Warn("mailer: send failed", "to", to, "err", err)
 		return err
 	}

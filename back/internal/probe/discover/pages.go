@@ -8,9 +8,9 @@ import (
 	"sync"
 )
 
-// PagesWanted is how many pages the shortlist carries: what the strip can show
+// pagesWanted is how many pages the shortlist carries: what the strip can show
 // without becoming a list; the picker is where the plan limit bites.
-const PagesWanted = 5
+const pagesWanted = 5
 
 // Page is one discovered page and how it answered. Status 0 means found but
 // never probed, reported as unknown rather than down.
@@ -29,7 +29,7 @@ type Page struct {
 
 // findPages builds the shortlist and probes it. Discovery order is by cost:
 // robots, then the sitemap, homepage links as the free fallback.
-func findPages(ctx context.Context, p Prober, dns Resolver, base string, homepage []byte) (pages, hosts []Page) {
+func findPages(ctx context.Context, p prober, dns resolver, base string, homepage []byte) (pages, hosts []Page) {
 	r := fetchRobots(ctx, p, base)
 
 	// Homepage links are read either way: even when a sitemap answers, the links
@@ -48,8 +48,8 @@ func findPages(ctx context.Context, p Prober, dns Resolver, base string, homepag
 }
 
 // probePages runs the shortlist concurrently, bounded by its own length
-// (rank capped it at PagesWanted).
-func probePages(ctx context.Context, p Prober, cands []candidate) []Page {
+// (rank capped it at pagesWanted).
+func probePages(ctx context.Context, p prober, cands []candidate) []Page {
 	pages := make([]Page, len(cands))
 	var wg sync.WaitGroup
 	for i, c := range cands {

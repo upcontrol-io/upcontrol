@@ -87,10 +87,10 @@ func (c Completion) Usage() (prompt, completion int64) {
 	return int64(max(c.PromptTokens, 0)), int64(max(c.CompletionTokens, 0))
 }
 
-// ExplainResult carries the validated answer plus the quota counters.
+// explainResult carries the validated answer plus the quota counters.
 // Used/Limit are the monthly call count, never tokens.
-type ExplainResult struct {
-	Answer ExplainAnswer
+type explainResult struct {
+	Answer explainAnswer
 	Cached bool
 	Used   int
 	Limit  int
@@ -99,52 +99,52 @@ type ExplainResult struct {
 	Prompt string
 }
 
-type LLM interface {
+type llm interface {
 	Complete(ctx context.Context, sc Scenario, input Input) (Completion, error)
 	// ID names the answering brain for the cache hash: a cached answer is
 	// never served across brains. Settings can change at runtime, so it takes a ctx.
 	ID(ctx context.Context) string
 }
 
-// ExplainAnswer is the strict triage shape every explain answer must match.
-type ExplainAnswer struct {
+// explainAnswer is the strict triage shape every explain answer must match.
+type explainAnswer struct {
 	Problem     string            `json:"problem"`
 	Cause       string            `json:"cause"`
 	Confidence  string            `json:"confidence"` // high|medium|low
 	Severity    *string           `json:"severity"`
 	Area        *string           `json:"area"`
 	Fix         *string           `json:"fix"`
-	Investigate []InvestigateStep `json:"investigate"`
+	Investigate []investigateStep `json:"investigate"`
 }
 
-// InvestigateStep is one ordered next step; Command is null when no runnable
+// investigateStep is one ordered next step; Command is null when no runnable
 // command exists.
-type InvestigateStep struct {
+type investigateStep struct {
 	Step    string  `json:"step"`
 	Command *string `json:"command"`
 }
 
-// ParseAnswer gates model output against the strict answer shape. It runs
+// parseAnswer gates model output against the strict answer shape. It runs
 // before every quota/ledger write, so a failing answer charges nothing.
-func ParseAnswer(raw []byte) (ExplainAnswer, error) {
-	var a ExplainAnswer
+func parseAnswer(raw []byte) (explainAnswer, error) {
+	var a explainAnswer
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return ExplainAnswer{}, fmt.Errorf("ai: answer is not the strict JSON shape: %w", err)
+		return explainAnswer{}, fmt.Errorf("ai: answer is not the strict JSON shape: %w", err)
 	}
 	if strings.TrimSpace(a.Problem) == "" {
-		return ExplainAnswer{}, errors.New("ai: answer problem is empty")
+		return explainAnswer{}, errors.New("ai: answer problem is empty")
 	}
 	if strings.TrimSpace(a.Cause) == "" {
-		return ExplainAnswer{}, errors.New("ai: answer cause is empty")
+		return explainAnswer{}, errors.New("ai: answer cause is empty")
 	}
 	if a.Confidence != "high" && a.Confidence != "medium" && a.Confidence != "low" {
-		return ExplainAnswer{}, fmt.Errorf("ai: answer confidence %q is not high, medium or low", a.Confidence)
+		return explainAnswer{}, fmt.Errorf("ai: answer confidence %q is not high, medium or low", a.Confidence)
 	}
 	if a.Severity != nil && *a.Severity != "critical" && *a.Severity != "major" && *a.Severity != "minor" {
-		return ExplainAnswer{}, fmt.Errorf("ai: answer severity %q is not critical, major or minor", *a.Severity)
+		return explainAnswer{}, fmt.Errorf("ai: answer severity %q is not critical, major or minor", *a.Severity)
 	}
 	if n := len(a.Investigate); n < 1 || n > 5 {
-		return ExplainAnswer{}, fmt.Errorf("ai: answer has %d investigate steps, want 1 to 5", n)
+		return explainAnswer{}, fmt.Errorf("ai: answer has %d investigate steps, want 1 to 5", n)
 	}
 	return a, nil
 }
@@ -158,7 +158,7 @@ type Prices struct {
 
 type Accountant struct {
 	pool   *pg.Pool
-	llm    LLM
+	llm    llm
 	prices Prices
 }
 
@@ -175,13 +175,13 @@ func (a *Accountant) Configured(ctx context.Context) bool {
 	return true
 }
 
-func New(pool *pg.Pool, llm LLM, prices Prices) *Accountant {
+func New(pool *pg.Pool, llm llm, prices Prices) *Accountant {
 	return &Accountant{pool: pool, llm: llm, prices: prices}
 }
 
 // Explain meters one explain against the plan's monthly quota. A nil limit is
 // the only unlimited sentinel; a real limit, 0 included, gates the call count.
-func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, input Input, limit *int32) (*ExplainResult, error) {
+func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, input Input, limit *int32) (*explainResult, error) {
 	// No key = the feature is off, said plainly before anything is read or
 	// spent. "Nothing was spent." holds trivially: no cache row, no counter.
 	if !a.Configured(ctx) {
@@ -189,7 +189,7 @@ func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, i
 	}
 	q := a.pool.Queries()
 	month := currentMonth()
-	hash := HashInput(sc, a.llm.ID(ctx), input)
+	hash := hashInput(sc, a.llm.ID(ctx), input)
 
 	// 1. Cache hit = no LLM call, no quota. A row that no longer parses is a
 	// miss the fresh answer overwrites; read errors are logged, not swallowed.
@@ -201,14 +201,14 @@ func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, i
 		slog.Error("ai: cache read failed", "err", err, "tenant_id", tenantID, "scenario", sc.Key)
 	}
 	if err == nil {
-		if ans, perr := ParseAnswer([]byte(cached)); perr == nil {
+		if ans, perr := parseAnswer([]byte(cached)); perr == nil {
 			// The answer consults no quota, so a counter blip serves it with
 			// used=0 rather than failing a free answer into a 500.
 			used, uerr := usedThisMonth(ctx, q, tenantID, month)
 			if uerr != nil {
 				slog.Error("ai: usage read failed on cache hit", "err", uerr, "tenant_id", tenantID, "scenario", sc.Key)
 			}
-			return &ExplainResult{Answer: ans, Cached: true, Used: used, Limit: limitOf(limit)}, nil
+			return &explainResult{Answer: ans, Cached: true, Used: used, Limit: limitOf(limit)}, nil
 		}
 	}
 
@@ -227,7 +227,7 @@ func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, i
 	// 3. Call the model. Nothing is charged until the output parses; an
 	// unusable body is retried once, two failures surface as a provider problem.
 	var comp Completion
-	var ans ExplainAnswer
+	var ans explainAnswer
 	for attempt := 1; ; attempt++ {
 		var cerr error
 		comp, cerr = a.llm.Complete(ctx, sc, input)
@@ -240,7 +240,7 @@ func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, i
 			return nil, cerr
 		}
 		var perr error
-		ans, perr = ParseAnswer(comp.RawJSON)
+		ans, perr = parseAnswer(comp.RawJSON)
 		if perr == nil {
 			break
 		}
@@ -303,7 +303,7 @@ func (a *Accountant) Explain(ctx context.Context, tenantID int64, sc Scenario, i
 	}
 	slog.Info("ai: call", a.callLogAttrs(sc, comp)...)
 	// The increment returned the post-write counter; no confirming read.
-	return &ExplainResult{Answer: ans, Cached: false, Used: int(used), Limit: limitOf(limit), Prompt: input.UserMessage()}, nil
+	return &explainResult{Answer: ans, Cached: false, Used: int(used), Limit: limitOf(limit), Prompt: input.UserMessage()}, nil
 }
 
 // limitOf renders the response-side limit: a number for metered plans, 0 for unlimited.
@@ -359,9 +359,9 @@ func usedThisMonth(ctx context.Context, q *sqlc.Queries, tenantID int64, month t
 	return int(used), nil
 }
 
-// HashInput fingerprints scenario, version, brain, meta and lines; volatile
+// hashInput fingerprints scenario, version, brain, meta and lines; volatile
 // Context is excluded. Length-prefixing keeps different inputs from colliding.
-func HashInput(sc Scenario, brainID string, input Input) [32]byte {
+func hashInput(sc Scenario, brainID string, input Input) [32]byte {
 	h := sha256.New()
 	writeHashPart(h, sc.Key)
 	writeHashPart(h, strconv.Itoa(sc.Version))

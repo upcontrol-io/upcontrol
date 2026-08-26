@@ -39,14 +39,14 @@ var (
 
 // findAPI locates the app's API: the bundle first (one request, the real base
 // path), conventional paths as the fallback.
-func findAPI(ctx context.Context, p Prober, base string, homepage []byte) *API {
+func findAPI(ctx context.Context, p prober, base string, homepage []byte) *API {
 	if api := apiFromBundle(ctx, p, base, homepage); api != nil {
 		return api
 	}
 	return apiFromPaths(ctx, p, base)
 }
 
-func apiFromBundle(ctx context.Context, p Prober, base string, homepage []byte) *API {
+func apiFromBundle(ctx context.Context, p prober, base string, homepage []byte) *API {
 	src := mainBundle(base, homepage)
 	if src == "" {
 		return nil
@@ -165,7 +165,7 @@ func commonPrefix(a, b string) string {
 
 // apiFromPaths tries the conventional entry points; an SPA answers 200 with
 // HTML for every path, so only a JSON answer or an auth refusal identifies one.
-func apiFromPaths(ctx context.Context, p Prober, base string) *API {
+func apiFromPaths(ctx context.Context, p prober, base string) *API {
 	root := strings.TrimRight(base, "/")
 	tried := 0
 	for _, path := range apiPaths {

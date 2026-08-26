@@ -46,7 +46,7 @@ func liveClaims() map[string]any {
 
 // googleWith builds a handler pointed at a fake token endpoint. The endpoint
 // records the form it was posted so the exchange itself can be asserted.
-func googleWith(t *testing.T, handler http.HandlerFunc) *Google {
+func googleWith(t *testing.T, handler http.HandlerFunc) *google {
 	t.Helper()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -63,7 +63,7 @@ func jsonPost(body string) *http.Request {
 	return req
 }
 
-func postGoogle(h *Google, body string) *httptest.ResponseRecorder {
+func postGoogle(h *google, body string) *httptest.ResponseRecorder {
 	req := jsonPost(body)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

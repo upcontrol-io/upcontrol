@@ -10,7 +10,7 @@ import (
 )
 
 func TestValidate(t *testing.T) {
-	valid := Event{
+	valid := event{
 		Name: "page_view", Path: "/pricing", Title: "Pricing",
 		Referrer: "https://news.ycombinator.com/", UTMSource: "hn", UTMMedium: "referral",
 		Props: map[string]string{"which": "header"},
@@ -21,28 +21,28 @@ func TestValidate(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*Event)
+		mutate func(*event)
 		why    string
 	}{
-		{"name_uppercase", func(e *Event) { e.Name = "Page_View" }, "name grammar is lowercase only"},
-		{"name_space", func(e *Event) { e.Name = "page view" }, "names cannot contain spaces"},
-		{"name_dash", func(e *Event) { e.Name = "page-view" }, "dash is not in the grammar"},
-		{"name_empty", func(e *Event) { e.Name = "" }, "empty name"},
-		{"name_too_long", func(e *Event) { e.Name = strings.Repeat("a", 65) }, "name cap is 64"},
-		{"path_too_long", func(e *Event) { e.Path = "/" + strings.Repeat("p", 256) }, "path cap is 256"},
-		{"title_too_long", func(e *Event) { e.Title = strings.Repeat("t", 129) }, "title cap is 128"},
-		{"referrer_too_long", func(e *Event) { e.Referrer = "https://" + strings.Repeat("r", 505) }, "referrer cap is 512"},
-		{"utm_source_too_long", func(e *Event) { e.UTMSource = strings.Repeat("s", 129) }, "utm cap is 128"},
-		{"utm_medium_too_long", func(e *Event) { e.UTMMedium = strings.Repeat("m", 129) }, "utm cap is 128"},
-		{"utm_campaign_too_long", func(e *Event) { e.UTMCampaign = strings.Repeat("c", 129) }, "utm cap is 128"},
-		{"props_too_many", func(e *Event) {
+		{"name_uppercase", func(e *event) { e.Name = "Page_View" }, "name grammar is lowercase only"},
+		{"name_space", func(e *event) { e.Name = "page view" }, "names cannot contain spaces"},
+		{"name_dash", func(e *event) { e.Name = "page-view" }, "dash is not in the grammar"},
+		{"name_empty", func(e *event) { e.Name = "" }, "empty name"},
+		{"name_too_long", func(e *event) { e.Name = strings.Repeat("a", 65) }, "name cap is 64"},
+		{"path_too_long", func(e *event) { e.Path = "/" + strings.Repeat("p", 256) }, "path cap is 256"},
+		{"title_too_long", func(e *event) { e.Title = strings.Repeat("t", 129) }, "title cap is 128"},
+		{"referrer_too_long", func(e *event) { e.Referrer = "https://" + strings.Repeat("r", 505) }, "referrer cap is 512"},
+		{"utm_source_too_long", func(e *event) { e.UTMSource = strings.Repeat("s", 129) }, "utm cap is 128"},
+		{"utm_medium_too_long", func(e *event) { e.UTMMedium = strings.Repeat("m", 129) }, "utm cap is 128"},
+		{"utm_campaign_too_long", func(e *event) { e.UTMCampaign = strings.Repeat("c", 129) }, "utm cap is 128"},
+		{"props_too_many", func(e *event) {
 			e.Props = map[string]string{}
 			for i := 0; i < 17; i++ {
 				e.Props["k"+strings.Repeat("x", 2)+string(rune('a'+i%26))] = "v"
 			}
 		}, "props cap is 16 keys"},
-		{"prop_key_too_long", func(e *Event) { e.Props = map[string]string{strings.Repeat("k", 65): "v"} }, "prop key cap is 64"},
-		{"prop_value_too_long", func(e *Event) { e.Props = map[string]string{"k": strings.Repeat("v", 201)} }, "prop value cap is 200"},
+		{"prop_key_too_long", func(e *event) { e.Props = map[string]string{strings.Repeat("k", 65): "v"} }, "prop key cap is 64"},
+		{"prop_value_too_long", func(e *event) { e.Props = map[string]string{"k": strings.Repeat("v", 201)} }, "prop value cap is 200"},
 	}
 	for _, c := range cases {
 		e := valid // copy
@@ -66,7 +66,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestSanitizeStripsControlChars(t *testing.T) {
-	e := Event{Name: "page\x00_view", Title: "Pri\x1bcing", Props: map[string]string{"a\x02b": "v\x7f"}}
+	e := event{Name: "page\x00_view", Title: "Pri\x1bcing", Props: map[string]string{"a\x02b": "v\x7f"}}
 	e.sanitize()
 	if e.Name != "page_view" {
 		t.Errorf("control char not stripped from name: %q", e.Name)
@@ -117,7 +117,7 @@ func TestParseBody(t *testing.T) {
 	if kept, dropped = ParseBody(strings.NewReader("{not json")); len(kept) != 0 || dropped != 0 {
 		t.Errorf("malformed body: kept=%d dropped=%d, want 0/0", len(kept), dropped)
 	}
-	big := `{"events":[{"name":"page_view","title":"` + strings.Repeat("x", MaxBodyBytes) + `"}]}`
+	big := `{"events":[{"name":"page_view","title":"` + strings.Repeat("x", maxBodyBytes) + `"}]}`
 	if kept, dropped = ParseBody(strings.NewReader(big)); len(kept) != 0 || dropped != 0 {
 		t.Errorf("oversized body: kept=%d dropped=%d, want 0/0", len(kept), dropped)
 	}
@@ -146,7 +146,7 @@ func TestVisitorCookieRoundTrip(t *testing.T) {
 	if _, ok := VisitorToken(r); ok {
 		t.Error("no cookie: VisitorToken must report absent")
 	}
-	r.AddCookie(&http.Cookie{Name: CookieName, Value: tok})
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
 	got, ok := VisitorToken(r)
 	if !ok || got != tok {
 		t.Fatalf("VisitorToken = %q %v, want %q true", got, ok, tok)
@@ -155,7 +155,7 @@ func TestVisitorCookieRoundTrip(t *testing.T) {
 	// A corrupt cookie is treated as no cookie, not as a lookup on garbage.
 	for _, bad := range []string{"short", strings.Repeat("g", 32), "", strings.Repeat("a", 33)} {
 		r := httptest.NewRequest("POST", "/public/track", nil)
-		r.AddCookie(&http.Cookie{Name: CookieName, Value: bad})
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: bad})
 		if _, ok := VisitorToken(r); ok {
 			t.Errorf("cookie %q must not validate", bad)
 		}
@@ -164,8 +164,8 @@ func TestVisitorCookieRoundTrip(t *testing.T) {
 	w := httptest.NewRecorder()
 	SetVisitorCookie(w, tok, false)
 	c := w.Result().Cookies()[0]
-	if c.Name != CookieName || c.Value != tok || c.Path != "/" || !c.HttpOnly ||
-		c.SameSite != http.SameSiteLaxMode || c.MaxAge != int(VisitorCookieTTL.Seconds()) {
+	if c.Name != cookieName || c.Value != tok || c.Path != "/" || !c.HttpOnly ||
+		c.SameSite != http.SameSiteLaxMode || c.MaxAge != int(visitorCookieTTL.Seconds()) {
 		t.Errorf("cookie not per spec: %+v", c)
 	}
 	if c.Secure {
@@ -182,7 +182,7 @@ func TestScopeRoundTrip(t *testing.T) {
 	r := httptest.NewRequest("POST", "/public/track", nil)
 	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
 	r.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0) Chrome/126.0")
-	r.AddCookie(&http.Cookie{Name: CookieName, Value: MintVisitorToken()})
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: MintVisitorToken()})
 
 	s := ScopeFromRequest(r)
 	if len(s.Token) != 32 {
@@ -196,39 +196,39 @@ func TestScopeRoundTrip(t *testing.T) {
 	}
 
 	ctx := WithScope(r.Context(), s)
-	if ScopeFrom(ctx) != s {
-		t.Error("ScopeFrom must return the attached scope")
+	if scopeFrom(ctx) != s {
+		t.Error("scopeFrom must return the attached scope")
 	}
-	if ScopeFrom(r.Context()) != nil {
+	if scopeFrom(r.Context()) != nil {
 		t.Error("a context without a scope must yield nil")
 	}
 }
 
 func TestGeoResolvesCountry(t *testing.T) {
-	geo, err := OpenGeo()
+	g, err := openGeo()
 	if err != nil {
 		t.Fatalf("embedded mmdb failed to open: %v", err)
 	}
 
 	// A well-known anycast address: resolvable in every country database.
-	if c := geo.Country("8.8.8.8"); c == "" {
+	if c := g.Country("8.8.8.8"); c == "" {
 		t.Error("8.8.8.8 must resolve to a country code")
 	}
 	// Private ranges are not in the database: unknown, not an error.
 	for _, ip := range []string{"192.168.1.1", "127.0.0.1", "10.0.0.1", "", "not-an-ip"} {
-		if c := geo.Country(ip); c != "" {
+		if c := g.Country(ip); c != "" {
 			t.Errorf("Country(%q) = %q, want \"\"", ip, c)
 		}
 	}
-	// A nil Geo degrades to unknown instead of panicking.
-	var nilGeo *Geo
+	// A nil geo degrades to unknown instead of panicking.
+	var nilGeo *geo
 	if c := nilGeo.Country("8.8.8.8"); c != "" {
-		t.Errorf("nil Geo must answer \"\", got %q", c)
+		t.Errorf("nil geo must answer \"\", got %q", c)
 	}
 }
 
 func TestIPHashTruncatesToEightBytes(t *testing.T) {
-	h := IPHash("203.0.113.9")
+	h := ipHash("203.0.113.9")
 	if len(h) != 8 {
 		t.Fatalf("hash length = %d, want 8", len(h))
 	}
@@ -236,10 +236,10 @@ func TestIPHashTruncatesToEightBytes(t *testing.T) {
 	if string(h[:]) != string(full[:8]) {
 		t.Error("hash must be the first 8 bytes of sha256")
 	}
-	if IPHash("203.0.113.9") != h {
+	if ipHash("203.0.113.9") != h {
 		t.Error("hash must be deterministic")
 	}
-	if IPHash("203.0.113.10") == h {
+	if ipHash("203.0.113.10") == h {
 		t.Error("different IPs must hash differently")
 	}
 }

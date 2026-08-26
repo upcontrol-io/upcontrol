@@ -22,8 +22,8 @@ func TestFromRequest_FixedIdentity(t *testing.T) {
 	}
 
 	plain := New(nil, 0, nil)
-	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, ErrNoSession) {
-		t.Fatalf("without fixed identity a cookieless request must be ErrNoSession, got %v", err)
+	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, errNoSession) {
+		t.Fatalf("without fixed identity a cookieless request must be errNoSession, got %v", err)
 	}
 }
 

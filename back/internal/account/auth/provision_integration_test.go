@@ -66,7 +66,7 @@ func TestProvisionSeedsEmailChannelOnce(t *testing.T) {
 }
 
 // Single-user mode: the synthetic session has no token hash, so the
-// token-joined GetMe can never answer for it; Me keys off the identity.
+// token-joined GetMe can never answer for it; me keys off the identity.
 func TestMe_FixedIdentityAnswersWithoutCookie(t *testing.T) {
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {

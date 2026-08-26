@@ -21,7 +21,7 @@ const (
 	DefaultTTL = 30 * 24 * time.Hour
 )
 
-var ErrNoSession = errors.New("session: no valid session")
+var errNoSession = errors.New("session: no valid session")
 
 // Manager creates and validates sessions against the session table.
 type Manager struct {
@@ -68,7 +68,7 @@ func (m *Manager) LookupSession(ctx context.Context, rawToken string) (sqlc.Sess
 		// Never log the token or its hash: a log that can be replayed into a
 		// session is a second credential store.
 		m.log.Info("session: refused", "reason", "no valid session for token")
-		return sqlc.Session{}, ErrNoSession
+		return sqlc.Session{}, errNoSession
 	}
 	_ = m.pool.Queries().TouchSession(ctx, s.ID)
 	return s, nil
@@ -90,13 +90,13 @@ func (m *Manager) WithFixedIdentity(personID, tenantID int64) *Manager {
 // FromRequest extracts the session from an HTTP request's cookie.
 func (m *Manager) FromRequest(ctx context.Context, r *http.Request) (sqlc.Session, error) {
 	// The nil check keeps a cookieless request on a nil Manager answering
-	// ErrNoSession, which is what tests that never mint sessions construct.
+	// errNoSession, which is what tests that never mint sessions construct.
 	if m != nil && m.fixedPersonID != 0 {
 		return sqlc.Session{PersonID: m.fixedPersonID, TenantID: m.fixedTenantID}, nil
 	}
 	c, err := r.Cookie(CookieName)
 	if err != nil || c.Value == "" {
-		return sqlc.Session{}, ErrNoSession
+		return sqlc.Session{}, errNoSession
 	}
 	return m.LookupSession(ctx, c.Value)
 }

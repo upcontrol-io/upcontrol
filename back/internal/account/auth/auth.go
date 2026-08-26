@@ -41,8 +41,8 @@ type Mailer interface {
 	SendInvite(ctx context.Context, to, code, project, invitedBy string) error
 }
 
-// MagicLink handles the request/redeem magic-link flow.
-type MagicLink struct {
+// magicLink handles the request/redeem magic-link flow.
+type magicLink struct {
 	pool    *pg.Pool
 	sess    *session.Manager
 	devMode bool
@@ -57,23 +57,23 @@ type MagicLink struct {
 
 // NewMagicLink builds a magic-link handler. mailer may be nil (no email delivery
 // yet); log may be nil (a discard default is used); rec may be nil.
-func NewMagicLink(p *pg.Pool, sm *session.Manager, devMode bool, mailer Mailer, rec *analytics.Recorder, log *slog.Logger) *MagicLink {
+func NewMagicLink(p *pg.Pool, sm *session.Manager, devMode bool, mailer Mailer, rec *analytics.Recorder, log *slog.Logger) *magicLink {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &MagicLink{pool: p, sess: sm, devMode: devMode, mailer: mailer, log: log, rec: rec}
+	return &magicLink{pool: p, sess: sm, devMode: devMode, mailer: mailer, log: log, rec: rec}
 }
 
 // WithSelfHosted marks the install as self-hosted: every tenant this door
 // creates gets the 'Self-hosted' plan. Chainable.
-func (h *MagicLink) WithSelfHosted(v bool) *MagicLink { h.selfHosted = v; return h }
+func (h *magicLink) WithSelfHosted(v bool) *magicLink { h.selfHosted = v; return h }
 
 type magicLinkReq struct {
 	Email string `json:"email"`
 	Token string `json:"token,omitempty"`
 }
 
-func (h *MagicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *magicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if crossSitePost(r) {
 		// A redeem forged from another site would hand this browser a session
 		// in whatever account the attacker has a code for.
@@ -99,7 +99,7 @@ func (h *MagicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *MagicLink) request(w http.ResponseWriter, r *http.Request, email string) {
+func (h *magicLink) request(w http.ResponseWriter, r *http.Request, email string) {
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
 	// Throttle by IP (sliding window, shared across replicas).
@@ -165,7 +165,7 @@ var ErrCodeCooldown = errors.New("magic-link: a code was issued recently")
 
 // issueCode stores one fresh code for email; both doors obey the same TTL,
 // cap and cooldown. It does NOT create the account.
-func (h *MagicLink) issueCode(ctx context.Context, email string) (string, error) {
+func (h *magicLink) issueCode(ctx context.Context, email string) (string, error) {
 	if existing, err := h.pool.Queries().GetMagicLinkCode(ctx, email); err == nil {
 		if existing.CreatedAt.Valid && time.Since(existing.CreatedAt.Time) < emailCooldown {
 			return "", ErrCodeCooldown
@@ -183,7 +183,7 @@ func (h *MagicLink) issueCode(ctx context.Context, email string) (string, error)
 	return code, nil
 }
 
-func (h *MagicLink) redeem(w http.ResponseWriter, r *http.Request, email, token string) {
+func (h *magicLink) redeem(w http.ResponseWriter, r *http.Request, email, token string) {
 	// The analytics scope rides the context down, so account_created fires
 	// with this request's visitor identity.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
@@ -253,7 +253,7 @@ type personInfo struct {
 // Provision is ensureAccount for callers outside the sign-in flow, so both
 // doors produce the same tenant. domain names a NEW project, never renames.
 func Provision(ctx context.Context, pool *pg.Pool, email, domain string, rec *analytics.Recorder, selfHosted bool) (personID, tenantID int64, err error) {
-	h := &MagicLink{pool: pool, rec: rec, selfHosted: selfHosted}
+	h := &magicLink{pool: pool, rec: rec, selfHosted: selfHosted}
 	info, err := h.ensureAccount(ctx, email, domain)
 	return info.ID, info.TenantID, err
 }
@@ -262,7 +262,7 @@ func Provision(ctx context.Context, pool *pg.Pool, email, domain string, rec *an
 // same credential the sign-in door issues. ip goes through the shared window.
 func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (string, error) {
 	email = NormalizeEmail(email)
-	h := &MagicLink{pool: pool}
+	h := &magicLink{pool: pool}
 	if cnt, err := pool.Queries().RecordMagicLinkIP(ctx, ip); err == nil && cnt > ipWindowCap {
 		return "", ErrRateLimited
 	}
@@ -274,11 +274,11 @@ var ErrRateLimited = errors.New("magic-link: too many requests from this address
 
 // The sign-in door leaves the domain EMPTY: the first website check names the
 // project. A placeholder here would leak into every screen the customer sees.
-func (h *MagicLink) ensurePerson(ctx context.Context, email string) (personInfo, error) {
+func (h *magicLink) ensurePerson(ctx context.Context, email string) (personInfo, error) {
 	return h.ensureAccount(ctx, email, "")
 }
 
-func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (personInfo, error) {
+func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (personInfo, error) {
 	// Defensive: every caller normalises, and this is where it would matter
 	// if one ever forgot — the UNIQUE column below is byte-exact.
 	email = NormalizeEmail(email)
@@ -322,7 +322,7 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`,
 		projectID)
 	// Issue an API key so the ingest door is open from the first signup.
-	keySecret := randomHexAuth(16)
+	keySecret := randomHexAuth()
 	keyPrefix := keySecret[:12]
 	keyFull := "uc_live_" + keySecret
 	keyHash := sha256.Sum256([]byte(keyFull))
@@ -347,7 +347,7 @@ func (h *MagicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	}, nil
 }
 
-func (h *MagicLink) tenantForPerson(ctx context.Context, personID int64) (int64, error) {
+func (h *magicLink) tenantForPerson(ctx context.Context, personID int64) (int64, error) {
 	var tenantID int64
 	err := h.pool.Raw().QueryRow(ctx,
 		`SELECT tenant_id FROM tenant_member WHERE person_id = $1 ORDER BY tenant_id LIMIT 1`,
@@ -357,7 +357,7 @@ func (h *MagicLink) tenantForPerson(ctx context.Context, personID int64) (int64,
 
 // activateInvites is the proof-of-ownership half of an invitation, called only
 // from the redeem doors: pending memberships activate, tenants get the channel.
-func (h *MagicLink) activateInvites(ctx context.Context, personID int64, email string) {
+func (h *magicLink) activateInvites(ctx context.Context, personID int64, email string) {
 	// Defensive, same reason as in ensureAccount: the NOT EXISTS below
 	// compares target byte for byte, so the one spelling is the normalised one.
 	email = NormalizeEmail(email)
@@ -381,15 +381,15 @@ func (h *MagicLink) activateInvites(ctx context.Context, personID int64, email s
 	}
 }
 
-// Me handles GET /v1/me.
-type Me struct {
+// me handles GET /v1/me.
+type me struct {
 	pool *pg.Pool
 	sess *session.Manager
 }
 
-func NewMe(p *pg.Pool, sm *session.Manager) *Me { return &Me{pool: p, sess: sm} }
+func NewMe(p *pg.Pool, sm *session.Manager) *me { return &me{pool: p, sess: sm} }
 
-func (h *Me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
@@ -437,12 +437,12 @@ func (h *Me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// Logout handles POST /v1/auth/logout.
-type Logout struct{ sess *session.Manager }
+// logout handles POST /v1/auth/logout.
+type logout struct{ sess *session.Manager }
 
-func NewLogout(sm *session.Manager) *Logout { return &Logout{sess: sm} }
+func NewLogout(sm *session.Manager) *logout { return &logout{sess: sm} }
 
-func (h *Logout) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *logout) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(session.CookieName); err == nil && c.Value != "" {
 		_ = h.sess.Delete(r.Context(), c.Value)
 	}
@@ -450,13 +450,13 @@ func (h *Logout) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// NotImplemented is the placeholder for the Google + Telegram OAuth endpoints:
+// notImplemented is the placeholder for the Google + Telegram OAuth endpoints:
 // mounted, but answers 501: never a silent 200 that reads as a login.
-type NotImplemented struct{ method string }
+type notImplemented struct{ method string }
 
-func NewNotImplemented(method string) *NotImplemented { return &NotImplemented{method: method} }
+func newNotImplemented(method string) *notImplemented { return &notImplemented{method: method} }
 
-func (h *NotImplemented) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+func (h *notImplemented) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusNotImplemented, map[string]any{
 		"error": map[string]any{
 			"code":    "not_implemented",
@@ -580,8 +580,8 @@ func ptrStr(s *string) string {
 	return *s
 }
 
-func randomHexAuth(n int) string {
-	b := make([]byte, n)
+func randomHexAuth() string {
+	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }

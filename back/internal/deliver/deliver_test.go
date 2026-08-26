@@ -15,53 +15,53 @@ func TestBackoffSchedule(t *testing.T) {
 	// The base delays should be 1/2/4/8/16s. Jitter makes them slightly larger
 	// but never smaller (jitter is [0, base/2)).
 	for attempt := 0; attempt < 5; attempt++ {
-		d := Backoff(attempt)
+		d := backoff(attempt)
 		base := time.Duration(1<<attempt) * time.Second
 		if d < base {
-			t.Errorf("Backoff(%d) = %v, want >= %v (base)", attempt, d, base)
+			t.Errorf("backoff(%d) = %v, want >= %v (base)", attempt, d, base)
 		}
 		if d > base+base/2 {
-			t.Errorf("Backoff(%d) = %v, want <= %v (base + jitter)", attempt, d, base+base/2)
+			t.Errorf("backoff(%d) = %v, want <= %v (base + jitter)", attempt, d, base+base/2)
 		}
 	}
 }
 
 func TestBackoffCaps(t *testing.T) {
 	// Attempt 10 should still cap at the 16s base (attempt index 4).
-	d := Backoff(10)
+	d := backoff(10)
 	if d < 16*time.Second {
-		t.Errorf("Backoff(10) = %v, want >= 16s", d)
+		t.Errorf("backoff(10) = %v, want >= 16s", d)
 	}
 	if d > 24*time.Second {
-		t.Errorf("Backoff(10) = %v, want <= 24s (16s + 8s jitter)", d)
+		t.Errorf("backoff(10) = %v, want <= 24s (16s + 8s jitter)", d)
 	}
 }
 
 func TestClassifyError(t *testing.T) {
 	cases := []struct {
 		code int
-		want Outcome
+		want outcome
 	}{
-		{0, OutcomeRetryable},   // network
-		{200, OutcomeOK},        // success
-		{400, OutcomeFatal},     // bad request
-		{403, OutcomeFatal},     // bot blocked
-		{404, OutcomeFatal},     // not found
-		{429, OutcomeRetryable}, // rate limited
-		{500, OutcomeRetryable}, // server error
-		{502, OutcomeRetryable}, // bad gateway
-		{503, OutcomeRetryable}, // unavailable
+		{0, outcomeRetryable},   // network
+		{200, outcomeOK},        // success
+		{400, outcomeFatal},     // bad request
+		{403, outcomeFatal},     // bot blocked
+		{404, outcomeFatal},     // not found
+		{429, outcomeRetryable}, // rate limited
+		{500, outcomeRetryable}, // server error
+		{502, outcomeRetryable}, // bad gateway
+		{503, outcomeRetryable}, // unavailable
 	}
 	for _, c := range cases {
-		if got := ClassifyError(c.code); got != c.want {
-			t.Errorf("ClassifyError(%d) = %q, want %q", c.code, got, c.want)
+		if got := classifyError(c.code); got != c.want {
+			t.Errorf("classifyError(%d) = %q, want %q", c.code, got, c.want)
 		}
 	}
 }
 
 func TestNextTryAtFatal(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(1, OutcomeFatal, now)
+	got := nextTryAt(1, outcomeFatal, now)
 	if !got.IsZero() {
 		t.Error("fatal should return zero time (DLQ)")
 	}
@@ -69,7 +69,7 @@ func TestNextTryAtFatal(t *testing.T) {
 
 func TestNextTryAtOK(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(1, OutcomeOK, now)
+	got := nextTryAt(1, outcomeOK, now)
 	if !got.IsZero() {
 		t.Error("ok should return zero time (no retry)")
 	}
@@ -77,7 +77,7 @@ func TestNextTryAtOK(t *testing.T) {
 
 func TestNextTryAtRetryable(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(0, OutcomeRetryable, now)
+	got := nextTryAt(0, outcomeRetryable, now)
 	if got.IsZero() {
 		t.Fatal("retryable should return a future time")
 	}
@@ -88,14 +88,14 @@ func TestNextTryAtRetryable(t *testing.T) {
 
 func TestNextTryAtMaxAttempts(t *testing.T) {
 	now := time.Now()
-	got := NextTryAt(MaxAttempts, OutcomeRetryable, now)
+	got := nextTryAt(maxAttempts, outcomeRetryable, now)
 	if !got.IsZero() {
 		t.Error("max attempts should return zero time (DLQ)")
 	}
 }
 
 func TestBreakerOpensAfter5Min(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	// No failures → breaker closed.
 	if b.IsOpen(start) {
@@ -107,45 +107,45 @@ func TestBreakerOpensAfter5Min(t *testing.T) {
 		t.Error("breaker should be closed immediately after first failure")
 	}
 	// After 5 minutes, breaker opens.
-	if !b.IsOpen(start.Add(BreakerTimeout)) {
-		t.Error("breaker should open after BreakerTimeout")
+	if !b.IsOpen(start.Add(breakerTimeout)) {
+		t.Error("breaker should open after breakerTimeout")
 	}
 }
 
 func TestBreakerClosesOnSuccess(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	b.RecordFailure(start)
 	b.RecordFailure(start.Add(time.Minute))
 	// Success closes it.
 	b.RecordSuccess()
-	if b.IsOpen(start.Add(BreakerTimeout + time.Minute)) {
+	if b.IsOpen(start.Add(breakerTimeout + time.Minute)) {
 		t.Error("breaker should be closed after success")
 	}
 }
 
 func TestBreakerFailover(t *testing.T) {
-	var b Breaker
+	var b breaker
 	start := time.Now()
 	b.RecordFailure(start)
-	// Breaker open → failover.
-	if !b.ShouldFailover(start.Add(BreakerTimeout)) {
+	// breaker open → failover.
+	if !b.IsOpen(start.Add(breakerTimeout)) {
 		t.Error("should failover when breaker is open")
 	}
 	b.RecordSuccess()
-	if b.ShouldFailover(start.Add(BreakerTimeout)) {
+	if b.IsOpen(start.Add(breakerTimeout)) {
 		t.Error("should NOT failover when breaker is closed")
 	}
 }
 
 func TestBreakerStreakExtendsNotResets(t *testing.T) {
-	var b Breaker
+	var b breaker
 	t0 := time.Now()
 	b.RecordFailure(t0)
 	// Another failure at t0+1m should NOT reset the streak start.
 	b.RecordFailure(t0.Add(time.Minute))
 	// The breaker should open at t0+5m, not t0+1m+5m.
-	if !b.IsOpen(t0.Add(BreakerTimeout)) {
+	if !b.IsOpen(t0.Add(breakerTimeout)) {
 		t.Error("breaker should open based on first failure, not extended streak")
 	}
 }
@@ -164,7 +164,7 @@ func TestFormatTelegram_CarriesTheAnswerAndTheLink(t *testing.T) {
 			{Label: "Down since", Value: "14:02 UTC"},
 		},
 		Lines:   []string{"HTTP/1.1 503 Service Unavailable"},
-		Actions: []ActionButton{{Label: "Runbook", URL: "https://acme.test/runbook"}},
+		Actions: []actionButton{{Label: "Runbook", URL: "https://acme.test/runbook"}},
 	}, "https://upcontrol.io/app")
 	for _, want := range []string{
 		"🔴 <b>Checkout is down</b>",
@@ -195,7 +195,7 @@ func TestFormatTelegram_EscapesEverythingDynamic(t *testing.T) {
 		Summary: "escape <b>me</b>",
 		Fields:  []Field{{Label: "<i>k</i>", Value: "a && b < c", Mono: true}},
 		Lines:   []string{`<img src=x onerror="boom">`},
-		Actions: []ActionButton{{Label: "a<b>c", URL: "https://x.test/?a=1&b=2"}},
+		Actions: []actionButton{{Label: "a<b>c", URL: "https://x.test/?a=1&b=2"}},
 	}, "https://upcontrol.io/app")
 	for _, banned := range []string{
 		"Promise<Map", "<i>k</i>", "<img src=x", "<b>me</b>", "a<b>c",
@@ -286,8 +286,8 @@ func TestDownForLine_StaysHonestUnderAMinute(t *testing.T) {
 func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
-	restore := HTTPClient
-	HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	restore := httpClient
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var v map[string]any
 		_ = json.NewDecoder(req.Body).Decode(&v)
 		mu.Lock()
@@ -295,7 +295,7 @@ func TestTelegramButtonsFollowTheChatKind(t *testing.T) {
 		mu.Unlock()
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok")), Header: http.Header{}}, nil
 	})}
-	defer func() { HTTPClient = restore }()
+	defer func() { httpClient = restore }()
 
 	ch := &TelegramChannel{Token: func(context.Context) string { return "t" }}
 	payload := AlertPayload{Title: "down", Status: "down", IncidentID: "abc123"}

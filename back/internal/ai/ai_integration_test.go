@@ -38,7 +38,7 @@ type fakeLLM struct {
 	raw string
 }
 
-// fakeAnswerJSON passes ParseAnswer's strict gate: non-empty problem and
+// fakeAnswerJSON passes parseAnswer's strict gate: non-empty problem and
 // cause, a legal confidence, one investigate step.
 const fakeAnswerJSON = `{"problem":"test problem","cause":"test cause","confidence":"low","investigate":[{"step":"look"}]}`
 
@@ -112,7 +112,7 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 	acct := New(pool, model, Prices{})
 	cachedRows := func(input Input) int64 {
 		var n int64
-		h := HashInput(ExplainLogs, model.ID(ctx), input)
+		h := hashInput(ExplainLogs, model.ID(ctx), input)
 		if err := pool.Raw().QueryRow(ctx,
 			`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,
 			tenantID, h[:]).Scan(&n); err != nil {
@@ -171,7 +171,7 @@ func TestExplain_QuotaCacheAndLedger(t *testing.T) {
 	broken := Input{Lines: []string{"write: no space left on device"}}
 	model.comp = Completion{RawJSON: []byte(`{"problem": "trunc`), Model: "gpt-test"}
 	if _, err := acct.Explain(ctx, tenantID, ExplainLogs, broken, limitPtr(5)); err == nil {
-		t.Fatal("an answer that fails ParseAnswer twice must fail the explain")
+		t.Fatal("an answer that fails parseAnswer twice must fail the explain")
 	}
 	if model.calls != 3 {
 		t.Fatalf("the model was called %d times, want 3 — one real call plus two attempts on the broken answer", model.calls)
@@ -254,7 +254,7 @@ func TestExplain_LastSlotRace(t *testing.T) {
 	racer := barrierLLM{gate: gate, comp: gptCompletion()}
 	type outcome struct {
 		idx int
-		res *ExplainResult
+		res *explainResult
 		err error
 	}
 	out := make(chan outcome, 2)
@@ -309,7 +309,7 @@ func TestExplain_LastSlotRace(t *testing.T) {
 		if i == refusedIdx {
 			want = 0
 		}
-		h := HashInput(ExplainLogs, racer.ID(ctx), in)
+		h := hashInput(ExplainLogs, racer.ID(ctx), in)
 		if err := pool.Raw().QueryRow(ctx,
 			`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,
 			tenantID, h[:]).Scan(&n); err != nil {
@@ -424,7 +424,7 @@ func TestExplain_IncrementFailsAfterAnswer(t *testing.T) {
 		t.Fatalf("a dead database is a 500-path error, not a quota refusal: %v", err)
 	}
 
-	h := HashInput(ExplainLogs, model.ID(ctx), in)
+	h := hashInput(ExplainLogs, model.ID(ctx), in)
 	var usageRows, ledgerRows, cacheRows int64
 	if err := verify.Raw().QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM ai_usage WHERE tenant_id = $1),
@@ -478,7 +478,7 @@ func TestExplain_FailedProviderCallStillRecordsSpend(t *testing.T) {
 	if ledgerRows != 1 {
 		t.Fatalf("ai_call rows = %d, want 1 — the paid call must be on the books even when it failed", ledgerRows)
 	}
-	h := HashInput(ExplainLogs, model.ID(ctx), in)
+	h := hashInput(ExplainLogs, model.ID(ctx), in)
 	var cacheRows int64
 	if err := pool.Raw().QueryRow(ctx,
 		`SELECT count(*) FROM ai_explain_cache WHERE tenant_id = $1 AND input_hash = $2`,

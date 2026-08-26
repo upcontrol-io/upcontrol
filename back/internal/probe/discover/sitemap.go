@@ -40,7 +40,7 @@ type candidate struct {
 
 // fetchSitemapURLs returns the sitemap's URLs, or nil when the host has no
 // sitemap we can read. Costs at most sitemapMaxChildren+1 requests.
-func fetchSitemapURLs(ctx context.Context, p Prober, base string, r robots) []candidate {
+func fetchSitemapURLs(ctx context.Context, p prober, base string, r robots) []candidate {
 	locations := r.sitemaps
 	if len(locations) == 0 {
 		// The convention, tried only when robots.txt named nothing.
@@ -94,7 +94,7 @@ func fetchSitemapURLs(ctx context.Context, p Prober, base string, r robots) []ca
 
 // fetchSitemapDoc gets and parses one sitemap; a gzipped sitemap FILE is not
 // handled (that is content, not Content-Encoding).
-func fetchSitemapDoc(ctx context.Context, p Prober, loc string) *sitemapDoc {
+func fetchSitemapDoc(ctx context.Context, p prober, loc string) *sitemapDoc {
 	res := p.Execute(ctx, CheckSpec{
 		URL: loc, Method: http.MethodGet,
 		TimeoutMs:    uint32(perRequestTimeout.Milliseconds()),

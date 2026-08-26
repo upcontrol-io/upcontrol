@@ -25,8 +25,8 @@ import (
 // open; a day is the forgiving edge.
 const initDataFreshness = 24 * time.Hour
 
-// TelegramMiniApp handles POST /v1/auth/telegram.
-type TelegramMiniApp struct {
+// telegramMiniApp handles POST /v1/auth/telegram.
+type telegramMiniApp struct {
 	pool     *pg.Pool
 	sess     *session.Manager
 	botToken string
@@ -35,13 +35,13 @@ type TelegramMiniApp struct {
 
 // NewTelegramMiniApp builds the handler. botToken empty means no Telegram bot
 // is configured; the handler then answers 501, same as before it existed.
-func NewTelegramMiniApp(p *pg.Pool, sm *session.Manager, botToken string, devMode bool) *TelegramMiniApp {
-	return &TelegramMiniApp{pool: p, sess: sm, botToken: strings.TrimSpace(botToken), devMode: devMode}
+func NewTelegramMiniApp(p *pg.Pool, sm *session.Manager, botToken string, devMode bool) *telegramMiniApp {
+	return &telegramMiniApp{pool: p, sess: sm, botToken: strings.TrimSpace(botToken), devMode: devMode}
 }
 
-func (h *TelegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *telegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.botToken == "" {
-		NewNotImplemented("Telegram").ServeHTTP(w, r)
+		newNotImplemented("Telegram").ServeHTTP(w, r)
 		return
 	}
 	var req struct {

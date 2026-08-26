@@ -27,8 +27,8 @@ import (
 // channel, or the presser is not a member.
 const notConnected = "This chat is not connected to a project. Ask the owner for an invite link."
 
-// Bot is the long-polling Telegram bot.
-type Bot struct {
+// bot is the long-polling Telegram bot.
+type bot struct {
 	token     string
 	appURL    string // public origin — the Open Mini App web_app button's target
 	pool      *pg.Pool
@@ -40,8 +40,8 @@ type Bot struct {
 
 // NewBot builds a bot. The token is the Bot API token from @BotFather; appURL
 // is the deployment's public origin ("" hides the Open App button).
-func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *slog.Logger) *Bot {
-	return &Bot{
+func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *slog.Logger) *bot {
+	return &bot{
 		// Trimmed here: a token with a trailing newline breaks every request
 		// URL and looks like a started-but-dead poller.
 		token:     strings.TrimSpace(token),
@@ -55,7 +55,7 @@ func NewBot(token, appURL string, pool *pg.Pool, lc *incident.Lifecycle, log *sl
 
 // Run polls getUpdates under an advisory lock until ctx is cancelled; the
 // session-level lock auto-releases if the holder crashes.
-func (b *Bot) Run(ctx context.Context) error {
+func (b *bot) Run(ctx context.Context) error {
 	// The lock must sit on a DEDICATED connection: pool.Exec borrows an idle
 	// connection the pool may close, silently releasing the lock.
 	const lockKey = 0x75637467 // "uctg" — stable, unique per bot
@@ -120,7 +120,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 // register tells Telegram the command list and the menu button; both are
 // idempotent and best-effort, a failure is logged and polling continues.
-func (b *Bot) register() {
+func (b *bot) register() {
 	if err := b.call("setMyCommands", map[string]any{"commands": []map[string]string{
 		{"command": "status", "description": "How your checks and incidents are doing"},
 		{"command": "mute", "description": "Silence alerts for a while (30m, 2h, 1d)"},
@@ -149,7 +149,7 @@ func (b *Bot) register() {
 
 // poll is the panic-safe getUpdates: a panic becomes an error the loop
 // backs off from, instead of killing the goroutine.
-func (b *Bot) poll(ctx context.Context) (updates []tgUpdate, err error) {
+func (b *bot) poll(ctx context.Context) (updates []tgUpdate, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			updates, err = nil, fmt.Errorf("poll cycle panicked: %v", r)
@@ -160,7 +160,7 @@ func (b *Bot) poll(ctx context.Context) (updates []tgUpdate, err error) {
 
 // dispatch is the panic-safe update handler: one malformed update can fail,
 // loudly, without taking the poller down with it.
-func (b *Bot) dispatch(ctx context.Context, u tgUpdate) {
+func (b *bot) dispatch(ctx context.Context, u tgUpdate) {
 	defer func() {
 		if r := recover(); r != nil {
 			b.log.Error("telegram handler panicked", "update_id", u.UpdateID, "panic", r)
@@ -201,7 +201,7 @@ type tgChat struct {
 	Title string `json:"title"`
 }
 
-func (b *Bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
+func (b *bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=60",
 		b.token, b.offset)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -229,7 +229,7 @@ func (b *Bot) getUpdates(ctx context.Context) ([]tgUpdate, error) {
 
 // call is the one Bot API door: POST JSON and report both transport failures
 // and API refusals (a bad token answers 401, a malformed request 400).
-func (b *Bot) call(method string, body map[string]any) error {
+func (b *bot) call(method string, body map[string]any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -247,7 +247,7 @@ func (b *Bot) call(method string, body map[string]any) error {
 	return nil
 }
 
-func (b *Bot) answerCallback(callbackID string, text string) {
+func (b *bot) answerCallback(callbackID string, text string) {
 	_ = b.call("answerCallbackQuery", map[string]any{
 		"callback_query_id": callbackID,
 		"text":              text,
@@ -268,7 +268,7 @@ func command(text string) (name, rest string) {
 	return name, strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), fields[0]))
 }
 
-func (b *Bot) handleUpdate(ctx context.Context, u tgUpdate) {
+func (b *bot) handleUpdate(ctx context.Context, u tgUpdate) {
 	if u.CallbackQuery != nil {
 		b.handleCallback(ctx, u.CallbackQuery)
 		return
@@ -299,7 +299,7 @@ func (b *Bot) handleUpdate(ctx context.Context, u tgUpdate) {
 
 // handleStart processes the /start deep link: anything that is not a valid
 // unredeemed invite binds nothing. The redeem runs in one transaction.
-func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
+func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	if strings.HasPrefix(payload, "prj-") {
 		// Old links are already in people's chats; the honest answer names
 		// the new way instead of silently ignoring them.
@@ -451,7 +451,7 @@ func (b *Bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 
 // personByTelegramID finds-or-creates the person by telegram_id inside the
 // caller's transaction, keeping telegram_username current.
-func (b *Bot) personByTelegramID(ctx context.Context, tx pgx.Tx, from tgUser) (int64, error) {
+func (b *bot) personByTelegramID(ctx context.Context, tx pgx.Tx, from tgUser) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
 		`SELECT id FROM person WHERE telegram_id = $1`, from.ID).Scan(&id)
@@ -499,7 +499,7 @@ func nullableLabel(label string) any {
 
 // memberForChat resolves the presser AND the chat's tenant in one round trip:
 // the presser must be a member of the tenant whose alerts land here.
-func (b *Bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, name string) {
+func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, name string) {
 	err := b.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, ac.tenant_id, p.name
 		   FROM alert_channel ac
@@ -514,7 +514,7 @@ func (b *Bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID
 }
 
 // handleHelp answers /help: the command list plus the Open Mini App button.
-func (b *Bot) handleHelp(msg *tgMessage) {
+func (b *bot) handleHelp(msg *tgMessage) {
 	b.sendWithApp(msg.Chat.ID,
 		"What this bot does:\n"+
 			"/status — your checks and any open incidents\n"+
@@ -528,7 +528,7 @@ func (b *Bot) handleHelp(msg *tgMessage) {
 
 // handleStatus answers /status; only a member of the chat's tenant gets an
 // answer, anyone else learns nothing.
-func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
+func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
@@ -585,7 +585,7 @@ func (b *Bot) handleStatus(ctx context.Context, msg *tgMessage) {
 
 // openIncidentTitles reads the still-open incidents; ok=false means the read
 // failed, which /status says rather than implying "there are none".
-func (b *Bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []string, ok bool) {
+func (b *bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []string, ok bool) {
 	rows, err := b.pool.Raw().Query(ctx,
 		`SELECT title FROM incident
 		  WHERE tenant_id = $1 AND resolved_at IS NULL
@@ -634,7 +634,7 @@ func namesFrom(arr []byte) []string {
 
 // handleMute silences this chat's alerts; the window lives on muted_until and
 // the delivery worker reschedules around it, expiry needs no bot involvement.
-func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
+func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 	d, err := parseMuteDuration(arg)
 	if err != nil {
 		b.send(msg.Chat.ID, "How long? Try /mute 30m, /mute 2h or /mute 1d (up to 7d).")
@@ -659,7 +659,7 @@ func (b *Bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 
 // handleUnmute lifts the mute early AND un-parks what the window deferred:
 // the worker defers muted alerts to the mute's end, it does not drop them.
-func (b *Bot) handleUnmute(ctx context.Context, msg *tgMessage) {
+func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
@@ -698,7 +698,7 @@ func (b *Bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 
 // handleStop disconnects THIS chat: the destination goes, membership and
 // role stay. A fresh invite link brings the chat back.
-func (b *Bot) handleStop(ctx context.Context, msg *tgMessage) {
+func (b *bot) handleStop(ctx context.Context, msg *tgMessage) {
 	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
@@ -747,7 +747,7 @@ func parseMuteDuration(s string) (time.Duration, error) {
 
 // handleCallback processes button presses; the data is "action:<public_id>",
 // the same id the alert payload carried.
-func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
+func (b *bot) handleCallback(ctx context.Context, cb *tgCallback) {
 	action, pubID, ok := parseCallback(cb.Data)
 	if !ok {
 		b.answerCallback(cb.ID, "Unknown action")
@@ -780,7 +780,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 
 // handleAck records the incident's MTTA mark, idempotent; the timeline
 // names the person: "who closed it" is a fact.
-func (b *Bot) handleAck(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
+func (b *bot) handleAck(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
 	_, _ = b.pool.Raw().Exec(ctx,
 		`UPDATE incident SET acked_at = now(), acked_by = $2 WHERE id = $1 AND acked_at IS NULL`,
 		incID, personID)
@@ -793,7 +793,7 @@ func (b *Bot) handleAck(ctx context.Context, cb *tgCallback, incID, personID int
 
 // handleResolve closes through the same lifecycle the detector uses, so the
 // close reason and resolved_at are written the one way.
-func (b *Bot) handleResolve(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
+func (b *bot) handleResolve(ctx context.Context, cb *tgCallback, incID, personID int64, name string) {
 	var monitorID *int64
 	if err := b.pool.Raw().QueryRow(ctx,
 		`SELECT monitor_id FROM incident WHERE id = $1`, incID).Scan(&monitorID); err != nil || monitorID == nil {
@@ -840,7 +840,7 @@ func parseCallback(data string) (action, id string, ok bool) {
 
 // incidentByPublicID resolves the callback's uuid-hex payload to an incident
 // of THIS tenant, or reports that it is not theirs.
-func (b *Bot) incidentByPublicID(ctx context.Context, pubHex string, tenantID int64) (int64, bool) {
+func (b *bot) incidentByPublicID(ctx context.Context, pubHex string, tenantID int64) (int64, bool) {
 	raw, err := hex.DecodeString(pubHex)
 	if err != nil || len(raw) != 16 {
 		return 0, false
@@ -851,12 +851,12 @@ func (b *Bot) incidentByPublicID(ctx context.Context, pubHex string, tenantID in
 	return id, err == nil
 }
 
-func (b *Bot) send(chatID int64, text string) {
+func (b *bot) send(chatID int64, text string) {
 	b.sendWithKeyboard(chatID, text, nil)
 }
 
 // sendWithApp adds the Open Mini App button when an app URL is configured.
-func (b *Bot) sendWithApp(chatID int64, text string) {
+func (b *bot) sendWithApp(chatID int64, text string) {
 	if b.appURL == "" {
 		b.send(chatID, text)
 		return
@@ -869,7 +869,7 @@ func (b *Bot) sendWithApp(chatID int64, text string) {
 	b.sendWithKeyboard(chatID, text, kb)
 }
 
-func (b *Bot) sendWithKeyboard(chatID int64, text string, replyMarkup map[string]any) {
+func (b *bot) sendWithKeyboard(chatID int64, text string, replyMarkup map[string]any) {
 	body := map[string]any{
 		"chat_id": chatID,
 		"text":    text,

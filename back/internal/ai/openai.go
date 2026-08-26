@@ -29,7 +29,7 @@ type OpenAISettings struct {
 type OpenAIClient struct {
 	Settings   func(ctx context.Context) OpenAISettings
 	Timeout    time.Duration
-	HTTPClient *http.Client // injectable for tests; Timeout rides the context either way
+	httpClient *http.Client // injectable for tests; Timeout rides the context either way
 	// LogPrompt echoes the exact system+user bytes of every call to the log
 	// (the prompt-editing loop: see it, edit scenario.go, see it again).
 	LogPrompt bool
@@ -75,7 +75,7 @@ type paramQuirk struct {
 	dropReasoningEffort     bool
 }
 
-// paramQuirks maps LLM.ID() → paramQuirk.
+// paramQuirks maps llm.ID() → paramQuirk.
 var paramQuirks sync.Map
 
 // adapt maps a provider refusal to the quirk that avoids it; ok=false when
@@ -182,7 +182,7 @@ func (c *OpenAIClient) completeOnce(ctx context.Context, sc Scenario, input Inpu
 			"system", sc.SystemPrompt, "user", input.UserMessage())
 	}
 
-	hc := c.HTTPClient
+	hc := c.httpClient
 	if hc == nil {
 		hc = &http.Client{}
 	}

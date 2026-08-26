@@ -365,7 +365,7 @@ func TestOpenAIClient_InjectedClientStillTimesOut(t *testing.T) {
 
 	c := newTestClient(srv)
 	c.Timeout = 50 * time.Millisecond
-	c.HTTPClient = &http.Client{} // no Timeout of its own — the context must bind
+	c.httpClient = &http.Client{} // no Timeout of its own; the context must bind
 	_, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
 	close(released)
 	if err == nil {

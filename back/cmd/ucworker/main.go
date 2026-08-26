@@ -104,7 +104,7 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 		}
 		dw.RegisterChannel(&deliver.SMTPChannel{Mailer: mailer.NewDynamic(smtpCfg, d.Logger)})
 	}
-	go dw.Run(ctx, 2*time.Second)
+	go dw.Run(ctx)
 
 	// Cutoff recompute: every 1 minute per project.
 	go runWithLock(ctx, pool, d, "cutoff", time.Minute, func(ctx context.Context) {

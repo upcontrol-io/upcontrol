@@ -10,8 +10,8 @@ import (
 // uc_vid is the first-party visitor cookie: HttpOnly, SameSite=Lax, one year.
 // A random token, not a fingerprint; the server stores only sha256(token).
 const (
-	CookieName       = "uc_vid"
-	VisitorCookieTTL = 365 * 24 * time.Hour
+	cookieName       = "uc_vid"
+	visitorCookieTTL = 365 * 24 * time.Hour
 	tokenHexLen      = 32 // 16 random bytes, hex-encoded
 )
 
@@ -27,7 +27,7 @@ func MintVisitorToken() string {
 // VisitorToken returns the raw uc_vid cookie, or ok=false when absent or not
 // 32 hex chars: a corrupt cookie counts as no cookie, not garbage lookup.
 func VisitorToken(r *http.Request) (string, bool) {
-	c, err := r.Cookie(CookieName)
+	c, err := r.Cookie(cookieName)
 	if err != nil || len(c.Value) != tokenHexLen {
 		return "", false
 	}
@@ -41,8 +41,8 @@ func VisitorToken(r *http.Request) (string, bool) {
 // the request (dev runs plain HTTP, a Secure cookie would be dropped).
 func SetVisitorCookie(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name: CookieName, Value: token, Path: "/",
-		MaxAge: int(VisitorCookieTTL.Seconds()), HttpOnly: true,
+		Name: cookieName, Value: token, Path: "/",
+		MaxAge: int(visitorCookieTTL.Seconds()), HttpOnly: true,
 		Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
 }

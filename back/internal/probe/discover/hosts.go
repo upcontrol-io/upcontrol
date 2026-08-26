@@ -8,9 +8,9 @@ import (
 	"sync"
 )
 
-// Resolver is the DNS lookup this package needs, so tests can answer without a
+// resolver is the DNS lookup this package needs, so tests can answer without a
 // network and without depending on what some real domain happens to publish.
-type Resolver interface {
+type resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
@@ -24,7 +24,7 @@ const hostsWanted = 3
 
 // findHosts discovers the site's other hosts: conventional names that resolve,
 // plus any subdomain the site itself pointed at.
-func findHosts(ctx context.Context, p Prober, dns Resolver, base string, seen []candidate) []Page {
+func findHosts(ctx context.Context, p prober, dns resolver, base string, seen []candidate) []Page {
 	root, err := url.Parse(base)
 	if err != nil || dns == nil {
 		return nil

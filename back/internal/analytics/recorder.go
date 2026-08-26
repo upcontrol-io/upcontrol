@@ -23,31 +23,31 @@ const (
 	bufferSize = 1024 // queued request-batches before dropping
 )
 
-// VisitorStore is the Postgres half; the recorder speaks to this interface so
+// visitorStore is the Postgres half; the recorder speaks to this interface so
 // its test runs against a fake instead of a database.
-type VisitorStore interface {
+type visitorStore interface {
 	// VisitorIDByToken resolves the visitor id for a token hash, creating the
 	// row (with first-touch attribution) on first sight.
-	VisitorIDByToken(ctx context.Context, tokenHash []byte, first FirstTouch, at time.Time) (int64, error)
+	VisitorIDByToken(ctx context.Context, tokenHash []byte, first firstTouch, at time.Time) (int64, error)
 	LinkVisitorEmail(ctx context.Context, visitorID int64, email string) error
 	LinkVisitorPerson(ctx context.Context, visitorID, personID, tenantID int64, at time.Time) error
 	MarkVisitorAccountCreated(ctx context.Context, visitorID int64, at time.Time) error
 	TouchVisitorLastSeen(ctx context.Context, visitorID int64, at time.Time, country, device string, nEvents int64) error
 }
 
-// EventSink is the ClickHouse half; *ch.Conn satisfies it.
-type EventSink interface {
+// eventSink is the ClickHouse half; *ch.Conn satisfies it.
+type eventSink interface {
 	InsertWebEvents(ctx context.Context, rows []ch.WebEventRow) error
 }
 
-// PoolStore adapts the sqlc queries to VisitorStore over a pg.Pool.
+// PoolStore adapts the sqlc queries to visitorStore over a pg.Pool.
 type PoolStore struct{ Pool *pg.Pool }
 
 func ts(at time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: at.UTC(), Valid: true}
 }
 
-func (s PoolStore) VisitorIDByToken(ctx context.Context, tokenHash []byte, first FirstTouch, at time.Time) (int64, error) {
+func (s PoolStore) VisitorIDByToken(ctx context.Context, tokenHash []byte, first firstTouch, at time.Time) (int64, error) {
 	// First-touch upsert: first non-empty value wins on every field, across
 	// flush batches too; RETURNING id covers insert and conflict branches.
 	return s.Pool.Queries().UpsertWebVisitorFirst(ctx, sqlc.UpsertWebVisitorFirstParams{
@@ -86,9 +86,9 @@ func (s PoolStore) TouchVisitorLastSeen(ctx context.Context, visitorID int64, at
 	})
 }
 
-// FirstTouch is the one-shot attribution written when a visitor row is
+// firstTouch is the one-shot attribution written when a visitor row is
 // created (first non-empty value wins; later values never overwrite).
-type FirstTouch struct {
+type firstTouch struct {
 	Referrer    string
 	UTMSource   string
 	UTMMedium   string
@@ -104,24 +104,24 @@ type FirstTouch struct {
 type track struct {
 	at             time.Time
 	tokenHash      []byte // nil = anonymous request (no uc_vid): visitor_id 0
-	first          FirstTouch
+	first          firstTouch
 	personID       int64
 	tenantID       int64
 	country        string
 	ipHash         [8]byte
-	ua             UA
+	ua             ua
 	email          string
 	linkPerson     bool
 	accountCreated bool
-	events         []Event
+	events         []event
 }
 
 // Recorder is the async analytics writer. A nil *Recorder is a valid no-op:
 // every entry point checks for nil.
 type Recorder struct {
-	store VisitorStore
-	sink  EventSink
-	geo   *Geo
+	store visitorStore
+	sink  eventSink
+	geo   *geo
 	log   *slog.Logger
 
 	in      chan track
@@ -135,11 +135,11 @@ type Recorder struct {
 
 // NewRecorder builds a Recorder around the two stores; a GeoIP parse failure
 // downgrades to country="" rather than failing startup.
-func NewRecorder(store VisitorStore, sink EventSink, log *slog.Logger) *Recorder {
+func NewRecorder(store visitorStore, sink eventSink, log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
 	}
-	geo, err := OpenGeo()
+	geo, err := openGeo()
 	if err != nil {
 		log.Warn("analytics: geoip database failed to parse; country unknown", "err", err)
 		geo = nil
@@ -175,7 +175,7 @@ func (r *Recorder) Stop(ctx context.Context) error {
 
 // Track enqueues a validated event batch from POST /public/track.
 // personID/tenantID are 0 unless a live session stamped them.
-func (r *Recorder) Track(ctx context.Context, events []Event, personID, tenantID int64) {
+func (r *Recorder) Track(ctx context.Context, events []event, personID, tenantID int64) {
 	if r == nil || len(events) == 0 {
 		return
 	}
@@ -183,7 +183,7 @@ func (r *Recorder) Track(ctx context.Context, events []Event, personID, tenantID
 	t.personID, t.tenantID = personID, tenantID
 	t.events = events
 	for _, e := range events {
-		mergeFirst(&t.first, FirstTouch{
+		mergeFirst(&t.first, firstTouch{
 			Path:        e.Path,
 			Referrer:    e.Referrer,
 			UTMSource:   e.UTMSource,
@@ -202,7 +202,7 @@ func (r *Recorder) ServerEvent(ctx context.Context, name string, personID, tenan
 	}
 	t := r.baseTrack(ctx)
 	t.personID, t.tenantID = personID, tenantID
-	t.events = []Event{{Name: name, Props: props}}
+	t.events = []event{{Name: name, Props: props}}
 	r.enqueue(t)
 }
 
@@ -252,15 +252,15 @@ func (r *Recorder) CountInvalid(n int) {
 // IP (used once here), the truncated IP hash, the parsed UA.
 func (r *Recorder) baseTrack(ctx context.Context) track {
 	t := track{at: time.Now()}
-	if s := ScopeFrom(ctx); s != nil {
+	if s := scopeFrom(ctx); s != nil {
 		if s.Token != "" {
 			h := sha256.Sum256([]byte(s.Token))
 			t.tokenHash = h[:]
 		}
 		t.country = r.geo.Country(s.IP)
-		t.ipHash = IPHash(s.IP)
-		t.ua = ParseUA(s.UA)
-		t.first = FirstTouch{Country: t.country, Device: t.ua.Device, IsBot: t.ua.Device == "bot"}
+		t.ipHash = ipHash(s.IP)
+		t.ua = parseUA(s.UA)
+		t.first = firstTouch{Country: t.country, Device: t.ua.Device, IsBot: t.ua.Device == "bot"}
 	}
 	return t
 }
@@ -331,7 +331,7 @@ func (r *Recorder) flush(list []track) {
 	// the same visitor's first page_view; the upsert stays first-non-empty.
 	type group struct {
 		tokenHash []byte
-		first     FirstTouch
+		first     firstTouch
 		id        int64
 		tracks    []track
 	}
@@ -422,7 +422,7 @@ func (r *Recorder) flush(list []track) {
 
 // mergeFirst keeps the first non-empty value per field (first-touch wins);
 // IsBot is sticky-true across the merge.
-func mergeFirst(dst *FirstTouch, src FirstTouch) {
+func mergeFirst(dst *firstTouch, src firstTouch) {
 	if dst.Referrer == "" {
 		dst.Referrer = src.Referrer
 	}
