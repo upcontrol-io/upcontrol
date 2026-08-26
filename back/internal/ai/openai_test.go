@@ -82,13 +82,69 @@ func adaptServer(t *testing.T, rejectParam, message string, calls *int, bodies *
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":"+jsonMust(t, streamAnswer)+"},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, done)
 	}))
 }
 
-// A 400 naming max_completion_tokens gets one retry without it; max_tokens
-// carries the cap, and the learned quirk spares the next call.
-func TestOpenAIClient_AdaptsToGatewayRejectingMaxCompletionTokens(t *testing.T) {
+// A 400 naming a parameter gets exactly one retry without it, and the cap
+// rides whichever spelling survives — dropping one must not drop the rest.
+func TestOpenAIClient_AdaptsToRefusedParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		reject  string
+		message string
+		effort  string // set only where the case needs a reasoning scenario
+		carrier string // the parameter that must still carry the 42
+	}{
+		{
+			name:    "gateway rejects max_completion_tokens",
+			reject:  "max_completion_tokens",
+			message: "Unrecognized request argument supplied: max_completion_tokens",
+			carrier: "max_tokens",
+		},
+		// OpenAI's own refusal names both spellings: the retry must drop
+		// max_tokens, not the replacement it points at.
+		{
+			name:    "openai rejects max_tokens",
+			reject:  "max_tokens",
+			message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+			carrier: "max_completion_tokens",
+		},
+		{
+			name:    "non-reasoning model rejects reasoning_effort",
+			reject:  "reasoning_effort",
+			message: "Unrecognized request argument supplied: reasoning_effort",
+			effort:  "medium",
+			carrier: "max_completion_tokens",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			var bodies []map[string]any
+			srv := adaptServer(t, tc.reject, tc.message, &calls, &bodies)
+			defer srv.Close()
+
+			sc := testScenario(16384)
+			sc.ReasoningEffort = tc.effort
+			if _, err := newTestClient(srv).Complete(context.Background(), sc, Input{Lines: []string{"boom"}}); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("calls = %d, want 2 — one refusal, one adapted retry", calls)
+			}
+			if _, has := bodies[1][tc.reject]; has {
+				t.Fatalf("the retry must drop %s — the parameter the provider refused", tc.reject)
+			}
+			if bodies[1][tc.carrier] != float64(42) {
+				t.Fatalf("retry %s = %v, want 42 — the surviving spelling must still carry the cap", tc.carrier, bodies[1][tc.carrier])
+			}
+		})
+	}
+}
+
+// The learned quirk is remembered: the second call spends no refusal round
+// trip re-learning it.
+func TestOpenAIClient_RemembersTheLearnedQuirk(t *testing.T) {
 	var calls int
 	var bodies []map[string]any
 	srv := adaptServer(t, "max_completion_tokens",
@@ -96,81 +152,22 @@ func TestOpenAIClient_AdaptsToGatewayRejectingMaxCompletionTokens(t *testing.T) 
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	if _, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}}); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("calls = %d, want 2 — one refusal, one adapted retry", calls)
-	}
-	if _, has := bodies[1]["max_completion_tokens"]; has {
-		t.Fatal("the retry must drop the refused spelling")
-	}
-	if bodies[1]["max_tokens"] != float64(42) {
-		t.Fatalf("retry max_tokens = %v, want 42 — the surviving spelling must still carry the cap", bodies[1]["max_tokens"])
-	}
-	if _, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom2"}}); err != nil {
-		t.Fatalf("second Complete: %v", err)
+	for _, line := range []string{"boom", "boom2"} {
+		if _, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{line}}); err != nil {
+			t.Fatalf("Complete(%s): %v", line, err)
+		}
 	}
 	if calls != 3 {
-		t.Fatalf("calls = %d, want 3 — the quirk is remembered, no re-learning round trip", calls)
-	}
-}
-
-// OpenAI's own refusal names both spellings: the retry must drop max_tokens,
-// not the replacement it points at.
-func TestOpenAIClient_AdaptsToOpenAIRejectingMaxTokens(t *testing.T) {
-	var calls int
-	var bodies []map[string]any
-	srv := adaptServer(t, "max_tokens",
-		"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", &calls, &bodies)
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	if _, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}}); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("calls = %d, want 2", calls)
-	}
-	if _, has := bodies[1]["max_tokens"]; has {
-		t.Fatal("the retry must drop max_tokens — the parameter the provider refused")
-	}
-	if bodies[1]["max_completion_tokens"] != float64(42) {
-		t.Fatalf("retry max_completion_tokens = %v, want 42", bodies[1]["max_completion_tokens"])
-	}
-}
-
-// A scenario names an effort and a non-reasoning model refuses it: one retry
-// without reasoning_effort.
-func TestOpenAIClient_AdaptsToModelRejectingReasoningEffort(t *testing.T) {
-	var calls int
-	var bodies []map[string]any
-	srv := adaptServer(t, "reasoning_effort",
-		"Unrecognized request argument supplied: reasoning_effort", &calls, &bodies)
-	defer srv.Close()
-
-	sc := testScenario(16384)
-	sc.ReasoningEffort = "medium"
-
-	c := newTestClient(srv)
-	if _, err := c.Complete(context.Background(), sc, Input{Lines: []string{"boom"}}); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("calls = %d, want 2 — one refusal, one retry", calls)
-	}
-	if _, has := bodies[1]["reasoning_effort"]; has {
-		t.Fatal("the retry must drop reasoning_effort — the parameter the provider refused")
-	}
-	// Dropping one spelling must not quietly drop the rest of the scenario.
-	if bodies[1]["max_completion_tokens"] != float64(42) {
-		t.Fatalf("retry max_completion_tokens = %v, want 42", bodies[1]["max_completion_tokens"])
+		t.Fatalf("calls = %d, want 3 — two completions, the refusal learned once", calls)
 	}
 }
 
 // streamAnswer is the strict-shape payload every happy-path stream carries;
 // tests may split or repeat it freely.
 const streamAnswer = `{"problem":"p","cause":"c","confidence":"high","fix":null,"investigate":[]}`
+
+// done closes every scripted stream.
+const done = "data: [DONE]\n\n"
 
 // Drives the client against a scripted SSE server and asserts the assembled
 // JSON, the usage numbers and the request body the scenario dictated.
@@ -182,7 +179,7 @@ func TestOpenAIClient_StreamAssemblesAnswerAndUsage(t *testing.T) {
 		"data: {\"model\":\"gpt-test-2025-01\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer[:half]) + "}}],\"usage\":null}\n\n",
 		"data: {\"model\":\"gpt-test-2025-01\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer[half:]) + "},\"finish_reason\":\"stop\"}],\"usage\":null}\r\n\r\n",
 		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":45}}\n\n",
-		"data: [DONE]\n\n",
+		done,
 	}, &gotReq))
 	defer srv.Close()
 
@@ -245,7 +242,7 @@ func TestOpenAIClient_AbortsPastByteCap(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, big[:3000]) + "}}]}\n\n",
 		"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, big[3000:6000]) + "}}]}\n\n",
 		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
-		"data: [DONE]\n\n",
+		done,
 	}, nil))
 	defer srv.Close()
 
@@ -281,26 +278,6 @@ func TestOpenAIClient_Non2xxCarriesStatusAndBody(t *testing.T) {
 	}
 }
 
-// An error object pushed mid-stream fails the call with the provider's own
-// message, not "no content".
-func TestOpenAIClient_ProviderErrorChunkFailsCall(t *testing.T) {
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n",
-		"data: {\"error\":{\"message\":\"You exceeded your current quota\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	_, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err == nil {
-		t.Fatal("an error chunk mid-stream must fail the call")
-	}
-	if !strings.Contains(err.Error(), "You exceeded your current quota") {
-		t.Fatalf("the error must surface the provider's message; got %v", err)
-	}
-}
-
 // finish_reason "length" is an error, not a truncated answer; the spend
 // travels out with it.
 func TestOpenAIClient_FinishReasonLengthIsError(t *testing.T) {
@@ -308,7 +285,7 @@ func TestOpenAIClient_FinishReasonLengthIsError(t *testing.T) {
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer) + "},\"finish_reason\":\"length\"}]}\n\n",
 		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
-		"data: [DONE]\n\n",
+		done,
 	}, nil))
 	defer srv.Close()
 
@@ -331,26 +308,69 @@ func TestOpenAIClient_FinishReasonLengthIsError(t *testing.T) {
 	}
 }
 
-// A stream with no usage chunk records the -1 sentinel, never a false zero;
-// the model falls back to the configured name.
-func TestOpenAIClient_AbsentUsageRecordsUnknownTokens(t *testing.T) {
-	answer := streamAnswer
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer) + "},\"finish_reason\":\"stop\"}]}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
+// Streams that do produce an answer: what the assembled JSON, the usage
+// numbers and the model name must be once the stream ends.
+func TestOpenAIClient_AssemblesFromHealthyStreams(t *testing.T) {
+	half := len(streamAnswer) / 2
+	for _, tc := range []struct {
+		name           string
+		chunks         []string
+		wantPrompt     int
+		wantCompletion int
+		wantModel      string
+	}{
+		// No usage chunk means unknown, never a false zero, and the model
+		// falls back to the configured name.
+		{
+			name: "no usage chunk",
+			chunks: []string{
+				"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer) + "},\"finish_reason\":\"stop\"}]}\n\n",
+				done,
+			},
+			wantPrompt: -1, wantCompletion: -1, wantModel: "gpt-test",
+		},
+		// One unparseable line between healthy chunks is skipped, not fatal.
+		{
+			name: "malformed line between healthy chunks",
+			chunks: []string{
+				"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer[:half]) + "}}]}\n\n",
+				"data: {this is not json\n\n",
+				"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer[half:]) + "}}]}\n\n",
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+				done,
+			},
+			wantPrompt: 7, wantCompletion: 3, wantModel: "gpt-test",
+		},
+		// The final chunk's model field is the authoritative name for the
+		// ledger, not the first delta's.
+		{
+			name: "model named twice",
+			chunks: []string{
+				"data: {\"model\":\"gpt-first\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer) + "},\"finish_reason\":\"stop\"}]}\n\n",
+				"data: {\"model\":\"gpt-final\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+				done,
+			},
+			wantPrompt: 1, wantCompletion: 1, wantModel: "gpt-final",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(sseHandler(t, tc.chunks, nil))
+			defer srv.Close()
 
-	c := newTestClient(srv)
-	comp, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if comp.PromptTokens != -1 || comp.CompletionTokens != -1 {
-		t.Fatalf("usage = %d/%d, want -1/-1 — no usage chunk means unknown, not free", comp.PromptTokens, comp.CompletionTokens)
-	}
-	if comp.Model != "gpt-test" {
-		t.Fatalf("model = %q, want the configured name when the stream carries none", comp.Model)
+			comp, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if string(comp.RawJSON) != streamAnswer {
+				t.Fatalf("assembled JSON = %q, want the chunks joined into the full answer", comp.RawJSON)
+			}
+			if comp.PromptTokens != tc.wantPrompt || comp.CompletionTokens != tc.wantCompletion {
+				t.Fatalf("usage = %d/%d, want %d/%d", comp.PromptTokens, comp.CompletionTokens, tc.wantPrompt, tc.wantCompletion)
+			}
+			if comp.Model != tc.wantModel {
+				t.Fatalf("model = %q, want %q", comp.Model, tc.wantModel)
+			}
+		})
 	}
 }
 
@@ -376,95 +396,91 @@ func TestOpenAIClient_InjectedClientStillTimesOut(t *testing.T) {
 	}
 }
 
-// One unparseable data line in an otherwise healthy stream is skipped, not
-// fatal.
-func TestOpenAIClient_SkipsMalformedChunk(t *testing.T) {
-	answer := streamAnswer
-	half := len(answer) / 2
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer[:half]) + "}}]}\n\n",
-		"data: {this is not json\n\n",
-		"data: {\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, answer[half:]) + "}}]}\n\n",
-		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
+// Every stream that cannot produce an answer fails the call, and the error
+// carries the stream's own reason — never a bare "no content", never a
+// dangling colon.
+func TestOpenAIClient_FailingStreamsNameTheirReason(t *testing.T) {
+	runOfGarbage := make([]string, 40)
+	for i := range runOfGarbage {
+		runOfGarbage[i] = "data: {garbage line " + fmt.Sprint(i) + "\n\n"
+	}
+	// Alternating valid-but-empty and garbage never trips the run cap, so the
+	// total bound is the only honest stop short of the deadline.
+	var totalGarbage []string
+	for i := 0; i < 80; i++ {
+		totalGarbage = append(totalGarbage,
+			"data: {\"choices\":[]}\n\n", // parses, carries nothing: resets the run
+			"data: {garbage "+fmt.Sprint(i)+"\n\n")
+	}
 
-	c := newTestClient(srv)
-	comp, err := c.Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err != nil {
-		t.Fatalf("a malformed line between healthy chunks must be skipped, not fail: %v", err)
-	}
-	if string(comp.RawJSON) != answer {
-		t.Fatalf("assembled JSON = %q, want the chunks around the garbage joined", comp.RawJSON)
-	}
-	if comp.PromptTokens != 7 || comp.CompletionTokens != 3 {
-		t.Fatalf("usage = %d/%d, want 7/3 from the final usage chunk", comp.PromptTokens, comp.CompletionTokens)
-	}
-}
-
-// No message means type + code, neither means an explicit sentence; the
-// error must never be a dangling colon.
-func TestOpenAIClient_ErrorChunkFallsBackToTypeAndCode(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		chunk string
-		want  string
+		name   string
+		chunks []string
+		want   []string
 	}{
-		{"type and code", `{"error":{"type":"insufficient_quota","code":"quota_exceeded"}}`, "insufficient_quota quota_exceeded"},
-		{"no fields at all", `{"error":{}}`, "provider reported an error with no message"},
+		{
+			name: "error object mid-stream",
+			chunks: []string{
+				"data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n",
+				"data: {\"error\":{\"message\":\"You exceeded your current quota\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+				done,
+			},
+			want: []string{"You exceeded your current quota"},
+		},
+		// No message means type + code; neither means an explicit sentence.
+		{
+			name:   "error object carrying only type and code",
+			chunks: []string{`data: {"error":{"type":"insufficient_quota","code":"quota_exceeded"}}` + "\n\n", done},
+			want:   []string{"insufficient_quota quota_exceeded"},
+		},
+		{
+			name:   "error object with no fields at all",
+			chunks: []string{`data: {"error":{}}` + "\n\n", done},
+			want:   []string{"provider reported an error with no message"},
+		},
+		// A string-shaped error object is the nothing-parseable case.
+		{
+			name:   "string-shaped error object",
+			chunks: []string{`data: {"error":"rate limited by upstream"}` + "\n\n", done},
+			want:   []string{"no content", "rate limited by upstream"},
+		},
+		{
+			name:   "a run of unparseable lines",
+			chunks: runOfGarbage,
+			want:   []string{"in a row", "garbage line 0"},
+		},
+		{
+			name:   "unparseable lines past the total bound",
+			chunks: totalGarbage,
+			want:   []string{"in total", "garbage 0"},
+		},
+		// Any finish reason other than "stop" is an error, never an answer.
+		{
+			name: "finish reason other than stop",
+			chunks: []string{
+				"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, `{"problem":"p"`) + "},\"finish_reason\":\"content_filter\"}]}\n\n",
+				done,
+			},
+			want: []string{"content_filter"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(sseHandler(t, []string{
-				"data: " + tc.chunk + "\n\n",
-				"data: [DONE]\n\n",
-			}, nil))
+			srv := httptest.NewServer(sseHandler(t, tc.chunks, nil))
 			defer srv.Close()
 
 			_, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
 			if err == nil {
-				t.Fatal("an error chunk must fail the call")
+				t.Fatal("a stream that carries no answer must fail the call")
 			}
-			if !strings.Contains(err.Error(), tc.want) || strings.HasSuffix(err.Error(), ": ") {
-				t.Fatalf("error = %q, want it to carry %q and not end in a dangling colon", err.Error(), tc.want)
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to carry %q", err.Error(), want)
+				}
+			}
+			if strings.HasSuffix(err.Error(), ": ") {
+				t.Fatalf("error = %q, must not end in a dangling colon", err.Error())
 			}
 		})
-	}
-}
-
-// Any finish reason other than "stop" is an error, never an answer.
-func TestOpenAIClient_OtherFinishReasonsFailTheSameWay(t *testing.T) {
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, `{"problem":"p"`) + "},\"finish_reason\":\"content_filter\"}]}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
-
-	_, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err == nil {
-		t.Fatal("a non-stop finish reason must fail the call")
-	}
-	if !strings.Contains(err.Error(), "content_filter") {
-		t.Fatalf("the error must name the finish reason; got %v", err)
-	}
-}
-
-// The final chunk's model field is the authoritative name for the ledger,
-// not the first delta's.
-func TestOpenAIClient_StreamedModelLastChunkWins(t *testing.T) {
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"model\":\"gpt-first\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer) + "},\"finish_reason\":\"stop\"}]}\n\n",
-		"data: {\"model\":\"gpt-final\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
-
-	comp, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if comp.Model != "gpt-final" {
-		t.Fatalf("model = %q, want the last chunk's gpt-final", comp.Model)
 	}
 }
 
@@ -474,7 +490,7 @@ func TestOpenAIClient_BoundsStreamedModelName(t *testing.T) {
 	long := strings.Repeat("é", 200) // multibyte: the cut must not split a rune
 	srv := httptest.NewServer(sseHandler(t, []string{
 		"data: {\"model\":\"" + long + "\",\"choices\":[{\"delta\":{\"content\":" + jsonMust(t, streamAnswer) + "},\"finish_reason\":\"stop\"}]}\n\n",
-		"data: [DONE]\n\n",
+		done,
 	}, nil))
 	defer srv.Close()
 
@@ -487,66 +503,6 @@ func TestOpenAIClient_BoundsStreamedModelName(t *testing.T) {
 	}
 	if !utf8.ValidString(comp.Model) {
 		t.Fatalf("bounded model name is not valid UTF-8: %q", comp.Model)
-	}
-}
-
-// A stream with nothing parseable names the count and the first malformed
-// line; the string-shaped error object is exactly this case.
-func TestOpenAIClient_GarbageOnlyStreamNamesTheChunks(t *testing.T) {
-	srv := httptest.NewServer(sseHandler(t, []string{
-		"data: {\"error\":\"rate limited by upstream\"}\n\n",
-		"data: [DONE]\n\n",
-	}, nil))
-	defer srv.Close()
-
-	_, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err == nil {
-		t.Fatal("a stream with no content must fail")
-	}
-	for _, want := range []string{"no content", "rate limited by upstream"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want it to carry %q — the stream's own reason must surface", err.Error(), want)
-		}
-	}
-}
-
-// A run of unparseable lines fails the call instead of logging until the
-// deadline.
-func TestOpenAIClient_ConsecutiveGarbageEndsTheStream(t *testing.T) {
-	chunks := make([]string, 40)
-	for i := range chunks {
-		chunks[i] = "data: {garbage line " + fmt.Sprint(i) + "\n\n"
-	}
-	srv := httptest.NewServer(sseHandler(t, chunks, nil))
-	defer srv.Close()
-
-	_, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err == nil {
-		t.Fatal("a garbage-only stream must fail the call")
-	}
-	if !strings.Contains(err.Error(), "in a row") || !strings.Contains(err.Error(), "garbage line 0") {
-		t.Fatalf("error = %q, want the consecutive-malformed failure naming the first line", err)
-	}
-}
-
-// Alternating valid-but-empty and garbage chunks never trips the run cap; the
-// total bound is the only honest stop short of the deadline.
-func TestOpenAIClient_TotalGarbageEndsTheStream(t *testing.T) {
-	chunks := make([]string, 0, 160)
-	for i := 0; i < 80; i++ {
-		chunks = append(chunks,
-			"data: {\"choices\":[]}\n\n", // parses, carries nothing: resets the run
-			"data: {garbage "+fmt.Sprint(i)+"\n\n")
-	}
-	srv := httptest.NewServer(sseHandler(t, chunks, nil))
-	defer srv.Close()
-
-	_, err := newTestClient(srv).Complete(context.Background(), testScenario(16384), Input{Lines: []string{"boom"}})
-	if err == nil {
-		t.Fatal("an interspersed-garbage stream must fail the call")
-	}
-	if !strings.Contains(err.Error(), "in total") || !strings.Contains(err.Error(), "garbage 0") {
-		t.Fatalf("error = %q, want the total-malformed failure naming the first line", err)
 	}
 }
 
