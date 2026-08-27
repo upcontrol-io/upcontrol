@@ -26,7 +26,7 @@ generated, 10.7k front, 2.6k CLI, 1.8k SQL and infra.
 | 12   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | Operator choice on their own box                 | Low    |
 | 13   | Implement fingerprinting (gap, not a cut)                | Error grouping that actually groups              | Medium |
 
-Guiding principles for all of these live in [philosophy.md](philosophy.md).
+Guiding principles for all of these live in [philosophy.md](./internal/philosophy.md).
 
 ---
 
