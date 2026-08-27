@@ -764,20 +764,20 @@ components:
           type: array
           description: >
             One status per bucket, oldest first. The page draws exactly this
-            many bars: the checks table keeps 7 days, so a longer strip would
-            be drawing days nobody observed. What a bucket covers is
-            `barSpanSec` — a day normally, the check's own interval while the
-            monitor is younger than a day.
+            many bars and no more: the strip covers only what the monitor has
+            actually measured. The window climbs 1-2-4-8-16-24 h as history
+            accumulates, doubling the bar count at each rung, so what one bucket
+            covers (`barSpanSec`) holds still while the bars get thinner.
           items: { $ref: "#/components/schemas/HealthStatus" }
         barSpanSec:
           type: integer
-          example: 86400
+          example: 300
           description: >
-            Seconds one bar covers. 86400 once there is more than a day of
-            history; otherwise the monitor's check interval, so a page opened an
-            hour after signing up fills as the fleet works instead of showing six
-            empty days for a week. The page prints its own axis from this number
-            and must not assume days.
+            Seconds one bar covers: five minutes normally, the monitor's own
+            check interval when that is longer, and wider on the top rungs where
+            the bar count is capped. Multiply by the number of bars for the
+            window the strip reaches, which is at most a day. The page prints
+            its own axis from this number and must not assume a fixed bucket.
     StatusPageResponse:
       type: object
       required:
@@ -802,15 +802,17 @@ components:
     NetworkTile:
       description: >
         One phase of the request, as a median over the last 24 h of successful
-        probes. Measured from the checks table (dns_ms / connect_ms / tls_ms /
-        total_ms), never sample data — a phase that never ran (no handshake on a
-        plaintext host) is absent rather than reported as zero.
+        probes: dns, tcp and response. Measured from the checks table (dns_ms /
+        connect_ms / total_ms), never sample data — a phase that never ran (no
+        lookup on a reused connection) is absent rather than reported as zero.
+        The TLS handshake is measured and stored but deliberately NOT published
+        as a tile (owner decision, 2026-08-27).
       type: object
       required: [label, value, note, status]
       properties:
-        label: { type: string, example: "tls" }
+        label: { type: string, example: "tcp" }
         value: { type: string, example: "35 ms" }
-        note: { type: string, example: "handshake" }
+        note: { type: string, example: "connection" }
         status: { $ref: "#/components/schemas/WatchStatus" }
     StatusPageUpdate:
       type: object
@@ -855,6 +857,11 @@ components:
           type: boolean
         updatedAt: { type: string, format: date-time }
         poweredBy: { type: boolean }
+        claimed:
+          description: >
+            Whether the page belongs to an account. Clients treat ABSENT as
+            claimed (an older backend knows no claim controls): fail closed.
+          type: boolean
 
     # --- landing watch ------------------------------------------------------
     WatchStatus:
@@ -961,12 +968,24 @@ components:
           type: integer
           format: int32
           example: 3
+        claimedSlug:
+          description: >
+            Present only when the host already has a CLAIMED status page — the
+            landing then opens it instead of promising a watch it cannot
+            perform.
+          type: string
     WatchRequest:
       type: object
-      required: [host, email]
+      required: [host]
       properties:
         host: { type: string, example: "example.com" }
-        email: { type: string, format: email }
+        email:
+          description: >
+            Optional. With an address the call provisions the account and
+            mails a sign-in code; without one it creates or reuses the host's
+            public status page.
+          type: string
+          format: email
         targets:
           description: >
             The ticked rows' ids (absolute URLs) to watch alongside the host.
@@ -989,12 +1008,12 @@ components:
           $ref: "#/components/schemas/WatchLogin"
     WatchLogin:
       description: >
-        How the visitor gets into the account this call just created. A
-        magic-link code is always issued; in prod it is delivered by email and
-        this object is empty, because returning a login token to an anonymous
-        caller who typed somebody else's address is account takeover. In dev the
-        code rides the response so the flow works without an inbox — the same
-        relaxation POST /v1/auth/magic-link makes.
+        How the visitor gets into the account this call just created. On the
+        e-mail path a magic-link code is always issued; in prod it is delivered
+        by email and this object is empty, because returning a login token to
+        an anonymous caller who typed somebody else's address is account
+        takeover. In dev the code rides the response so the flow works without
+        an inbox — the same relaxation POST /v1/auth/magic-link makes.
       type: object
       properties:
         dev_token:
@@ -2360,9 +2379,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [claimToken]
+              description: >
+                Exactly one of claimToken or slug; when both arrive the token
+                wins and the slug is ignored. The slug form claims the
+                UNCLAIMED status page it names — open claim, first caller
+                wins: the conditional burn is the lock.
               properties:
                 claimToken: { type: string }
+                slug: { type: string }
       responses:
         "200":
           description: OK

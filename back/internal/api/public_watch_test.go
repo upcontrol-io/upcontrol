@@ -1,10 +1,29 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWatchWithoutAnEmailIsRefusedOnASelfHost(t *testing.T) {
+	// A self-host has no use-before-signup story, so the e-mail-less watch is
+	// refused there. The refusal must land before the pool and the executor
+	// are touched: both are nil in this struct, so a check that ran later
+	// would panic rather than fail.
+	h := &writeAPI{selfHosted: true}
+	w := httptest.NewRecorder()
+	h.publicWatch(w, httptest.NewRequest("POST", "/public/watch",
+		strings.NewReader(`{"host":"example.com"}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(w.Body.String(), "missing_email") {
+		t.Errorf("body = %q, want missing_email", w.Body.String())
+	}
+}
 
 func TestWatchIsNotThrottledByTheCheckThatPrecededIt(t *testing.T) {
 	// The landing flow (check, tick, watch) sits inside the check's cooldown:

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
@@ -189,6 +192,56 @@ type anonymousReq struct {
 	Arch         string `json:"arch"`
 }
 
+// unclaimedTenant is a tenant nobody has proved they own yet. Two doors mint
+// one — the CLI's anonymous project and the landing's e-mail-less watch — so
+// the shape they hand out has to be identical.
+//
+// Both get a claim token even though only the CLI shows one: a terminal has no
+// other credential, while a watch-made page is claimed by slug from the page
+// itself. The HASH is what matters on that path — a non-NULL
+// claim_token_hash IS the "unclaimed" marker that the watch door's reuse
+// lookup and POST /v1/claim both test, and that claiming clears.
+type unclaimedTenant struct {
+	TenantID     int64
+	ProjectID    int64
+	ProjectPubID pgtype.UUID
+	ClaimToken   string
+	Key          string
+}
+
+// newUnclaimedTenant creates the tenant, its claim token, its project and its
+// API key. name titles the workspace; domain names the project ("" when the
+// caller has no host to name it after).
+func newUnclaimedTenant(ctx context.Context, pool *pg.Pool, name, domain string) (unclaimedTenant, error) {
+	raw := pool.Raw()
+	var out unclaimedTenant
+	if err := raw.QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name) VALUES ($1, $2) RETURNING id`,
+		newUUID(), name).Scan(&out.TenantID); err != nil {
+		return unclaimedTenant{}, err
+	}
+	out.ClaimToken = randomHex()
+	claimHash := sha256.Sum256([]byte(out.ClaimToken))
+	if _, err := raw.Exec(ctx,
+		`UPDATE tenant SET claim_token_hash = $1 WHERE id = $2`, claimHash[:], out.TenantID); err != nil {
+		return unclaimedTenant{}, err
+	}
+	out.ProjectPubID = newUUID()
+	if err := raw.QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, $3) RETURNING id`,
+		out.ProjectPubID, out.TenantID, domain).Scan(&out.ProjectID); err != nil {
+		return unclaimedTenant{}, err
+	}
+	_, _ = raw.Exec(ctx,
+		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, out.ProjectID)
+	key, err := issueKey(ctx, pool, out.TenantID, out.ProjectID)
+	if err != nil {
+		return unclaimedTenant{}, err
+	}
+	out.Key = key
+	return out, nil
+}
+
 func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !h.allow("mint:" + installClientIP(r)) {
@@ -200,47 +253,23 @@ func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 	var req anonymousReq
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
 
-	raw := h.pool.Raw()
-	var tenantID int64
-	if err := raw.QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES ($1, 'unclaimed') RETURNING id`,
-		newUUID()).Scan(&tenantID); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	claimToken := randomHex()
-	claimHash := sha256.Sum256([]byte(claimToken))
-	if _, err := raw.Exec(ctx,
-		`UPDATE tenant SET claim_token_hash = $1 WHERE id = $2`, claimHash[:], tenantID); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	projectPub := newUUID()
-	var projectID int64
-	if err := raw.QueryRow(ctx,
-		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, '') RETURNING id`,
-		projectPub, tenantID).Scan(&projectID); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	_, _ = raw.Exec(ctx,
-		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID)
-	key, err := issueKey(ctx, h.pool, tenantID, projectID)
+	t, err := newUnclaimedTenant(ctx, h.pool, "unclaimed", "")
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 
 	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"projectId":  "prj_" + hex.EncodeToString(projectPub.Bytes[:6]),
-		"key":        key, // shown exactly once, like POST /v1/keys/rotate
-		"claimToken": claimToken,
-		"claimUrl":   h.publicOrigin + "/claim/" + claimToken,
+		"projectId":  "prj_" + hex.EncodeToString(t.ProjectPubID.Bytes[:6]),
+		"key":        t.Key, // shown exactly once, like POST /v1/keys/rotate
+		"claimToken": t.ClaimToken,
+		"claimUrl":   h.publicOrigin + "/claim/" + t.ClaimToken,
 	})
 }
 
 type claimReq struct {
 	ClaimToken string `json:"claimToken"`
+	Slug       string `json:"slug"`
 }
 
 func (h *install) claim(w http.ResponseWriter, r *http.Request) {
@@ -251,8 +280,13 @@ func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req claimReq
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.ClaimToken == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil ||
+		(req.ClaimToken == "" && req.Slug == "") {
 		writeAPIErr(w, http.StatusBadRequest, "missing_claim_token")
+		return
+	}
+	if req.ClaimToken == "" {
+		h.claimBySlug(ctx, w, s, req.Slug)
 		return
 	}
 	hash := sha256.Sum256([]byte(req.ClaimToken))
@@ -272,6 +306,42 @@ func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = h.pool.Raw().Exec(ctx,
 		`UPDATE tenant SET claim_token_hash = NULL, claimed_at = now() WHERE id = $1`, tenantID)
+	writeAPIJSON(w, http.StatusOK, map[string]any{"claimed": true})
+}
+
+// claimBySlug claims the UNCLAIMED status page the slug names — open claim,
+// first caller wins. Burn first, the reverse of the token path above: the
+// conditional burn is the lock, and with membership first a race loser would
+// end up a member of the winner's tenant.
+func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc.Session, slug string) {
+	tx, err := h.pool.Raw().Begin(ctx)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	defer tx.Rollback(ctx)
+	var tenantID int64
+	if err := tx.QueryRow(ctx,
+		`UPDATE tenant SET claim_token_hash = NULL, claimed_at = now()
+		  WHERE id = (SELECT tenant_id FROM status_page WHERE slug = $1)
+		    AND claim_token_hash IS NOT NULL
+		  RETURNING id`, slug).Scan(&tenantID); err != nil {
+		writeAPIErr(w, http.StatusNotFound, "not_claimable")
+		return
+	}
+	// Raw SQL because the sqlc Queries are pool-bound (no tx); must stay
+	// identical to EnsureTenantMember in session.sql.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tenant_member (tenant_id, person_id, role, status)
+		 VALUES ($1, $2, 'login', 'active')
+		 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, s.PersonID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"claimed": true})
 }
 

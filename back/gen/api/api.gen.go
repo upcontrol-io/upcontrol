@@ -642,7 +642,9 @@ type ChannelsResponse struct {
 
 // CheckResponse defines model for CheckResponse.
 type CheckResponse struct {
-	Groups []WatchGroup `json:"groups"`
+	// ClaimedSlug Present only when the host already has a CLAIMED status page — the landing then opens it instead of promising a watch it cannot perform.
+	ClaimedSlug *string      `json:"claimedSlug,omitempty"`
+	Groups      []WatchGroup `json:"groups"`
 
 	// NetworkChecks One row per fact the probe actually established. A fact it cannot measure yet (error page, security headers, health URL) is omitted, not faked — the landing renders those as unknown.
 	NetworkChecks []NetworkCheck `json:"networkChecks"`
@@ -1003,12 +1005,12 @@ type NetworkCheck struct {
 	Value  string      `json:"value"`
 }
 
-// NetworkTile One phase of the request, as a median over the last 24 h of successful probes. Measured from the checks table (dns_ms / connect_ms / tls_ms / total_ms), never sample data — a phase that never ran (no handshake on a plaintext host) is absent rather than reported as zero.
+// NetworkTile One phase of the request, as a median over the last 24 h of successful probes: dns, tcp and response. Measured from the checks table (dns_ms / connect_ms / total_ms), never sample data — a phase that never ran (no lookup on a reused connection) is absent rather than reported as zero. The TLS handshake is measured and stored but deliberately NOT published as a tile (owner decision, 2026-08-27).
 type NetworkTile struct {
-	// Label Example: tls
+	// Label Example: tcp
 	Label string `json:"label"`
 
-	// Note Example: handshake
+	// Note Example: connection
 	Note   string      `json:"note"`
 	Status WatchStatus `json:"status"`
 
@@ -1120,13 +1122,13 @@ type ProjectMeta struct {
 
 // PublicComponent defines model for PublicComponent.
 type PublicComponent struct {
-	// BarSpanSec Seconds one bar covers. 86400 once there is more than a day of history; otherwise the monitor's check interval, so a page opened an hour after signing up fills as the fleet works instead of showing six empty days for a week. The page prints its own axis from this number and must not assume days.
+	// BarSpanSec Seconds one bar covers: five minutes normally, the monitor's own check interval when that is longer, and wider on the top rungs where the bar count is capped. Multiply by the number of bars for the window the strip reaches, which is at most a day. The page prints its own axis from this number and must not assume a fixed bucket.
 	//
 	//
-	// Example: 86400
+	// Example: 300
 	BarSpanSec *int `json:"barSpanSec,omitempty"`
 
-	// Bars One status per bucket, oldest first. The page draws exactly this many bars: the checks table keeps 7 days, so a longer strip would be drawing days nobody observed. What a bucket covers is `barSpanSec` — a day normally, the check's own interval while the monitor is younger than a day.
+	// Bars One status per bucket, oldest first. The page draws exactly this many bars and no more: the strip covers only what the monitor has actually measured. The window climbs 1-2-4-8-16-24 h as history accumulates, doubling the bar count at each rung, so what one bucket covers (`barSpanSec`) holds still while the bars get thinner.
 	Bars []HealthStatus `json:"bars"`
 
 	// Key The monitor's public id — a component IS a check.
@@ -1148,6 +1150,8 @@ type PublicIncident struct {
 
 // PublicStatusResponse defines model for PublicStatusResponse.
 type PublicStatusResponse struct {
+	// Claimed Whether the page belongs to an account. Clients treat ABSENT as claimed (an older backend knows no claim controls): fail closed.
+	Claimed    *bool             `json:"claimed,omitempty"`
 	Components []PublicComponent `json:"components"`
 	Incidents  []PublicIncident  `json:"incidents"`
 
@@ -1345,7 +1349,7 @@ type WatchGroup struct {
 	Title  string     `json:"title"`
 }
 
-// WatchLogin How the visitor gets into the account this call just created. A magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes.
+// WatchLogin How the visitor gets into the account this call just created. On the e-mail path a magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes.
 type WatchLogin struct {
 	// DevToken Dev builds only. Redeem via POST /v1/auth/magic-link.
 	DevToken *string `json:"dev_token,omitempty"`
@@ -1353,7 +1357,8 @@ type WatchLogin struct {
 
 // WatchRequest defines model for WatchRequest.
 type WatchRequest struct {
-	Email openapi_types.Email `json:"email"`
+	// Email Optional. With an address the call provisions the account and mails a sign-in code; without one it creates or reuses the host's public status page.
+	Email *openapi_types.Email `json:"email,omitempty"`
 
 	// Host Example: example.com
 	Host string `json:"host"`
@@ -1367,7 +1372,7 @@ type WatchRequest struct {
 
 // WatchResponse defines model for WatchResponse.
 type WatchResponse struct {
-	// Login How the visitor gets into the account this call just created. A magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes.
+	// Login How the visitor gets into the account this call just created. On the e-mail path a magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes.
 	Login *WatchLogin `json:"login,omitempty"`
 
 	// Slug Example: prj-42
@@ -1465,7 +1470,8 @@ type PatchV1ChannelsIdJSONBody struct {
 
 // PostV1ClaimJSONBody defines parameters for PostV1Claim.
 type PostV1ClaimJSONBody struct {
-	ClaimToken string `json:"claimToken"`
+	ClaimToken *string `json:"claimToken,omitempty"`
+	Slug       *string `json:"slug,omitempty"`
 }
 
 // PostV1EventJSONBody defines parameters for PostV1Event.

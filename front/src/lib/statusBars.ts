@@ -1,10 +1,12 @@
 /** Everything a strip says about time derives from `barSpanSec`; shared by the
- *  status page and the Dashboard so both read the same bars the same way. */
+ *  status page and the Dashboard so both read the same bars the same way. One bar
+ *  covers five minutes normally, the check's own interval when that is longer, and
+ *  more on the top rungs where the bar count is capped — the strip reaches back that
+ *  times its bar count, and never more than a day. */
 import type { HealthStatus } from './types';
 
-export const DAY_SEC = 86400;
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** The bucket to assume when a backend omits `barSpanSec` — the ladder's first rung. */
+export const BASE_SPAN_SEC = 300;
 
 /** Status as a word: colour never carries a state alone. */
 const BAR_WORD: Record<HealthStatus, string> = {
@@ -14,26 +16,19 @@ const BAR_WORD: Record<HealthStatus, string> = {
   nodata: 'no data',
 };
 
-/** How far back a whole strip reaches, in words: "7 days", "1 h", "35 min". */
+/** How far back a whole strip reaches, in words: "24 h", "1 h", "35 min". Never days — the
+ *  window ladder stops at 24 h, and "1 days" is what the days branch used to print there. */
 export function spanLabel(spanSec: number, count: number): string {
   const total = spanSec * count;
-  if (total % DAY_SEC === 0) return `${total / DAY_SEC} days`;
   if (total >= 3600 && total % 3600 === 0) return `${total / 3600} h`;
   return `${Math.round(total / 60)} min`;
 }
 
-/** The right-hand end of the axis: a day-bucketed strip ends today, a finer one now. */
-export function spanEndLabel(spanSec: number): string {
-  return spanSec >= DAY_SEC ? 'today' : 'now';
-}
-
-/** When one bucket was — a date for daily buckets, a clock time for finer ones. */
-function bucketTime(index: number, count: number, spanSec: number, end = new Date()): string {
-  if (index === count - 1) return spanEndLabel(spanSec);
-  const at = new Date(end.getTime() - (count - 1 - index) * spanSec * 1000);
-  return spanSec >= DAY_SEC
-    ? `${MONTHS[at.getMonth()]} ${at.getDate()}`
-    : `${at.getHours()}:${String(at.getMinutes()).padStart(2, '0')}`;
+/** When one bucket was — a clock time, since no bucket is a day wide any more. */
+function bucketTime(index: number, count: number, spanSec: number): string {
+  if (index === count - 1) return 'now';
+  const at = new Date(Date.now() - (count - 1 - index) * spanSec * 1000);
+  return `${at.getHours()}:${String(at.getMinutes()).padStart(2, '0')}`;
 }
 
 /** A whole tooltip: when, and what it was. */

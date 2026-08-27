@@ -2236,7 +2236,8 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        claimToken: string;
+                        claimToken?: string;
+                        slug?: string;
                     };
                 };
             };
@@ -3067,11 +3068,11 @@ export interface components {
             shown: boolean;
             /** @example 99.99% */
             uptime: string;
-            /** @description One status per bucket, oldest first. The page draws exactly this many bars: the checks table keeps 7 days, so a longer strip would be drawing days nobody observed. What a bucket covers is `barSpanSec` — a day normally, the check's own interval while the monitor is younger than a day. */
+            /** @description One status per bucket, oldest first. The page draws exactly this many bars and no more: the strip covers only what the monitor has actually measured. The window climbs 1-2-4-8-16-24 h as history accumulates, doubling the bar count at each rung, so what one bucket covers (`barSpanSec`) holds still while the bars get thinner. */
             bars: components["schemas"]["HealthStatus"][];
             /**
-             * @description Seconds one bar covers. 86400 once there is more than a day of history; otherwise the monitor's check interval, so a page opened an hour after signing up fills as the fleet works instead of showing six empty days for a week. The page prints its own axis from this number and must not assume days.
-             * @example 86400
+             * @description Seconds one bar covers: five minutes normally, the monitor's own check interval when that is longer, and wider on the top rungs where the bar count is capped. Multiply by the number of bars for the window the strip reaches, which is at most a day. The page prints its own axis from this number and must not assume a fixed bucket.
+             * @example 300
              */
             barSpanSec?: number;
         };
@@ -3087,13 +3088,13 @@ export interface components {
             showIncidents: boolean;
             showPoweredBy: boolean;
         };
-        /** @description One phase of the request, as a median over the last 24 h of successful probes. Measured from the checks table (dns_ms / connect_ms / tls_ms / total_ms), never sample data — a phase that never ran (no handshake on a plaintext host) is absent rather than reported as zero. */
+        /** @description One phase of the request, as a median over the last 24 h of successful probes: dns, tcp and response. Measured from the checks table (dns_ms / connect_ms / total_ms), never sample data — a phase that never ran (no lookup on a reused connection) is absent rather than reported as zero. The TLS handshake is measured and stored but deliberately NOT published as a tile (owner decision, 2026-08-27). */
         NetworkTile: {
-            /** @example tls */
+            /** @example tcp */
             label: string;
             /** @example 35 ms */
             value: string;
-            /** @example handshake */
+            /** @example connection */
             note: string;
             status: components["schemas"]["WatchStatus"];
         };
@@ -3125,6 +3126,8 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
             poweredBy?: boolean;
+            /** @description Whether the page belongs to an account. Clients treat ABSENT as claimed (an older backend knows no claim controls): fail closed. */
+            claimed?: boolean;
         };
         /** @enum {string} */
         WatchStatus: "ok" | "check" | "down" | "nodata";
@@ -3186,12 +3189,17 @@ export interface components {
              * @example 3
              */
             watchLimit?: number;
+            /** @description Present only when the host already has a CLAIMED status page — the landing then opens it instead of promising a watch it cannot perform. */
+            claimedSlug?: string;
         };
         WatchRequest: {
             /** @example example.com */
             host: string;
-            /** Format: email */
-            email: string;
+            /**
+             * Format: email
+             * @description Optional. With an address the call provisions the account and mails a sign-in code; without one it creates or reuses the host's public status page.
+             */
+            email?: string;
             /**
              * @description The ticked rows' ids (absolute URLs) to watch alongside the host. Untrusted: the server keeps only the ones on `host` and creates no more than the plan allows. Absent means "just the host".
              * @example [
@@ -3212,7 +3220,7 @@ export interface components {
             watching?: number;
             login?: components["schemas"]["WatchLogin"];
         };
-        /** @description How the visitor gets into the account this call just created. A magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes. */
+        /** @description How the visitor gets into the account this call just created. On the e-mail path a magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes. */
         WatchLogin: {
             /** @description Dev builds only. Redeem via POST /v1/auth/magic-link. */
             dev_token?: string;

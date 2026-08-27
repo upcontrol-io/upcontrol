@@ -5,7 +5,7 @@ import { publicStatus as publicStatusApi, isOffline, type components } from '@/l
 import type { HealthStatus } from '@/lib/types';
 import { useRevealOnScroll } from '@/lib/useRevealOnScroll';
 import { formatMinutesAgo } from '@/lib/formatTime';
-import { DAY_SEC, bucketLabel, spanEndLabel, spanLabel } from '@/lib/statusBars';
+import { BASE_SPAN_SEC, bucketLabel, spanLabel } from '@/lib/statusBars';
 import styles from './PublicStatus.module.css';
 
 type BarStatus = 'ok' | 'check' | 'down' | 'nodata';
@@ -117,7 +117,7 @@ export function PublicStatus() {
 				? 'check'
 				: 'ok';
 
-	const barSpan = shownComponents[0]?.barSpanSec ?? DAY_SEC;
+	const barSpan = shownComponents[0]?.barSpanSec ?? BASE_SPAN_SEC;
 	const network = page.network ?? [];
 	const host = page.title || projectSlug || 'status';
 	const updatedMinutes = page.updatedAt ? Math.floor((Date.now() - Date.parse(page.updatedAt)) / 60_000) : 0;
@@ -158,7 +158,7 @@ export function PublicStatus() {
 					</div>
 					<div className={styles.componentList}>
 						{shownComponents.map((component, rowIndex) => {
-							const bars = buildBars((component.bars ?? []) as HealthStatus[], component.barSpanSec ?? DAY_SEC);
+							const bars = buildBars((component.bars ?? []) as HealthStatus[], component.barSpanSec ?? BASE_SPAN_SEC);
 							const ongoing = isFailure(currentState(bars.map((bar) => bar.status)));
 							const rowState = ongoing ? currentState(bars.map((bar) => bar.status)) : 'ok';
 							const rowLabel = ongoing
@@ -173,7 +173,7 @@ export function PublicStatus() {
 										<span className={styles.componentName}>{component.name}</span>
 										<span className={styles.componentStatus}>{rowLabel}</span>
 										<span className={styles.componentUptime}>
-											{component.uptime} · {spanLabel(component.barSpanSec ?? DAY_SEC, bars.length)}
+											{component.uptime} · {spanLabel(component.barSpanSec ?? BASE_SPAN_SEC, bars.length)}
 										</span>
 									</div>
 									<div className={styles.bars}>
@@ -204,7 +204,7 @@ export function PublicStatus() {
 									? `${spanLabel(barSpan, shownComponents[0].bars.length)} ago`
 									: ''}
 							</span>
-							<span>{spanEndLabel(barSpan)}</span>
+							<span>{'now'}</span>
 						</div>
 					</div>
 				</section>

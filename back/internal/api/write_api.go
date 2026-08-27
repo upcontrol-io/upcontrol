@@ -935,28 +935,63 @@ func (h *writeAPI) statusConfig(ctx context.Context, tenantID int64) statusPageC
 	return cfg
 }
 
-// statusBars is how many daily bars the page draws — one per retained day. The
-// checks table keeps 7 days, so drawing 60 would be drawing 53 days we never saw.
-const statusBars = 7
+// The strip's window climbs a ladder as history accumulates (owner decision,
+// 2026-08-27): an account with forty minutes of checks is shown its forty
+// minutes, never a day of grey. Each rung doubles the window AND the bar count,
+// so a bar keeps covering the same slice of time and simply gets thinner. The
+// ladder stops at a day — this page answers "how has today gone", and the
+// checks table keeps a week only so the window has room to reach 24 h.
+var statusWindows = [...]time.Duration{
+	time.Hour,
+	2 * time.Hour,
+	4 * time.Hour,
+	8 * time.Hour,
+	16 * time.Hour,
+	24 * time.Hour,
+}
 
-// Until an account has a day of history, one bar is one check: seven daily
-// bars would read `nodata` for a week on a brand-new account.
 const (
-	statusIntervalBars = 12             // one per check, so the strip is the last 12 runs
-	statusDayThreshold = 24 * time.Hour // older history than this and days win
+	// The first rung's bar count: 1 h over 12 bars is one bar per five minutes,
+	// and every rung above keeps that five minutes by doubling the count.
+	statusBarsBase = 12
+	// Where the doubling has to stop. Past this the bars are hairlines — on a
+	// 350px phone column 96 of them are already under 2px — so the top rungs
+	// widen the bucket instead of multiplying bars nobody can hit.
+	statusBarsMax = 96
 )
 
-// barSpanFor picks the bucket for one monitor: a day, or its own interval.
-// `oldest` is the first check held (zero when there are none).
-func barSpanFor(oldest time.Time, intervalSec int32, now time.Time) time.Duration {
-	if !oldest.IsZero() && now.Sub(oldest) >= statusDayThreshold {
-		return 24 * time.Hour
+// barPlanFor sizes one monitor's strip: how far back it reaches, what one bar
+// covers, and how many there are. `oldest` is the first check held (zero when
+// there are none).
+func barPlanFor(oldest time.Time, intervalSec int32, now time.Time) (window, bucket time.Duration, count int) {
+	// A rung is earned by having filled the one below it: an hour of history
+	// buys the two-hour window, sixteen hours buy the day.
+	window = statusWindows[0]
+	if !oldest.IsZero() {
+		have := now.Sub(oldest)
+		for i, w := range statusWindows[:len(statusWindows)-1] {
+			if have >= w {
+				window = statusWindows[i+1]
+			}
+		}
 	}
-	span := time.Duration(intervalSec) * time.Second
-	if span <= 0 {
-		span = 5 * time.Minute
+
+	// A bucket shorter than the check's own interval draws gaps that are not
+	// outages: most of those bars would hold no check at all.
+	bucket = statusWindows[0] / statusBarsBase
+	if interval := time.Duration(intervalSec) * time.Second; interval > bucket {
+		bucket = interval
 	}
-	return span
+	count = int(window / bucket)
+	if count > statusBarsMax {
+		count = statusBarsMax
+		bucket = window / time.Duration(count)
+	}
+	// An interval wider than the whole window: one bar, honestly one bar.
+	if count < 1 {
+		count, bucket = 1, window
+	}
+	return window, bucket, count
 }
 
 // statusComponents renders one component per monitor with measured uptime and
@@ -988,56 +1023,45 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 
 	now := time.Now().UTC()
 
-	// One query for every monitor's daily ok/total over the retained window
-	// plus the first check held, which decides the bucket size.
+	// The first check held per monitor: it decides which rung of the ladder the
+	// strip is on. Bounded by the retention window, which is all the table has.
 	type day struct{ ok, total uint64 }
-	daily := map[int64]map[int64]day{}
 	oldest := map[int64]time.Time{}
 	if h.ch != nil {
 		chRows, cerr := h.ch.Raw().Query(ctx, `
-			SELECT monitor_id, toStartOfDay(ts) AS d, countIf(ok = 1), count(), min(ts)
-			  FROM checks
+			SELECT monitor_id, min(ts) FROM checks
 			 WHERE tenant_id = ? AND ts >= now() - INTERVAL 7 DAY
-			 GROUP BY monitor_id, d`, uint64(tenantID))
+			 GROUP BY monitor_id`, uint64(tenantID))
 		if cerr == nil {
 			for chRows.Next() {
 				var monID uint64
-				var d, first time.Time
-				var ok, total uint64
-				if chRows.Scan(&monID, &d, &ok, &total, &first) == nil {
-					id := int64(monID)
-					m := daily[id]
-					if m == nil {
-						m = map[int64]day{}
-						daily[id] = m
-					}
-					m[d.UTC().Unix()] = day{ok: ok, total: total}
-					if prev, seen := oldest[id]; !seen || first.Before(prev) {
-						oldest[id] = first.UTC()
-					}
+				var first time.Time
+				if chRows.Scan(&monID, &first) == nil {
+					oldest[int64(monID)] = first.UTC()
 				}
 			}
 			_ = chRows.Close()
 		}
 	}
 
-	// Monitors young enough to be drawn per check, and how far back their strip
-	// reaches — the widest of them bounds the one raw query below.
-	spans := map[int64]time.Duration{}
+	// Every strip's plan, and how far back the widest of them reaches — that
+	// bounds the one raw query below.
+	type barPlan struct {
+		bucket time.Duration
+		count  int
+	}
+	plans := map[int64]barPlan{}
 	var rawFrom time.Time
 	for _, m := range mons {
-		span := barSpanFor(oldest[m.id], m.intervalSec, now)
-		spans[m.id] = span
-		if span >= 24*time.Hour {
-			continue
-		}
-		if from := now.Add(-span * statusIntervalBars); rawFrom.IsZero() || from.Before(rawFrom) {
+		window, bucket, count := barPlanFor(oldest[m.id], m.intervalSec, now)
+		plans[m.id] = barPlan{bucket: bucket, count: count}
+		if from := now.Add(-window); rawFrom.IsZero() || from.Before(rawFrom) {
 			rawFrom = from
 		}
 	}
 
-	// Per-check buckets counted BACKWARDS from now: a 5-minute probe is not
-	// clock-aligned, and wall-clock buckets would draw false gaps.
+	// Buckets counted BACKWARDS from now: a probe is not clock-aligned, and
+	// wall-clock buckets would draw false gaps.
 	recent := map[int64]map[int]day{}
 	if h.ch != nil && !rawFrom.IsZero() {
 		chRows, cerr := h.ch.Raw().Query(ctx, `
@@ -1052,12 +1076,12 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 					continue
 				}
 				id := int64(monID)
-				span := spans[id]
-				if span <= 0 || span >= 24*time.Hour {
+				p := plans[id]
+				if p.bucket <= 0 {
 					continue
 				}
-				bucket := int(now.Sub(ts.UTC()) / span)
-				if bucket < 0 || bucket >= statusIntervalBars {
+				bucket := int(now.Sub(ts.UTC()) / p.bucket)
+				if bucket < 0 || bucket >= p.count {
 					continue
 				}
 				m := recent[id]
@@ -1076,7 +1100,6 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 		}
 	}
 
-	today := now.Truncate(24 * time.Hour)
 	out := make([]map[string]any, 0, len(mons))
 	for _, m := range mons {
 		shown, ok := cfg.Shown[m.key]
@@ -1086,20 +1109,11 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 		if publicOnly && !shown {
 			continue
 		}
-		span := spans[m.id]
-		count := statusBars
-		if span < 24*time.Hour {
-			count = statusIntervalBars
-		}
-		bars := make([]string, count)
+		p := plans[m.id]
+		bars := make([]string, p.count)
 		var okTotal, total uint64
-		for i := range count {
-			var d day
-			if span >= 24*time.Hour {
-				d = daily[m.id][today.AddDate(0, 0, -(count-1-i)).Unix()]
-			} else {
-				d = recent[m.id][count-1-i] // bucket 0 is the newest, so it lands last
-			}
+		for i := range p.count {
+			d := recent[m.id][p.count-1-i] // bucket 0 is the newest, so it lands last
 			switch {
 			case d.total == 0:
 				bars[i] = "nodata"
@@ -1116,9 +1130,10 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 		out = append(out, map[string]any{
 			"key": m.key, "name": m.name, "shown": shown,
 			"uptime": pctLabelAPI(okTotal, total), "bars": bars,
-			// What one bar covers. The page prints its own axis from this, so a
-			// strip of five-minute bars can never be labelled "7 days ago".
-			"barSpanSec": int(span / time.Second),
+			// What one bar covers. The page multiplies it by the bar count to
+			// print its own axis, so a strip can never be labelled a window it
+			// does not reach.
+			"barSpanSec": int(p.bucket / time.Second),
 		})
 	}
 	return out
@@ -1127,19 +1142,22 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 // pctLabelAPI is read_api's pctLabel — same rendering, same "—" for no data.
 func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 
-// statusNetwork renders the probe phases as medians over the retained window.
-// A phase that never ran (no TLS on a plaintext host) produces no tile.
+// statusNetwork renders the probe phases as medians over the retained window:
+// three tiles, DNS, TCP and RESPONSE. The handshake is deliberately absent
+// (owner decision, 2026-08-27) — do not add a TLS tile back thinking it was
+// dropped by accident. tls_ms is still measured and still stored; it is only
+// not published here.
 func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[string]any {
 	if h.ch == nil {
 		return []map[string]any{}
 	}
-	var dns, connect, tls, total float64
+	var dns, connect, total float64
 	var samples uint64
 	err := h.ch.Raw().QueryRow(ctx, `
-		SELECT median(dns_ms), median(connect_ms), median(tls_ms), median(total_ms), count()
+		SELECT median(dns_ms), median(connect_ms), median(total_ms), count()
 		  FROM checks
 		 WHERE tenant_id = ? AND ts >= now() - INTERVAL 24 HOUR AND ok = 1`,
-		uint64(tenantID)).Scan(&dns, &connect, &tls, &total, &samples)
+		uint64(tenantID)).Scan(&dns, &connect, &total, &samples)
 	if err != nil || samples == 0 {
 		// Nothing measured in the window: no tiles. An empty section is the
 		// honest answer for an account whose first probe has not run yet.
@@ -1152,13 +1170,12 @@ func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[stri
 	}{
 		{"dns", dns, "name lookup"},
 		{"tcp", connect, "connection"},
-		{"tls", tls, "handshake"},
 		{"response", total, "start to finish"},
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		// Zero is silence: a plaintext host records no handshake, and a reused
-		// connection no lookup. Only `response` is always real.
+		// Zero is silence: a reused connection records no lookup and no connect.
+		// Only `response` is always real.
 		if r.ms == 0 && r.label != "response" {
 			continue
 		}
@@ -1940,6 +1957,18 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	// numbers live in one place.
 	body["watchLimit"] = h.freeWatchLimit(r.Context())
 
+	// A CLAIMED page for the host, when one exists: the landing then opens it
+	// instead of promising a watch it cannot perform.
+	var claimedSlug string
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT sp.slug FROM status_page sp
+		   JOIN tenant t ON t.id = sp.tenant_id
+		   JOIN project p ON p.id = sp.project_id
+		  WHERE p.domain = $1 AND t.claim_token_hash IS NULL
+		  ORDER BY sp.id LIMIT 1`, bareHost(host)).Scan(&claimedSlug); err == nil {
+		body["claimedSlug"] = claimedSlug
+	}
+
 	h.cacheCheck(host, body)
 	writeAPIJSON(w, http.StatusOK, body)
 }
@@ -2277,8 +2306,10 @@ func (h *writeAPI) cacheCheck(host string, body map[string]any) {
 }
 
 func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
-	// A host typed on the landing becomes a real account: it creates exactly
-	// what the magic link would, so the two doors agree.
+	// A host typed on the landing becomes a real account: with an address the
+	// door provisions exactly what the magic link would, so the two doors
+	// agree; without one it mints an unclaimed tenant the visitor can claim
+	// later, because the result comes first and the account second.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 	var req struct {
 		Host    string   `json:"host"`
@@ -2286,8 +2317,19 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		Targets []string `json:"targets"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	if req.Host == "" || !strings.Contains(req.Email, "@") {
+	if req.Host == "" {
 		writeAPIErr(w, http.StatusBadRequest, "missing_host_or_email")
+		return
+	}
+	// A typed-but-malformed address is still an error.
+	if req.Email != "" && !strings.Contains(req.Email, "@") {
+		writeAPIErr(w, http.StatusBadRequest, "missing_host_or_email")
+		return
+	}
+	// A self-host has no use-before-signup story: an anonymous tenant there
+	// is an invisible orphan.
+	if req.Email == "" && h.selfHosted {
+		writeAPIErr(w, http.StatusBadRequest, "missing_email")
 		return
 	}
 	if !h.watchAllow(analytics.ClientIP(r)) {
@@ -2311,18 +2353,60 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// The project is named after the site asked about; an existing account
 	// keeps the name it has.
 	host := bareHost(req.Host)
-	_, tenantID, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
-	if err != nil || tenantID == 0 {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
+	var tenantID, projectID int64
+	if req.Email != "" {
+		_, tid, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
+		if err != nil || tid == 0 {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		tenantID = tid
+		h.rec.LinkEmail(ctx, req.Email)
+		_ = h.pool.Raw().QueryRow(ctx,
+			`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
+	} else {
+		// One page per host at this anonymous door. The ORDER BY prefers a
+		// CLAIMED tenant over an unclaimed one, so the claimed answer wins when
+		// both somehow exist — and a claimed host is never re-minted or added
+		// to: reusing it would let anyone who types the domain add monitors to
+		// somebody's account.
+		var claimed bool
+		err := h.pool.Raw().QueryRow(ctx,
+			`SELECT t.id, p.id, (t.claim_token_hash IS NULL)
+			   FROM tenant t
+			   JOIN project p ON p.tenant_id = t.id
+			  WHERE p.domain = $1
+			  ORDER BY (t.claim_token_hash IS NULL) DESC, p.id LIMIT 1`, host).Scan(&tenantID, &projectID, &claimed)
+		if err == nil && claimed {
+			var slug string
+			if serr := h.pool.Raw().QueryRow(ctx,
+				`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, projectID).Scan(&slug); serr == nil {
+				// Nothing was created — no monitors, no channel, no event — so
+				// nothing is counted: only the existing page's address.
+				writeAPIJSON(w, http.StatusOK, map[string]any{
+					"statusUrl": "/status/" + slug,
+					"slug":      slug,
+					"watching":  0,
+					"login":     map[string]any{},
+				})
+				return
+			}
+			// A claimed tenant with no status page: nothing to point at, mint
+			// as if the host were new.
+		}
+		if err != nil || claimed {
+			t, terr := newUnclaimedTenant(ctx, h.pool, host, host)
+			if terr != nil {
+				writeAPIErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			tenantID, projectID = t.TenantID, t.ProjectID
+		}
 	}
-	// The event goes to ClickHouse with the host only; the e-mail goes to the
-	// Postgres visitor row and nowhere else.
+	// Both paths count: this is the funnel's step between check_run and
+	// signed_in. The event goes to ClickHouse with the host only — the e-mail,
+	// when there is one, went to the Postgres visitor row above and nowhere else.
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
-	h.rec.LinkEmail(ctx, req.Email)
-	var projectID int64
-	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
 
 	// The client's target list is not trusted: each must belong to the asked
 	// host, or this becomes a probe-enrolment service for strangers.
@@ -2354,11 +2438,13 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 
 	// The e-mail channel is the point of leaving an address: without it the
 	// account would watch the host and tell nobody.
-	_, _ = h.pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
-		 SELECT gen_random_uuid(), $1, 'email', $2
-		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
-		tenantID, req.Email)
+	if req.Email != "" {
+		_, _ = h.pool.Raw().Exec(ctx,
+			`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
+			 SELECT gen_random_uuid(), $1, 'email', $2
+			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
+			tenantID, req.Email)
+	}
 
 	// The page's public address is the site's name, not our internal id.
 	slug := h.claimSlug(ctx, host, projectID)
@@ -2376,18 +2462,21 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, projectID).Scan(&slug)
 
 	// A way in: the sign-in door's own code, e-mail only in prod (handing it
-	// back anonymously is account takeover). Dev echoes it.
+	// back anonymously is account takeover). Dev echoes it. Without an address
+	// there is nobody to tell and nobody to let in: login stays empty.
 	login := map[string]any{}
-	if code, cerr := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r)); cerr == nil {
-		// Best-effort in both modes: dev never depends on an inbox, and in
-		// prod a stored-but-undelivered code just waits on the retry.
-		if h.mailer != nil {
-			if serr := h.mailer.SendCode(ctx, req.Email, code); serr != nil {
-				slog.Warn("watch: login code stored but not delivered", "email", req.Email, "err", serr)
+	if req.Email != "" {
+		if code, cerr := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r)); cerr == nil {
+			// Best-effort in both modes: dev never depends on an inbox, and in
+			// prod a stored-but-undelivered code just waits on the retry.
+			if h.mailer != nil {
+				if serr := h.mailer.SendCode(ctx, req.Email, code); serr != nil {
+					slog.Warn("watch: login code stored but not delivered", "email", req.Email, "err", serr)
+				}
 			}
-		}
-		if h.devMode {
-			login["dev_token"] = code
+			if h.devMode {
+				login["dev_token"] = code
+			}
 		}
 	}
 
@@ -2517,8 +2606,11 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	slug := pathLast(r.URL.Path)
 	var tenantID int64
+	var claimed bool
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT tenant_id FROM status_page WHERE slug = $1`, slug).Scan(&tenantID); err != nil {
+		`SELECT sp.tenant_id, (t.claim_token_hash IS NULL)
+		   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
+		  WHERE sp.slug = $1`, slug).Scan(&tenantID, &claimed); err != nil {
 		// A page not yet configured resolves by its project slug. The parsed id
 		// is a PROJECT id, kept apart from the tenant id.
 		var projectID int64
@@ -2527,7 +2619,9 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if qerr := h.pool.Raw().QueryRow(ctx,
-			`SELECT tenant_id FROM project WHERE id = $1`, projectID).Scan(&tenantID); qerr != nil || tenantID == 0 {
+			`SELECT p.tenant_id, (t.claim_token_hash IS NULL)
+			   FROM project p JOIN tenant t ON t.id = p.tenant_id
+			  WHERE p.id = $1`, projectID).Scan(&tenantID, &claimed); qerr != nil || tenantID == 0 {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
 			return
 		}
@@ -2540,6 +2634,7 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 		"network":    []map[string]any{},
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
 		"poweredBy":  cfg.ShowPoweredBy,
+		"claimed":    claimed,
 		// Whether the SECTION is published, not whether it is empty: the owner
 		// who hid a section must not get a heading under it.
 		"showIncidents": cfg.ShowIncidents,
