@@ -10,21 +10,21 @@ generated, 10.7k front, 2.6k CLI, 1.8k SQL and infra.
 
 ## Summary
 
-| #    | Change                                                    | Wins                                              | Risk    |
-|------|-----------------------------------------------------------|---------------------------------------------------|---------|
-| 1    | Split the README by audience                              | The first 30 seconds of every evaluation          | None    |
+| #    | Change                                                   | Wins                                             | Risk   |
+|------|----------------------------------------------------------|--------------------------------------------------|--------|
+| 1    | Split the README by audience                             | The first 30 seconds of every evaluation         | None   |
 | 2    | One entity: Event, named or derived; drop the dictionary | `normalize` gone, logs-vs-events vocabulary gone | Low    |
-| 3    | Fold ucworker into ucapi                                  | One container, one image, one deploy              | Low     |
-| 4    | Drop the second Caddy                                     | One container                                     | Low     |
-| 5    | Remove the AI Explain feature                             | ~900 lines + a query + UI surface                 | Low     |
-| 6    | Decide what analytics is for                              | ~500 lines + a table, or a missing page           | Low     |
-| 7    | Move `discover/` out of `internal/probe/`                 | A package filed under the wrong binary            | None    |
-| 8    | Ship the WAL's replay path, or stop fsyncing              | Honesty, or latency                               | Medium  |
-| 9    | Postgres by default; drop ClickHouse                      | The 2GB floor, one whole database                 | Medium  |
-| 10   | Keep: ucprobe as its own binary                           | —                                                 | —       |
-| 11   | Store the client's level verbatim + `level_norm`          | Nothing rewritten behind the user's back          | Low     |
-| 12   | Keep scrubbing, add a `UC_SCRUB=0` off switch             | Operator choice on their own box                  | Low     |
-| 13   | Implement fingerprinting (gap, not a cut)                 | Error grouping that actually groups               | Medium  |
+| 3    | Fold ucworker into ucapi                                 | One container, one image, one deploy             | Low    |
+| 4    | Drop the second Caddy                                    | One container                                    | Low    |
+| 5    | Remove the AI Explain feature                            | ~900 lines + a query + UI surface                | Low    |
+| 6    | Decide what analytics is for                             | ~500 lines + a table, or a missing page          | Low    |
+| 7    | Move `discover/` out of `internal/probe/`                | A package filed under the wrong binary           | None   |
+| 8    | Ship the WAL's replay path, or stop fsyncing             | Honesty, or latency                              | Medium |
+| 9    | Postgres by default; drop ClickHouse                     | The 2GB floor, one whole database                | Medium |
+| 10   | Keep: ucprobe as its own binary                          | —                                                | —      |
+| 11   | Store the client's level verbatim + `level_norm`         | Nothing rewritten behind the user's back         | Low    |
+| 12   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | Operator choice on their own box                 | Low    |
+| 13   | Implement fingerprinting (gap, not a cut)                | Error grouping that actually groups              | Medium |
 
 Guiding principles for all of these live in [philosophy.md](philosophy.md).
 

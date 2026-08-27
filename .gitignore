@@ -14,3 +14,6 @@ back/spool/
 
 # Docs
 docs/internal
+
+# IDE
+.idea
