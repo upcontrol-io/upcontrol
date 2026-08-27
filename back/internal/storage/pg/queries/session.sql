@@ -7,13 +7,20 @@ VALUES (sqlc.arg(token_hash), sqlc.arg(person_id), sqlc.arg(tenant_id),
 
 -- name: GetSessionByToken :one
 -- Only non-expired sessions match. last_seen_at is touched separately.
-SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at
+-- project_id rides along: every /v1/* request resolves the current project
+-- off the session (docs/plans/projects-axis.md), so it must survive this read.
+SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at, project_id
   FROM session
  WHERE token_hash = $1
    AND expires_at > now();
 
 -- name: TouchSession :exec
 UPDATE session SET last_seen_at = now() WHERE id = $1;
+
+-- name: SetSessionProject :exec
+-- The project switcher: points the session at a project the handler has
+-- already verified belongs to the session's tenant.
+UPDATE session SET project_id = $2 WHERE id = $1;
 
 -- name: DeleteSession :exec
 DELETE FROM session WHERE token_hash = $1;
@@ -34,7 +41,10 @@ VALUES (sqlc.arg(tenant_id), sqlc.arg(person_id), 'login', 'active')
 ON CONFLICT (tenant_id, person_id) DO NOTHING;
 
 -- name: GetMe :one
--- The /v1/me aggregate: person + tenant + first project, joined off the session.
+-- The /v1/me aggregate: person + tenant + current project, joined off the
+-- session. The project is the session's own when it still belongs to the
+-- tenant, else the tenant's lowest id — a session whose project was deleted
+-- (or never set) still answers instead of going NULL while projects exist.
 SELECT
   p.id       AS person_id,
   p.public_id AS person_public_id,
@@ -44,6 +54,7 @@ SELECT
   t.id       AS tenant_id,
   t.plan,
   t.billing,
+  s.project_id AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
@@ -52,7 +63,7 @@ FROM session s
 JOIN person p       ON p.id = s.person_id
 JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = s.tenant_id
 JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.tenant_id = t.id
+LEFT JOIN project pr ON pr.id = COALESCE((SELECT id FROM project WHERE id = s.project_id AND tenant_id = t.id), (SELECT min(id) FROM project WHERE tenant_id = t.id))
 WHERE s.token_hash = $1 AND s.expires_at > now()
 ORDER BY pr.created_at
 LIMIT 1;
@@ -61,7 +72,8 @@ LIMIT 1;
 -- The same /v1/me aggregate keyed by the identity itself: single-user mode
 -- (UC_AUTH=none) has no session row, so the token-hash join above can never
 -- answer for it. Columns mirror GetMe exactly — the handler converts between
--- the two generated row types.
+-- the two generated row types. session_project_id is the NULL literal (no
+-- session row exists here) and the project is the tenant's lowest id.
 SELECT
   p.id       AS person_id,
   p.public_id AS person_public_id,
@@ -71,6 +83,7 @@ SELECT
   t.id       AS tenant_id,
   t.plan,
   t.billing,
+  NULL::bigint AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
@@ -78,7 +91,7 @@ SELECT
 FROM person p
 JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = sqlc.arg(tenant_id)
 JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.tenant_id = t.id
+LEFT JOIN project pr ON pr.id = (SELECT min(id) FROM project WHERE tenant_id = t.id)
 WHERE p.id = sqlc.arg(person_id)
 ORDER BY pr.created_at
 LIMIT 1;

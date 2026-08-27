@@ -710,8 +710,10 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete the project and everything under it.
-         * @description Irreversible. Every table hangs off tenant/project with ON DELETE CASCADE, and the session is cleared with it.
+         * Remove the session's current project from the account, releasing its status page.
+         * @description Irreversible for the ACCOUNT: the current project leaves it, its monitors stop and the owner's API key is destroyed. Other projects in the tenant are untouched and the session survives, falling back to the tenant's lowest project. When the current project is the LAST one the tenant is deleted too — that is how an account is closed — and only then is the session cookie cleared. `accountDeleted` reports which of the two happened: the caller's project count was read before the write, and a destructive action is the last place to let the client guess.
+         *
+         *     The project's STATUS PAGE is not destroyed. It moves to a fresh unclaimed tenant, keeping its slug and its address, so a link somebody already holds still resolves and anyone may claim the page again through `POST /v1/claim`. An ownerless page alerts nobody (channels are tenant-scoped and stay with the account) and stops probing; the reaper collects it if nobody claims it.
          */
         delete: {
             parameters: {
@@ -722,16 +724,164 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Deleted. The session cookie is cleared. */
+                /** @description Deleted. `accountDeleted` true means the session cookie was cleared too. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            accountDeleted: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every project in this tenant, oldest first.
+         * @description The projects axis (plan-limited: Free 1, Indie 2, Growth 5, Agency 10, self-hosted unlimited). No `current` flag rides these rows: the current project's id already comes from /v1/me, and a second source for the same fact is how the two start disagreeing.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            projects: components["schemas"]["ProjectListItem"][];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a project in this tenant and switch the session to it.
+         * @description Provisions what a project needs to receive logs from the first minute: the project row, its project_seq and an active API key. The plan gate runs first (402 with the cheapest lifting plan in `upgrade.plan`); on success the session's current project points at the new row.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example example.com */
+                        domain: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created; the row as GET /v1/projects would list it. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProjectListItem"];
+                    };
+                };
+                /** @description Missing domain (`missing_domain`). */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/project/switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Point this session at another of the tenant's projects.
+         * @description The switcher's per-row action. The id must be one of this tenant's projects (as GET /v1/projects listed it); anything else, whether another tenant's, stale or unknown, is the same 404 `unknown_project`, so the endpoint never confirms which ids exist. Single-user (self-host) sessions have no session row: the call answers 204 without writing.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example prj_1 */
+                        id: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Switched (a single-user session has no row to write). */
                 204: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content?: never;
                 };
+                /** @description `missing_project_id` — the body carried no id, or would not parse. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 401: components["responses"]["Unauthorized"];
+                /** @description Not one of this tenant's projects (`unknown_project`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2650,8 +2800,11 @@ export interface components {
                 upgrade?: {
                     /** @example Free allows 3 HTTP checks. */
                     reason: string;
-                    /** @description Optional row to highlight on the pricing table. */
-                    highlight?: string;
+                    /**
+                     * @description The cheapest plan that lifts the limit, lowercased. Absent at the top of the ladder: there the client shows the message instead of the modal. The server names it from plan_entitlement; the client never computes it.
+                     * @example indie
+                     */
+                    plan?: string;
                 };
             };
         };
@@ -2683,7 +2836,16 @@ export interface components {
         };
         MeResponse: {
             account: components["schemas"]["Account"];
-            project: components["schemas"]["Project"];
+            /** @description The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15). */
+            project: components["schemas"]["Project"] | null;
+        };
+        ProjectListItem: {
+            /** @example 6f9619ff8b86d97111d1c1e4bba1f0b2 */
+            id: string;
+            /** @example example.com */
+            domain: string;
+            /** Format: date-time */
+            createdAt: string;
         };
         /** @enum {string} */
         HealthStatus: "ok" | "check" | "down" | "nodata";
@@ -3128,6 +3290,8 @@ export interface components {
             poweredBy?: boolean;
             /** @description Whether the page belongs to an account. Clients treat ABSENT as claimed (an older backend knows no claim controls): fail closed. */
             claimed?: boolean;
+            /** @description Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page. */
+            mine?: boolean;
         };
         /** @enum {string} */
         WatchStatus: "ok" | "check" | "down" | "nodata";

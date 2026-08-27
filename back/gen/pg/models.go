@@ -247,6 +247,7 @@ type PlanEntitlement struct {
 	IncidentDays       int32
 	MinIntervalSec     int32
 	TelegramRecipients int32
+	Projects           *int32
 }
 
 type ProbeNode struct {
@@ -287,6 +288,7 @@ type Session struct {
 	CreatedAt  pgtype.Timestamptz
 	LastSeenAt pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
+	ProjectID  *int64
 }
 
 type SourceConnection struct {

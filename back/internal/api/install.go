@@ -97,9 +97,9 @@ func (h *install) issueToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	var projectID int64
-	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, s.TenantID).Scan(&projectID); err != nil {
+	// The session's current project (the tenant's first as the fallback).
+	projectID := currentProjectID(ctx, h.pool, s, s.TenantID)
+	if projectID == 0 {
 		writeAPIErr(w, http.StatusInternalServerError, "no_project")
 		return
 	}
@@ -289,52 +289,117 @@ func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 		h.claimBySlug(ctx, w, s, req.Slug)
 		return
 	}
+	// The token only locates the tenant: adoptTenant's conditional burn is
+	// what makes every claim single-shot, on both paths.
 	hash := sha256.Sum256([]byte(req.ClaimToken))
-	var tenantID int64
+	var anonTenantID int64
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM tenant WHERE claim_token_hash = $1`, hash[:]).Scan(&tenantID); err != nil {
+		`SELECT id FROM tenant WHERE claim_token_hash = $1`, hash[:]).Scan(&anonTenantID); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "invalid_claim_token")
 		return
 	}
-	// Membership first, then burn the token: the failure mode of the reverse
-	// order is a token spent on a claim that attached nobody.
-	if err := h.pool.Queries().EnsureTenantMember(ctx, sqlc.EnsureTenantMemberParams{
-		TenantID: tenantID, PersonID: s.PersonID,
-	}); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	_, _ = h.pool.Raw().Exec(ctx,
-		`UPDATE tenant SET claim_token_hash = NULL, claimed_at = now() WHERE id = $1`, tenantID)
-	writeAPIJSON(w, http.StatusOK, map[string]any{"claimed": true})
+	h.adoptTenant(ctx, w, s, anonTenantID)
 }
 
 // claimBySlug claims the UNCLAIMED status page the slug names — open claim,
-// first caller wins. Burn first, the reverse of the token path above: the
-// conditional burn is the lock, and with membership first a race loser would
-// end up a member of the winner's tenant.
+// first caller wins. The slug only locates the tenant: adoptTenant's
+// conditional burn is the lock, so a race loser — or the page's own owner,
+// whose token is already burned — answers not_claimable with no special
+// case for either.
 func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc.Session, slug string) {
+	var anonTenantID int64
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id FROM status_page WHERE slug = $1`, slug).Scan(&anonTenantID); err != nil {
+		writeAPIErr(w, http.StatusNotFound, "not_claimable")
+		return
+	}
+	h.adoptTenant(ctx, w, s, anonTenantID)
+}
+
+// adoptTenant moves the anonymous tenant's whole project footprint into the
+// claimer's tenant, then deletes the anonymous tenant. Claim adopts, it never
+// adds a membership: a second tenant_member row is what the session lookup
+// (ORDER BY tenant_id LIMIT 1) can never see — the bug this rewrites
+// (docs/plans/projects-axis.md Decision 6). One transaction; the conditional
+// burn is the race lock, exactly as the slug path always had it.
+func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc.Session, anonTenantID int64) {
+	// Self-adoption is impossible before anything is touched: an anon id that
+	// IS the claimer's own tenant answers the burn's 404 locally, so no future
+	// wiring mistake can reparent a tenant onto itself and DELETE it.
+	if anonTenantID == s.TenantID {
+		writeAPIErr(w, http.StatusNotFound, "not_claimable")
+		return
+	}
 	tx, err := h.pool.Raw().Begin(ctx)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	defer tx.Rollback(ctx)
-	var tenantID int64
+	// Burn conditionally: the first claim of this tenant wins, a concurrent
+	// or replayed one matches no row. The row is deleted below anyway — the
+	// WHERE on the hash is the point, not the columns it sets.
+	var burned int64
 	if err := tx.QueryRow(ctx,
 		`UPDATE tenant SET claim_token_hash = NULL, claimed_at = now()
-		  WHERE id = (SELECT tenant_id FROM status_page WHERE slug = $1)
-		    AND claim_token_hash IS NOT NULL
-		  RETURNING id`, slug).Scan(&tenantID); err != nil {
+		  WHERE id = $1 AND claim_token_hash IS NOT NULL
+		 RETURNING id`, anonTenantID).Scan(&burned); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_claimable")
 		return
 	}
-	// Raw SQL because the sqlc Queries are pool-bound (no tx); must stay
-	// identical to EnsureTenantMember in session.sql.
+	// Serialize the claimer's tenant for the rest of this transaction: the
+	// gate below counts projects, and two claims landing together would each
+	// count the other's row as absent and both pass. The anon tenant's burn
+	// is the other half of the lock, per anon page.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM tenant WHERE id = $1 FOR UPDATE`, s.TenantID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Absorb the claimer's empty project (Decision 5): a sign-up-via-claim
+	// account's lone project is an unused placeholder, and deleting it frees
+	// the Free plan's only slot for the page coming in. Empty is exact — one
+	// project, no monitors, and nothing ever ingested through it — and it runs
+	// BEFORE the gate so the freed slot counts. The foreign keys do the rest:
+	// api_key, project_seq and status_page all cascade off project.
+	//
+	// `project_seq.next > 1` IS the ingest marker: every project is born at 1
+	// and only LeaseSeqBlock (internal/ring/seq) moves it, so an SDK-only
+	// account — a key wired up, logs flowing, no monitor ever created — is not
+	// mistaken for a placeholder and deleted out from under its own key.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status)
-		 VALUES ($1, $2, 'login', 'active')
-		 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, s.PersonID); err != nil {
+		`DELETE FROM project p
+		  WHERE p.tenant_id = $1
+		    AND (SELECT count(*) FROM project q WHERE q.tenant_id = $1) = 1
+		    AND NOT EXISTS (SELECT 1 FROM monitor m WHERE m.project_id = p.id)
+		    AND NOT EXISTS (SELECT 1 FROM project_seq ps
+		                     WHERE ps.project_id = p.id AND ps.next > 1)`, s.TenantID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// The projects wall, counted after the absorb: at the limit with a USED
+	// project the claim stops here (the rollback rides the defer above); with
+	// the just-absorbed empty one it does not. The count rides the open
+	// transaction (a pool-bound count would only see the deletion after
+	// commit); the wall itself has one owner, projectsRefusalQ.
+	if msg, plan := projectsRefusalQ(ctx, h.pool, h.pool.Queries().WithTx(tx), s.TenantID); msg != "" {
+		writeUpgradeRequired(w, msg, plan)
+		return
+	}
+	// Reparent the footprint. Everything not on this list — alert channels,
+	// ai_usage, delivery_queue, error_alert_state — dies with the anonymous
+	// tenant below, deliberately (Decision 6). The table names are a fixed
+	// list in this file, never input.
+	for _, table := range [...]string{
+		"project", "monitor", "incident", "status_page",
+		"source_connection", "api_key", "install_token",
+	} {
+		if _, err := tx.Exec(ctx,
+			`UPDATE `+table+` SET tenant_id = $1 WHERE tenant_id = $2`, s.TenantID, anonTenantID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, anonTenantID); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}

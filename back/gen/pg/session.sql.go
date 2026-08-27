@@ -104,6 +104,7 @@ SELECT
   t.id       AS tenant_id,
   t.plan,
   t.billing,
+  s.project_id AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
@@ -112,7 +113,7 @@ FROM session s
 JOIN person p       ON p.id = s.person_id
 JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = s.tenant_id
 JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.tenant_id = t.id
+LEFT JOIN project pr ON pr.id = COALESCE((SELECT id FROM project WHERE id = s.project_id AND tenant_id = t.id), (SELECT min(id) FROM project WHERE tenant_id = t.id))
 WHERE s.token_hash = $1 AND s.expires_at > now()
 ORDER BY pr.created_at
 LIMIT 1
@@ -127,13 +128,17 @@ type GetMeRow struct {
 	TenantID         int64
 	Plan             string
 	Billing          string
+	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
 	ProjectDomain    *string
 	ProjectCreatedAt pgtype.Timestamptz
 }
 
-// The /v1/me aggregate: person + tenant + first project, joined off the session.
+// The /v1/me aggregate: person + tenant + current project, joined off the
+// session. The project is the session's own when it still belongs to the
+// tenant, else the tenant's lowest id — a session whose project was deleted
+// (or never set) still answers instead of going NULL while projects exist.
 func (q *Queries) GetMe(ctx context.Context, tokenHash []byte) (GetMeRow, error) {
 	row := q.db.QueryRow(ctx, getMe, tokenHash)
 	var i GetMeRow
@@ -146,6 +151,7 @@ func (q *Queries) GetMe(ctx context.Context, tokenHash []byte) (GetMeRow, error)
 		&i.TenantID,
 		&i.Plan,
 		&i.Billing,
+		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,
 		&i.ProjectDomain,
@@ -164,6 +170,7 @@ SELECT
   t.id       AS tenant_id,
   t.plan,
   t.billing,
+  NULL::bigint AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
@@ -171,7 +178,7 @@ SELECT
 FROM person p
 JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = $1
 JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.tenant_id = t.id
+LEFT JOIN project pr ON pr.id = (SELECT min(id) FROM project WHERE tenant_id = t.id)
 WHERE p.id = $2
 ORDER BY pr.created_at
 LIMIT 1
@@ -191,6 +198,7 @@ type GetMeByIdentityRow struct {
 	TenantID         int64
 	Plan             string
 	Billing          string
+	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
 	ProjectDomain    *string
@@ -200,7 +208,8 @@ type GetMeByIdentityRow struct {
 // The same /v1/me aggregate keyed by the identity itself: single-user mode
 // (UC_AUTH=none) has no session row, so the token-hash join above can never
 // answer for it. Columns mirror GetMe exactly — the handler converts between
-// the two generated row types.
+// the two generated row types. session_project_id is the NULL literal (no
+// session row exists here) and the project is the tenant's lowest id.
 func (q *Queries) GetMeByIdentity(ctx context.Context, arg GetMeByIdentityParams) (GetMeByIdentityRow, error) {
 	row := q.db.QueryRow(ctx, getMeByIdentity, arg.TenantID, arg.PersonID)
 	var i GetMeByIdentityRow
@@ -213,6 +222,7 @@ func (q *Queries) GetMeByIdentity(ctx context.Context, arg GetMeByIdentityParams
 		&i.TenantID,
 		&i.Plan,
 		&i.Billing,
+		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,
 		&i.ProjectDomain,
@@ -245,13 +255,15 @@ func (q *Queries) GetPersonByEmail(ctx context.Context, email *string) (GetPerso
 }
 
 const getSessionByToken = `-- name: GetSessionByToken :one
-SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at
+SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at, project_id
   FROM session
  WHERE token_hash = $1
    AND expires_at > now()
 `
 
 // Only non-expired sessions match. last_seen_at is touched separately.
+// project_id rides along: every /v1/* request resolves the current project
+// off the session (docs/plans/projects-axis.md), so it must survive this read.
 func (q *Queries) GetSessionByToken(ctx context.Context, tokenHash []byte) (Session, error) {
 	row := q.db.QueryRow(ctx, getSessionByToken, tokenHash)
 	var i Session
@@ -263,8 +275,25 @@ func (q *Queries) GetSessionByToken(ctx context.Context, tokenHash []byte) (Sess
 		&i.CreatedAt,
 		&i.LastSeenAt,
 		&i.ExpiresAt,
+		&i.ProjectID,
 	)
 	return i, err
+}
+
+const setSessionProject = `-- name: SetSessionProject :exec
+UPDATE session SET project_id = $2 WHERE id = $1
+`
+
+type SetSessionProjectParams struct {
+	ID        int64
+	ProjectID *int64
+}
+
+// The project switcher: points the session at a project the handler has
+// already verified belongs to the session's tenant.
+func (q *Queries) SetSessionProject(ctx context.Context, arg SetSessionProjectParams) error {
+	_, err := q.db.Exec(ctx, setSessionProject, arg.ID, arg.ProjectID)
+	return err
 }
 
 const touchSession = `-- name: TouchSession :exec

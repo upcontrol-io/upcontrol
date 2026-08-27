@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,13 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case r.URL.Path == "/v1/project" && r.Method == http.MethodDelete:
 		h.deleteProject(w, r, tenantID)
+
+	case r.URL.Path == "/v1/projects" && r.Method == http.MethodGet:
+		h.listProjects(w, r, tenantID)
+	case r.URL.Path == "/v1/projects" && r.Method == http.MethodPost:
+		h.createProject(w, r, tenantID, s)
+	case r.URL.Path == "/v1/project/switch" && r.Method == http.MethodPost:
+		h.switchProject(w, r, tenantID, s)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/sources/") && r.Method == http.MethodPatch:
 		h.patchSource(w, r, tenantID)
@@ -456,11 +464,15 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 	var project, invitedBy string
+	// The mail names the session's current project (the tenant's first as
+	// fallback); a tenant with no project keeps the tenant name, the old
+	// LEFT JOIN answer.
+	s, _ := h.sess.FromRequest(ctx, r)
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
 		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
-		  WHERE t.id = $1
-		  ORDER BY p.id LIMIT 1`, tenantID).Scan(&project)
+		  WHERE t.id = $1 AND (p.id = $2 OR p.id IS NULL)`,
+		tenantID, currentProjectID(ctx, h.pool, s, tenantID)).Scan(&project)
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
 		inviterID).Scan(&invitedBy)
@@ -530,11 +542,14 @@ func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 		return
 	}
 	var project, invitedBy string
+	// Same project naming as the invite: the session's current project, the
+	// tenant's first as fallback, tenant name when no project exists.
+	s, _ := h.sess.FromRequest(ctx, r)
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
 		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
-		  WHERE t.id = $1
-		  ORDER BY p.id LIMIT 1`, tenantID).Scan(&project)
+		  WHERE t.id = $1 AND (p.id = $2 OR p.id IS NULL)`,
+		tenantID, currentProjectID(ctx, h.pool, s, tenantID)).Scan(&project)
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
 		inviterID).Scan(&invitedBy)
@@ -696,15 +711,103 @@ func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID in
 	writeAPIJSON(w, http.StatusOK, out)
 }
 
-// DELETE /v1/project: cascades to the tenant and everything under it; the
-// session cookie goes too, so the caller does not land on a dead dashboard.
+// DELETE /v1/project deletes the session's CURRENT project, not the account:
+// with several projects on a plan, a confirmation that names one domain may
+// not take the other four with it. The LAST project is still how an account
+// is closed — the tenant goes, and only then the session cookie — because
+// leaving an unreachable tenant behind is not a way out either.
+//
+// `accountDeleted` says which of the two happened. The caller knows its own
+// project count, but it read that BEFORE the write; a destructive action is
+// the last place to let the client guess.
 func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	if _, err := h.pool.Raw().Exec(r.Context(), `DELETE FROM tenant WHERE id = $1`, tenantID); err != nil {
+	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	count, err := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)
+	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	session.ClearCookie(w)
-	w.WriteHeader(http.StatusNoContent)
+	last := projectID == 0 || count <= 1
+
+	tx, err := h.pool.Raw().Begin(ctx)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	defer tx.Rollback(ctx)
+	if projectID != 0 {
+		if err := releaseProject(ctx, tx, projectID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if last {
+		// The project is out of the way by now, so this cascade takes only what
+		// belonged to the ACCOUNT: members, channels, quotas.
+		if _, err := tx.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, tenantID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if last {
+		session.ClearCookie(w)
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{"accountDeleted": last})
+}
+
+// releaseProject hands a project to a fresh UNCLAIMED tenant instead of
+// deleting it: **removing a project does not remove its status page — the page
+// simply becomes ownerless** (user decision, 2026-08-27). It keeps its slug and
+// its address, so a link somebody already holds still resolves, and anyone may
+// claim it again through the same door the landing's pages use. This is
+// `adoptTenant` run backwards.
+//
+// What does NOT travel: the api_key and install_token are the person's
+// credentials and die here, and the monitors are paused — the owner asked for
+// this to stop, and a released page that keeps probing spends our money on
+// somebody who left. Channels, members and quotas are tenant-scoped and stay
+// with the account, so the page alerts nobody, which is what ownerless means.
+//
+// Deleting the key is also what lets the reaper collect the page later: its
+// exclusion spares an anonymous tenant that has BOTH ingested and still holds a
+// key, which is the `uc init` install in use and not this.
+func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
+	var domain string
+	if err := tx.QueryRow(ctx, `SELECT domain FROM project WHERE id = $1`, projectID).Scan(&domain); err != nil {
+		return err
+	}
+	claimHash := sha256.Sum256([]byte(randomHex()))
+	var orphanTenant int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, claim_token_hash)
+		 VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		domain, claimHash[:]).Scan(&orphanTenant); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE project SET tenant_id = $1 WHERE id = $2`, orphanTenant, projectID); err != nil {
+		return err
+	}
+	for _, table := range [...]string{"monitor", "status_page", "incident", "source_connection"} {
+		if _, err := tx.Exec(ctx,
+			`UPDATE `+table+` SET tenant_id = $1 WHERE project_id = $2`, orphanTenant, projectID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE monitor SET paused = true WHERE project_id = $1`, projectID); err != nil {
+		return err
+	}
+	for _, table := range [...]string{"api_key", "install_token"} {
+		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE project_id = $1`, projectID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *writeAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantID int64) {
@@ -722,9 +825,10 @@ func (h *writeAPI) connectSource(w http.ResponseWriter, r *http.Request, tenantI
 		Activate bool `json:"activate"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	var projectID int64
-	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
+	// The connection lands in the session's current project (the tenant's
+	// first as the fallback).
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var id int64
 	var paused bool
 	var lastSignal pgtype.Timestamptz
@@ -814,7 +918,8 @@ func sourceID(s string) int64 {
 // tenant's checks, and each row's uptime is measured, not typed in.
 func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	cfg := h.statusConfig(ctx, tenantID)
+	s, _ := h.sess.FromRequest(ctx, r)
+	cfg := h.statusConfig(ctx, s, tenantID)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"slug":          cfg.Slug,
 		"title":         cfg.Title,
@@ -843,7 +948,8 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusBadRequest, "bad_body")
 		return
 	}
-	cfg := h.statusConfig(ctx, tenantID)
+	s, _ := h.sess.FromRequest(ctx, r)
+	cfg := h.statusConfig(ctx, s, tenantID)
 	if req.Shown != nil {
 		cfg.Shown = req.Shown
 	}
@@ -860,10 +966,10 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	cfg.Domain = req.Domain
 
 	raw, _ := json.Marshal(cfg)
-	var projectID int64
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var projectDomain string
 	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT id, domain FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID, &projectDomain)
+		`SELECT id, domain FROM project WHERE id = $1`, projectID).Scan(&projectID, &projectDomain)
 	// First save of a page that never existed: name it after the domain, not
 	// the id. An existing slug is never rewritten.
 	if cfg.Slug == "prj-"+strconv.FormatInt(projectID, 10) {
@@ -904,16 +1010,19 @@ type statusPageConfig struct {
 }
 
 // statusConfig loads the saved settings, defaulting a page that has never been
-// configured to "publish everything" — the page exists to be public.
-func (h *writeAPI) statusConfig(ctx context.Context, tenantID int64) statusPageConfig {
+// configured to "publish everything" — the page exists to be public. The
+// project it reads is the session's current one (the tenant's first as the
+// fallback); the gate-authenticated tenantID decides the tenant, so a failed
+// session re-read cannot send the lookup to tenant 0.
+func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID int64) statusPageConfig {
 	cfg := statusPageConfig{ShowNetwork: true, ShowIncidents: true, ShowPoweredBy: true, Shown: map[string]bool{}}
-	var projectID int64
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var domain, title, slug *string
 	var raw []byte
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, s.slug, s.title, s.domain, s.config
 		   FROM project p LEFT JOIN status_page s ON s.tenant_id = p.tenant_id
-		  WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1`, tenantID).Scan(&projectID, &slug, &title, &domain, &raw)
+		  WHERE p.id = $1`, projectID).Scan(&projectID, &slug, &title, &domain, &raw)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
@@ -1202,18 +1311,20 @@ func msLabel(ms float64) string {
 
 // logQueryBuilder binds the tenant's ring cutoff: the window is whatever
 // project_window.cutoff_seq is; below it is displaced, not served.
-func (h *writeAPI) logQueryBuilder(ctx context.Context, tenantID int64) *query.QueryBuilder {
-	var projectID, cutoffSeq int64
+func (h *writeAPI) logQueryBuilder(ctx context.Context, r *http.Request, tenantID int64) *query.QueryBuilder {
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	var cutoffSeq int64
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, COALESCE(pw.cutoff_seq, 0)
 		   FROM project p LEFT JOIN project_window pw ON pw.project_id = p.id
-		  WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1`, tenantID).Scan(&projectID, &cutoffSeq)
+		  WHERE p.id = $1`, projectID).Scan(&projectID, &cutoffSeq)
 	return query.New(tenantID, projectID, cutoffSeq)
 }
 
 func (h *writeAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	qb := h.logQueryBuilder(ctx, tenantID)
+	qb := h.logQueryBuilder(ctx, r, tenantID)
 	q := r.URL.Query()
 	// Absent or unrecognised window means the whole ring: a bad value must not
 	// invent a narrower window than was asked for.
@@ -1481,7 +1592,7 @@ func (h *writeAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID 
 		metaLine = projectMetaLine(meta)
 	}
 	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainLogs,
-		ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, tenantID)}, ent.AiExplains)
+		ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, r, tenantID)}, ent.AiExplains)
 	if err != nil {
 		h.explainError(w, err, tenantID)
 		return
@@ -1522,7 +1633,7 @@ func (h *writeAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenant
 	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err == nil && len(meta) > 0 {
 		metaLine = projectMetaLine(meta)
 	}
-	input := ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, tenantID)}
+	input := ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, r, tenantID)}
 	// The brain's identity and the generation knobs. A null model means no key
 	// resolves anywhere: the front's "Explain is off" fact.
 	var model any
@@ -1625,7 +1736,7 @@ func (h *writeAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenan
 	for _, entry := range mergeTimeline(lifecycle, events) {
 		inputCtx = append(inputCtx, fmt.Sprintf("%v %v", entry["time"], entry["text"]))
 	}
-	inputCtx = append(inputCtx, h.explainContext(ctx, tenantID)...)
+	inputCtx = append(inputCtx, h.explainContext(ctx, r, tenantID)...)
 	// The meta line is the stable half of the context: the one entry the cache
 	// hash covers. Everything explainContext gathers is volatile, unhashed.
 	metaLine := ""
@@ -1722,7 +1833,7 @@ func (h *writeAPI) explainError(w http.ResponseWriter, err error, tenantID int64
 		return
 	}
 	if errors.Is(err, ai.ErrOverQuota) {
-		writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.")
+		writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.", "")
 		return
 	}
 	// The underlying cause must be traceable server-side.
@@ -1741,11 +1852,11 @@ func (h *writeAPI) aiNotConfiguredMsg() string {
 
 // explainContext gathers the volatile room facts (services, monitors, open
 // incident). Unhashed on purpose; every source is best-effort.
-func (h *writeAPI) explainContext(ctx context.Context, tenantID int64) []string {
+func (h *writeAPI) explainContext(ctx context.Context, r *http.Request, tenantID int64) []string {
 	var out []string
 	// Services over the whole visible ring — the selection may come from any
 	// of it — capped because service names are customer-named and unbounded.
-	if rows := h.runServiceRows(ctx, h.logQueryBuilder(ctx, tenantID).Services(0)); len(rows) > 0 {
+	if rows := h.runServiceRows(ctx, h.logQueryBuilder(ctx, r, tenantID).Services(0)); len(rows) > 0 {
 		names := make([]string, 0, len(rows))
 		for _, row := range rows[:min(len(rows), 10)] {
 			if name, _ := row["name"].(string); name != "" {
@@ -2350,6 +2461,13 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decision 7: the e-mail-less arm reads the session. A signed-in visitor
+	// whose plan has room for another project gets it in their own tenant
+	// below; signed out, or no room, keeps the anonymous demo mint. An error
+	// is simply no session — the door is public, a missing cookie must never
+	// fail it.
+	s, serr := h.sess.FromRequest(ctx, r)
+
 	// The project is named after the site asked about; an existing account
 	// keeps the name it has.
 	host := bareHost(req.Host)
@@ -2395,12 +2513,40 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			// as if the host were new.
 		}
 		if err != nil || claimed {
-			t, terr := newUnclaimedTenant(ctx, h.pool, host, host)
-			if terr != nil {
-				writeAPIErr(w, http.StatusInternalServerError, "internal")
-				return
+			// The mint arm is where the session matters (Decision 7): a host
+			// nobody holds, typed by a signed-in visitor with room for one more
+			// project, becomes a project in their OWN tenant — no demo page to
+			// claim later, and the monitors and status page below land on the
+			// caller's account from the first check. Everything else keeps the
+			// demo mint exactly as today: signed out, no room (the wall is on
+			// the claim button, never on the check), and a claimed domain
+			// without a page — somebody already owns that one.
+			own := false
+			if err != nil && serr == nil && s.TenantID != 0 {
+				if msg, _ := h.projectsRefusal(ctx, s.TenantID); msg == "" {
+					pid, perr := createTenantProject(ctx, h.pool, s.TenantID, host)
+					if perr == nil {
+						tenantID, projectID = s.TenantID, pid
+						own = true
+						// Decision 18: the caller just created this project;
+						// the app must open on it. Same pick as createProject,
+						// and like it the pick never gates the response.
+						if s.ID != 0 {
+							_ = h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
+								ID: s.ID, ProjectID: &pid,
+							})
+						}
+					}
+				}
 			}
-			tenantID, projectID = t.TenantID, t.ProjectID
+			if !own {
+				t, terr := newUnclaimedTenant(ctx, h.pool, host, host)
+				if terr != nil {
+					writeAPIErr(w, http.StatusInternalServerError, "internal")
+					return
+				}
+				tenantID, projectID = t.TenantID, t.ProjectID
+			}
 		}
 	}
 	// Both paths count: this is the funnel's step between check_run and
@@ -2486,6 +2632,43 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		"watching":  watching,
 		"login":     login,
 	})
+}
+
+// createTenantProject provisions a project for a tenant that already exists —
+// the signed-in watch door's mint: newUnclaimedTenant's triple (project,
+// project_seq, api_key) minus the tenant and the claim token, in one
+// transaction like POST /v1/projects, so a failure mid-provision leaves no
+// half-made project eating a plan slot. The gate is the caller's: this door
+// checks it once, before choosing between this and the demo mint.
+func createTenantProject(ctx context.Context, pool *pg.Pool, tenantID int64, domain string) (int64, error) {
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	var projectID int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, $3) RETURNING id`,
+		newUUID(), tenantID, domain).Scan(&projectID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID); err != nil {
+		return 0, err
+	}
+	// The key insert is tx-bound (createProject's pattern): a pool-bound
+	// issueKey would autocommit outside the transaction.
+	secret := randomHex()
+	hash := sha256.Sum256([]byte("uc_live_" + secret))
+	if _, err := pool.Queries().WithTx(tx).CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
+		TenantID:   tenantID,
+		ProjectID:  projectID,
+		Prefix:     secret[:12],
+		SecretHash: hash[:],
+	}); err != nil {
+		return 0, err
+	}
+	return projectID, tx.Commit(ctx)
 }
 
 // sameHostTargets keeps only targets belonging to the asked host: without it
@@ -2626,7 +2809,11 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cfg := h.statusConfig(ctx, tenantID)
+	// The public door has no viewer session to honour: the page's tenant
+	// decides, and a tenant-only session lands on the lowest project id —
+	// exactly the pre-projects pick. A signed-in viewer's own session must
+	// not bend somebody else's page toward their current project.
+	cfg := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
 	resp := map[string]any{
 		"title":      cfg.Title,
 		"components": h.statusComponents(ctx, tenantID, cfg, true),
@@ -2638,6 +2825,13 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 		// Whether the SECTION is published, not whether it is empty: the owner
 		// who hid a section must not get a heading under it.
 		"showIncidents": cfg.ShowIncidents,
+	}
+	// The viewer's own page says so: mine is present and true only when a
+	// session resolves AND belongs to the page's tenant. Absent = not the
+	// viewer's page (signed out, or somebody else's); errors are ignored —
+	// the door is public and must answer the same either way.
+	if vs, verr := h.sess.FromRequest(ctx, r); verr == nil && vs.TenantID == tenantID {
+		resp["mine"] = true
 	}
 	// The owner's switch decides whether the section is published at all; what it
 	// then shows is measured, never sample data.

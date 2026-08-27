@@ -97,9 +97,14 @@ components:
                 reason:
                   type: string
                   example: "Free allows 3 HTTP checks."
-                highlight:
+                plan:
                   type: string
-                  description: Optional row to highlight on the pricing table.
+                  example: "indie"
+                  description: >-
+                    The cheapest plan that lifts the limit, lowercased. Absent at
+                    the top of the ladder: there the client shows the message
+                    instead of the modal. The server names it from
+                    plan_entitlement; the client never computes it.
 
     # --- account ------------------------------------------------------------
     Plan:
@@ -135,7 +140,23 @@ components:
       required: [account, project]
       properties:
         account: { $ref: "#/components/schemas/Account" }
-        project: { $ref: "#/components/schemas/Project" }
+        project:
+          allOf:
+            - $ref: "#/components/schemas/Project"
+          nullable: true
+          description: >-
+            The tenant's current project, or null when the tenant has no projects
+            (possible after a lost claim race or deleting the last project; Decision 15).
+    # One row of GET /v1/projects. The id is the same public-id encoding
+    # /v1/me's project carries, so the front's "current row" is an equality
+    # check against me.project.id — no second source of that fact here.
+    ProjectListItem:
+      type: object
+      required: [id, domain, createdAt]
+      properties:
+        id: { type: string, example: "6f9619ff8b86d97111d1c1e4bba1f0b2" }
+        domain: { type: string, example: "example.com" }
+        createdAt: { type: string, format: date-time }
 
     # --- dashboard / monitors ----------------------------------------------
     HealthStatus:
@@ -862,6 +883,11 @@ components:
             Whether the page belongs to an account. Clients treat ABSENT as
             claimed (an older backend knows no claim controls): fail closed.
           type: boolean
+        mine:
+          description: >
+            Present and true only when the viewer's session belongs to the
+            page's tenant; absent = not the viewer's page.
+          type: boolean
 
     # --- landing watch ------------------------------------------------------
     WatchStatus:
@@ -1524,13 +1550,121 @@ paths:
   /v1/project:
     delete:
       tags: [account]
-      summary: Delete the project and everything under it.
+      summary: Remove the session's current project from the account, releasing its status page.
       description: >
-        Irreversible. Every table hangs off tenant/project with ON DELETE
-        CASCADE, and the session is cleared with it.
+        Irreversible for the ACCOUNT: the current project leaves it, its
+        monitors stop and the owner's API key is destroyed. Other projects in
+        the tenant are untouched and the session survives, falling back to the
+        tenant's lowest project. When the current project is the LAST one the
+        tenant is deleted too — that is how an account is closed — and only
+        then is the session cookie cleared. `accountDeleted` reports which of
+        the two happened: the caller's project count was read before the write,
+        and a destructive action is the last place to let the client guess.
+
+
+        The project's STATUS PAGE is not destroyed. It moves to a fresh
+        unclaimed tenant, keeping its slug and its address, so a link somebody
+        already holds still resolves and anyone may claim the page again
+        through `POST /v1/claim`. An ownerless page alerts nobody (channels are
+        tenant-scoped and stay with the account) and stops probing; the reaper
+        collects it if nobody claims it.
       responses:
-        "204": { description: Deleted. The session cookie is cleared. }
+        "200":
+          description: Deleted. `accountDeleted` true means the session cookie was cleared too.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accountDeleted]
+                properties:
+                  accountDeleted: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/projects:
+    get:
+      tags: [account]
+      summary: Every project in this tenant, oldest first.
+      description: >
+        The projects axis (plan-limited: Free 1, Indie 2, Growth 5, Agency 10,
+        self-hosted unlimited). No `current` flag rides these rows: the
+        current project's id already comes from /v1/me, and a second source
+        for the same fact is how the two start disagreeing.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProjectListItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [account]
+      summary: Create a project in this tenant and switch the session to it.
+      description: >
+        Provisions what a project needs to receive logs from the first
+        minute: the project row, its project_seq and an active API key. The
+        plan gate runs first (402 with the cheapest lifting plan in
+        `upgrade.plan`); on success the session's current project points at
+        the new row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain: { type: string, example: "example.com" }
+      responses:
+        "200":
+          description: Created; the row as GET /v1/projects would list it.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/ProjectListItem" } },
+            }
+        "400":
+          description: Missing domain (`missing_domain`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/project/switch:
+    post:
+      tags: [account]
+      summary: Point this session at another of the tenant's projects.
+      description: >
+        The switcher's per-row action. The id must be one of this tenant's
+        projects (as GET /v1/projects listed it); anything else, whether
+        another tenant's, stale or unknown, is the same 404 `unknown_project`,
+        so the endpoint never confirms which ids exist. Single-user
+        (self-host) sessions have no session row: the call answers 204
+        without writing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string, example: "prj_1" }
+      responses:
+        "204": { description: Switched (a single-user session has no row to write). }
+        "400": { description: "`missing_project_id` — the body carried no id, or would not parse." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Not one of this tenant's projects (`unknown_project`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/keys:
     get:

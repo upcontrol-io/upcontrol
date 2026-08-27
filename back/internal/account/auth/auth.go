@@ -416,6 +416,18 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Decision 15: a tenant with zero projects (lost claim race, or the last
+	// project deleted) answers `"project": null` — the LEFT JOIN's NULL row,
+	// signalled by a nil ProjectID. Both doors land here: GetMeByIdentity rows
+	// are converted to GetMeRow above, so the identity path emits null too.
+	var project any
+	if row.ProjectID != nil {
+		project = map[string]any{
+			"id":        uuidStr(row.ProjectPublicID),
+			"domain":    row.ProjectDomain,
+			"createdAt": row.ProjectCreatedAt,
+		}
+	}
 	resp := map[string]any{
 		"account": map[string]any{
 			"id":       uuidStr(row.PersonPublicID),
@@ -428,11 +440,7 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// full /app. Web and Mini App gate off this one field.
 			"role": row.MemberRole,
 		},
-		"project": map[string]any{
-			"id":        uuidStr(row.ProjectPublicID),
-			"domain":    row.ProjectDomain,
-			"createdAt": row.ProjectCreatedAt,
-		},
+		"project": project,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

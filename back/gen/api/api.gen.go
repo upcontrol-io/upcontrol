@@ -721,8 +721,10 @@ type Error struct {
 
 		// Upgrade Present only on 402. Drives the client's upgrade prompt.
 		Upgrade *struct {
-			// Highlight Optional row to highlight on the pricing table.
-			Highlight *string `json:"highlight,omitempty"`
+			// Plan The cheapest plan that lifts the limit, lowercased. Absent at the top of the ladder: there the client shows the message instead of the modal. The server names it from plan_entitlement; the client never computes it.
+			//
+			// Example: indie
+			Plan *string `json:"plan,omitempty"`
 
 			// Reason Example: Free allows 3 HTTP checks.
 			Reason string `json:"reason"`
@@ -929,7 +931,9 @@ type LogsResponse struct {
 // MeResponse defines model for MeResponse.
 type MeResponse struct {
 	Account Account `json:"account"`
-	Project Project `json:"project"`
+
+	// Project The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15).
+	Project *Project `json:"project"`
 }
 
 // Metric defines model for Metric.
@@ -1111,6 +1115,17 @@ type Project struct {
 	Id string `json:"id"`
 }
 
+// ProjectListItem defines model for ProjectListItem.
+type ProjectListItem struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Domain Example: example.com
+	Domain string `json:"domain"`
+
+	// Id Example: 6f9619ff8b86d97111d1c1e4bba1f0b2
+	Id string `json:"id"`
+}
+
 // ProjectMeta defines model for ProjectMeta.
 type ProjectMeta struct {
 	Description *string `json:"description,omitempty"`
@@ -1154,6 +1169,9 @@ type PublicStatusResponse struct {
 	Claimed    *bool             `json:"claimed,omitempty"`
 	Components []PublicComponent `json:"components"`
 	Incidents  []PublicIncident  `json:"incidents"`
+
+	// Mine Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page.
+	Mine *bool `json:"mine,omitempty"`
 
 	// Network Empty when the owner has the section switched off, or when nothing has been measured yet.
 	Network   *[]NetworkTile `json:"network,omitempty"`
@@ -1568,6 +1586,18 @@ type PostV1LogsExplainPreviewJSONBody struct {
 	Lines []string `json:"lines"`
 }
 
+// PostV1ProjectSwitchJSONBody defines parameters for PostV1ProjectSwitch.
+type PostV1ProjectSwitchJSONBody struct {
+	// Id Example: prj_1
+	Id string `json:"id"`
+}
+
+// PostV1ProjectsJSONBody defines parameters for PostV1Projects.
+type PostV1ProjectsJSONBody struct {
+	// Domain Example: example.com
+	Domain string `json:"domain"`
+}
+
 // PostV1ProjectsAnonymousJSONBody defines parameters for PostV1ProjectsAnonymous.
 type PostV1ProjectsAnonymousJSONBody struct {
 	AgentVersion *string `json:"agent_version,omitempty"`
@@ -1669,6 +1699,12 @@ type PatchV1MonitorsIdJSONRequestBody = MonitorPatch
 
 // PutV1ProjectMetaJSONRequestBody defines body for PutV1ProjectMeta for application/json ContentType.
 type PutV1ProjectMetaJSONRequestBody = ProjectMeta
+
+// PostV1ProjectSwitchJSONRequestBody defines body for PostV1ProjectSwitch for application/json ContentType.
+type PostV1ProjectSwitchJSONRequestBody PostV1ProjectSwitchJSONBody
+
+// PostV1ProjectsJSONRequestBody defines body for PostV1Projects for application/json ContentType.
+type PostV1ProjectsJSONRequestBody PostV1ProjectsJSONBody
 
 // PostV1ProjectsAnonymousJSONRequestBody defines body for PostV1ProjectsAnonymous for application/json ContentType.
 type PostV1ProjectsAnonymousJSONRequestBody PostV1ProjectsAnonymousJSONBody

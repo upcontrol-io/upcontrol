@@ -174,7 +174,11 @@ func TestNamingNeverRewritesAHandPickedSlug(t *testing.T) {
 		tenantID).Scan(&projectID); err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	chosen := fmt.Sprintf("chosen-%d", uniq%100000)
+	// The FULL nanosecond stamp, not uniq%100000: status_page.slug is UNIQUE,
+	// and truncating to five digits leaves ~100 µs of resolution — two tests
+	// running side by side in the shared integration DSN collide on it and one
+	// fails at the insert, which is what made this suite flake at random.
+	chosen := fmt.Sprintf("chosen-%d", uniq)
 	if _, err := pool.Raw().Exec(ctx,
 		`INSERT INTO status_page (tenant_id, project_id, slug, title) VALUES ($1, $2, $3, 'mine')`,
 		tenantID, projectID, chosen); err != nil {

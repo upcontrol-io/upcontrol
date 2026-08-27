@@ -116,9 +116,17 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 		_ = pool.Queries().PurgeExpiredBatches(ctx)
 	})
 
+	// Unclaimed anonymous tenants: monitors pause after 24 h, the tenant dies
+	// after 7 days (Decision 10, docs/plans/projects-axis.md).
+	go runWithLock(ctx, pool, d, "unclaimed-reaper", 10*time.Minute, func(ctx context.Context) {
+		if err := reapUnclaimed(ctx, pool); err != nil {
+			d.Logger.Warn("unclaimed reaper tick error", "err", err)
+		}
+	})
+
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
 	// "Error logs" / "Repeating error logs" settings. No ClickHouse, no job.
-	jobs := "delivery+cutoff+purge"
+	jobs := "delivery+cutoff+purge+reaper"
 	if d.Config.ClickHouseAddr != "" {
 		chConn, cherr := ch.Open(ctx, ch.Options{
 			Addr: []string{d.Config.ClickHouseAddr}, Database: d.Config.ClickHouseDB,
@@ -234,6 +242,38 @@ func recomputeCutoff(ctx context.Context, pool *pg.Pool, d app.Deps) {
 			WindowHours: pgtype.Numeric{Int: new(big.Int).SetUint64(uint64(result.WindowHours * 100)), Exp: -2, Valid: true},
 		})
 	}
+}
+
+// reapUnclaimed retires abandoned anonymous tenants (Decision 10 of
+// docs/plans/projects-axis.md): their monitors pause after 24 h and the
+// tenant row is deleted after 7 days. The delete's cascade clears the
+// tenant's remaining rows, the same cascade claim adoption relies on.
+func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
+	if _, err := pool.Raw().Exec(ctx, `UPDATE monitor SET paused = true WHERE NOT paused AND tenant_id IN (SELECT id FROM tenant WHERE claim_token_hash IS NOT NULL AND created_at < now() - interval '24 hours')`); err != nil {
+		return err
+	}
+	// An unclaimed tenant is not always an abandoned demo page: `uc init`
+	// without an account mints one through POST /v1/projects/anonymous and
+	// hands the developer its API key, which they may be shipping data
+	// through for weeks before they ever sign up. Such an install is spared,
+	// and it is recognised by BOTH halves of what it is — a key it still
+	// holds, and data that has actually flowed through it:
+	//
+	//   - `project_seq.next > 1` is the ingest marker: every project is born
+	//     at 1 and only LeaseSeqBlock (internal/ring/seq) moves it.
+	//   - an api_key still on the project. A page RELEASED by a project
+	//     deletion has ingested plenty but its key died with the release
+	//     (releaseProject), so the seq alone would spare it forever; that is
+	//     an ownerless page, and it is exactly what this job is for.
+	_, err := pool.Raw().Exec(ctx,
+		`DELETE FROM tenant t
+		  WHERE t.claim_token_hash IS NOT NULL
+		    AND t.created_at < now() - interval '7 days'
+		    AND NOT EXISTS (SELECT 1 FROM project p
+		                      JOIN project_seq ps ON ps.project_id = p.id
+		                      JOIN api_key ak    ON ak.project_id = p.id
+		                     WHERE p.tenant_id = t.id AND ps.next > 1)`)
+	return err
 }
 
 // hashJobName produces a stable int64 for the advisory lock key.

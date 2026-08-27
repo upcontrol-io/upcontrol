@@ -101,20 +101,20 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	// gate, answering 402 with the reason the upgrade prompt shows.
 	plan := h.tenantPlan(r.Context(), tenantID)
 	if msg := h.intervalRefusal(r.Context(), plan, req.Interval); msg != "" {
-		writeUpgradeRequired(w, msg)
+		writeUpgradeRequired(w, msg, "")
 		return
 	}
 	// Entitlement gate: count current monitors vs the plan's http_checks limit.
 	count, _ := h.pool.Queries().CountMonitorsByTenant(r.Context(), tenantID)
 	limit, _ := h.pool.Queries().GetPlanHTTPChecks(r.Context(), plan)
 	if limit > 0 && count >= limit {
-		writeUpgradeRequired(w, plan+" allows "+strconv.Itoa(int(limit))+" HTTP checks.")
+		writeUpgradeRequired(w, plan+" allows "+strconv.Itoa(int(limit))+" HTTP checks.", "")
 		return
 	}
-	// Get the first project for this tenant (the MVP's one-project model).
-	var projectID int64
-	_ = h.pool.Raw().QueryRow(r.Context(),
-		`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
+	// The monitor lands in the session's current project; the tenant's first
+	// project is the fallback (no session row yet, pick unset or stale).
+	s, _ := h.sess.FromRequest(r.Context(), r)
+	projectID := currentProjectID(r.Context(), h.pool, s, tenantID)
 	pubID := newUUID()
 	var keyword *string
 	if req.Keyword != "" {
@@ -218,7 +218,7 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	if req.Interval != nil {
 		// Same floor as create, or the wall is one PATCH away from not existing.
 		if msg := h.intervalRefusal(r.Context(), h.tenantPlan(r.Context(), tenantID), *req.Interval); msg != "" {
-			writeUpgradeRequired(w, msg)
+			writeUpgradeRequired(w, msg, "")
 			return
 		}
 		v := parseInterval(*req.Interval)
@@ -440,13 +440,19 @@ func validateMonitorCreate(kind, target string) string {
 }
 
 // writeUpgradeRequired is the one shape a paid wall may take: 402 carrying
-// `upgrade.reason`, which the client routes into its upgrade prompt.
-func writeUpgradeRequired(w http.ResponseWriter, reason string) {
+// `upgrade.reason` — and, when a cheaper plan lifts this wall, `upgrade.plan`,
+// which the client routes into its upgrade prompt. No plan field at the top
+// of the ladder: the front shows the message instead of the modal.
+func writeUpgradeRequired(w http.ResponseWriter, reason, plan string) {
+	upgrade := map[string]string{"reason": reason}
+	if plan != "" {
+		upgrade["plan"] = plan
+	}
 	writeAPIJSON(w, http.StatusPaymentRequired, map[string]any{
 		"error": map[string]any{
 			"code":    "plan_limit_exceeded",
 			"message": reason,
-			"upgrade": map[string]string{"reason": reason},
+			"upgrade": upgrade,
 		},
 	})
 }

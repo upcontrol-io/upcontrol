@@ -297,6 +297,11 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/incidents/{id}/explain", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)
+	// The projects axis: list/create behind the session door, and the
+	// switcher's write. Same handler, mounted next to its sibling route.
+	mux.Handle("GET /v1/projects", wa)
+	mux.Handle("POST /v1/projects", wa)
+	mux.Handle("POST /v1/project/switch", wa)
 
 	// Installer endpoints: anonymous mint is public (throttled); claim needs
 	// a session; status and spec upload authenticate by the project API key.

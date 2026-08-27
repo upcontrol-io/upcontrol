@@ -7,7 +7,22 @@ package pg
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countProjectsByTenant = `-- name: CountProjectsByTenant :one
+SELECT count(*) FROM project WHERE tenant_id = $1
+`
+
+// The projects plan axis (docs/plans/projects-axis.md): this count against
+// plan_entitlement.projects (NULL = unlimited) is the create/claim gate.
+func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectsByTenant, tenantID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const getProjectMeta = `-- name: GetProjectMeta :one
 SELECT meta FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1
@@ -20,6 +35,43 @@ func (q *Queries) GetProjectMeta(ctx context.Context, tenantID int64) ([]byte, e
 	var meta []byte
 	err := row.Scan(&meta)
 	return meta, err
+}
+
+const listProjectsByTenant = `-- name: ListProjectsByTenant :many
+SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id
+`
+
+type ListProjectsByTenantRow struct {
+	ID        int64
+	PublicID  pgtype.UUID
+	Domain    string
+	CreatedAt pgtype.Timestamptz
+}
+
+// The Projects page: every project in the tenant, oldest first.
+func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]ListProjectsByTenantRow, error) {
+	rows, err := q.db.Query(ctx, listProjectsByTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListProjectsByTenantRow
+	for rows.Next() {
+		var i ListProjectsByTenantRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.Domain,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setProjectMeta = `-- name: SetProjectMeta :exec
