@@ -11,3 +11,6 @@ playwright-report/
 # Go
 back/coverage.out
 back/spool/
+
+# Docs
+docs/internal
