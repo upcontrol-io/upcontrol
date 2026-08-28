@@ -2129,8 +2129,8 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Both paths count: this is the funnel's step between check_run and
-	// signed_in. The event goes to ClickHouse with the host only — the e-mail,
-	// when there is one, went to the Postgres visitor row above and nowhere else.
+	// signed_in. The event goes to Postgres with the host only; the e-mail,
+	// when there is one, went to the visitor row above and nowhere else.
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 
 	// The client's target list is not trusted: each must belong to the asked

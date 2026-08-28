@@ -602,9 +602,9 @@ UPDATE plan_entitlement SET ai_explains =  50 WHERE plan = 'Indie';
 UPDATE plan_entitlement SET ai_explains = 200 WHERE plan = 'Growth';
 UPDATE plan_entitlement SET ai_explains = 400 WHERE plan = 'Agency';
 
--- web_visitor is the Postgres half of product analytics (plan: product-analytics
--- §Decision 6): a directory of current visitor state — first-touch attribution,
--- identity, counters. ClickHouse web_events is the raw stream; this table is
+-- web_visitor is the visitor directory of product analytics (plan:
+-- product-analytics §Decision 6): current visitor state — first-touch
+-- attribution, identity, counters. web_events is the raw stream; this table is
 -- what answers "who is this visitor". First-touch columns are written exactly
 -- once (INSERT ... ON CONFLICT DO NOTHING in queries/analytics.sql); identity
 -- and last_* columns are touched on every recorder flush. token_hash is

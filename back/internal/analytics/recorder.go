@@ -207,7 +207,7 @@ func (r *Recorder) ServerEvent(ctx context.Context, name string, personID, tenan
 }
 
 // LinkEmail records an email on the visitor row (watch_signup). The email
-// goes ONLY to Postgres, never into ClickHouse props.
+// goes ONLY to the Postgres visitor row, never into event props.
 func (r *Recorder) LinkEmail(ctx context.Context, email string) {
 	if r == nil || email == "" {
 		return

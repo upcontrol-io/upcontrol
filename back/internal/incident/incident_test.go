@@ -53,12 +53,12 @@ func TestNewUUID_UniqueAndValid(t *testing.T) {
 	}
 }
 
-func TestFreezeSlice_WithoutClickHouseIsANoOp(t *testing.T) {
+func TestFreezeSlice_WithoutStoreIsANoOp(t *testing.T) {
 	// The slice is evidence, not a precondition: an incident must still open
-	// with no ClickHouse (tests, a degraded node) and not error there.
+	// with no store wired (tests) and not error there.
 	l := New(nil, nil)
 	if err := l.freezeSlice(t.Context(), 1, 2, 3); err != nil {
-		t.Fatalf("freezeSlice without ClickHouse must be a silent no-op, got: %v", err)
+		t.Fatalf("freezeSlice without a store must be a silent no-op, got: %v", err)
 	}
 }
 

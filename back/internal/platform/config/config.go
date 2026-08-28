@@ -17,14 +17,9 @@ type Config struct {
 	HTTPAddr    string
 	Environment string // dev|staging|prod
 
-	PostgresURL    string
-	ClickHouseAddr string // host:port
-	ClickHouseDB   string
-	ClickHouseUser string
-	ClickHousePass string
+	PostgresURL string
 
-	MigrationsPostgresDir   string // path to db/postgres, for `ucapi migrate`
-	MigrationsClickHouseDir string
+	MigrationsPostgresDir string // path to db/postgres, for `ucapi migrate`
 
 	// Telegram. Both empty = no bot: the long-poll never starts and the app
 	// stops offering Telegram, rather than offering a dead destination.
@@ -113,11 +108,6 @@ func Load(service string) (Config, error) {
 	if pgPass := getenvOrFile("UC_POSTGRES_PASSWORD", &c.Warnings); pgPass != "" && c.PostgresURL != "" {
 		c.PostgresURL = injectPgPassword(c.PostgresURL, pgPass)
 	}
-	c.ClickHouseAddr = getenv("UC_CLICKHOUSE_ADDR", "localhost:9000")
-	c.ClickHouseDB = getenv("UC_CLICKHOUSE_DB", "upcontrol")
-	c.ClickHouseUser = getenv("UC_CLICKHOUSE_USER", "default")
-	c.ClickHousePass = getenvOrFile("UC_CLICKHOUSE_PASSWORD", &c.Warnings)
-
 	c.TelegramBotToken = getenvOrFile("UC_TELEGRAM_BOT_TOKEN", &c.Warnings)
 	c.TelegramBotUsername = strings.TrimPrefix(getenv("UC_TELEGRAM_BOT_USERNAME", ""), "@")
 
@@ -158,7 +148,6 @@ func Load(service string) (Config, error) {
 	c.EmailAPIKey = getenvOrFile("UC_EMAIL_API_KEY", &c.Warnings)
 
 	c.MigrationsPostgresDir = getenv("UC_PG_MIGRATIONS_DIR", "../../db/postgres")
-	c.MigrationsClickHouseDir = getenv("UC_CH_MIGRATIONS_DIR", "../../db/clickhouse")
 
 	c.LogLevel = getenv("UC_LOG_LEVEL", "info")
 	c.LogFormat = getenv("UC_LOG_FORMAT", c.logFormatDefault())
@@ -182,7 +171,6 @@ func Load(service string) (Config, error) {
 	if c.Environment == "prod" {
 		if service != "ucprobe" {
 			require(&errs, c.PostgresURL != "", "UC_POSTGRES_URL")
-			require(&errs, c.ClickHouseAddr != "", "UC_CLICKHOUSE_ADDR")
 		}
 		require(&errs, c.NodeToken != "", "UC_NODE_TOKEN")
 	}

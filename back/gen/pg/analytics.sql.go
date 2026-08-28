@@ -21,7 +21,7 @@ type LinkVisitorEmailParams struct {
 }
 
 // watch_signup: the email goes ONLY to this Postgres row, never into
-// ClickHouse props (§Decision 7). Last write wins — a newer verified address
+// event props (§Decision 7). Last write wins — a newer verified address
 // is better data than the first one typed.
 func (q *Queries) LinkVisitorEmail(ctx context.Context, arg LinkVisitorEmailParams) error {
 	_, err := q.db.Exec(ctx, linkVisitorEmail, arg.Email, arg.ID)

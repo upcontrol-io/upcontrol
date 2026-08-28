@@ -1,5 +1,5 @@
-// Package batcher accumulates decoded rows and flushes them to ClickHouse in
-// batches; the 1/sec-per-key flush floor caps part count (one part per INSERT).
+// Package batcher accumulates decoded rows and flushes them to Postgres in
+// batches; the 1/sec-per-key flush floor caps write churn (one batch per flush).
 package batcher
 
 import (

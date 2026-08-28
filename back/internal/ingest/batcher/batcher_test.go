@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// fakeSink records every flush's row count (a proxy for ClickHouse parts).
+// fakeSink records every flush's row count (a proxy for batch INSERT count).
 type fakeSink struct {
 	mu      sync.Mutex
 	flushes map[string][]int // key -> per-flush row counts

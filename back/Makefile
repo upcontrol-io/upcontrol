@@ -14,7 +14,6 @@ PKG := ./...
 SQLC       := $(GO) tool sqlc
 OAPI       := $(GO) tool oapi-codegen
 BUF        := $(GO) tool buf
-GOOSE      := $(GO) tool goose
 LINT       := $(GO) tool golangci-lint
 
 # Packages in the "Logic" zone (§0.1): every one of these MUST ship a _test.go.

@@ -330,7 +330,7 @@ func TestRecorderBotOnlyBatchSkipsLastSeenTouch(t *testing.T) {
 	r.Track(ctx, []event{{Name: "page_view", Path: "/"}, {Name: "page_view", Path: "/pricing"}}, 0, 0)
 	rows := waitBatch(t, sink)
 
-	// Bot events still land in ClickHouse and create the directory row; only
+	// Bot events still land in web_events and create the directory row; only
 	// the touch is skipped, so last_seen never advances on bot traffic.
 	if len(rows) != 2 || rows[0].VisitorID != 1 {
 		t.Fatalf("rows = %+v, want 2 bot rows under visitor 1", rows)

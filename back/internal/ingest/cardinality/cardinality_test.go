@@ -57,7 +57,7 @@ func TestGate5000HostsDictionaryDoesNotGrow(t *testing.T) {
 		t.Fatal("no cardinality_capped warning fired for 5000 hosts")
 	}
 	// The stored dictionary is the 1000 real values plus the sentinel: at most
-	// ceiling+1 distinct strings reach ClickHouse.
+	// ceiling+1 distinct strings reach Postgres.
 	if len(stored) > 1001 {
 		t.Errorf("stored dictionary has %d distinct values, want <= 1001 (ceiling+sentinel)", len(stored))
 	}

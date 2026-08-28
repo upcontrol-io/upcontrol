@@ -22,7 +22,7 @@ generated, 10.7k front, 2.6k CLI, 1.8k SQL and infra.
 | #    | Change                                                   | Status |
 |------|----------------------------------------------------------|--------|
 | 1    | Split the README by audience                             | **DONE**, and then some: the heartbeat line was made true rather than deleted |
-| 2    | One entity: Event, named or derived; drop the dictionary | **PARTIAL** — dictionary and tiers deleted; the `named_by` model was not built |
+| 2    | One entity: Event, named or derived; drop the dictionary | **BUILT, narrow** — dictionary deleted; the `uc.event` marker ships; the read-API split stays |
 | 3    | Fold ucworker into ucapi                                 | **DONE** |
 | 4    | Drop the second Caddy                                    | **DECLINED** (owner, 2026-08-28) |
 | 5    | Decide what analytics is for                             | **DECLINED** — and the premise is false, see the item |
@@ -70,28 +70,28 @@ While rewriting, fix the two claims that are wrong today:
 
 ## 2. One entity — Event; names declared or derived; drop the dictionary
 
-> **PARTIAL.** The dictionary and its five tiers are deleted (`normalize.go`,
-> 108 lines to 52) and `EventTier` is gone — it was written on every row and
-> read by nothing. The `named_by` model below was NOT built.
+> **BUILT (2026-08-29).** The dictionary and its five tiers are deleted
+> (`normalize.go`, 108 lines to 52) and `EventTier` is gone — it was written on
+> every row and read by nothing. The `named_by` model below is now built: a JSON
+> line may carry `"uc.event": true`, which declares that its message is an event
+> name rather than a log line. `normalize.Classify` honours the marker (the
+> reserved `uc.*` prefix still wins over it), `track()` sends it, and the
+> contract documents it on `POST /i`.
 >
-> Why: `track('payment_failed')` reaches the server as `{"msg":"payment_failed"}`,
-> shape-identical to a log line. The dictionary WAS the only declared-vs-derived
-> signal, so the model here needs a new wire marker, an SDK release and a
-> contract change. Owner chose the narrow path instead (2026-08-28): a name
-> earns an `events` row by having an engine behind it.
+> The contradiction this item left open is resolved: a derived identity IS the
+> fingerprint and is NOT addressable as a name in alert rules, so retuning
+> item 12's masking can never silently rewrite someone's rules.
 >
-> Two names qualify, both guarded by a test because both failures are silent:
-> the `deploy` family (post-deploy suppression reads it), and **`install_verified`**
-> — which this document could not see, because its only consumer is the closed
-> `admin/` dashboard, outside this repo. `uc.*` stays reserved.
+> The marker reaches users only at the next npm release, so the textual
+> fallback stays and is what keeps the gap safe for every already-published
+> SDK: the `deploy` family (post-deploy suppression reads it) and
+> **`install_verified`**, whose only consumer is the closed `admin/` dashboard,
+> outside this repo. Both remain guarded by tests because both failures are
+> silent.
 >
 > Both sub-items below are DONE: `eventKind` reordered (a failure now outranks
 > its subject, though `deploy` stays first), and `mergeTimeline` sorts on
 > `time.Time`.
->
-> Open, if this is ever finished: derived names must NOT be addressable in alert
-> rules — only the fingerprint. Otherwise retuning item 12's masking silently
-> rewrites people's rules. That contradiction is not resolved in the text below.
 
 Decision taken 2026-08-27, refined same day. There is one domain entity:
 
@@ -282,10 +282,12 @@ thing not to do is keep paying for a guarantee you don't deliver.
 > the detector, (4) `admin/`, (5) teardown — delete `storage/ch`, drop the
 > service from both compose files, lift `install.sh`'s 2GB floor, rewrite docs.
 >
-> Undecided: `checks_1m`, `series_1h`, `checks_1h`, `metrics_5m`, `metrics_1h`
-> and `baselines` are deliberately NOT ported. Re-creating seven materialized
-> views as Postgres triggers rebuilds the complexity this item exists to delete;
-> each needs a call on re-derive-on-demand versus drop.
+> Decided: the six rollups (`checks_1m`, `series_1h`, `checks_1h`, `metrics_5m`,
+> `metrics_1h`, `baselines`) are dropped, not deferred. A survey found them read
+> by nothing in core, cloud or admin; only `series_1m` was ever queried, and it
+> was ported and is what the detector's median/MAD reads. Nothing is lost.
+> Re-creating the materialized views as Postgres triggers would rebuild the
+> complexity this item exists to delete.
 
 Decision taken 2026-08-27: Postgres is the storage engine. ClickHouse is at
 minimum optional and OFF by default; the working intent is to remove it

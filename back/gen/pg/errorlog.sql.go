@@ -56,10 +56,10 @@ type ListErrorSubscribedChannelsRow struct {
 	Notify   []byte
 }
 
-// The error-log scanner's Postgres side (docs/plans/channel-notify-settings.md).
-// The scan itself reads ClickHouse; these queries answer "who subscribed" and
-// remember what was already alerted so a persisting error does not page every
-// 60-second tick.
+// The error-log scanner's queries (docs/plans/channel-notify-settings.md).
+// The scan itself reads the logs table; these queries answer "who subscribed"
+// and remember what was already alerted so a persisting error does not page
+// every 60-second tick.
 // Channels that asked to hear about error logs at all. The scanner groups the
 // rows by tenant and reads each channel's window out of `notify` itself.
 func (q *Queries) ListErrorSubscribedChannels(ctx context.Context) ([]ListErrorSubscribedChannelsRow, error) {

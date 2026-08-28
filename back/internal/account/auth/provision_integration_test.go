@@ -24,7 +24,6 @@ func TestProvisionSeedsEmailChannelOnce(t *testing.T) {
 		t.Skip("UC_TEST_POSTGRES not set; skipping provisioning integration test")
 	}
 	ctx := context.Background()
-	// Postgres-only: an empty ClickHouse addr makes the CH half a no-op.
 	if err := migrate.Run(ctx, dsn, "../../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}

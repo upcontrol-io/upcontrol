@@ -32,7 +32,7 @@ RETURNING id;
 
 -- name: LinkVisitorEmail :exec
 -- watch_signup: the email goes ONLY to this Postgres row, never into
--- ClickHouse props (§Decision 7). Last write wins — a newer verified address
+-- event props (§Decision 7). Last write wins — a newer verified address
 -- is better data than the first one typed.
 UPDATE web_visitor SET email = sqlc.arg(email) WHERE id = sqlc.arg(id);
 

@@ -421,11 +421,13 @@ CREATE TABLE instance_setting (
 
 -- Telemetry, ported from db/clickhouse: the ring-displaced log table, the
 -- never-displaced event table, check history, metrics, web analytics, and the
--- per-minute counts the detector's baseline reads. The ClickHouse rollups
+-- per-minute counts the detector's baseline reads. The six rollups
 -- (checks_1m, series_1h, checks_1h, metrics_5m, metrics_1h, baselines) are
--- deliberately NOT ported: they are re-derived on demand or maintained at
--- ingest — porting materialized views as triggers is the complexity this
--- collapse exists to remove. No TTLs either: retention becomes partition drops.
+-- dropped, not deferred: a survey found them read by nothing in core, cloud
+-- or admin, and the one rollup anything read (series_1m) is ported above as
+-- the per-minute counts. Porting materialized views as triggers is the
+-- complexity this collapse exists to remove. No TTLs either: retention
+-- becomes partition drops.
 
 -- logs is the ring table. Range-partitioned on ts so retention is a partition
 -- drop; the PK carries every column the ring orders by, and the partition key

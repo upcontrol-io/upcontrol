@@ -44,7 +44,7 @@ DELETE FROM monitor WHERE public_id = $1 AND tenant_id = $2;
 
 -- name: GetMonitorInterval :one
 -- Used by SubmitResults to reschedule at the monitor's real interval (not a
--- hardcoded 5m) AND to label the raw check row written to ClickHouse. A
+-- hardcoded 5m) AND to label the raw check row written to Postgres. A
 -- missing row means the monitor was deleted mid-flight.
 SELECT tenant_id, interval_sec, paused FROM monitor WHERE id = $1;
 

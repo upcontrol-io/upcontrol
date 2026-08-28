@@ -195,7 +195,7 @@ type GetMonitorIntervalRow struct {
 }
 
 // Used by SubmitResults to reschedule at the monitor's real interval (not a
-// hardcoded 5m) AND to label the raw check row written to ClickHouse. A
+// hardcoded 5m) AND to label the raw check row written to Postgres. A
 // missing row means the monitor was deleted mid-flight.
 func (q *Queries) GetMonitorInterval(ctx context.Context, id int64) (GetMonitorIntervalRow, error) {
 	row := q.db.QueryRow(ctx, getMonitorInterval, id)

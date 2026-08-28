@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Check is a single named dependency probe (e.g. "postgres", "clickhouse"). It
+// Check is a single named dependency probe (e.g. "postgres"). It
 // must be cheap and time-bounded by the caller.
 type Check func(ctx context.Context) error
 
