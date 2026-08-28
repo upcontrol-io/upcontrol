@@ -5,7 +5,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { detect, type Detection } from './detect.js';
-import { collectSpec, formatSpec, isDescriptive } from './meta.js';
 import {
   SDK_PIN,
   bundledSkillDir,
@@ -17,7 +16,7 @@ import {
   skillFresh,
   writeDotenvKey,
 } from './files.js';
-import { CLI_VERSION, endpointFrom, fetchInstallStatus, mintAnonymousProject, putProjectMeta, redeemInstallToken } from './net.js';
+import { CLI_VERSION, endpointFrom, fetchInstallStatus, mintAnonymousProject, redeemInstallToken } from './net.js';
 
 interface Flags {
   key?: string;
@@ -25,7 +24,6 @@ interface Flags {
   endpoint?: string;
   copilot: boolean;
   noKey: boolean;
-  noMeta: boolean;
   json: boolean;
   timeout: number;
   help: boolean;
@@ -33,7 +31,7 @@ interface Flags {
 }
 
 function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
-  const flags: Flags = { copilot: false, noKey: false, noMeta: false, json: false, timeout: 120, help: false, version: false };
+  const flags: Flags = { copilot: false, noKey: false, json: false, timeout: 120, help: false, version: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -52,9 +50,6 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags 
         break;
       case '--no-key':
         flags.noKey = true;
-        break;
-      case '--no-meta':
-        flags.noMeta = true;
         break;
       case '--json':
         flags.json = true;
@@ -95,7 +90,6 @@ Init flags:
                        the key of YOUR project (never echoed, single use)
   --key <uc_live_...>  use this key instead of provisioning one (written to .env, never echoed)
   --no-key             skip key provisioning entirely
-  --no-meta            skip sending the project spec (init prints it before sending)
   --copilot            also install the skill for GitHub Copilot (.github/skills/)
   --endpoint <url>     override the API endpoint (default: $UPCONTROL_ENDPOINT or https://upcontrol.io)
 
@@ -119,9 +113,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   // True when this run tried and failed to establish a key: the result says
   // success:false and init exits 1, so no agent wires an app that sends nothing.
   let keyFailed = false;
-  // The key this run established. Reading the environment again afterwards
-  // sent the spec to the wrong project, ignoring --key or --token.
-  let resolvedKey = '';
   if (flags.token) {
     // The dashboard's one-time token: redeem it for this account's project key.
     // On failure never fall back to the anonymous mint: wrong-project logs.
@@ -129,7 +120,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     if (redeemed.ok && redeemed.key) {
       const gi = ensureEnvIgnored(cwd);
       writeDotenvKey(cwd, redeemed.key);
-      resolvedKey = redeemed.key;
       keySource = 'token';
       keyNote = gi.fixed ? '.gitignore did not cover .env - fixed, then wrote the key' : 'written to .env';
     } else if (redeemed.error === 'unreachable') {
@@ -142,7 +132,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   } else if (flags.key) {
     const gi = ensureEnvIgnored(cwd);
     writeDotenvKey(cwd, flags.key);
-    resolvedKey = flags.key;
     keySource = 'flag';
     keyNote = gi.fixed ? '.gitignore did not cover .env - fixed, then wrote the key' : 'written to .env';
   } else if (keySource === 'none' && !flags.noKey) {
@@ -150,7 +139,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     if (mint.ok && mint.key) {
       const gi = ensureEnvIgnored(cwd);
       writeDotenvKey(cwd, mint.key);
-      resolvedKey = mint.key;
       keySource = 'minted';
       claimUrl = mint.claimUrl;
       keyNote = gi.fixed ? '.gitignore did not cover .env - fixed, then wrote the key' : 'written to .env';
@@ -162,12 +150,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
       keyNote = `backend unreachable at ${endpoint} - set UPCONTROL_API_KEY or paste a key from /app/sources#key`;
     }
   }
-
-  // The project spec: printed before it is sent, and never allowed to affect
-  // the install's outcome. No key, --no-meta, or nothing descriptive: no upload.
-  const metaKey = resolvedKey || process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd);
-  const collected = flags.noMeta || !metaKey ? null : collectSpec(cwd, 'node ' + process.version);
-  const spec = collected && isDescriptive(collected) ? collected : null;
 
   const result = {
     success: !keyFailed,
@@ -181,12 +163,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   };
 
   if (det.mode !== 'interactive') {
-    // The spec block goes above the JSON because agent mode's contract is
-    // "the last line is the result" - every caller parses it that way.
-    if (spec && metaKey) {
-      out(formatSpec(spec));
-      await putProjectMeta(endpoint, metaKey, spec);
-    }
     out(JSON.stringify(result));
     return keyFailed ? 1 : 0;
   }
@@ -209,13 +185,6 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   out('');
   out('  The agent reads the installed upcontrol skill, stages a diff for your');
   out('  review, and finishes with `npx upcontrol verify`.');
-  // Printed before the upload, last in the banner: nothing leaves until it
-  // has been shown.
-  if (spec && metaKey) {
-    out('');
-    out(formatSpec(spec));
-    await putProjectMeta(endpoint, metaKey, spec);
-  }
   if (keyFailed) {
     out('');
     out('  init did NOT provision a key - fix the note on the key line above and rerun.');

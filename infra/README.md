@@ -36,7 +36,6 @@ openssl rand -hex 32 > secrets/node_token
 openssl rand -hex 32 > secrets/secret_key_hex
 : > secrets/telegram_bot_token             # empty = feature off
 : > secrets/smtp_password
-: > secrets/ai_api_key
 docker compose pull && docker compose up -d
 ```
 

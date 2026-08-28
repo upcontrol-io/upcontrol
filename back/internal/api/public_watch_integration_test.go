@@ -76,7 +76,7 @@ func newWatchFixture(t *testing.T) *watchFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	f.ownerCookie = &http.Cookie{Name: session.CookieName, Value: token}
-	wa := NewWriteAPI(pool, nil, f.sess, nil, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false)
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)

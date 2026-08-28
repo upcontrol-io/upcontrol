@@ -5,7 +5,6 @@ import { CopyField } from '@/components/code';
 import { invalidateApiData, useApiData } from '@/lib/useApiData';
 import {
 	channels as channelsApi,
-	explainPreview,
 	installToken as installTokenApi,
 	instance,
 	keys as keysApi,
@@ -48,9 +47,6 @@ export function Settings() {
 		() => statusPageApi.get(),
 	);
 	const { data: liveKeys, loading: keysLoading, failed: keysFailed } = useApiData('keys', () => keysApi());
-	// The wired brain, read from the preview endpoint — composed, not executed:
-	// it spends nothing and consults no model. `model: null` = Explain is off.
-	const { data: brain } = useApiData('aiBrain', () => explainPreview([]));
 	// The bot's presence fact: the server offers a telegram destination only
 	// when a bot is configured, so the channels read doubles as the indicator.
 	const { data: chans } = useApiData('channels', () => channelsApi());
@@ -68,11 +64,6 @@ export function Settings() {
 	const [rotatedKey, setRotatedKey] = useState<string | null>(null);
 	// Write-only fields: the server seals what is typed here and never
 	// returns it, so these inputs always start empty.
-	const [aiKey, setAiKey] = useState('');
-	const [aiModelField, setAiModelField] = useState('');
-	const [aiBaseURL, setAiBaseURL] = useState('');
-	const ai = useSectionAction();
-	const [aiRemoveAsking, setAiRemoveAsking] = useState(false);
 	const [tgToken, setTgToken] = useState('');
 	const [tgUsername, setTgUsername] = useState('');
 	const tg = useSectionAction();
@@ -141,43 +132,9 @@ export function Settings() {
 		}
 	}
 
-	// undefined = still reading; null = Explain is off; string = the brain.
-	const aiModel = brain === undefined ? undefined : (brain?.model ?? null);
 	const tgReady =
 		(chans?.connectableChannels ?? []).some((c) => c.kind === 'telegram') ||
 		(chans?.channels ?? []).some((c) => c.kind === 'telegram');
-
-	async function saveAI() {
-		const values: { key?: string; model?: string; baseUrl?: string } = {};
-		if (aiKey.trim()) values.key = aiKey.trim();
-		if (aiModelField.trim()) values.model = aiModelField.trim();
-		if (aiBaseURL.trim()) values.baseUrl = aiBaseURL.trim();
-		if (Object.keys(values).length === 0) return;
-		await ai.run(
-			async () => {
-				await instance.putAI(values);
-				setAiKey('');
-				setAiModelField('');
-				setAiBaseURL('');
-				invalidateApiData('aiBrain');
-				return 'Saved. Explain answers with these settings from the next question on.';
-			},
-			'Could not save. Try again.',
-		);
-	}
-
-	async function removeAI() {
-		await ai.run(
-			async () => {
-				await instance.deleteAI();
-				invalidateApiData('aiBrain');
-				return 'Removed. If the server env still carries AI settings, Explain keeps using those; otherwise Explain is off.';
-			},
-			'Could not remove the settings. Try again.',
-			false,
-		);
-		setAiRemoveAsking(false);
-	}
 
 	async function saveTelegramBot() {
 		const token = tgToken.trim();
@@ -297,84 +254,6 @@ export function Settings() {
 			</section>
 
 			<section className={styles.section}>
-				<h2 className={styles.sectionTitle}>AI</h2>
-				{aiModel === undefined ? (
-					<span className={styles.hint}>Reading whether Explain is configured…</span>
-				) : aiModel === null ? (
-					<span className={styles.hint}>Explain is off — no API key is configured.</span>
-				) : (
-					<span className={styles.hint}>
-						Explain is answered by <code>{aiModel}</code>.
-					</span>
-				)}
-				<form
-					className={styles.stackForm}
-					onSubmit={(event) => {
-						event.preventDefault();
-						void saveAI();
-					}}
-				>
-					<Input
-						type="password"
-						value={aiKey}
-						onChange={(event) => setAiKey(event.target.value)}
-						placeholder="API key: sk-…"
-						aria-label="OpenAI-format API key"
-						autoComplete="off"
-					/>
-					<Input
-						value={aiModelField}
-						onChange={(event) => setAiModelField(event.target.value)}
-						placeholder="Model: gpt-5-nano-2025-08-07"
-						aria-label="Chat model"
-						autoComplete="off"
-					/>
-					<Input
-						value={aiBaseURL}
-						onChange={(event) => setAiBaseURL(event.target.value)}
-						placeholder="API base URL: https://api.openai.com/v1"
-						aria-label="API base URL"
-						autoComplete="off"
-					/>
-					<Button
-						type="submit"
-						variant="secondary"
-						disabled={ai.busy || (!aiKey.trim() && !aiModelField.trim() && !aiBaseURL.trim())}
-					>
-						{ai.busy ? 'Saving…' : 'Save AI settings'}
-					</Button>
-				</form>
-				<span className={styles.hint}>
-					OpenAI format: the key like <code>sk-…</code>, the model as the provider spells it, the base URL
-					of any OpenAI-compatible endpoint (OpenAI, OpenRouter, a local gateway or proxy). Fill only what
-					you are changing — empty fields keep their current value. Everything is stored encrypted and
-					never shown again.
-				</span>
-				{ai.note && (
-					<span className={ai.note.failed ? styles.tokenError : styles.hint}>{ai.note.text}</span>
-				)}
-				{aiModel != null && (
-					<div className={styles.rotateRow}>
-						{aiRemoveAsking ? (
-							<>
-								<span className={styles.hint}>Remove the AI settings saved here?</span>
-								<Button variant="danger" size="sm" disabled={ai.busy} onClick={() => void removeAI()}>
-									Remove
-								</Button>
-								<Button variant="ghost" size="sm" onClick={() => setAiRemoveAsking(false)}>
-									Keep
-								</Button>
-							</>
-						) : (
-							<Button variant="secondary" size="sm" onClick={() => setAiRemoveAsking(true)}>
-								Remove AI settings
-							</Button>
-						)}
-					</div>
-				)}
-			</section>
-
-			<section className={styles.section}>
 				<h2 className={styles.sectionTitle}>Telegram bot</h2>
 				{tgReady ? (
 					<span className={styles.hint}>
@@ -484,8 +363,8 @@ export function Settings() {
 					empty fields keep their current value. Everything is stored encrypted and never shown again.
 				</span>
 				{smtp.note && <span className={smtp.note.failed ? styles.tokenError : styles.hint}>{smtp.note.text}</span>}
-				{/* Unconditional, unlike the AI block above (which reads its state):
-				    SMTP is write-only, so a DELETE-on-nothing no-op is the honest option. */}
+				{/* Unconditional: SMTP is write-only, nothing reads its state back,
+				    so a DELETE-on-nothing no-op is the honest option. */}
 				<div className={styles.rotateRow}>
 					{smtpRemoveAsking ? (
 						<>

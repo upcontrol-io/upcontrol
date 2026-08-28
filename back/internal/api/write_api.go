@@ -28,7 +28,6 @@ import (
 
 	"go.upcontrol.io/back/internal/account/auth"
 	"go.upcontrol.io/back/internal/account/session"
-	"go.upcontrol.io/back/internal/ai"
 	"go.upcontrol.io/back/internal/analytics"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/probe/discover"
@@ -44,20 +43,16 @@ type writeAPI struct {
 	ch   *ch.Conn
 	sess *session.Manager
 	exec *executor.Executor
-	acct *ai.Accountant
 	// selfHosted (UC_SELF_HOSTED=1): the anonymous watch door provisions
 	// 'Self-hosted' tenants, same as the sign-in door.
 	selfHosted bool
-	// One mutex for the three in-memory per-replica maps below: two replicas
-	// give 2× each limit. Keys: "bucket:ip", host, tenant.
+	// One mutex for the two in-memory per-replica maps below: two replicas
+	// give 2× each limit. Keys: "bucket:ip", host.
 	checkMu     sync.Mutex
 	checkSeenAt map[string]time.Time
 	// Answers already computed, keyed by host. A check spends up to
 	// discover.MaxRequests of somebody else's bandwidth.
 	checkCache map[string]cachedCheck
-	// Per-tenant throttle for POST /v1/logs/explain: it spends provider money.
-	// Per-replica like checkSeenAt: two replicas admit 2× the limit.
-	explainSeenAt map[int64][]time.Time
 	// Dev relaxation, and the only one: the anonymous watch echoes the login
 	// code it issued. Never true in prod — see publicWatch.
 	devMode bool
@@ -72,20 +67,13 @@ type writeAPI struct {
 // fix, long enough that a link doing the rounds does not re-probe per visitor.
 const checkCacheTTL = 10 * time.Minute
 
-// The explain throttle: a sliding one-minute window of six requests per
-// tenant. Burst gate only: the monthly bound is plan_entitlement.ai_explains.
-const (
-	explainBurst  = 6
-	explainWindow = time.Minute
-)
-
 type cachedCheck struct {
 	body map[string]any
 	at   time.Time
 }
 
-func NewWriteAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, acct *ai.Accountant, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
-	return &writeAPI{pool: p, ch: chConn, sess: sm, exec: executor.New(), acct: acct, checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, explainSeenAt: map[int64][]time.Time{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
+func NewWriteAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
+	return &writeAPI{pool: p, ch: chConn, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
 }
 
 func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -101,9 +89,8 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// Notify members read (GETs below); every mutation needs login. Explain is
-	// the one POST that is a read: the quota is the plan's, not the role's.
-	if r.Method != http.MethodGet && !explainPath(r.URL.Path) && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+	// Notify members read (GETs below); every mutation needs login.
+	if r.Method != http.MethodGet && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
@@ -166,15 +153,6 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case r.URL.Path == "/v1/logs" && r.Method == http.MethodGet:
 		h.getLogs(w, r, tenantID)
-	case r.URL.Path == "/v1/logs/explain" && r.Method == http.MethodPost:
-		h.explainLogs(w, r, tenantID)
-	case r.URL.Path == "/v1/logs/explain/preview" && r.Method == http.MethodPost:
-		h.previewExplain(w, r, tenantID)
-
-	// Incident explain: the caller sends only the id. The suffix check keeps
-	// this arm disjoint from the GET below, whose pathLast is "explain".
-	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && strings.HasSuffix(r.URL.Path, "/explain") && r.Method == http.MethodPost:
-		h.explainIncident(w, r, tenantID)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)
@@ -182,12 +160,6 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 	}
-}
-
-// explainPath reports whether p is an Explain endpoint: POSTs on the wire
-// but reads in substance, which is why the role gate exempts exactly them.
-func explainPath(p string) bool {
-	return strings.HasSuffix(p, "/explain") || strings.HasSuffix(p, "/explain/preview")
 }
 
 func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
@@ -1559,364 +1531,6 @@ func (h *writeAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key str
 	return out
 }
 
-func (h *writeAPI) explainLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	// Idempotent by input hash, cached by fingerprint, metered against the
-	// plan's quota (402). No key configured = 503, never a canned fallback.
-	ctx := r.Context()
-	var req struct {
-		Lines []string `json:"lines"`
-	}
-	// Cap the body before anything is counted: the caps below promise a bounded
-	// input, and an unbounded decode would buffer the body first.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || len(req.Lines) == 0 {
-		writeAPIErr(w, http.StatusBadRequest, "missing_lines")
-		return
-	}
-	if !h.explainInputOK(w, req.Lines) {
-		return
-	}
-	ent, ok := h.explainGate(ctx, w, tenantID)
-	if !ok {
-		return
-	}
-	// The meta line is the stable half of the context: the one entry the cache
-	// hash covers. Everything explainContext gathers is volatile, unhashed.
-	metaLine := ""
-	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			// A failed meta read re-keys the cache (a guaranteed miss and a
-			// billable call). The operator must see why.
-			slog.Warn("ai explain: project meta read failed", "err", err, "tenant_id", tenantID)
-		}
-	} else if len(meta) > 0 {
-		metaLine = projectMetaLine(meta)
-	}
-	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainLogs,
-		ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, r, tenantID)}, ent.AiExplains)
-	if err != nil {
-		h.explainError(w, err, tenantID)
-		return
-	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"problem":     res.Answer.Problem,
-		"cause":       res.Answer.Cause,
-		"confidence":  res.Answer.Confidence,
-		"fix":         res.Answer.Fix,
-		"investigate": res.Answer.Investigate,
-		"cached":      res.Cached,
-		"used":        res.Used,
-		"limit":       res.Limit,
-		// Dev observability: the exact user message, empty on a cache hit. The
-		// system prompt is static in scenario.go.
-		"prompt": res.Prompt,
-	})
-}
-
-// previewExplain returns the exact bytes about to be sent: same validation
-// and context as explainLogs, but no model call, quota or throttle slot.
-func (h *writeAPI) previewExplain(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	ctx := r.Context()
-	var req struct {
-		Lines []string `json:"lines"`
-	}
-	// Unlike explainLogs, empty `lines` is legitimate: Settings reads `model`
-	// here without composing an explanation. Only malformed bodies are refused.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeAPIErr(w, http.StatusBadRequest, "bad_json")
-		return
-	}
-	if !h.explainInputOK(w, req.Lines) {
-		return
-	}
-	sc := ai.ExplainLogs
-	metaLine := ""
-	if meta, err := h.pool.Queries().GetProjectMeta(ctx, tenantID); err == nil && len(meta) > 0 {
-		metaLine = projectMetaLine(meta)
-	}
-	input := ai.Input{Lines: req.Lines, MetaLine: metaLine, Context: h.explainContext(ctx, r, tenantID)}
-	// The brain's identity and the generation knobs. A null model means no key
-	// resolves anywhere: the front's "Explain is off" fact.
-	var model any
-	if h.acct.Configured(ctx) {
-		model = h.acct.BrainID(ctx)
-	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"system":            sc.SystemPrompt,
-		"user":              input.UserMessage(),
-		"model":             model,
-		"temperature":       sc.Temperature,
-		"max_output_tokens": sc.MaxOutputTokens,
-	})
-}
-
-// explainIncident: the server owns the evidence, so only the id is sent.
-// Same money path as explainLogs; ai.ExplainIncident adds severity and area.
-func (h *writeAPI) explainIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	ctx := r.Context()
-	// The {id} is the PUBLIC uuid (the serial id never leaves this process);
-	// the same lookup returns the internal id the queries below key on.
-	pubID := parseUUID(r.PathValue("id"))
-	var id int64
-	var title, status string
-	var detectedAt, resolvedAt pgtype.Timestamptz
-	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT id, title, status, detected_at, resolved_at FROM incident WHERE public_id = $1 AND tenant_id = $2`,
-		pubID, tenantID).Scan(&id, &title, &status, &detectedAt, &resolvedAt); err != nil {
-		// Only a row this tenant does not own is a 404: a dead pool fails
-		// closed as a 500, never "not found" for an incident that exists.
-		if !errors.Is(err, pgx.ErrNoRows) {
-			slog.Error("ai explain: read incident failed", "err", err, "tenant_id", tenantID)
-			writeAPIErr(w, http.StatusInternalServerError, "internal")
-			return
-		}
-		writeAPIErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	ent, ok := h.explainGate(ctx, w, tenantID)
-	if !ok {
-		return
-	}
-	// Evidence, as the card builds it. A failed read here is a logged 500
-	// before anything is charged; an empty slice is not an error.
-	rows, serr := h.pool.Queries().ListIncidentSlice(ctx, id)
-	if serr != nil {
-		slog.Error("ai explain: read incident slice failed", "err", serr, "incident_id", id, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	lines := make([]string, 0, len(rows))
-	for _, l := range rows {
-		// Same "HH:MM:SS  message" shape the live stream and the card's
-		// renderer use, so the model reads what the reader would have seen.
-		at := ""
-		if l.Ts.Valid {
-			at = l.Ts.Time.Format("15:04:05") + "  "
-		}
-		lines = append(lines, at+l.Message)
-	}
-	end := time.Now()
-	if resolvedAt.Valid {
-		end = resolvedAt.Time
-	}
-	updates, uerr := h.pool.Queries().ListIncidentUpdates(ctx, id)
-	if uerr != nil {
-		slog.Error("ai explain: read incident updates failed", "err", uerr, "incident_id", id, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	lifecycle := make([]map[string]any, 0, len(updates))
-	for _, u := range updates {
-		entry := map[string]any{"time": "", "text": u.Text}
-		if u.At.Valid {
-			entry["time"] = u.At.Time.Format("15:04")
-		}
-		lifecycle = append(lifecycle, entry)
-	}
-	// 30 minutes before the open through the close, best-effort like the card
-	// renderer: enrichment, never load-bearing.
-	var events []ch.EventRow
-	if h.ch != nil && detectedAt.Valid {
-		events, _ = h.ch.EventsAround(ctx, tenantID,
-			detectedAt.Time.Add(-30*time.Minute), end, detectedAt.Time, 50)
-	}
-	// Fact lines first, then the timeline oldest-first (mergeTimeline orders
-	// both), then the room the logs explain sends.
-	open := "closed"
-	if status == "down" || status == "check" {
-		open = "open"
-	}
-	minutes := 0
-	if detectedAt.Valid {
-		minutes = int(end.Sub(detectedAt.Time).Minutes())
-	}
-	inputCtx := []string{
-		"Incident: " + title,
-		fmt.Sprintf("Status: %s, running %d minutes", open, minutes),
-	}
-	for _, entry := range mergeTimeline(lifecycle, events) {
-		inputCtx = append(inputCtx, fmt.Sprintf("%v %v", entry["time"], entry["text"]))
-	}
-	inputCtx = append(inputCtx, h.explainContext(ctx, r, tenantID)...)
-	// The meta line is the stable half of the context: the one entry the cache
-	// hash covers. Everything explainContext gathers is volatile, unhashed.
-	metaLine := ""
-	if meta, merr := h.pool.Queries().GetProjectMeta(ctx, tenantID); merr != nil {
-		if !errors.Is(merr, pgx.ErrNoRows) {
-			slog.Warn("ai explain: project meta read failed", "err", merr, "tenant_id", tenantID)
-		}
-	} else if len(meta) > 0 {
-		metaLine = projectMetaLine(meta)
-	}
-	res, err := h.acct.Explain(ctx, tenantID, ai.ExplainIncident,
-		ai.Input{Lines: lines, MetaLine: metaLine, Context: inputCtx}, ent.AiExplains)
-	if err != nil {
-		h.explainError(w, err, tenantID)
-		return
-	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"problem":    res.Answer.Problem,
-		"cause":      res.Answer.Cause,
-		"confidence": res.Answer.Confidence,
-		// Incident-scenario additions; null when the answer carried none —
-		// honestly absent, never derived client- or server-side.
-		"severity":    res.Answer.Severity,
-		"area":        res.Answer.Area,
-		"fix":         res.Answer.Fix,
-		"investigate": res.Answer.Investigate,
-		"cached":      res.Cached,
-		"used":        res.Used,
-		"limit":       res.Limit,
-		"prompt":      res.Prompt,
-	})
-}
-
-// explainInputOK enforces the shared input caps; false means the
-// input_too_large response is already written.
-func (h *writeAPI) explainInputOK(w http.ResponseWriter, lines []string) bool {
-	// The registry owns the caps: over-cap input is rejected, never trimmed,
-	// and the message quotes the caps so it cannot drift from them.
-	sc := ai.ExplainLogs
-	total, over := 0, len(lines) > sc.MaxInputLines
-	for _, line := range lines {
-		if len(line) > sc.MaxLineBytes {
-			over = true
-		}
-		total += len(line)
-	}
-	if over || total > sc.MaxInputBytes {
-		writeAPIErrMsg(w, http.StatusBadRequest, "input_too_large",
-			fmt.Sprintf("Explain reads at most %d lines (%d KiB, %d bytes per line).", sc.MaxInputLines, sc.MaxInputBytes/1024, sc.MaxLineBytes))
-		return false
-	}
-	return true
-}
-
-// explainGate runs the shared throttle then the fail-closed quota read;
-// false means the 429 or 500 response is already written.
-func (h *writeAPI) explainGate(ctx context.Context, w http.ResponseWriter,
-	tenantID int64) (sqlc.PlanEntitlement, bool) {
-	// The throttle stands between validation and the first read: anything
-	// validated burns a slot even on a cached or 402 answer.
-	if ok, retryAfter := h.explainAllow(tenantID); !ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int64((retryAfter+time.Second-1)/time.Second)))
-		writeAPIErrMsg(w, http.StatusTooManyRequests, "explain_rate_limited", "Too many Explain requests. Try again in a minute.")
-		return sqlc.PlanEntitlement{}, false
-	}
-	// Quota gate, fail closed: a failed read is a 500, never a silent 0 =
-	// "unlimited". Only NULL ai_explains means unlimited.
-	plan, perr := tenantPlan(ctx, h.pool, tenantID)
-	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-		slog.Error("ai explain: read tenant plan failed", "err", perr, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return sqlc.PlanEntitlement{}, false
-	}
-	ent, eerr := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	if errors.Is(eerr, pgx.ErrNoRows) {
-		// tenant.plan is free text with no FK to plan_entitlement: an unknown
-		// tier falls back to the Free row, the fail-closed answer.
-		slog.Warn("ai explain: plan has no entitlement row, using Free", "plan", plan, "tenant_id", tenantID)
-		ent, eerr = h.pool.Queries().GetPlanEntitlement(ctx, "Free")
-	}
-	if eerr != nil {
-		slog.Error("ai explain: read plan entitlement failed", "err", eerr, "plan", plan, "tenant_id", tenantID)
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return sqlc.PlanEntitlement{}, false
-	}
-	return ent, true
-}
-
-// explainError maps one acct.Explain error to its response and writes it.
-func (h *writeAPI) explainError(w http.ResponseWriter, err error, tenantID int64) {
-	if errors.Is(err, ai.ErrNotConfigured) {
-		writeAPIErrMsg(w, http.StatusServiceUnavailable, "ai_not_configured",
-			h.aiNotConfiguredMsg())
-		return
-	}
-	if errors.Is(err, ai.ErrOverQuota) {
-		writeUpgradeRequired(w, "Your plan's monthly AI-explain quota is used up.", "")
-		return
-	}
-	// The underlying cause must be traceable server-side.
-	slog.Error("ai explain failed", "err", err, "tenant_id", tenantID)
-	writeAPIErr(w, http.StatusInternalServerError, "internal")
-}
-
-// aiNotConfiguredMsg: on a self-host the Settings door accepts a key, so the
-// message names it; hosted tenants get no door that would answer them 404.
-func (h *writeAPI) aiNotConfiguredMsg() string {
-	if h.selfHosted {
-		return "AI is not configured on this instance. Add an OpenAI-compatible API key in Settings."
-	}
-	return "AI explains are not available on this instance."
-}
-
-// explainContext gathers the volatile room facts (services, monitors, open
-// incident). Unhashed on purpose; every source is best-effort.
-func (h *writeAPI) explainContext(ctx context.Context, r *http.Request, tenantID int64) []string {
-	var out []string
-	// Services over the whole visible ring — the selection may come from any
-	// of it — capped because service names are customer-named and unbounded.
-	if rows := h.runServiceRows(ctx, h.logQueryBuilder(ctx, r, tenantID).Services(0)); len(rows) > 0 {
-		names := make([]string, 0, len(rows))
-		for _, row := range rows[:min(len(rows), 10)] {
-			if name, _ := row["name"].(string); name != "" {
-				names = append(names, name)
-			}
-		}
-		if len(names) > 0 {
-			out = append(out, "services in window: "+strings.Join(names, ", "))
-		}
-	}
-	if mons, err := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID); err == nil {
-		for _, m := range mons[:min(len(mons), 10)] {
-			out = append(out, "monitors: "+m.Name+" "+m.Target)
-		}
-	}
-	if incRows, _ := h.pool.Queries().ListIncidentsByTenant(ctx,
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, Limit: 1}); len(incRows) > 0 &&
-		(incRows[0].Status == "down" || incRows[0].Status == "check") {
-		out = append(out, "open incident: "+incRows[0].Title)
-	}
-	return out
-}
-
-// projectMetaLine renders the installer-collected spec as one context entry,
-// omitting fields the spec did not carry.
-func projectMetaLine(meta []byte) string {
-	var spec struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Framework   string `json:"framework"`
-		Runtime     string `json:"runtime"`
-		Language    string `json:"language"`
-	}
-	if json.Unmarshal(meta, &spec) != nil {
-		return ""
-	}
-	head := spec.Name
-	if spec.Description != "" {
-		head += " — " + spec.Description
-	}
-	var parts []string
-	if spec.Framework != "" {
-		parts = append(parts, "framework "+spec.Framework)
-	}
-	if spec.Runtime != "" {
-		parts = append(parts, spec.Runtime)
-	}
-	if spec.Language != "" {
-		parts = append(parts, spec.Language)
-	}
-	if head == "" && len(parts) == 0 {
-		return ""
-	}
-	line := "product: " + head
-	if len(parts) > 0 {
-		line += "; " + strings.Join(parts, "; ")
-	}
-	return line
-}
-
 // tenantPlan reads the tenant's plan name (Free|Indie|Growth|Agency).
 func tenantPlan(ctx context.Context, pool *pg.Pool, tenantID int64) (string, error) {
 	var plan string
@@ -1926,8 +1540,8 @@ func tenantPlan(ctx context.Context, pool *pg.Pool, tenantID int64) (string, err
 
 func (h *writeAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	idStr := pathLast(r.URL.Path)
-	// The public id, like the explain endpoint: `incidentToAPI` only ever
-	// sends the uuid; the serial id never reaches a caller.
+	// The public id: `incidentToAPI` only ever sends the uuid; the serial id
+	// never reaches a caller.
 	var title, status string
 	var affected int
 	if err := h.pool.Raw().QueryRow(r.Context(),
@@ -2354,41 +1968,6 @@ func (h *writeAPI) allowOnce(bucket, ip string, cooldown time.Duration) bool {
 		}
 	}
 	return true
-}
-
-// explainAllow admits or refuses one explain per tenant; refusal returns the
-// Retry-After. The map is lazy: tests build writeAPI by struct literal.
-func (h *writeAPI) explainAllow(tenantID int64) (bool, time.Duration) {
-	h.checkMu.Lock()
-	defer h.checkMu.Unlock()
-	if h.explainSeenAt == nil {
-		h.explainSeenAt = map[int64][]time.Time{}
-	}
-	now := time.Now()
-	slots := h.explainSeenAt[tenantID]
-	kept := slots[:0]
-	for _, t := range slots {
-		if now.Sub(t) < explainWindow {
-			kept = append(kept, t)
-		}
-	}
-	if len(kept) >= explainBurst {
-		h.explainSeenAt[tenantID] = kept
-		// kept is non-empty here and in time order, so kept[0] is the slot
-		// that releases the window first.
-		return false, explainWindow - now.Sub(kept[0])
-	}
-	h.explainSeenAt[tenantID] = append(kept, now)
-	if len(h.explainSeenAt) > 512 { // opportunistic GC keeps the map bounded
-		for id, ts := range h.explainSeenAt {
-			// Slots are appended in time order, so the last one is the newest;
-			// every stored slice is non-empty (both exits above store one).
-			if now.Sub(ts[len(ts)-1]) > 5*time.Minute {
-				delete(h.explainSeenAt, id)
-			}
-		}
-	}
-	return true, 0
 }
 
 // cachedCheck returns a previous answer for this host, if it is still fresh.

@@ -12,9 +12,12 @@ import (
 )
 
 const countProjectsByTenant = `-- name: CountProjectsByTenant :one
+
 SELECT count(*) FROM project WHERE tenant_id = $1
 `
 
+// Project queries: the tenant's projects — the plan-axis count and the list
+// the Projects page renders.
 // The projects plan axis (docs/plans/projects-axis.md): this count against
 // plan_entitlement.projects (NULL = unlimited) is the create/claim gate.
 func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID int64) (int64, error) {
@@ -22,19 +25,6 @@ func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID int64) (in
 	var count int64
 	err := row.Scan(&count)
 	return count, err
-}
-
-const getProjectMeta = `-- name: GetProjectMeta :one
-SELECT meta FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1
-`
-
-// Tenant-scoped like every other project resolver in the app: the explain
-// context reader holds a tenant id, not a project id.
-func (q *Queries) GetProjectMeta(ctx context.Context, tenantID int64) ([]byte, error) {
-	row := q.db.QueryRow(ctx, getProjectMeta, tenantID)
-	var meta []byte
-	err := row.Scan(&meta)
-	return meta, err
 }
 
 const listProjectsByTenant = `-- name: ListProjectsByTenant :many
@@ -72,26 +62,4 @@ func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]L
 		return nil, err
 	}
 	return items, nil
-}
-
-const setProjectMeta = `-- name: SetProjectMeta :exec
-
-UPDATE project SET meta = $3 WHERE id = $1 AND tenant_id = $2
-`
-
-type SetProjectMetaParams struct {
-	ID       int64
-	TenantID int64
-	Meta     []byte
-}
-
-// Project queries: the installer-collected project spec (ai-provider plan,
-// Decision 15b). Lives beside its table, not in ai.sql — the writer is the
-// install endpoint, which has nothing to do with the AI package.
-// Tenant-scoped on purpose: this is the one externally-authenticated project
-// write, and the API-key resolver returns tenant+project from the same row,
-// so the guard costs one predicate and nothing else.
-func (q *Queries) SetProjectMeta(ctx context.Context, arg SetProjectMetaParams) error {
-	_, err := q.db.Exec(ctx, setProjectMeta, arg.ID, arg.TenantID, arg.Meta)
-	return err
 }

@@ -149,14 +149,6 @@ jobs:
           docker run --rm --network host -e PGPASSWORD=upcontrol postgres:18.6 \
             createdb -h 127.0.0.1 -U upcontrol upcontrol_auth
           go test -tags=integration ./internal/account/auth/...
-      - name: ai integration tests (accountant ledger)
-        env:
-          UC_TEST_POSTGRES: >-
-            postgres://upcontrol:upcontrol@localhost:5432/upcontrol_ai?sslmode=disable
-        run: |
-          docker run --rm --network host -e PGPASSWORD=upcontrol postgres:18.6 \
-            createdb -h 127.0.0.1 -U upcontrol upcontrol_ai
-          go test -tags=integration ./internal/ai/...
       - run: make test-contract
 
   front:
@@ -191,7 +183,7 @@ jobs:
           # placeholders — nothing here is a real credential.
           mkdir -p secrets
           for s in pg_password ch_password node_token secret_key_hex \
-                   telegram_bot_token smtp_password ai_api_key; do
+                   telegram_bot_token smtp_password; do
             echo ci-placeholder > "secrets/$s"
           done
           docker compose -f docker-compose.yml config -q

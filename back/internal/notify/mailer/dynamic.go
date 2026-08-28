@@ -26,7 +26,8 @@ func NewDynamic(settings func(context.Context) Config, log *slog.Logger) *dynami
 func (d *dynamic) WithSignInBase(base string) *dynamic { d.base = base; return d }
 
 // Configured reports whether a relay exists right now. The auth handler reads
-// it through an optional interface assertion (the ai.Configured idiom).
+// it through an optional interface assertion: a mailer that cannot answer the
+// question is simply treated as configured.
 func (d *dynamic) Configured(ctx context.Context) bool {
 	return strings.TrimSpace(d.settings(ctx).Host) != ""
 }

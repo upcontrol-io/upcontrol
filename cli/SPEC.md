@@ -636,29 +636,11 @@ ten minutes.**
 4. `SECURITY.md` with the deny-list, the telemetry payload, the scrubbing rules and a vulnerability
    disclosure address.
 5. A paragraph on reverse injection: the agent reads somebody else's logs, which may contain hostile
-   text. This used to say "logs are not fed into the model at any step" — with the arrival of
-   Explain that stopped being true, and the boundary does not run there. What is true now:
-
-   - **Neither ingest, nor the CLI, nor the SDK feed lines into the model.** Ingest, scrubbing and
-     storage do without it; lines are scrubbed before they are written, the key never reaches the
-     model.
-   - **Only the lines a human selected and pressed Explain on go to the model**, and only those —
-     not the whole window, not neighboring projects. With no provider configured anywhere (no
-     `UC_AI_*` in the environment, nothing saved on the Settings screen) Explain is simply off:
-     the endpoint answers 503 `ai_not_configured` and names the fix. There is no fallback answer.
-     The network-free heuristic this paragraph used to describe was removed on 2026-08-20 by owner
-     decision — the guess is the model's or it does not exist, and a canned one signed with the
-     product's name is the worst of both.
-   - **The selected lines are untrusted input and are handled as such.** They travel inside
-     `<log-lines>` markers, the system prompt declares everything inside the markers to be data and
-     not instructions, and any marker met in the lines themselves is neutralized before sending
-     (`ai.UserMessage`) — the fence cannot be closed from the inside.
-   - The model's answer is strict JSON of a fixed shape; it executes nothing and is written nowhere
-     except the answer cache.
-
-   Injection remains a risk of the level "the model may produce a wrong conclusion", not "somebody
-   else's text gains control", and this has to be written down in advance, because an attentive
-   reader will ask.
+   text. **Log lines are not fed into a model at any step.** Not on ingest, not by the CLI, not by
+   the SDK, and not by the product: lines are scrubbed before they are written, stored, and read
+   back by a human. The one model in the picture is the user's own coding agent, running on the
+   user's own machine over the user's own repository — and this has to be written down in advance,
+   because an attentive reader will ask.
 
 ---
 

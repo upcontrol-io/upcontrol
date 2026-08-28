@@ -13,7 +13,6 @@ import (
 
 	"go.upcontrol.io/back/internal/account/auth"
 	"go.upcontrol.io/back/internal/account/session"
-	"go.upcontrol.io/back/internal/ai"
 	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/api"
 	"go.upcontrol.io/back/internal/incident"
@@ -132,13 +131,6 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 			sealFn, openFn = k.Seal, k.Open
 		}
 	}
-	aiSettings := func(c context.Context) ai.OpenAISettings {
-		return ai.OpenAISettings{
-			BaseURL: pgPool.InstanceValue(c, openFn, "ai_base_url", d.Config.AIBaseURL),
-			Model:   pgPool.InstanceValue(c, openFn, "ai_model", d.Config.AIModel),
-			Key:     pgPool.InstanceValue(c, openFn, "ai_api_key", d.Config.AIAPIKey),
-		}
-	}
 	tgToken := func(c context.Context) string {
 		return pgPool.InstanceValue(c, openFn, "telegram_bot_token", d.Config.TelegramBotToken)
 	}
@@ -239,31 +231,12 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// Instance settings (self-host only; the hosted cloud answers 404): the
 	// Settings fields write here, sealed before storage.
 	instSettings := api.NewInstanceSettings(pgPool, sm, d.Config.SelfHosted, sealFn)
-	mux.Handle("PUT /v1/instance/ai", instSettings)
-	mux.Handle("DELETE /v1/instance/ai", instSettings)
 	mux.Handle("PUT /v1/instance/telegram-bot", instSettings)
 	mux.Handle("DELETE /v1/instance/telegram-bot", instSettings)
 	mux.Handle("PUT /v1/instance/smtp", instSettings)
 	mux.Handle("DELETE /v1/instance/smtp", instSettings)
 
-	// Explain has ONE brain, OpenAI-compatible: a Settings-set key wins over
-	// UC_AI_API_KEY; no key anywhere means 503, never a canned fallback.
-	llm := &ai.OpenAIClient{
-		Settings:  aiSettings,
-		Timeout:   d.Config.AITimeout,
-		LogPrompt: d.Config.AILogPrompt,
-	}
-	if bootAI := aiSettings(ctx); bootAI.Key != "" {
-		d.Logger.Info("ai: explain llm active", "llm", "openai-compatible", "model", bootAI.Model, "base_url", bootAI.BaseURL)
-	} else {
-		d.Logger.Info("ai: explain not configured", "hint",
-			"no AI key: paste one in Settings, or provide UC_AI_API_KEY_FILE (secrets/ai_api_key)")
-	}
-	acct := ai.New(pgPool, llm, ai.Prices{
-		InputPer1M:  d.Config.AIInputPricePer1M,
-		OutputPer1M: d.Config.AIOutputPricePer1M,
-	})
-	wa := api.NewWriteAPI(pgPool, chConn, sm, acct, devMode, mail, recorder, d.Config.SelfHosted)
+	wa := api.NewWriteAPI(pgPool, chConn, sm, devMode, mail, recorder, d.Config.SelfHosted)
 	mux.Handle("POST /v1/channels", wa)
 	// The gear's notification settings. The mux route is half the wiring:
 	// without it the PATCH answered 405 with the handler unreachable.
@@ -287,14 +260,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("GET /v1/status-page", wa)
 	mux.Handle("PUT /v1/status-page", wa)
 	mux.Handle("GET /v1/logs", wa)
-	mux.Handle("POST /v1/logs/explain", wa)
-	// The preview composes the same prompt without the model call: dev
-	// observability for the prompt-editing loop.
-	mux.Handle("POST /v1/logs/explain/preview", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
-	// The incident's own explain: the request is just the id. One more
-	// segment and a different method than the GET above: no mux overlap.
-	mux.Handle("POST /v1/incidents/{id}/explain", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)
 	// The projects axis: list/create behind the session door, and the
@@ -304,14 +270,13 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/project/switch", wa)
 
 	// Installer endpoints: anonymous mint is public (throttled); claim needs
-	// a session; status and spec upload authenticate by the project API key.
+	// a session; status authenticates by the project API key.
 	inst := api.NewInstall(pgPool, chConn, sm, d.Config.PublicOrigin, d.Config.SelfHosted)
 	mux.Handle("POST /v1/projects/anonymous", inst)
 	mux.Handle("POST /v1/claim", inst)
 	mux.Handle("GET /v1/install/status", inst)
 	mux.Handle("POST /v1/install/token", inst)
 	mux.Handle("POST /v1/install/redeem", inst)
-	mux.Handle("PUT /v1/project/meta", inst)
 
 	mux.Handle("POST /public/check", wa)
 	mux.Handle("POST /public/watch", wa)

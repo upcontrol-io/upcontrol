@@ -81,7 +81,7 @@ func newProjectsFixture(t *testing.T) *projectsFixture {
 	}
 	f.cookie = &http.Cookie{Name: session.CookieName, Value: token}
 
-	wa := NewWriteAPI(pool, nil, f.sess, nil, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false)
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/projects", wa)
 	mux.Handle("POST /v1/projects", wa)
@@ -344,7 +344,7 @@ func TestCreateProjectProvisionsAndSwitches(t *testing.T) {
 func TestSwitchIsANoOpForASingleUserSession(t *testing.T) {
 	f := newProjectsFixture(t)
 	sm := session.New(f.pool, session.DefaultTTL, nil).WithFixedIdentity(f.personID, f.tenantID)
-	wa := NewWriteAPI(f.pool, nil, sm, nil, false, nil, nil, false)
+	wa := NewWriteAPI(f.pool, nil, sm, false, nil, nil, false)
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/project/switch", wa)
 

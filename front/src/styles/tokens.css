@@ -147,7 +147,6 @@
   /* Tables, code listings, cards and anything with a copy control: wider than a
      paragraph, still capped so it does not sprawl to 1000px on a large screen. */
   --doc-block: 52rem;
-  --measure-answer: 46rem; /* prose measure for AI answers: full-width panels line-wrap past readable */
 
   --leading-body: 1.65;
 

@@ -137,7 +137,7 @@ for s in pg_password ch_password node_token secret_key_hex; do
 		say "secrets/$s: generated"
 	fi
 done
-for s in telegram_bot_token smtp_password ai_api_key; do
+for s in telegram_bot_token smtp_password; do
 	[ -f "secrets/$s" ] || : > "secrets/$s"
 done
 

@@ -1,15 +1,11 @@
 # UpControl
 
-Monitoring that arrives with the "why", not just "down" — uptime checks, application logs and AI incident explanations in one compose file, wired into your app by the coding agent you already use.
+Monitoring that arrives with the "why", not just "down" — uptime checks and application logs in one compose file, wired into your app by the coding agent you already use.
 
 [![CI](https://github.com/upcontrol-io/upcontrol/actions/workflows/ci.yml/badge.svg)](https://github.com/upcontrol-io/upcontrol/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/upcontrol?label=npx%20upcontrol)](https://www.npmjs.com/package/upcontrol)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/upcontrol-io/upcontrol)](https://github.com/upcontrol-io/upcontrol/releases)
-
-<!-- launch-asset: hero GIF — the incident card firing Explain and getting the
-     triage answer. Shot list: docs/launch-assets.md -->
-![UpControl incident explain](docs/assets/hero.gif)
 
 Two things, and neither of them is an afternoon:
 
@@ -33,10 +29,9 @@ cd upcontrol/infra
 ```
 
 Four questions, a few pulled images, and `https://localhost` is a working
-instance: website checks every minute, a log ingest endpoint, Telegram and
-email alerts, and an Explain button that reads an incident's own evidence and
-answers what broke, why, and what to run next. No account with us, no phone
-home — [no telemetry of any kind](#what-this-is-and-is-not).
+instance: website checks every minute, a log ingest endpoint, and Telegram and
+email alerts. No account with us, no phone home — [no telemetry of any
+kind](#what-this-is-and-is-not).
 
 **Requirements:** Docker with Compose v2, 4GB RAM recommended (2GB + active
 swap minimum), 10GB free disk.
@@ -111,13 +106,8 @@ exactly that.
   watched for free on every check — measured uptime, never asserted.
 - **Log ingest** over one HTTP door (`POST /i`, NDJSON): the SDK and CLI wire
   an app up in one command, and a WAL makes the receipt durable.
-- **Incidents with a "why"**: error-rate detection over your own logs,
-  deploys and webhooks correlated onto the timeline, and an **Explain** button
-  whose answer is the model's read of the evidence — labelled as a guess with
-  its confidence, with runnable next steps. Bring your own OpenAI-compatible
-  key (OpenAI, OpenRouter, a local gateway — model and endpoint are yours to
-  pick) and paste it into Settings; without one, Explain says it is off
-  instead of guessing.
+- **Incidents with a "why"**: error-rate detection over your own logs, with
+  deploys and webhooks correlated onto the timeline.
 - **Alerts** to Telegram, email (your SMTP), Slack, Discord or any webhook —
   a channel is a destination, one field to add.
 - **A public status page** per project, with real uptime bars.
@@ -131,7 +121,6 @@ exactly that.
 | --- | --- | --- | --- |
 | Uptime checks | yes | yes | via exporters |
 | Application logs | yes — one ingest endpoint | no | yes — Loki |
-| AI incident explain | yes (bring your own OpenAI-format key) | no | no |
 | Deploy/webhook correlation | yes | no | build it yourself |
 | Setup | one compose file | **one container — lighter than us** | several services + query languages |
 | Status pages | yes | yes | plugins |
@@ -180,7 +169,6 @@ flowchart LR
     UCWORKER["ucworker"] --> PG
     UCWORKER -->|"log detectors, incident lifecycle, rollups"| CH
     UCWORKER -->|"alerts"| CHANNELS["Telegram bot, SMTP email, webhooks"]
-    UCAPI -->|"Explain, only with a configured key"| AI["AI provider"]
 ```
 
 | Component | What it is responsible for |
@@ -193,7 +181,6 @@ flowchart LR
 | ClickHouse | The telemetry store: logs, events, checks; the availability detector reads it on submit, ucworker's detectors read it on their ticker. |
 | SDK / CLI | `npx upcontrol` and `@upcontrol/sdk` (MIT): the installer wires an app up, the SDK's `track()` never throws and never blocks, everything goes to `POST /i` as NDJSON. |
 | Delivery channels | Telegram bot, SMTP email, Slack, Discord, any webhook. A channel is a destination, not a rule engine. |
-| AI provider | Optional and yours: Explain works only when an OpenAI-compatible key is configured; without one it says it is off instead of guessing. |
 
 The full package map, data flows and storage writers live in
 [docs/architecture.md](docs/architecture.md).

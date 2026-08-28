@@ -1,6 +1,6 @@
 # Simplification candidates
 
-Ten places the system could get smaller, ordered by value per unit of risk.
+Twelve places the system could get smaller, ordered by value per unit of risk.
 Each entry says what to cut, what it costs, and — where the honest answer is
 "don't" — why the complexity is load-bearing.
 
@@ -16,15 +16,14 @@ generated, 10.7k front, 2.6k CLI, 1.8k SQL and infra.
 | 2    | One entity: Event, named or derived; drop the dictionary | `normalize` gone, logs-vs-events vocabulary gone | Low    |
 | 3    | Fold ucworker into ucapi                                 | One container, one image, one deploy             | Low    |
 | 4    | Drop the second Caddy                                    | One container                                    | Low    |
-| 5    | Remove the AI Explain feature                            | ~900 lines + a query + UI surface                | Low    |
-| 6    | Decide what analytics is for                             | ~500 lines + a table, or a missing page          | Low    |
-| 7    | Move `discover/` out of `internal/probe/`                | A package filed under the wrong binary           | None   |
-| 8    | Ship the WAL's replay path, or stop fsyncing             | Honesty, or latency                              | Medium |
-| 9    | Postgres by default; drop ClickHouse                     | The 2GB floor, one whole database                | Medium |
-| 10   | Keep: ucprobe as its own binary                          | —                                                | —      |
-| 11   | Store the client's level verbatim + `level_norm`         | Nothing rewritten behind the user's back         | Low    |
-| 12   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | Operator choice on their own box                 | Low    |
-| 13   | Implement fingerprinting (gap, not a cut)                | Error grouping that actually groups              | Medium |
+| 5    | Decide what analytics is for                             | ~500 lines + a table, or a missing page          | Low    |
+| 6    | Move `discover/` out of `internal/probe/`                | A package filed under the wrong binary           | None   |
+| 7    | Ship the WAL's replay path, or stop fsyncing             | Honesty, or latency                              | Medium |
+| 8    | Postgres by default; drop ClickHouse                     | The 2GB floor, one whole database                | Medium |
+| 9    | Keep: ucprobe as its own binary                          | —                                                | —      |
+| 10   | Store the client's level verbatim + `level_norm`         | Nothing rewritten behind the user's back         | Low    |
+| 11   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | Operator choice on their own box                 | Low    |
+| 12   | Implement fingerprinting (gap, not a cut)                | Error grouping that actually groups              | Medium |
 
 Guiding principles for all of these live in [philosophy.md](./internal/philosophy.md).
 
@@ -64,7 +63,7 @@ Decision taken 2026-08-27, refined same day. There is one domain entity:
   declares it; when absent — console mirroring, logger bridges, syslog/Loki/
   OTLP pipes, stack traces, senders with no human at the call site — ingest
   derives it: the message with variable parts masked ("user <n> not found").
-  The fingerprint (item 13) is the hash of that same template; one mechanism.
+  The fingerprint (item 12) is the hash of that same template; one mechanism.
 - `named_by=client` rows are sparse business facts, kept long; they anchor
   the correlation timeline and post-deploy suppression.
 - `named_by=derived` rows are the firehose, 24–48h retention; they feed the
@@ -83,7 +82,7 @@ and the double-write's conceptual weight. Kept as documented convention:
 `detect.go:158`) and the `uc.*` reserved prefix.
 
 **Trade-off:** free-form names mean typos become distinct event types, and
-derived-name quality depends on template masking (see item 13's tuning note).
+derived-name quality depends on template masking (see item 12's tuning note).
 The dictionary's tier-based alert severity is gone; alert rules must name
 events explicitly. Correct trade for a tool whose clients are coding agents
 reading their own names back.
@@ -130,29 +129,7 @@ it's a container for nothing.
 Combined with #3, the compose file goes from 8 services to 5: postgres,
 clickhouse, migrate (one-shot), ucapi, caddy — plus ucprobe where used.
 
-## 5. Remove the AI Explain feature
-
-Decision taken 2026-08-27: drop it entirely, not just the metering.
-
-The core objection: Explain answers from log lines alone — it has no access to
-the source code that produced them. For a shallow error (a connection refused,
-a missing env var) the surrounding lines are often enough; for anything real,
-the answer is a paraphrase of the stack trace the user can already read. The
-value does not cover its footprint.
-
-What goes: `internal/ai` (905 lines — `ai.go` 409 with the per-plan usage
-counter and token-cost recording, `openai.go` 404, `scenario.go` 92), the
-`LatestExplain` query (`ring/query/query.go:293`), the Explain UI
-(`front/src/components/product/ExplainAnswer.tsx` and its call sites), and the
-OpenAI key from configuration and docs.
-
-**Trade-off:** the hosted service loses a paid-tier differentiator, and this is
-the one feature that justified the metering plumbing — removing it makes the
-plan-limits code simpler too. If a future Explain returns with source access
-(e.g. via the CLI's agent skills reading the repo), it should be rebuilt on
-that footing rather than resurrected from this code.
-
-## 6. Decide what analytics is for
+## 5. Decide what analytics is for
 
 `internal/analytics` is a complete first-party web analytics engine — visitor
 IDs via a `uc_vid` cookie, user-agent parsing, GeoIP, UTM capture, IP hashed
@@ -170,7 +147,7 @@ surface, with none of the value.
 different repo, it is not dead and should simply be documented as
 hosted-serving. Confirm before deleting.
 
-## 7. Move `discover/` out of `internal/probe/`
+## 6. Move `discover/` out of `internal/probe/`
 
 `internal/probe/discover` is ~1,000 lines that crawl robots.txt, sitemaps,
 hosts and page links to *suggest what to monitor*. It is filed under
@@ -194,7 +171,7 @@ item in the document and the one most likely to be skipped for being cosmetic;
 it is worth doing precisely because the current layout has already misled at
 least one reader about where the code runs.
 
-## 8. Ship the WAL's replay path, or stop fsyncing
+## 7. Ship the WAL's replay path, or stop fsyncing
 
 `ingest.go:155` appends and fsyncs every accepted batch before returning a
 receipt. The comment directly above it is candid: *"No replay path exists yet;
@@ -211,7 +188,7 @@ more code, which is not what this document is for. Dropping the fsync is the
 simplification, and it costs you the guarantee. Pick deliberately — the one
 thing not to do is keep paying for a guarantee you don't deliver.
 
-## 9. Postgres by default; drop ClickHouse
+## 8. Postgres by default; drop ClickHouse
 
 Decision taken 2026-08-27: Postgres is the storage engine. ClickHouse is at
 minimum optional and OFF by default; the working intent is to remove it
@@ -257,7 +234,7 @@ holding a 2GB RAM floor on every install to be ready for them is the wrong
 default. Removing rather than dual-backing also avoids the worst outcome —
 maintaining two storage backends forever.
 
-## 10. Keep: ucprobe as its own binary
+## 9. Keep: ucprobe as its own binary
 
 Listed so it isn't revisited. The probe leases checks, runs them, submits
 results, and holds no database credentials. That last property is the point: it
@@ -270,10 +247,10 @@ work, submit results, on a loop. "Run periodically and report to the master
 node" is already exactly what it does; RPC is only the name for those two
 calls, and a probe in another region is the same binary at a different address.
 
-The binary is ~610 lines and there is nothing in it to cut. See #7 for the
+The binary is ~610 lines and there is nothing in it to cut. See #6 for the
 package that made it look larger.
 
-## 11. Store the client's level verbatim, normalize into a second column
+## 10. Store the client's level verbatim, normalize into a second column
 
 Decision taken 2026-08-27. Today `normalizeLevel` (`decode.go:190`) rewrites
 whatever the client sent into `info|warn|error|debug|trace`, and anything it
@@ -293,7 +270,7 @@ exists — it has to, because `level = 'error'` filters cannot fuzzy-match at
 read time on every query. What is bought: the user's data is never rewritten,
 only annotated.
 
-## 12. Keep scrubbing, add an off switch
+## 11. Keep scrubbing, add an off switch
 
 Decision taken 2026-08-27. Secret scrubbing (`internal/ingest/scrub`) stays —
 the hosted service cannot store other people's bearer tokens and connection
@@ -317,14 +294,13 @@ server-side so the comment becomes true, behind the same `UC_SCRUB` switch.
 a real but small cost on the hot path; the scrubber is already a single-pass
 matcher built for exactly this.
 
-## 13. Implement fingerprinting — a gap, not a cut
+## 12. Implement fingerprinting — a gap, not a cut
 
 Decision taken 2026-08-27. The `fingerprint` column exists in the schema with
-a bloom-filter index, two queries consume it (`ErrorGroups`,
-`LatestExplain`), and the errorlog detector's new-vs-repeat logic depends on
-it — but nothing on the write path ever computes it, so every row stores 0
-and all error lines collapse into one group whose cooldown suppresses every
-other error in the project.
+a bloom-filter index, `ErrorGroups` consumes it, and the errorlog detector's
+new-vs-repeat logic depends on it — but nothing on the write path ever
+computes it, so every row stores 0 and all error lines collapse into one
+group whose cooldown suppresses every other error in the project.
 
 Implement it at ingest: mask the variable parts of the scrubbed message
 (numbers, hex runs, quoted strings), and that masked template does double

@@ -141,23 +141,6 @@ a[class]:active {
   white-space: nowrap;
 }
 
-/* Text arriving a line at a time: the AI triage read. Stagger with
-   animation-delay; global because modules rewrite foreign keyframes names. */
-@keyframes uc-reveal {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.uc-reveal {
-  animation: uc-reveal var(--duration-disclosure) var(--ease) both;
-}
-
 /* Shared status-dot pulse — used by StatusDot and anything mid-check. */
 @keyframes uc-dot-pulse {
   0%,

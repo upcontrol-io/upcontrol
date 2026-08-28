@@ -11,17 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countAIExplains = `-- name: CountAIExplains :one
-SELECT used FROM ai_usage WHERE tenant_id = $1 AND month = date_trunc('month', now())::date
-`
-
-func (q *Queries) CountAIExplains(ctx context.Context, tenantID int64) (int32, error) {
-	row := q.db.QueryRow(ctx, countAIExplains, tenantID)
-	var used int32
-	err := row.Scan(&used)
-	return used, err
-}
-
 const countMonitors = `-- name: CountMonitors :one
 SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat'
 `
@@ -62,7 +51,7 @@ func (q *Queries) GetAPIKeyForTenant(ctx context.Context, tenantID int64) (GetAP
 }
 
 const getPlanEntitlement = `-- name: GetPlanEntitlement :one
-SELECT plan, http_checks, regions, window_lines, window_hours, retain_mult, ai_explains, incident_days, min_interval_sec, telegram_recipients, projects FROM plan_entitlement WHERE plan = $1
+SELECT plan, http_checks, regions, window_lines, window_hours, retain_mult, incident_days, min_interval_sec, telegram_recipients, projects FROM plan_entitlement WHERE plan = $1
 `
 
 func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEntitlement, error) {
@@ -75,7 +64,6 @@ func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEnti
 		&i.WindowLines,
 		&i.WindowHours,
 		&i.RetainMult,
-		&i.AiExplains,
 		&i.IncidentDays,
 		&i.MinIntervalSec,
 		&i.TelegramRecipients,

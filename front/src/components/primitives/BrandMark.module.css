@@ -53,27 +53,3 @@
   transform-origin: center;
   animation: uc-brand-beat 3.4s ease-in-out infinite;
 }
-
-/* The corner-chase: each corner turns 90ms behind the one before it, a
-   chase not a spin; 4-fold symmetry makes the loop seamless. */
-@keyframes uc-brand-quarter {
-  0%, 14% { transform: rotate(0deg); }
-  48%, 100% { transform: rotate(90deg); }
-}
-
-.chaseCorner {
-  /* view-box, not fill-box: the rotation centre is the mark's (8,8), the
-     same pivot the kit's files set with transform-box: view-box. */
-  transform-box: view-box;
-  transform-origin: 50% 50%;
-  animation: uc-brand-quarter 3s cubic-bezier(0.65, 0, 0.35, 1) infinite;
-}
-.chaseCorner:nth-child(2) { animation-delay: 90ms; }
-.chaseCorner:nth-child(3) { animation-delay: 180ms; }
-.chaseCorner:nth-child(4) { animation-delay: 270ms; }
-
-/* The chase cycle is 3s where the sweep's is 3.4s; the beat keyframes are
-   percentages, so only the duration changes. */
-.chaseSignal {
-  animation-duration: 3s;
-}

@@ -121,15 +121,11 @@ func telegramKeyboard(p AlertPayload, appURL string) [][]map[string]any {
 		})
 	}
 	if !p.Group && strings.HasPrefix(appURL, "https://") {
-		label, query := "Open", ""
-		if p.Detector != "" {
-			label, query = "Explain", "&explain=1"
-		}
 		rows = append(rows, []map[string]any{{
-			"text": label,
+			"text": "Open",
 			// appURL already ends in /app — alertLink builds on the same value.
 			"web_app": map[string]string{
-				"url": appURL + "?incident=" + url.QueryEscape(p.IncidentID) + query,
+				"url": appURL + "?incident=" + url.QueryEscape(p.IncidentID),
 			},
 		}})
 	}

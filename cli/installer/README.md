@@ -10,7 +10,7 @@ npx upcontrol
 [![Works with 10 coding agents](https://img.shields.io/badge/works%20with-10%20coding%20agents-blue)](https://github.com/upcontrol-io/upcontrol/blob/master/cli/installer/src/detect.ts)
 
 One command, for every agent (Claude Code, Cursor, Codex, Gemini CLI, Copilot,
-Windsurf, Amp, Aider, Cline, opencode). It does five deterministic things and
+Windsurf, Amp, Aider, Cline, opencode). It does four deterministic things and
 runs no AI of its own:
 
 1. **Installs the upcontrol skill** into `.claude/skills/` and
@@ -23,14 +23,7 @@ runs no AI of its own:
    cover it, and without ever printing it. Claim the project later (free, same
    key) via the printed link. Already have a key? `--key uc_live_...` or
    `UPCONTROL_API_KEY`.
-4. **Sends a five-field project spec** - `name`, `description`, `framework`,
-   `runtime`, `language`, read from `package.json` and the presence of
-   `tsconfig.json`. Never dependency lists, versions, file paths, git remotes,
-   env values or code. It prints the exact spec before sending it, so what
-   leaves is on your screen; `--no-meta` skips the step entirely. It exists so
-   that when you ask upcontrol to explain a log line, the answer knows what
-   your stack is.
-5. **Verifies.** `npx upcontrol verify` waits until data provably arrives and
+4. **Verifies.** `npx upcontrol verify` waits until data provably arrives and
    names the failure precisely when it does not.
 
 Then talk to your agent in plain language:
@@ -49,13 +42,10 @@ upcontrol for me" works as a single prompt too.
 
 - `npx upcontrol skills` - the reference topics the agent reads
 - `npx upcontrol status` - endpoint, key source, skill freshness, one JSON line
-- `npx upcontrol init --no-meta` - install without sending the project spec
 - Your code never leaves your machine: the CLI talks only to the upcontrol
   API, the intelligence is your own agent, and the SDK sends only what the
-  reviewed log points emit - scrubbed client-side first. What does leave is
-  the five-field spec above (printed before it is sent, skippable) and the log
-  lines your own code emits. Those lines reach a language model only when you
-  select some in the dashboard and press Explain - never on ingest, and never
-  the whole window.
+  reviewed log points emit - scrubbed client-side first. What leaves is the
+  log lines your own code emits, and nothing on our side ever feeds them to a
+  language model.
 
 https://upcontrol.io

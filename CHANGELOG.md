@@ -4,6 +4,31 @@ All notable changes to the self-hosted package. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Removed
+- **AI Explain, in full.** The button that read a log selection or an
+  incident's own evidence and answered what broke is gone from the product,
+  and so is everything behind it: the OpenAI-compatible client, the scenario
+  registry that held every prompt, cap and output contract, the quota
+  accounting and the answer cache. Nothing takes its place — an incident card
+  shows the facts the code computes and stops there.
+- **The Explain endpoints.** `/v1/logs/explain`, `/v1/logs/explain/preview`,
+  `/v1/incidents/{id}/explain`, `/v1/instance/ai` and `PUT /v1/project/meta`
+  are off the contract and unmounted. `npx upcontrol` no longer uploads a
+  project spec, which existed only as context for an explanation.
+- **The AI configuration.** Every `UC_AI_*` variable and the
+  `secrets/ai_api_key` file are gone from the stack, the Settings screen has
+  no AI section left, and the instance settings that section wrote
+  (`ai_api_key`, `ai_model`, `ai_base_url`) are deleted on upgrade.
+- **The Explain tables, destructively.** Migration `027_remove_ai` drops
+  `ai_call`, `ai_explain_cache` and `ai_usage`, and drops the columns
+  `plan_entitlement.ai_explains` and `project.meta`. An operator upgrading
+  loses the stored explain history for good: every cached answer, every
+  ledger row, every quota count. The Down migration recreates the empty
+  shapes so the chain can roll back — it restores no data, and nothing else
+  restores it either.
+
 ## [0.4.0] — 2026-08-26
 
 ### Added

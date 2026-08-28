@@ -637,76 +637,6 @@ components:
           type: string
           description: "The service label. Empty for lines that carried none."
         lines: { type: integer }
-    ExplainResponse:
-      # Triage shape (ai-provider plan decision 5). `fix`/`command` nullables
-      # are that decision's deliberate exception to the "null is never used"
-      # rule above: the triage contract distinguishes "no fix defensible" and
-      # "no runnable command" as facts of the answer, not as absent fields.
-      type: object
-      required: [problem, cause, confidence, fix, investigate, cached, used, limit]
-      properties:
-        problem:
-          type: string
-          description: "What the lines show, as fact — the model's own read, never derived."
-        cause:
-          type: string
-          description: "Best guess at why — graded by `confidence`, never by hedged wording alone."
-        confidence: { type: string, enum: [high, medium, low] }
-        # severity/area are the incident scenario's additions (its prompt asks
-        # for them); the log-selection explain leaves both null. Optional on
-        # purpose: one answer shape serves both scenarios.
-        severity:
-          type: string
-          enum: [critical, major, minor]
-          nullable: true
-          description: "The incident's blast radius graded from the evidence alone. Set only by the incident scenario (POST /v1/incidents/{id}/explain); null from the log-selection explain."
-        area:
-          type: string
-          nullable: true
-          description: "Where the problem lives, in one or two words taken from the input (a service name, API, database). Set only by the incident scenario; null from the log-selection explain."
-        fix:
-          type: string
-          nullable: true
-          description: "A concrete suggested solution, or null when none is defensible from the lines."
-        investigate:
-          type: array
-          description: "1 to 5 ordered next steps."
-          items: { $ref: "#/components/schemas/ExplainStep" }
-        cached: { type: boolean }
-        used: { type: integer, description: "Monthly explain calls used." }
-        limit: { type: integer, description: "Monthly explain quota; 0 = unlimited." }
-        prompt:
-          type: string
-          description: >-
-            Dev observability: the exact user-message bytes sent to the model
-            (the system prompt is static and lives in the scenario registry).
-            Empty string on a cache hit — no call was made.
-    ExplainPreviewResponse:
-      type: object
-      required: [system, user, model, temperature, max_output_tokens]
-      properties:
-        system: { type: string, description: "The scenario's static system prompt (scenario.go)." }
-        user: { type: string, description: "The composed user message: project spec, server context, the log lines." }
-        model:
-          type: string
-          nullable: true
-          description: >-
-            The wired brain's identity — 'openai:<base>:<model>' — or null
-            when no API key is configured anywhere (env or the Settings-set
-            instance key). Null is the client's "Explain is off" fact: the
-            explain endpoints answer 503 ai_not_configured until a key
-            arrives.
-        temperature: { type: number }
-        max_output_tokens: { type: integer }
-    ExplainStep:
-      type: object
-      required: [step, command]
-      properties:
-        step: { type: string }
-        command:
-          type: string
-          nullable: true
-          description: "A runnable command for this step, or null when none exists."
 
     # --- plan ---------------------------------------------------------------
     UsedMax:
@@ -758,10 +688,6 @@ components:
             the upgrade prompt when one is chosen (a paid wall is never a
             disabled control); this number is only how it knows where the wall is.
         httpChecks: { $ref: "#/components/schemas/UsedMax" }
-        aiExplains:
-          description: "Absent on plans with unlimited AI; never null."
-          allOf:
-            - $ref: "#/components/schemas/UsedMax"
         logWindow: { $ref: "#/components/schemas/LogWindow" }
         telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
         beyondWindow:
@@ -1155,20 +1081,6 @@ components:
           properties:
             level: { type: string, enum: [debug, info, warn, error] }
             keep: { type: number, description: "0.0–1.0 fraction to keep." }
-
-    # --- project meta (installer spec) --------------------------------------
-    ProjectMeta:
-      # The installer-collected project spec (ai-provider plan decision 15b):
-      # ONLY these five fields. Never dependency lists, versions, file paths,
-      # git remotes, env values or code — `npx upcontrol init` prints the exact
-      # spec before sending and `--no-meta` skips the upload entirely.
-      type: object
-      properties:
-        name: { type: string, maxLength: 200 }
-        description: { type: string, maxLength: 200 }
-        framework: { type: string, maxLength: 200 }
-        runtime: { type: string, maxLength: 200 }
-        language: { type: string, maxLength: 200 }
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -2016,94 +1928,13 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /v1/incidents/{id}/explain:
-    post:
-      tags: [incidents]
-      summary: >-
-        Explain one incident: the server assembles the evidence (incident
-        facts, timeline, frozen log slice), so the request carries no body.
-        402 routes to the upgrade prompt when over quota.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      responses:
-        "200":
-          description: OK — severity/area are set (non-null) only by this scenario.
-          content:
-            {
-              application/json:
-                { schema: { $ref: "#/components/schemas/ExplainResponse" } },
-            }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "402": { $ref: "#/components/responses/PaymentRequired" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "429": { $ref: "#/components/responses/TooManyRequests" }
-        "503":
-          description: >-
-            ai_not_configured — no API key anywhere (env or the Settings-set
-            instance key). Explain is off, not degraded. On a self-host the
-            message names Settings, the door that accepts a key; on a hosted
-            instance that door is not the caller's to open, so the message
-            states the fact and asks for nothing.
-
-  /v1/instance/ai:
-    put:
-      tags: [instance]
-      summary: >-
-        Self-host only (the hosted cloud answers 404): store the instance's
-        AI settings — API key, model, base URL — each optional, so changing
-        the model never demands re-pasting the key. Values are sealed
-        (AES-256-GCM under UC_SECRET_KEY_HEX) before they land in Postgres
-        and take effect on the next Explain — no restart. Nothing here is
-        ever returned by any endpoint; presence is read through the explain
-        preview's `model`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                key:
-                  type: string
-                  description: >-
-                    An OpenAI-format API key (like sk-...). Any
-                    OpenAI-compatible provider's key works.
-                model:
-                  type: string
-                  description: The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07.
-                baseUrl:
-                  type: string
-                  description: >-
-                    The chat-completions endpoint's base, e.g.
-                    https://api.openai.com/v1 — any OpenAI-compatible proxy
-                    or gateway. Empty keeps the env-configured one.
-      responses:
-        "204": { description: Stored. }
-        "400": { description: invalid_key / invalid_model / invalid_base_url / nothing_to_store — the message names the fix. }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: notify_role — changing the instance's brain is a login-role act. }
-        "404": { description: Not a self-host — this door does not exist on the hosted cloud. }
-        "503": { description: secret_key_missing — no UC_SECRET_KEY_HEX to seal with. }
-    delete:
-      tags: [instance]
-      summary: >-
-        Self-host only: remove every Settings-set AI value. Env config, if
-        any, takes over; otherwise Explain turns off.
-      responses:
-        "204": { description: Removed. }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: notify_role }
-        "404": { description: Not a self-host. }
-
   /v1/instance/telegram-bot:
     put:
       tags: [instance]
       summary: >-
         Self-host only (the hosted cloud answers 404): store the Telegram
-        bot's token and username. Sealed like the AI key. Alerts pick the
+        bot's token and username. Sealed under UC_SECRET_KEY_HEX before it
+        lands in Postgres, and never returned. Alerts pick the
         token up on the next send and the Channels/recipients surfaces
         appear immediately; the bot's /start linking and Mini App sign-in
         bind at boot, so they follow on the next restart.
@@ -2146,7 +1977,7 @@ paths:
       summary: >-
         Self-host only (the hosted cloud answers 404): store the SMTP relay
         for sign-in mail and email alerts. Each field optional — send only
-        what changes — sealed like the AI key, resolved per message, so a
+        what changes — sealed under UC_SECRET_KEY_HEX, resolved per message, so a
         saved relay works with no restart. Values are never returned.
       requestBody:
         required: true
@@ -2268,78 +2099,6 @@ paths:
                 { schema: { $ref: "#/components/schemas/LogsResponse" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/logs/explain/preview:
-    post:
-      tags: [logs]
-      summary: >-
-        The exact prompt a Explain call with these lines would send — composed,
-        not executed. No model call, no quota, no throttle slot. An empty
-        `lines` is valid: Settings calls it that way solely to read `model`,
-        the wired brain's identity (or null, Explain's off-fact).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [lines]
-              properties:
-                lines:
-                  type: array
-                  items: { type: string }
-      responses:
-        "200":
-          description: OK
-          content:
-            {
-              application/json:
-                { schema: { $ref: "#/components/schemas/ExplainPreviewResponse" } },
-            }
-        "400":
-          description: Malformed body, or over the input caps (`input_too_large`) — not an empty selection, which is valid here.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /v1/logs/explain:
-    post:
-      tags: [logs]
-      summary: Explain a log selection. 402 routes to the upgrade prompt when over quota.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [lines]
-              properties:
-                lines:
-                  type: array
-                  items: { type: string }
-      responses:
-        "200":
-          description: OK
-          content:
-            {
-              application/json:
-                { schema: { $ref: "#/components/schemas/ExplainResponse" } },
-            }
-        "400":
-          description: >-
-            Empty selection (`missing_lines`), or over the input caps — more
-            than 100 lines, a line past 2000 bytes, or 32 KiB total
-            (`input_too_large`, message states the caps).
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "402": { $ref: "#/components/responses/PaymentRequired" }
-        "429": { $ref: "#/components/responses/TooManyRequests" }
-        "503":
-          description: >-
-            ai_not_configured — no API key anywhere (env or the Settings-set
-            instance key). Explain is off, not degraded. On a self-host the
-            message names Settings, the door that accepts a key; on a hosted
-            instance that door is not the caller's to open, so the message
-            states the fact and asks for nothing.
 
   /v1/plan:
     get:
@@ -2626,34 +2385,6 @@ paths:
                   key: { type: string, description: Shown exactly once. }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
-
-  /v1/project/meta:
-    put:
-      tags: [install]
-      security:
-        - apiKey: []
-      x-hand-written: true
-      summary: |
-        The installer's project-spec upload (ai-provider plan decision 15b):
-        `npx upcontrol init` PUTs the five optionally-filled fields it printed
-        to stdout, key-authenticated exactly like POST /i. Stored after the
-        ingest scrubber runs over every value and every newline is stripped
-        (the spec renders inside prompt fences); read only as Explain context.
-        Unknown keys are dropped, null fields are rejected as the type error
-        they are, and a value over 200 characters (counted as sent, before
-        redaction expands it) is rejected — never silently truncated. PUT
-        REPLACES the whole spec: a field left out of the body is dropped from
-        storage, so send every field the spec still carries, which is what
-        `init` does on each run.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/ProjectMeta" }
-      responses:
-        "204": { description: Stored }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- hand-written (exist here for /docs/api; implemented by hand) --------
   /i:

@@ -156,28 +156,9 @@ export const logs = (
 	);
 };
 
-/** The triage shape behind Explain: problem as fact, cause as a graded guess. */
-export type ExplainResult = components["schemas"]["ExplainResponse"];
-
-/** The AI read of log lines. With no key configured the server answers
- *  503 ai_not_configured; render its message, which names the right door. */
-export const explainLogs = (lines: string[]) =>
-	fetchJSON<ExplainResult>("/v1/logs/explain", {
-		method: "POST",
-		body: JSON.stringify({ lines }),
-	});
-
 // Write-only by design: values are sealed server-side. Presence is read
-// through explainPreview's `model` and the channels screen's telegram surface.
+// through the channels screen's telegram surface, never read back from here.
 export const instance = {
-	// Each field optional: the server stores only what is sent, so a model
-	// change never demands re-pasting the key.
-	putAI: (values: { key?: string; model?: string; baseUrl?: string }) =>
-		fetchJSON<undefined>("/v1/instance/ai", {
-			method: "PUT",
-			body: JSON.stringify(values),
-		}),
-	deleteAI: () => fetchJSON<undefined>("/v1/instance/ai", { method: "DELETE" }),
 	putTelegramBot: (token: string, username: string) =>
 		fetchJSON<undefined>("/v1/instance/telegram-bot", {
 			method: "PUT",
@@ -190,24 +171,6 @@ export const instance = {
 		}),
 	deleteSMTP: () => fetchJSON<undefined>("/v1/instance/smtp", { method: "DELETE" }),
 };
-
-/** The AI read of one incident. The server assembles the evidence itself, so
- *  only the id travels; only this call sets `severity`/`area`. */
-export const explainIncident = (id: string) =>
-	fetchJSON<ExplainResult>(`/v1/incidents/${id}/explain`, {
-		method: "POST",
-	});
-
-/** The exact prompt Explain would send, composed but never executed; Settings
- *  reads the wired model's identity from the response. */
-export const explainPreview = (lines: string[]) =>
-	fetchJSON<components["schemas"]["ExplainPreviewResponse"]>(
-		"/v1/logs/explain/preview",
-		{
-			method: "POST",
-			body: JSON.stringify({ lines }),
-		},
-	);
 
 export const statusPage = {
 	get: () =>

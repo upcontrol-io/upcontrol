@@ -8,7 +8,6 @@ import {
 	type ReactNode,
 } from "react";
 import {
-	BrandMark,
 	Button,
 	EmptyState,
 	LinkButton,
@@ -17,13 +16,7 @@ import {
 	SkeletonPanel,
 } from "@/components/primitives";
 import { invalidateApiData, useApiData } from "@/lib/useApiData";
-import {
-	explainLogs,
-	logs as logsApi,
-	type ExplainResult,
-} from "@/lib/client";
-import { useScrollIntoView } from "@/lib/useScrollIntoView";
-import { ExplainAnswer } from "./ExplainAnswer";
+import { logs as logsApi } from "@/lib/client";
 import { LogMessage } from "./LogMessage";
 import { LogTimeline, type LogRange } from "./LogTimeline";
 import styles from "./LiveLogsPanel.module.css";
@@ -39,14 +32,6 @@ const LEVEL_OPTIONS = [
 	{ value: "info", label: "Info & debug" },
 ];
 
-/** The server's three input caps, mirrored from scenario.go (ExplainLogs):
- *  a JSON line runs to hundreds of bytes, so bytes bind before line count. */
-const EXPLAIN_MAX_LINES = 100;
-const EXPLAIN_MAX_LINE_BYTES = 2000;
-const EXPLAIN_MAX_TOTAL_BYTES = 32768;
-
-/** The bytes the server counts: UTF-8, not UTF-16 code units. */
-
 /** Roughly how many columns a strip has room for; the server snaps the ask
  *  to a width it can answer, so this is an opening bid. */
 const DETAIL_COLUMNS = 120;
@@ -58,43 +43,6 @@ function detailWidthFor(range: { from: number; to: number } | null): number {
 	const seconds = (range.to - range.from) / 1000;
 	if (seconds <= 0 || seconds > 3600) return 0;
 	return Math.max(1, Math.floor(seconds / DETAIL_COLUMNS));
-}
-
-const wireBytes = (text: string) => new TextEncoder().encode(text).length;
-
-/** The exact string sent per line, and what the caps count: raw server ts
- *  (ISO, not locale-rendered) and service, so the cache identity holds. */
-const wireLine = (line: { ts: string; service?: string; level: string; message: string }) =>
-	`${line.ts} ${line.service ?? "app"} ${line.level} ${line.message}`;
-
-/** The cap this selection breaks, or null when inside all three; the same
- *  arithmetic the handler runs, before any money is spent. */
-function selectionOverCap(lines: readonly string[]): string | null {
-	if (lines.length > EXPLAIN_MAX_LINES) return `max ${EXPLAIN_MAX_LINES} lines`;
-	let total = 0;
-	for (const line of lines) {
-		const bytes = wireBytes(line);
-		if (bytes > EXPLAIN_MAX_LINE_BYTES) return "one line is too long to read";
-		total += bytes;
-	}
-	if (total > EXPLAIN_MAX_TOTAL_BYTES) return "too much text to read at once";
-	return null;
-}
-
-/** The visible errors trimmed to what the server will read: newest lines
- *  kept, an oversized line skipped rather than fatal, output oldest-first. */
-function errorsUnderCaps(newestFirst: readonly string[]): string[] {
-	const kept: string[] = [];
-	let total = 0;
-	for (const line of newestFirst) {
-		if (kept.length === EXPLAIN_MAX_LINES) break;
-		const bytes = wireBytes(line);
-		if (bytes > EXPLAIN_MAX_LINE_BYTES) continue;
-		if (total + bytes > EXPLAIN_MAX_TOTAL_BYTES) break;
-		kept.push(line);
-		total += bytes;
-	}
-	return kept.reverse();
 }
 
 export function LiveLogsPanel() {
@@ -112,9 +60,6 @@ export function LiveLogsPanel() {
 	const cacheKey = filtered
 		? `logs:${[...pickedServices].sort().join(",")}|${[...pickedLevels].sort().join(",")}`
 		: "logs";
-	// The no-selection Explain button's own read (see its useApiData below);
-	// defined beside cacheKey because the range-change effect invalidates both.
-	const errorsKey = `errors:${[...pickedServices].sort().join(",")}`;
 	// The committed range arrives on pointer-up, not per frame, so a drag
 	// re-renders the chart and not this panel's several hundred rows.
 	const [range, setRange] = useState<LogRange | null>(null);
@@ -144,10 +89,8 @@ export function LiveLogsPanel() {
 		if (previous === null || previous.split("|")[0] !== cacheKey) return;
 		if (previous === readSig) return;
 		setAwaiting(true);
-		// Both reads answer for the committed range: the stream, and the
-		// visible errors the no-selection button counts.
-		invalidateApiData(cacheKey, errorsKey);
-	}, [readSig, cacheKey, errorsKey]);
+		invalidateApiData(cacheKey);
+	}, [readSig, cacheKey]);
 	// `loading` is false during a refetch by design ("nothing has answered yet",
 	// not "a request is in flight"), so the answer's arrival is the only signal.
 	useEffect(() => setAwaiting(false), [data]);
@@ -250,82 +193,6 @@ export function LiveLogsPanel() {
 	useEffect(() => {
 		if (data?.services?.length) setServices(data.services);
 	}, [data]);
-
-	// Explain reads the lines the reader picked, not the whole window: the answer
-	// is only as good as the question, and the quota is per read.
-	const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-	const [explaining, setExplaining] = useState(false);
-	const [explanation, setExplanation] = useState<ExplainResult | null>(null);
-	// Kept, not just counted: the context copy pastes the answer beside the
-	// lines it was READ from, so the wire bytes are snapshotted at read time..
-	const [explainedLines, setExplainedLines] = useState<readonly string[]>([]);
-	const [explainError, setExplainError] = useState<string | null>(null);
-	// The answer renders under the button that asked for it, which on a phone is
-	// off-screen — bring it to the reader (same rule as the incident card).
-	const readRef = useScrollIntoView<HTMLDivElement>(explaining || explanation);
-
-	function toggle(seq: string) {
-		setSelected((current) => {
-			const next = new Set(current);
-			if (!next.delete(seq)) next.add(seq);
-			return next;
-		});
-	}
-
-	// Only what is both picked and still on screen: narrowing the range after
-	// selecting must not send the reader's money on lines they can no longer see.
-	const picked = useMemo(
-		() => visible.filter((line) => selected.has(line.seq)),
-		[visible, selected],
-	);
-	// The wire line carries the server's own ts and service (canonical bytes,
-	// the cache identity server-side), oldest-first; built once, counted once..
-	const wire = useMemo(() => picked.map(wireLine), [picked]);
-	// Past any cap the read is a guaranteed 400: the button says so instead of
-	// sending money on a refusal..
-	const overCap = selectionOverCap(wire);
-
-	// The errors behind the no-selection button, keyed by service filter only:
-	// the committed range when drawn, else the server's window.
-	const {
-		data: errorsData,
-		loading: errorsLoading,
-		failed: errorsFailed,
-	} = useApiData(errorsKey, () => logsApi([...pickedServices], ["error"], range));
-	// The count is what will be sent (caps trim from the newest end); pending
-	// or failed, the button is simply not there..
-	const errorsWire = useMemo(() => {
-		if (errorsLoading || errorsFailed || !errorsData) return [];
-		return errorsUnderCaps(errorsData.lines.map(wireLine));
-	}, [errorsData, errorsLoading, errorsFailed]);
-
-	function explain(linesToSend: string[]) {
-		if (linesToSend.length === 0) return;
-		setExplaining(true);
-		setExplanation(null);
-		setExplainedLines(linesToSend);
-		setExplainError(null);
-		void explainLogs(linesToSend)
-			.then((res) => {
-				setExplanation(res);
-				// The read is metered: without re-reading the plan the sidebar's quota
-				// count stays stale until a reload, though the server counted the use..
-				invalidateApiData("plan");
-			})
-			.catch((err: unknown) => {
-				// F12-first: err.message alone hides the HTTP status and any
-				// attached response body, so the console carries the full failure..
-				console.error("explain failed", err);
-				// No upgrade wall here: show the server's own refusal words from
-				// err.message; the machine-generated shapes keep the designed line..
-				const message = err instanceof Error ? err.message : "";
-				const fromServer = message !== "" && !message.startsWith("HTTP ");
-				setExplainError(
-					fromServer ? message : "The read did not come back. Nothing was spent.",
-				);
-			})
-			.finally(() => setExplaining(false));
-	}
 
 	// One head for all three states: the pickers belong to the panel, so a
 	// loading or failed narrow still leaves the reader a way back..
@@ -465,25 +332,14 @@ export function LiveLogsPanel() {
 						{visible.map((line) => (
 							<div
 								key={line.seq}
-								role="checkbox"
-								tabIndex={0}
 								data-loglevel={
 									line.level === "error" || line.level === "warn"
 										? line.level
 										: undefined
 								}
-								aria-checked={selected.has(line.seq)}
-								onClick={() => toggle(line.seq)}
-								onKeyDown={(event) => {
-									if (event.key === "Enter" || event.key === " ") {
-										event.preventDefault();
-										toggle(line.seq);
-									}
-								}}
 								className={[
 									styles.row,
 									line.level === "error" && styles.rowError,
-									selected.has(line.seq) && styles.rowSelected,
 								]
 									.filter(Boolean)
 									.join(" ")}
@@ -521,79 +377,6 @@ export function LiveLogsPanel() {
 					)}
 				</div>
 			)}
-
-			{/* The trigger sits under the stream, beside the lines it will read:
-			    the reader picks rows at the bottom, where a head button is off-screen. */}
-			{picked.length > 0 ? (
-				<div className={styles.selectBar}>
-					<span className={styles.selectCount}>
-						{countOfLines(picked.length)} selected
-						{overCap && (
-							<span className={styles.selectCap}>{overCap}</span>
-						)}
-					</span>
-					<div className={styles.selectActions}>
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => setSelected(new Set())}
-						>
-							Clear
-						</Button>
-						<button
-							type="button"
-							className={styles.explainButton}
-							onClick={() => explain(wire)}
-							disabled={explaining || overCap !== null}
-						>
-							{explaining ? "Reading…" : `Explain ${countOfLines(picked.length)}`}
-						</button>
-					</div>
-				</div>
-			) : (
-				// Nothing picked: the timeline's visible errors answer "what broke?"
-				// through the same read; no errors in view, no button..
-				errorsWire.length > 0 && (
-					<div className={styles.selectBar}>
-						<div className={styles.selectActions}>
-							<button
-								type="button"
-								className={styles.explainButton}
-								onClick={() => explain(errorsWire)}
-								disabled={explaining}
-							>
-								{/* "last N" only when the timeline shows its live tail; a committed
-								    range is a slice of the past, where "last" claims a recency it lacks. */}
-								{explaining
-									? "Reading…"
-									: range
-										? `Explain ${countOfErrors(errorsWire.length)}`
-										: `Explain last ${countOfErrors(errorsWire.length)}`}
-							</button>
-						</div>
-					</div>
-				)
-			)}
-
-			{(explaining || explanation || explainError) && (
-				<div ref={readRef} className={styles.read}>
-					{explaining ? (
-						// The reading mark, centred where the answer will land: the one
-						// exception to "never a spinner", scoped to this state..
-						<div
-							className={styles.readChase}
-							role="status"
-							aria-label="Reading the lines"
-						>
-							<BrandMark variant="chase" size={48} />
-						</div>
-					) : explanation ? (
-						<ExplainAnswer result={explanation} lines={explainedLines} />
-					) : (
-						<p className={styles.readText}>{explainError}</p>
-					)}
-				</div>
-			)}
 		</section>
 	);
 }
@@ -607,11 +390,6 @@ function count(n: number): string {
 /** "1 line" / "23 lines" — narrowing to a service routinely lands on one. */
 function countOfLines(n: number): string {
 	return `${count(n)} ${n === 1 ? "line" : "lines"}`;
-}
-
-/** "1 error" / "23 errors" — the visible-errors count in the no-selection button. */
-function countOfErrors(n: number): string {
-	return `${count(n)} ${n === 1 ? "error" : "errors"}`;
 }
 
 /** HH:MM:SS in the reader's own zone — the API sends RFC 3339 UTC. */

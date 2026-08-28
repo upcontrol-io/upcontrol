@@ -6,9 +6,6 @@ SELECT * FROM plan_entitlement WHERE plan = $1;
 -- one is the number the sidebar and the Plan page print, that one is the gate.
 SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat';
 
--- name: CountAIExplains :one
-SELECT used FROM ai_usage WHERE tenant_id = $1 AND month = date_trunc('month', now())::date;
-
 -- name: GetProjectWindowInfo :one
 SELECT cutoff_seq, retain_seq, window_hours, beyond_errors, computed_at
   FROM project_window WHERE project_id = $1;

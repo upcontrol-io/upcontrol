@@ -40,18 +40,6 @@ type Config struct {
 	SMTPFrom     string
 	SMTPFromName string
 
-	// AI provider behind Explain; with no key anywhere, endpoints answer 503
-	// ai_not_configured (nothing here is required in prod; prices are USD/1M).
-	AIBaseURL          string
-	AIAPIKey           string
-	AIModel            string
-	AITimeout          time.Duration
-	AIInputPricePer1M  float64
-	AIOutputPricePer1M float64
-	// AILogPrompt echoes the full prompt to the log on every call; prod leaves
-	// it off because logs are forever.
-	AILogPrompt bool
-
 	// DetectEnabled gates the ucworker detection job (error-rate incidents);
 	// on by default, UC_DETECT_ENABLED=0 is the kill switch.
 	DetectEnabled bool
@@ -130,11 +118,6 @@ func Load(service string) (Config, error) {
 	c.SMTPFrom = getenv("UC_SMTP_FROM", "")
 	c.SMTPFromName = getenv("UC_SMTP_FROM_NAME", "UpControl")
 
-	c.AIBaseURL = getenv("UC_AI_BASE_URL", "https://api.openai.com/v1")
-	c.AIAPIKey = getenvOrFile("UC_AI_API_KEY", &c.Warnings)
-	c.AIModel = getenv("UC_AI_MODEL", "gpt-5-nano-2025-08-07")
-	c.AITimeout = getenvDuration("UC_AI_TIMEOUT", 60*time.Second, &errs)
-	c.AILogPrompt = os.Getenv("UC_AI_LOG_PROMPT") == "1"
 	c.DetectEnabled = os.Getenv("UC_DETECT_ENABLED") != "0"
 	c.SelfHosted = os.Getenv("UC_SELF_HOSTED") == "1"
 	c.UCAuth = getenv("UC_AUTH", "magic-link")
@@ -144,8 +127,6 @@ func Load(service string) (Config, error) {
 		errs = append(errs, fmt.Sprintf("UC_AUTH: must be magic-link or none (%q)", c.UCAuth))
 	}
 	c.OwnerEmail = getenv("UC_OWNER_EMAIL", "owner@localhost")
-	c.AIInputPricePer1M = getenvFloat("UC_AI_INPUT_PRICE_PER_1M", 0, &errs)
-	c.AIOutputPricePer1M = getenvFloat("UC_AI_OUTPUT_PRICE_PER_1M", 0, &errs)
 
 	c.EmailURL = getenv("UC_EMAIL_URL", "")
 	c.EmailAPIKey = getenvOrFile("UC_EMAIL_API_KEY", &c.Warnings)
@@ -248,19 +229,6 @@ func getenvInt(k string, def int, errs *[]string) int {
 		return def
 	}
 	return n
-}
-
-func getenvFloat(k string, def float64, errs *[]string) float64 {
-	v := os.Getenv(k)
-	if v == "" {
-		return def
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		*errs = append(*errs, fmt.Sprintf("%s: not a float (%q)", k, v))
-		return def
-	}
-	return f
 }
 
 func getenvDuration(k string, def time.Duration, errs *[]string) time.Duration {

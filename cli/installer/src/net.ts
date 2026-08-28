@@ -1,8 +1,6 @@
 // The CLI's API calls. The endpoint default is the product origin; the
 // env var and --endpoint exist for self-hosted stacks and local development.
 
-import type { ProjectSpec } from './meta.js';
-
 const DEFAULT_ENDPOINT = 'https://upcontrol.io';
 export const CLI_VERSION = '0.1.2';
 
@@ -86,28 +84,6 @@ export async function fetchInstallStatus(endpoint: string, key: string): Promise
   }
 }
 
-// Deliberately shorter than the other calls: a black-holed endpoint must not
-// hold init open.
-const META_TIMEOUT_MS = 3_000;
-
-// Best effort by contract: a refused or unreachable upload must never fail
-// the install.
-export async function putProjectMeta(endpoint: string, key: string, spec: ProjectSpec): Promise<void> {
-  try {
-    await request(
-      endpoint + '/v1/project/meta',
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Upcontrol-Key': key },
-        body: JSON.stringify(spec),
-      },
-      META_TIMEOUT_MS,
-    );
-  } catch {
-    /* best effort */
-  }
-}
-
 // One answer, body already consumed: a live Response can be dropped unread,
 // which leaks an undici handle and aborts the process during teardown.
 interface HttpAnswer {
@@ -116,9 +92,12 @@ interface HttpAnswer {
   text: string;
 }
 
-async function request(url: string, init: RequestInit, timeoutMs = 10_000): Promise<HttpAnswer> {
+// One timeout for every call: init, status and redeem all wait the same.
+const TIMEOUT_MS = 10_000;
+
+async function request(url: string, init: RequestInit): Promise<HttpAnswer> {
   const ctrl = new AbortController();
-  const kill = setTimeout(() => ctrl.abort(), timeoutMs);
+  const kill = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   (kill as { unref?: () => void }).unref?.();
   try {
     const res = await fetch(url, {

@@ -464,7 +464,7 @@ func writeAPIErr(w http.ResponseWriter, code int, msg string) {
 }
 
 // writeAPIErrMsg is writeAPIErr with the human message the Error schema marks
-// required beside code (the explain 400/429).
+// required beside code.
 func writeAPIErrMsg(w http.ResponseWriter, code int, errCode, msg string) {
 	writeAPIJSON(w, code, map[string]any{
 		"error": map[string]string{"code": errCode, "message": msg},

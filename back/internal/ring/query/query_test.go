@@ -237,17 +237,6 @@ func TestBeyondErrors_CountsOnlyTheDisplacedTail(t *testing.T) {
 	assertArgsHave(t, got.Args, int64(3), int64(4), int64(100), int64(900))
 }
 
-func TestLatestExplain_StaysInsideTheWindow(t *testing.T) {
-	// The AI read is sold as "your last N lines"; reading below the cutoff
-	// would hand the model lines the account can no longer see.
-	q := New(5, 6, 777)
-	got := q.LatestExplain(20)
-	if !contains(got.SQL, "seq >= ?") || !contains(got.SQL, "LIMIT 20") {
-		t.Fatalf("LatestExplain must scope to the cutoff and limit; got:\n%s", got.SQL)
-	}
-	assertArgsHave(t, got.Args, int64(5), int64(6), int64(777))
-}
-
 func TestCutoffSeq_IsReportedAsBuilt(t *testing.T) {
 	// /v1/plan reports this number to the account; it must be the same boundary
 	// the queries use, not a recomputed one.

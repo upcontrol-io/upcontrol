@@ -1,8 +1,9 @@
 // The projects plan axis (docs/plans/projects-axis.md): Free 1, Indie 2,
 // Growth 5, Agency 10 projects in the one tenant a person has; Self-hosted's
-// NULL row means unlimited, the ai_explains contract. The gate and the
-// upgrade hint live here so claim, create and the watch door read the same
-// ladder, and the ladder reads the entitlement table, never this file.
+// NULL row means unlimited, the same contract telegram_recipients carries.
+// The gate and the upgrade hint live here so claim, create and the watch door
+// read the same ladder, and the ladder reads the entitlement table, never this
+// file.
 
 package api
 

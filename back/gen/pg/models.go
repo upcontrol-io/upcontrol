@@ -8,31 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type AiCall struct {
-	ID               int64
-	TenantID         int64
-	Scenario         string
-	Model            string
-	PromptTokens     int64
-	CompletionTokens int64
-	CreatedAt        pgtype.Timestamptz
-}
-
-type AiExplainCache struct {
-	TenantID  int64
-	InputHash []byte
-	Text      string
-	CreatedAt pgtype.Timestamptz
-}
-
-type AiUsage struct {
-	TenantID         int64
-	Month            pgtype.Date
-	Used             int32
-	PromptTokens     int64
-	CompletionTokens int64
-}
-
 type AlertChannel struct {
 	ID                int64
 	PublicID          pgtype.UUID
@@ -243,7 +218,6 @@ type PlanEntitlement struct {
 	WindowLines        int64
 	WindowHours        int32
 	RetainMult         pgtype.Numeric
-	AiExplains         *int32
 	IncidentDays       int32
 	MinIntervalSec     int32
 	TelegramRecipients int32
@@ -263,7 +237,6 @@ type Project struct {
 	TenantID  int64
 	Domain    string
 	CreatedAt pgtype.Timestamptz
-	Meta      []byte
 }
 
 type ProjectSeq struct {

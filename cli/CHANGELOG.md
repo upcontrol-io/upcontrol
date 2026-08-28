@@ -12,6 +12,14 @@ deploy is rolled back, a bad published version is on other people's machines).
   land, and the `key.note` line says exactly what to fix. An agent that read
   `"success": true` while the key never arrived wired an app that silently
   sent nothing — the one defect a monitoring tool may not have.
+- `init` no longer collects or sends a project spec, and `--no-meta` is gone
+  with it. The five-field upload existed for exactly one reader — the Explain
+  prompt, so that an answer about a log line knew the stack it came from —
+  and Explain has been removed from the product, endpoint included: there is
+  no `PUT /v1/project/meta` on a current server. The upload was best effort
+  by contract (a refused or unreachable PUT never failed an install), so an
+  older installer pointed at a current server keeps working exactly as
+  before; its spec is simply ignored.
 
 ## 2026-08-17 — upcontrol 0.1.2
 

@@ -1544,162 +1544,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/incidents/{id}/explain": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Explain one incident: the server assembles the evidence (incident facts, timeline, frozen log slice), so the request carries no body. 402 routes to the upgrade prompt when over quota. */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK — severity/area are set (non-null) only by this scenario. */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ExplainResponse"];
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                402: components["responses"]["PaymentRequired"];
-                404: components["responses"]["NotFound"];
-                429: components["responses"]["TooManyRequests"];
-                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded. On a self-host the message names Settings, the door that accepts a key; on a hosted instance that door is not the caller's to open, so the message states the fact and asks for nothing. */
-                503: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/instance/ai": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Self-host only (the hosted cloud answers 404): store the instance's AI settings — API key, model, base URL — each optional, so changing the model never demands re-pasting the key. Values are sealed (AES-256-GCM under UC_SECRET_KEY_HEX) before they land in Postgres and take effect on the next Explain — no restart. Nothing here is ever returned by any endpoint; presence is read through the explain preview's `model`. */
-        put: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        /** @description An OpenAI-format API key (like sk-...). Any OpenAI-compatible provider's key works. */
-                        key?: string;
-                        /** @description The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07. */
-                        model?: string;
-                        /** @description The chat-completions endpoint's base, e.g. https://api.openai.com/v1 — any OpenAI-compatible proxy or gateway. Empty keeps the env-configured one. */
-                        baseUrl?: string;
-                    };
-                };
-            };
-            responses: {
-                /** @description Stored. */
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description invalid_key / invalid_model / invalid_base_url / nothing_to_store — the message names the fix. */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                401: components["responses"]["Unauthorized"];
-                /** @description notify_role — changing the instance's brain is a login-role act. */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Not a self-host — this door does not exist on the hosted cloud. */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description secret_key_missing — no UC_SECRET_KEY_HEX to seal with. */
-                503: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        post?: never;
-        /** Self-host only: remove every Settings-set AI value. Env config, if any, takes over; otherwise Explain turns off. */
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Removed. */
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                401: components["responses"]["Unauthorized"];
-                /** @description notify_role */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description Not a self-host. */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/instance/telegram-bot": {
         parameters: {
             query?: never;
@@ -1708,7 +1552,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Self-host only (the hosted cloud answers 404): store the Telegram bot's token and username. Sealed like the AI key. Alerts pick the token up on the next send and the Channels/recipients surfaces appear immediately; the bot's /start linking and Mini App sign-in bind at boot, so they follow on the next restart. */
+        /** Self-host only (the hosted cloud answers 404): store the Telegram bot's token and username. Sealed under UC_SECRET_KEY_HEX before it lands in Postgres, and never returned. Alerts pick the token up on the next send and the Channels/recipients surfaces appear immediately; the bot's /start linking and Mini App sign-in bind at boot, so they follow on the next restart. */
         put: {
             parameters: {
                 query?: never;
@@ -1813,7 +1657,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Self-host only (the hosted cloud answers 404): store the SMTP relay for sign-in mail and email alerts. Each field optional — send only what changes — sealed like the AI key, resolved per message, so a saved relay works with no restart. Values are never returned. */
+        /** Self-host only (the hosted cloud answers 404): store the SMTP relay for sign-in mail and email alerts. Each field optional — send only what changes — sealed under UC_SECRET_KEY_HEX, resolved per message, so a saved relay works with no restart. Values are never returned. */
         put: {
             parameters: {
                 query?: never;
@@ -1961,116 +1805,6 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/logs/explain/preview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** The exact prompt a Explain call with these lines would send — composed, not executed. No model call, no quota, no throttle slot. An empty `lines` is valid: Settings calls it that way solely to read `model`, the wired brain's identity (or null, Explain's off-fact). */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        lines: string[];
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ExplainPreviewResponse"];
-                    };
-                };
-                /** @description Malformed body, or over the input caps (`input_too_large`) — not an empty selection, which is valid here. */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/logs/explain": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Explain a log selection. 402 routes to the upgrade prompt when over quota. */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        lines: string[];
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ExplainResponse"];
-                    };
-                };
-                /** @description Empty selection (`missing_lines`), or over the input caps — more than 100 lines, a line past 2000 bytes, or 32 KiB total (`input_too_large`, message states the caps). */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                401: components["responses"]["Unauthorized"];
-                402: components["responses"]["PaymentRequired"];
-                429: components["responses"]["TooManyRequests"];
-                /** @description ai_not_configured — no API key anywhere (env or the Settings-set instance key). Explain is off, not degraded. On a self-host the message names Settings, the door that accepts a key; on a hosted instance that door is not the caller's to open, so the message states the fact and asks for nothing. */
-                503: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
         delete?: never;
         options?: never;
         head?: never;
@@ -2563,58 +2297,6 @@ export interface paths {
                 429: components["responses"]["TooManyRequests"];
             };
         };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/project/meta": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * The installer's project-spec upload (ai-provider plan decision 15b):
-         *     `npx upcontrol init` PUTs the five optionally-filled fields it printed
-         *     to stdout, key-authenticated exactly like POST /i. Stored after the
-         *     ingest scrubber runs over every value and every newline is stripped
-         *     (the spec renders inside prompt fences); read only as Explain context.
-         *     Unknown keys are dropped, null fields are rejected as the type error
-         *     they are, and a value over 200 characters (counted as sent, before
-         *     redaction expands it) is rejected — never silently truncated. PUT
-         *     REPLACES the whole spec: a field left out of the body is dropped from
-         *     storage, so send every field the spec still carries, which is what
-         *     `init` does on each run.
-         */
-        put: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": components["schemas"]["ProjectMeta"];
-                };
-            };
-            responses: {
-                /** @description Stored */
-                204: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                400: components["responses"]["BadRequest"];
-                401: components["responses"]["Unauthorized"];
-            };
-        };
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3152,47 +2834,6 @@ export interface components {
             name: string;
             lines: number;
         };
-        ExplainResponse: {
-            /** @description What the lines show, as fact — the model's own read, never derived. */
-            problem: string;
-            /** @description Best guess at why — graded by `confidence`, never by hedged wording alone. */
-            cause: string;
-            /** @enum {string} */
-            confidence: "high" | "medium" | "low";
-            /**
-             * @description The incident's blast radius graded from the evidence alone. Set only by the incident scenario (POST /v1/incidents/{id}/explain); null from the log-selection explain.
-             * @enum {string|null}
-             */
-            severity?: "critical" | "major" | "minor" | null;
-            /** @description Where the problem lives, in one or two words taken from the input (a service name, API, database). Set only by the incident scenario; null from the log-selection explain. */
-            area?: string | null;
-            /** @description A concrete suggested solution, or null when none is defensible from the lines. */
-            fix: string | null;
-            /** @description 1 to 5 ordered next steps. */
-            investigate: components["schemas"]["ExplainStep"][];
-            cached: boolean;
-            /** @description Monthly explain calls used. */
-            used: number;
-            /** @description Monthly explain quota; 0 = unlimited. */
-            limit: number;
-            /** @description Dev observability: the exact user-message bytes sent to the model (the system prompt is static and lives in the scenario registry). Empty string on a cache hit — no call was made. */
-            prompt?: string;
-        };
-        ExplainPreviewResponse: {
-            /** @description The scenario's static system prompt (scenario.go). */
-            system: string;
-            /** @description The composed user message: project spec, server context, the log lines. */
-            user: string;
-            /** @description The wired brain's identity — 'openai:<base>:<model>' — or null when no API key is configured anywhere (env or the Settings-set instance key). Null is the client's "Explain is off" fact: the explain endpoints answer 503 ai_not_configured until a key arrives. */
-            model: string | null;
-            temperature: number;
-            max_output_tokens: number;
-        };
-        ExplainStep: {
-            step: string;
-            /** @description A runnable command for this step, or null when none exists. */
-            command: string | null;
-        };
         UsedMax: {
             used: number;
             max: number;
@@ -3215,8 +2856,6 @@ export interface components {
              */
             minIntervalSec?: number;
             httpChecks: components["schemas"]["UsedMax"];
-            /** @description Absent on plans with unlimited AI; never null. */
-            aiExplains?: components["schemas"]["UsedMax"];
             logWindow: components["schemas"]["LogWindow"];
             telegramRecipients?: components["schemas"]["UsedMax"];
             /** @description Absent when there are zero errors beyond the window. */
@@ -3438,13 +3077,6 @@ export interface components {
                 /** @description 0.0–1.0 fraction to keep. */
                 keep: number;
             };
-        };
-        ProjectMeta: {
-            name?: string;
-            description?: string;
-            framework?: string;
-            runtime?: string;
-            language?: string;
         };
     };
     responses: {

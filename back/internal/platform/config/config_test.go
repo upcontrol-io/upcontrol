@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestSecretKeyFromHexRejects(t *testing.T) {
@@ -161,123 +160,6 @@ func TestGetenvOrFileWarnsOnEveryReadFailure(t *testing.T) {
 	}
 	if len(warns) != 2 {
 		t.Fatalf("missing file should also warn, got %v", warns)
-	}
-}
-
-func TestLoadAIKeyFromFile(t *testing.T) {
-	t.Setenv("UC_ENVIRONMENT", "dev")
-	_ = os.Unsetenv("UC_AI_API_KEY")
-	tf, err := os.CreateTemp("", "aikey")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(tf.Name()) })
-	if _, err := tf.WriteString("  sk-fromfile\n"); err != nil {
-		t.Fatal(err)
-	}
-	if err := tf.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("UC_AI_API_KEY_FILE", tf.Name())
-	c, err := Load("ucapi")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.AIAPIKey != "sk-fromfile" {
-		t.Errorf("AIAPIKey = %q, want sk-fromfile", c.AIAPIKey)
-	}
-	if len(c.Warnings) != 0 {
-		t.Errorf("readable key file should not warn, got %v", c.Warnings)
-	}
-
-	// The direct var beats the file.
-	t.Setenv("UC_AI_API_KEY", "sk-direct")
-	c, err = Load("ucapi")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.AIAPIKey != "sk-direct" {
-		t.Errorf("AIAPIKey = %q, want sk-direct", c.AIAPIKey)
-	}
-}
-
-func TestLoadAIDefaults(t *testing.T) {
-	// No AI vars set: every field falls back, and an absent key is not a
-	// boot error — Explain simply stays off until a key arrives.
-	t.Setenv("UC_ENVIRONMENT", "dev")
-	for _, k := range []string{
-		"UC_AI_BASE_URL", "UC_AI_API_KEY", "UC_AI_API_KEY_FILE",
-		"UC_AI_MODEL", "UC_AI_TIMEOUT",
-		"UC_AI_INPUT_PRICE_PER_1M", "UC_AI_OUTPUT_PRICE_PER_1M",
-	} {
-		_ = os.Unsetenv(k)
-	}
-	c, err := Load("ucapi")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.AIBaseURL != "https://api.openai.com/v1" {
-		t.Errorf("AIBaseURL = %q, want default", c.AIBaseURL)
-	}
-	if c.AIAPIKey != "" {
-		t.Errorf("AIAPIKey = %q, want empty", c.AIAPIKey)
-	}
-	if c.AIModel != "gpt-5-nano-2025-08-07" {
-		t.Errorf("AIModel = %q, want default", c.AIModel)
-	}
-	if c.AITimeout != 60*time.Second {
-		t.Errorf("AITimeout = %v, want 60s", c.AITimeout)
-	}
-	if c.AIInputPricePer1M != 0 || c.AIOutputPricePer1M != 0 {
-		t.Errorf("prices = %v/%v, want 0/0", c.AIInputPricePer1M, c.AIOutputPricePer1M)
-	}
-}
-
-func TestLoadAIValues(t *testing.T) {
-	t.Setenv("UC_ENVIRONMENT", "dev")
-	t.Setenv("UC_AI_BASE_URL", "https://gw.internal/v1")
-	t.Setenv("UC_AI_API_KEY", "sk-test")
-	t.Setenv("UC_AI_MODEL", "gpt-4o")
-	t.Setenv("UC_AI_TIMEOUT", "90s")
-	t.Setenv("UC_AI_INPUT_PRICE_PER_1M", "0.15")
-	t.Setenv("UC_AI_OUTPUT_PRICE_PER_1M", "0.6")
-	c, err := Load("ucapi")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.AIBaseURL != "https://gw.internal/v1" {
-		t.Errorf("AIBaseURL = %q", c.AIBaseURL)
-	}
-	if c.AIAPIKey != "sk-test" {
-		t.Errorf("AIAPIKey = %q", c.AIAPIKey)
-	}
-	if c.AIModel != "gpt-4o" {
-		t.Errorf("AIModel = %q", c.AIModel)
-	}
-	if c.AITimeout != 90*time.Second {
-		t.Errorf("AITimeout = %v, want 90s", c.AITimeout)
-	}
-	if c.AIInputPricePer1M != 0.15 || c.AIOutputPricePer1M != 0.6 {
-		t.Errorf("prices = %v/%v, want 0.15/0.6", c.AIInputPricePer1M, c.AIOutputPricePer1M)
-	}
-}
-
-func TestLoadAIBadValuesFailLoud(t *testing.T) {
-	// A malformed price or duration must surface in Load's aggregated error,
-	// not silently price every call at $0.
-	t.Setenv("UC_ENVIRONMENT", "dev")
-	t.Setenv("UC_AI_INPUT_PRICE_PER_1M", "0,60") // comma decimal, a realistic paste
-	_, err := Load("ucapi")
-	if err == nil || !contains(err.Error(), "UC_AI_INPUT_PRICE_PER_1M") {
-		t.Fatalf("expected UC_AI_INPUT_PRICE_PER_1M error, got %v", err)
-	}
-
-	t.Setenv("UC_AI_INPUT_PRICE_PER_1M", "0.15")
-	t.Setenv("UC_AI_TIMEOUT", "soon")
-	_, err = Load("ucapi")
-	if err == nil || !contains(err.Error(), "UC_AI_TIMEOUT") {
-		t.Fatalf("expected UC_AI_TIMEOUT error, got %v", err)
 	}
 }
 

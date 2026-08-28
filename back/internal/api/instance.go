@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -42,9 +41,6 @@ func validRelayHost(s string) bool {
 }
 
 const (
-	aiKeySetting      = "ai_api_key"
-	aiModelSetting    = "ai_model"
-	aiBaseURLSetting  = "ai_base_url"
 	tgTokenSetting    = "telegram_bot_token"
 	tgUsernameSetting = "telegram_bot_username"
 	smtpHostSetting   = "smtp_host"
@@ -78,60 +74,14 @@ func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// Changing the instance's brain is a settings act, not a notify-role one.
+	// Changing how the instance talks to the world is a settings act, not a
+	// notify-role one.
 	if !roleAtLeastLogin(ctx, h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
 
 	switch {
-	case r.URL.Path == "/v1/instance/ai" && r.Method == http.MethodPut:
-		// All three knobs optional, so a model change never demands re-pasting
-		// the key; DELETE resets the lot to env config.
-		var req struct {
-			Key     string `json:"key"`
-			Model   string `json:"model"`
-			BaseURL string `json:"baseUrl"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil {
-			writeAPIErr(w, http.StatusBadRequest, "bad_json")
-			return
-		}
-		values := map[string]string{}
-		if key := strings.TrimSpace(req.Key); key != "" {
-			if len(key) < 8 || len(key) > 512 || strings.ContainsAny(key, " \t\r\n") {
-				writeAPIErrMsg(w, http.StatusBadRequest, "invalid_key",
-					"Paste an OpenAI-format API key (like sk-...). Any OpenAI-compatible provider's key works.")
-				return
-			}
-			values[aiKeySetting] = key
-		}
-		if model := strings.TrimSpace(req.Model); model != "" {
-			if len(model) > 128 || strings.ContainsAny(model, " \t\r\n") {
-				writeAPIErrMsg(w, http.StatusBadRequest, "invalid_model",
-					"The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07.")
-				return
-			}
-			values[aiModelSetting] = model
-		}
-		if base := strings.TrimSpace(req.BaseURL); base != "" {
-			u, uerr := url.Parse(base)
-			if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || len(base) > 512 {
-				writeAPIErrMsg(w, http.StatusBadRequest, "invalid_base_url",
-					"A full URL like https://api.openai.com/v1 — any OpenAI-compatible proxy or gateway.")
-				return
-			}
-			values[aiBaseURLSetting] = base
-		}
-		if len(values) == 0 {
-			writeAPIErrMsg(w, http.StatusBadRequest, "nothing_to_store",
-				"Send at least one of key, model, baseUrl.")
-			return
-		}
-		h.store(w, ctx, values)
-	case r.URL.Path == "/v1/instance/ai" && r.Method == http.MethodDelete:
-		h.remove(w, ctx, aiKeySetting, aiModelSetting, aiBaseURLSetting)
-
 	case r.URL.Path == "/v1/instance/telegram-bot" && r.Method == http.MethodPut:
 		var req struct {
 			Token    string `json:"token"`
@@ -160,8 +110,9 @@ func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.remove(w, ctx, tgTokenSetting, tgUsernameSetting)
 
 	case r.URL.Path == "/v1/instance/smtp" && r.Method == http.MethodPut:
-		// The relay for sign-in mail and alerts. Each field optional, as the
-		// AI door; DELETE resets the lot to UC_SMTP_*.
+		// The relay for sign-in mail and alerts. Each field is optional, so one
+		// change never demands re-pasting the rest; DELETE resets the lot to
+		// UC_SMTP_*.
 		var req struct {
 			Host     string `json:"host"`
 			Port     string `json:"port"`

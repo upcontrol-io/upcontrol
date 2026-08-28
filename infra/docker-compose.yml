@@ -160,13 +160,6 @@ services:
       # Both empty = the app offers no Telegram destination at all.
       UC_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
       UC_TELEGRAM_BOT_USERNAME: ${UC_TELEGRAM_BOT_USERNAME:-}
-      # AI provider behind Explain (optional, OpenAI-format). No key = Explain
-      # is off; the app's Settings screen also takes key, model and base URL
-      # at runtime — those win over the values here.
-      UC_AI_API_KEY_FILE: /run/secrets/ai_api_key
-      UC_AI_BASE_URL: ${UC_AI_BASE_URL:-https://api.openai.com/v1}
-      UC_AI_MODEL: ${UC_AI_MODEL:-gpt-5-nano-2025-08-07}
-      UC_AI_TIMEOUT: ${UC_AI_TIMEOUT:-60s}
       UC_PUBLIC_ORIGIN: ${UC_PUBLIC_ORIGIN:-http://localhost}
     depends_on:
       postgres:
@@ -182,7 +175,6 @@ services:
       - secret_key_hex
       - telegram_bot_token
       - smtp_password
-      - ai_api_key
 
   ucworker:
     image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
@@ -300,7 +292,3 @@ secrets:
   # Optional: an empty file means "no SMTP password" (e.g. an open relay).
   smtp_password:
     file: ./secrets/smtp_password
-  # Optional: an empty file means "no AI provider key" — Explain stays off
-  # until one arrives here or through the app's Settings screen.
-  ai_api_key:
-    file: ./secrets/ai_api_key

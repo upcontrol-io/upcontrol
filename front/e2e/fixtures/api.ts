@@ -209,17 +209,6 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 		}),
 	);
 	await page.route("**/v1/logs", (route) => json(route, LOGS));
-	await page.route("**/v1/logs/explain/preview", (route) =>
-		json(route, {
-			system: "",
-			user: "",
-			// A configured brain by default; `model: null` is the Explain-off
-			// state a spec opts into by re-routing this endpoint.
-			model: "openai:https://api.openai.com/v1:gpt-4o-mini",
-			temperature: 0,
-			max_output_tokens: 0,
-		}),
-	);
 	await page.route("**/v1/status-page", (route) => {
 		if (route.request().method() === "PUT") {
 			const body = parseBody(route);

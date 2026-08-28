@@ -9,7 +9,7 @@ import { incidents as incidentsApi } from '@/lib/client';
 import styles from './Incidents.module.css';
 
 /** The incident history: latest 20, newest first (the contract has no
- *  pagination); a row opens the full card with timeline, slice, Explain. */
+ *  pagination); a row opens the full card with its timeline and log slice. */
 export function Incidents() {
 	const { loading, failed, data } = useApiData('incidents', () => incidentsApi());
 	const items = (data as { items: Incident[] } | undefined)?.items ?? [];

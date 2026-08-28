@@ -289,15 +289,3 @@ func (q *QueryBuilder) RecentEvents(window time.Duration, limit int) LogQuery {
 		Args: []any{q.tenantID, q.projectID, q.cutoffSeq, time.Now().UTC().Add(-window)},
 	}
 }
-
-// LatestExplain fetches the lines around an error fingerprint for the AI explain
-// feature. The caller passes the fingerprint from the incident card.
-func (q *QueryBuilder) LatestExplain(limit int) LogQuery {
-	return LogQuery{
-		SQL: fmt.Sprintf(
-			"SELECT ts, level, service, message FROM logs "+
-				"WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
-				"ORDER BY ts DESC LIMIT %d", limit),
-		Args: []any{q.tenantID, q.projectID, q.cutoffSeq},
-	}
-}

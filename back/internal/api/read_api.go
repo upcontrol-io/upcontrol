@@ -86,11 +86,6 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 		// are measured here, never hardcoded client-side.
 		"telegramRecipients": map[string]int{"used": tgUsed, "max": tgMax},
 	}
-	// aiExplains: absent on unlimited plans.
-	if ent.AiExplains != nil {
-		aiUsed, _ := h.pool.Queries().CountAIExplains(ctx, tenantID)
-		resp["aiExplains"] = map[string]int{"used": int(aiUsed), "max": int(*ent.AiExplains)}
-	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 

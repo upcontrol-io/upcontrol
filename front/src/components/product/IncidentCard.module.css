@@ -217,41 +217,8 @@
   border-top: 1px solid var(--line);
 }
 
-/* Triage — facts first (always true), guess last and labelled. */
-.triage {
-  padding: 14px var(--pad);
-  border-top: 1px solid var(--line);
-  background: var(--bg-sunken);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  /* useScrollIntoView brings this panel up when it appears; the margins are what
-     stop it landing under the sticky header or behind the floating tab bar. */
-  scroll-margin-top: calc(var(--header-h) + var(--space-3));
-  /* The bar is inset by the home-indicator too, so the clearance counts it
-     or the panel is short by the inset on a real iPhone. */
-  scroll-margin-bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom, 0px) + var(--space-3));
-}
-
-/* The panel is the model's answer, rendered by ExplainAnswer with its own
-   type scale and copy pair. */
-
-.triageBody {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.triageGuess {
-  display: block;
-  font-size: var(--text-xs);
-  line-height: 1.55;
-  color: var(--text-muted);
-}
-
-
 /* The one wall a card state may carry: a muted fact with a door, never a
-   banner; the quiet footer inside triage, the closer as .expiryRow. */
+   banner; the card's closer, framed as .expiryRow. */
 .wallRow {
   display: flex;
   flex-wrap: wrap;
@@ -359,14 +326,4 @@
   .title {
     font-size: 20px;
   }
-}
-
-/* The reading mark while the model answers — the same treatment as the logs
-   panel's `.readChase`, because it is the same wait for the same answer. */
-.triageChase {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: var(--space-6) 0;
-  color: var(--text-primary);
 }

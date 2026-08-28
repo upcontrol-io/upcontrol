@@ -385,10 +385,10 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 		{
 			// No Resolve: a detector closes its own incidents, and the button
 			// would be one that cannot act.
-			name:    "a detector spike is acknowledged or explained",
+			name:    "a detector spike is acknowledged or opened",
 			payload: detect,
 			appURL:  app,
-			want:    "Acknowledge=ack:abc123 | Explain=https://upcontrol.io/app?incident=abc123&explain=1",
+			want:    "Acknowledge=ack:abc123 | Open=https://upcontrol.io/app?incident=abc123",
 		},
 		{
 			// Telegram accepts web_app over https only, so a local stack keeps
@@ -408,7 +408,8 @@ func TestTelegramKeyboard_ButtonsFollowTheIncidentKind(t *testing.T) {
 		},
 		{
 			// Same rule as the private detector case (no Resolve; a detector
-			// closes its own incidents) minus the Explain button.
+			// closes its own incidents) minus the web_app row, which the Bot
+			// API refuses outside private chats.
 			name:    "a group detector spike is acknowledged only",
 			payload: groupDetect,
 			appURL:  app,

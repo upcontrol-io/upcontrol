@@ -93,48 +93,6 @@ func (e DeliveryState) Valid() bool {
 	}
 }
 
-// Defines values for ExplainResponseConfidence.
-const (
-	High   ExplainResponseConfidence = "high"
-	Low    ExplainResponseConfidence = "low"
-	Medium ExplainResponseConfidence = "medium"
-)
-
-// Valid indicates whether the value is a known member of the ExplainResponseConfidence enum.
-func (e ExplainResponseConfidence) Valid() bool {
-	switch e {
-	case High:
-		return true
-	case Low:
-		return true
-	case Medium:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for ExplainResponseSeverity.
-const (
-	Critical ExplainResponseSeverity = "critical"
-	Major    ExplainResponseSeverity = "major"
-	Minor    ExplainResponseSeverity = "minor"
-)
-
-// Valid indicates whether the value is a known member of the ExplainResponseSeverity enum.
-func (e ExplainResponseSeverity) Valid() bool {
-	switch e {
-	case Critical:
-		return true
-	case Major:
-		return true
-	case Minor:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for HealthStatus.
 const (
 	HealthStatusCheck  HealthStatus = "check"
@@ -732,66 +690,6 @@ type Error struct {
 	} `json:"error"`
 }
 
-// ExplainPreviewResponse defines model for ExplainPreviewResponse.
-type ExplainPreviewResponse struct {
-	MaxOutputTokens int `json:"max_output_tokens"`
-
-	// Model The wired brain's identity — 'openai:<base>:<model>' — or null when no API key is configured anywhere (env or the Settings-set instance key). Null is the client's "Explain is off" fact: the explain endpoints answer 503 ai_not_configured until a key arrives.
-	Model *string `json:"model"`
-
-	// System The scenario's static system prompt (scenario.go).
-	System      string  `json:"system"`
-	Temperature float32 `json:"temperature"`
-
-	// User The composed user message: project spec, server context, the log lines.
-	User string `json:"user"`
-}
-
-// ExplainResponse defines model for ExplainResponse.
-type ExplainResponse struct {
-	// Area Where the problem lives, in one or two words taken from the input (a service name, API, database). Set only by the incident scenario; null from the log-selection explain.
-	Area   *string `json:"area,omitempty"`
-	Cached bool    `json:"cached"`
-
-	// Cause Best guess at why — graded by `confidence`, never by hedged wording alone.
-	Cause      string                    `json:"cause"`
-	Confidence ExplainResponseConfidence `json:"confidence"`
-
-	// Fix A concrete suggested solution, or null when none is defensible from the lines.
-	Fix *string `json:"fix"`
-
-	// Investigate 1 to 5 ordered next steps.
-	Investigate []ExplainStep `json:"investigate"`
-
-	// Limit Monthly explain quota; 0 = unlimited.
-	Limit int `json:"limit"`
-
-	// Problem What the lines show, as fact — the model's own read, never derived.
-	Problem string `json:"problem"`
-
-	// Prompt Dev observability: the exact user-message bytes sent to the model (the system prompt is static and lives in the scenario registry). Empty string on a cache hit — no call was made.
-	Prompt *string `json:"prompt,omitempty"`
-
-	// Severity The incident's blast radius graded from the evidence alone. Set only by the incident scenario (POST /v1/incidents/{id}/explain); null from the log-selection explain.
-	Severity *ExplainResponseSeverity `json:"severity,omitempty"`
-
-	// Used Monthly explain calls used.
-	Used int `json:"used"`
-}
-
-// ExplainResponseConfidence defines model for ExplainResponse.Confidence.
-type ExplainResponseConfidence string
-
-// ExplainResponseSeverity The incident's blast radius graded from the evidence alone. Set only by the incident scenario (POST /v1/incidents/{id}/explain); null from the log-selection explain.
-type ExplainResponseSeverity string
-
-// ExplainStep defines model for ExplainStep.
-type ExplainStep struct {
-	// Command A runnable command for this step, or null when none exists.
-	Command *string `json:"command"`
-	Step    string  `json:"step"`
-}
-
 // HealthLine defines model for HealthLine.
 type HealthLine struct {
 	Segments    []HealthStatus `json:"segments"`
@@ -1066,9 +964,6 @@ type Plan string
 
 // PlanResponse defines model for PlanResponse.
 type PlanResponse struct {
-	// AiExplains Absent on plans with unlimited AI; never null.
-	AiExplains *UsedMax `json:"aiExplains,omitempty"`
-
 	// BeyondWindow Absent when there are zero errors beyond the window.
 	BeyondWindow        *BeyondWindow `json:"beyondWindow,omitempty"`
 	HttpChecks          UsedMax       `json:"httpChecks"`
@@ -1124,15 +1019,6 @@ type ProjectListItem struct {
 
 	// Id Example: 6f9619ff8b86d97111d1c1e4bba1f0b2
 	Id string `json:"id"`
-}
-
-// ProjectMeta defines model for ProjectMeta.
-type ProjectMeta struct {
-	Description *string `json:"description,omitempty"`
-	Framework   *string `json:"framework,omitempty"`
-	Language    *string `json:"language,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	Runtime     *string `json:"runtime,omitempty"`
 }
 
 // PublicComponent defines model for PublicComponent.
@@ -1509,18 +1395,6 @@ type PostV1InstallRedeemJSONBody struct {
 	Token string `json:"token"`
 }
 
-// PutV1InstanceAiJSONBody defines parameters for PutV1InstanceAi.
-type PutV1InstanceAiJSONBody struct {
-	// BaseUrl The chat-completions endpoint's base, e.g. https://api.openai.com/v1 — any OpenAI-compatible proxy or gateway. Empty keeps the env-configured one.
-	BaseUrl *string `json:"baseUrl,omitempty"`
-
-	// Key An OpenAI-format API key (like sk-...). Any OpenAI-compatible provider's key works.
-	Key *string `json:"key,omitempty"`
-
-	// Model The model name as the provider spells it, e.g. gpt-5-nano-2025-08-07.
-	Model *string `json:"model,omitempty"`
-}
-
 // PutV1InstanceSmtpJSONBody defines parameters for PutV1InstanceSmtp.
 type PutV1InstanceSmtpJSONBody struct {
 	// From The From address; most relays insist it is a verified one.
@@ -1575,16 +1449,6 @@ type GetV1LogsParamsWindow string
 
 // GetV1LogsParamsLevel defines parameters for GetV1Logs.
 type GetV1LogsParamsLevel string
-
-// PostV1LogsExplainJSONBody defines parameters for PostV1LogsExplain.
-type PostV1LogsExplainJSONBody struct {
-	Lines []string `json:"lines"`
-}
-
-// PostV1LogsExplainPreviewJSONBody defines parameters for PostV1LogsExplainPreview.
-type PostV1LogsExplainPreviewJSONBody struct {
-	Lines []string `json:"lines"`
-}
 
 // PostV1ProjectSwitchJSONBody defines parameters for PostV1ProjectSwitch.
 type PostV1ProjectSwitchJSONBody struct {
@@ -1676,29 +1540,17 @@ type PostV1EventTextRequestBody = PostV1EventTextBody
 // PostV1InstallRedeemJSONRequestBody defines body for PostV1InstallRedeem for application/json ContentType.
 type PostV1InstallRedeemJSONRequestBody PostV1InstallRedeemJSONBody
 
-// PutV1InstanceAiJSONRequestBody defines body for PutV1InstanceAi for application/json ContentType.
-type PutV1InstanceAiJSONRequestBody PutV1InstanceAiJSONBody
-
 // PutV1InstanceSmtpJSONRequestBody defines body for PutV1InstanceSmtp for application/json ContentType.
 type PutV1InstanceSmtpJSONRequestBody PutV1InstanceSmtpJSONBody
 
 // PutV1InstanceTelegramBotJSONRequestBody defines body for PutV1InstanceTelegramBot for application/json ContentType.
 type PutV1InstanceTelegramBotJSONRequestBody PutV1InstanceTelegramBotJSONBody
 
-// PostV1LogsExplainJSONRequestBody defines body for PostV1LogsExplain for application/json ContentType.
-type PostV1LogsExplainJSONRequestBody PostV1LogsExplainJSONBody
-
-// PostV1LogsExplainPreviewJSONRequestBody defines body for PostV1LogsExplainPreview for application/json ContentType.
-type PostV1LogsExplainPreviewJSONRequestBody PostV1LogsExplainPreviewJSONBody
-
 // PostV1MonitorsJSONRequestBody defines body for PostV1Monitors for application/json ContentType.
 type PostV1MonitorsJSONRequestBody = MonitorCreate
 
 // PatchV1MonitorsIdJSONRequestBody defines body for PatchV1MonitorsId for application/json ContentType.
 type PatchV1MonitorsIdJSONRequestBody = MonitorPatch
-
-// PutV1ProjectMetaJSONRequestBody defines body for PutV1ProjectMeta for application/json ContentType.
-type PutV1ProjectMetaJSONRequestBody = ProjectMeta
 
 // PostV1ProjectSwitchJSONRequestBody defines body for PostV1ProjectSwitch for application/json ContentType.
 type PostV1ProjectSwitchJSONRequestBody PostV1ProjectSwitchJSONBody

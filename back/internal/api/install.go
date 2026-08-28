@@ -1,5 +1,5 @@
 // The installer's endpoints: anonymous project mint, claim, install status
-// poll, install token mint/redeem and the key-authed project-spec upload.
+// poll and install token mint/redeem.
 
 package api
 
@@ -8,20 +8,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
-	"go.upcontrol.io/back/internal/ingest/scrub"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
@@ -73,8 +69,6 @@ func (h *install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.claim(w, r)
 	case r.URL.Path == "/v1/install/status" && r.Method == http.MethodGet:
 		h.status(w, r)
-	case r.URL.Path == "/v1/project/meta" && r.Method == http.MethodPut:
-		h.setMeta(w, r)
 	case r.URL.Path == "/v1/install/token" && r.Method == http.MethodPost:
 		h.issueToken(w, r)
 	case r.URL.Path == "/v1/install/redeem" && r.Method == http.MethodPost:
@@ -386,9 +380,9 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		return
 	}
 	// Reparent the footprint. Everything not on this list — alert channels,
-	// ai_usage, delivery_queue, error_alert_state — dies with the anonymous
-	// tenant below, deliberately (Decision 6). The table names are a fixed
-	// list in this file, never input.
+	// delivery_queue, error_alert_state — dies with the anonymous tenant
+	// below, deliberately (Decision 6). The table names are a fixed list in
+	// this file, never input.
 	for _, table := range [...]string{
 		"project", "monitor", "incident", "status_page",
 		"source_connection", "api_key", "install_token",
@@ -484,92 +478,6 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 		resp["verifiedAt"] = verifiedAt.UTC().Format(time.RFC3339)
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
-}
-
-// The five fields the installer may send; anything else is dropped. Never
-// versions, paths, git remotes, env values or code.
-var metaFields = [5]string{"name", "description", "framework", "runtime", "language"}
-
-// metaMaxRunes caps one value in runes AS SENT, before the scrubber (which
-// expands). Over-cap is a 400 naming the field, never a silent cut.
-const metaMaxRunes = 200
-
-// metaNewlines flattens \n, \r and U+2028/U+2029, which reach the provider
-// as line breaks. Fence tags are neutralized at render time (ai.UserMessage).
-var metaNewlines = strings.NewReplacer(
-	"\n", "", "\r", "",
-	"\u2028", "", "\u2029", "",
-)
-
-// metaError is a rejection the response can quote verbatim: code plus the
-// sentence that tells the caller what to fix.
-type metaError struct {
-	code    string
-	message string
-}
-
-// metaPayload whitelists, caps and scrubs the spec into stored project.meta
-// JSON. The null check below is a type check: null must not become `""`.
-func metaPayload(body []byte, now time.Time) ([]byte, *metaError) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
-		return nil, &metaError{code: "bad_body", message: "body must be a JSON object"}
-	}
-	out := make(map[string]string, len(metaFields)+2)
-	for _, f := range metaFields {
-		v, ok := raw[f]
-		if !ok {
-			continue
-		}
-		// A *string separates "absent/null" from "a string" via the decoder:
-		// null into *string yields nil without error.
-		var s *string
-		if err := json.Unmarshal(v, &s); err != nil || s == nil {
-			return nil, &metaError{code: "bad_body", message: f + " must be a string"}
-		}
-		if utf8.RuneCountInString(*s) > metaMaxRunes {
-			return nil, &metaError{code: "meta_too_large",
-				message: fmt.Sprintf("%s exceeds the %d-character cap", f, metaMaxRunes)}
-		}
-		out[f] = metaNewlines.Replace(scrub.Scrub(*s).Cleaned)
-	}
-	out["source"] = "installer"
-	out["collectedAt"] = now.Format(time.RFC3339)
-	b, _ := json.Marshal(out) // string values only: cannot fail
-	return b, nil
-}
-
-// setMeta is PUT /v1/project/meta, key-authenticated like install status;
-// nothing is stored before the whitelist, cap and scrubber have all passed.
-func (h *install) setMeta(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	key := requestKey(r)
-	if key == "" {
-		writeAPIErr(w, http.StatusUnauthorized, "missing_key")
-		return
-	}
-	tenant, err := h.keys.Resolve(ctx, key)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "bad_key")
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
-	if err != nil {
-		writeAPIErr(w, http.StatusBadRequest, "bad_body")
-		return
-	}
-	payload, merr := metaPayload(body, time.Now().UTC())
-	if merr != nil {
-		writeAPIErrMsg(w, http.StatusBadRequest, merr.code, merr.message)
-		return
-	}
-	if err := h.pool.Queries().SetProjectMeta(ctx, sqlc.SetProjectMetaParams{
-		ID: tenant.ProjectID, TenantID: tenant.TenantID, Meta: payload,
-	}); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // installClientIP mirrors auth.clientIP without exporting it: the throttle

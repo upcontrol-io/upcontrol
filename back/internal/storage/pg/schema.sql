@@ -696,3 +696,14 @@ UPDATE plan_entitlement SET projects = 10 WHERE plan = 'Agency';
 -- session row, is unaffected.
 ALTER TABLE session ADD COLUMN project_id bigint REFERENCES project(id) ON DELETE SET NULL;
 
+-- AI Explain is removed from the product (Aug 28, 2026, user decision): no LLM
+-- triage of logs or incidents, so the ledger, the cache, the quota axis, the
+-- project spec that existed only as explain context and the instance-level
+-- provider settings all go with it.
+DROP TABLE ai_call;
+DROP TABLE ai_explain_cache;
+DROP TABLE ai_usage;
+ALTER TABLE plan_entitlement DROP COLUMN ai_explains;
+ALTER TABLE project DROP COLUMN meta;
+DELETE FROM instance_setting WHERE key IN ('ai_api_key','ai_model','ai_base_url');
+
