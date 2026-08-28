@@ -48,7 +48,7 @@ func newMeFixture(t *testing.T) *meFixture {
 		t.Skip("UC_TEST_POSTGRES not set; skipping /v1/me project integration test")
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)

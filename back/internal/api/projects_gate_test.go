@@ -27,7 +27,7 @@ func openProjectsGateDB(t *testing.T) *pg.Pool {
 		t.Skip("UC_TEST_POSTGRES not set; skipping projects-gate integration test")
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)

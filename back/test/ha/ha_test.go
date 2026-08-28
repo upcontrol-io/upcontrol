@@ -236,9 +236,9 @@ func openPool(t *testing.T, dsn string) *pg.Pool {
 
 func applyMigrations(t *testing.T, dsn string) {
 	t.Helper()
-	// Apply goose migrations idempotently (UC_TEST_POSTGRES may point at a fresh
-	// DB). Postgres-only: ClickHouse addr empty => runClickHouse is a no-op.
-	if err := migrate.Run(context.Background(), dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	// Apply goose migrations idempotently (UC_TEST_POSTGRES may point at a
+	// fresh DB).
+	if err := migrate.Run(context.Background(), dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 }

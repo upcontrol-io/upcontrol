@@ -23,7 +23,7 @@ func TestNamingReclaimsTheServiceSlug(t *testing.T) {
 	ctx := context.Background()
 	// back/internal/api → three levels up is the repo root (same depth the HA
 	// test uses from back/test/ha).
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)
@@ -104,7 +104,7 @@ func TestNamingCreatesThePageRowWhenNoneExists(t *testing.T) {
 		t.Skip("UC_TEST_POSTGRES not set; skipping slug integration test")
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)
@@ -153,7 +153,7 @@ func TestNamingNeverRewritesAHandPickedSlug(t *testing.T) {
 		t.Skip("UC_TEST_POSTGRES not set; skipping slug integration test")
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)
