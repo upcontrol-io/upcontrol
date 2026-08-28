@@ -454,3 +454,34 @@ func TestComputeOverloadSteps(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
+
+// The self-hoster's switch: with ScrubOff the secret is stored exactly as sent
+// and nothing claims it was cleaned. The sibling test above uses the same
+// vector through the default Deps, so the pair pins both directions.
+func TestScrubOffStoresVerbatim(t *testing.T) {
+	sink := &fakeSink{}
+	h := New(Deps{
+		Keys:     &fakeKeys{},
+		Seq:      &fakeSeq{},
+		Sink:     sink,
+		Idem:     newFakeIdem(),
+		Spool:    &fakeSpool{pct: 0},
+		ScrubOff: true,
+	})
+	const secret = "Bearer supersecrettoken1234567890"
+	body := `{"msg":"auth ok","auth":"` + secret + `"}`
+	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if contains(rr.Body.String(), `"code":"scrubbed"`) {
+		t.Errorf("scrubbed warning with scrubbing off: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if env.Attrs["auth"] != secret {
+		t.Errorf("attr = %q, want the value stored verbatim", env.Attrs["auth"])
+	}
+}

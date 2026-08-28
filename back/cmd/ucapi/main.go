@@ -106,7 +106,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 
 	_ = os.MkdirAll(d.Config.SpoolDir, 0o755)
 
-	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, pgPool, chConn)
+	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, d.Config.ScrubOff, pgPool, chConn)
 	if err != nil {
 		_ = chConn.Close()
 		pgPool.Close()

@@ -142,6 +142,12 @@ services:
       # Self-host identity: new tenants land on the Self-hosted plan, and the
       # anonymous project mint answers 404.
       UC_SELF_HOSTED: "1"
+      # Secret scrubbing is on by default: the ingest door redacts tokens,
+      # connection strings and card numbers out of messages and attribute
+      # values before they are stored. On your own box that is your call, so
+      # UC_SCRUB=0 turns it off. It is honoured ONLY with UC_SELF_HOSTED=1 —
+      # the hosted service holds other people's secrets and cannot offer this.
+      # UC_SCRUB: "0"
       # Auth. `none` (the package default) provisions one owner at boot and
       # every request acts as them — no sign-in screen, no mailer needed.
       # `magic-link` restores email sign-in; without SMTP the code lands in

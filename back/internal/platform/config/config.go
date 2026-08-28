@@ -44,6 +44,11 @@ type Config struct {
 	// on by default, UC_DETECT_ENABLED=0 is the kill switch.
 	DetectEnabled bool
 
+	// ScrubOff disables server-side secret scrubbing (UC_SCRUB=0), and is
+	// honoured ONLY on a self-hosted instance. Negative on purpose: the zero
+	// value has to be "scrub", so a caller that forgets the field redacts.
+	ScrubOff bool
+
 	// SelfHosted marks a self-hosted install (UC_SELF_HOSTED=1): new tenants
 	// land on the 'Self-hosted' plan instead of 'Free'.
 	SelfHosted bool
@@ -120,6 +125,17 @@ func Load(service string) (Config, error) {
 
 	c.DetectEnabled = os.Getenv("UC_DETECT_ENABLED") != "0"
 	c.SelfHosted = os.Getenv("UC_SELF_HOSTED") == "1"
+	// Scrubbing is the default and stays mandatory on the hosted service: what
+	// it redacts is other people's tokens, which is not an operator's call to
+	// make. On their own box it is, so the switch needs UC_SELF_HOSTED with it.
+	if os.Getenv("UC_SCRUB") == "0" {
+		if c.SelfHosted {
+			c.ScrubOff = true
+		} else {
+			c.Warnings = append(c.Warnings,
+				"UC_SCRUB=0 ignored: secret scrubbing is optional only on a self-hosted instance (UC_SELF_HOSTED=1)")
+		}
+	}
 	c.UCAuth = getenv("UC_AUTH", "magic-link")
 	if c.UCAuth != "magic-link" && c.UCAuth != "none" {
 		// A typo here must not boot: silently leaving the magic-link door open

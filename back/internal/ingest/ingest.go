@@ -74,6 +74,10 @@ type Deps struct {
 	Idem  Idempotency
 	Spool SpoolFiller
 	Card  *cardinality.Limiter // per-request is also fine; shared is normal
+	// ScrubOff disables the secret scrubber (UC_SCRUB=0, self-host only).
+	// Negative on purpose: the zero value must scrub, so a Deps literal that
+	// omits it redacts rather than stores tokens verbatim.
+	ScrubOff bool
 }
 
 // Ingester is the POST /i handler. It is safe for concurrent use.
@@ -243,15 +247,21 @@ type RowEnvelope struct {
 func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record, d overloadDecision, ws *warningAccumulator) [][]byte {
 	out := make([][]byte, 0, len(recs))
 	for _, rec := range recs {
-		// Scrub the message and attribute values (defense in depth).
-		scrubbed := scrub.Scrub(rec.Message)
-		if len(scrubbed.Counts) > 0 {
-			ws.add("scrubbed", sumCounts(scrubbed.Counts))
-		}
-		for k, v := range rec.Attrs {
-			if s := scrub.Scrub(v); len(s.Counts) > 0 {
-				rec.Attrs[k] = s.Cleaned
-				ws.add("scrubbed", sumCounts(s.Counts))
+		// Scrub the message and attribute values (defense in depth). An operator
+		// on their own box may turn this off; the hosted service may not, and
+		// config refuses the switch there.
+		message := rec.Message
+		if !h.d.ScrubOff {
+			scrubbed := scrub.Scrub(rec.Message)
+			message = scrubbed.Cleaned
+			if len(scrubbed.Counts) > 0 {
+				ws.add("scrubbed", sumCounts(scrubbed.Counts))
+			}
+			for k, v := range rec.Attrs {
+				if s := scrub.Scrub(v); len(s.Counts) > 0 {
+					rec.Attrs[k] = s.Cleaned
+					ws.add("scrubbed", sumCounts(s.Counts))
+				}
 			}
 		}
 		cappedAttrs, keysCapped, valsCapped := capAttrs(rec.Attrs)
@@ -264,8 +274,8 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		env := RowEnvelope{
 			TenantID:    t.TenantID,
 			ProjectID:   t.ProjectID,
-			Message:     scrubbed.Cleaned,
-			Fingerprint: Fingerprint(scrubbed.Cleaned),
+			Message:     message,
+			Fingerprint: Fingerprint(message),
 			Level:       rec.Level,
 			LevelRaw:    rec.LevelRaw,
 			Service:     rec.Service,

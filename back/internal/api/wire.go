@@ -165,7 +165,7 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 
 type Batcher = batcher.Batcher
 
-func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
+func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
 	// Batcher: flushes to ClickHouse on 8 MiB / 200 ms / 1-sec-per-key.
 	bs := batcher.New(&chLogSink{conn: chConn}, nil, batcher.Options{})
 
@@ -183,6 +183,8 @@ func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Inge
 		Idem:  pg.NewIdempotency(pgPool),
 		Spool: &dirSpoolFiller{dir: spoolDir, max: 1 << 30},
 		Card:  cardinality.New(1000),
+		// Self-host only; config refuses the switch on the hosted service.
+		ScrubOff: scrubOff,
 	})
 
 	return ing, bs, nil

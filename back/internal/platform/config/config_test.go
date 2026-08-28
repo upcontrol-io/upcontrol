@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -176,5 +177,46 @@ func TestLoadProdProbeNeedsNoDatabase(t *testing.T) {
 	_ = os.Unsetenv("UC_NODE_TOKEN")
 	if _, err := Load("ucprobe"); err == nil {
 		t.Fatal("prod ucprobe Load without node token should fail")
+	}
+}
+
+// The scrub switch is security-relevant: it is honoured on a self-hosted box
+// and MUST be refused on the hosted service, where the tokens being redacted
+// belong to other people. If the gate is ever dropped, this fails.
+func TestScrubSwitchNeedsSelfHosted(t *testing.T) {
+	cases := []struct {
+		name       string
+		scrub      string
+		selfHosted string
+		wantOff    bool
+		wantWarn   bool
+	}{
+		{"default scrubs", "", "", false, false},
+		{"self-hosted may turn it off", "0", "1", true, false},
+		{"hosted refuses and says so", "0", "", false, true},
+		{"self-hosted default still scrubs", "", "1", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("UC_ENVIRONMENT", "dev")
+			t.Setenv("UC_SCRUB", tc.scrub)
+			t.Setenv("UC_SELF_HOSTED", tc.selfHosted)
+			c, err := Load("ucapi")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.ScrubOff != tc.wantOff {
+				t.Errorf("ScrubOff = %v, want %v", c.ScrubOff, tc.wantOff)
+			}
+			warned := false
+			for _, w := range c.Warnings {
+				if strings.Contains(w, "UC_SCRUB") {
+					warned = true
+				}
+			}
+			if warned != tc.wantWarn {
+				t.Errorf("UC_SCRUB warning present = %v, want %v (warnings: %v)", warned, tc.wantWarn, c.Warnings)
+			}
+		})
 	}
 }
