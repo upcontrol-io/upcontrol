@@ -52,8 +52,8 @@ npx upcontrol
 It does four deterministic things and runs no AI of its own:
 
 1. **Installs the skill** into `.claude/skills/` and `.agents/skills/`
-   (`--copilot` for `.github/skills/`) — the canonical event dictionary,
-   placement rules and stack recipes your agent follows.
+   (`--copilot` for `.github/skills/`) — event naming, placement rules and
+   stack recipes your agent follows.
 2. **Pins `@upcontrol/sdk`** in `package.json` at an exact version — the
    library whose `track()` never throws and never blocks.
 3. **Provisions a key**, no account required: an anonymous project is minted
@@ -104,6 +104,9 @@ exactly that.
 
 - **Website checks** from 1-minute intervals, with SSL and domain expiry
   watched for free on every check — measured uptime, never asserted.
+- **Heartbeat checks** for the jobs nothing can reach from outside: your cron
+  calls a URL when it finishes, and silence past its window opens an incident
+  like any failed check.
 - **Log ingest** over one HTTP door (`POST /i`, NDJSON): the SDK and CLI wire
   an app up in one command, and the receipt tells the sender what was accepted
   and what was scrubbed or shed.
@@ -152,10 +155,13 @@ live in [docs/architecture.md](docs/architecture.md).
 
 ## How the pieces talk
 
-Three Go services (`ucapi`, `ucworker`, `ucprobe`) and two databases run
-behind one contract, with no hidden paths. The app talks to `ucapi` on one
-origin, with an HttpOnly session cookie. The map, the component table and
-the data flows live in [docs/architecture.md](docs/architecture.md).
+Three Go services (`ucapi`, `ucworker`, `ucprobe`) and one database run behind
+one contract, with no hidden paths. Postgres holds everything, the accounts and
+the telemetry both. The app talks to `ucapi` on one origin, with an HttpOnly
+session cookie. On a self-hosted install `ucapi` runs the background jobs
+itself, so the whole thing is one fewer container than it looks. The map, the
+component table and the data flows live in
+[docs/architecture.md](docs/architecture.md).
 
 ## Development
 
