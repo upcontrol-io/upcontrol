@@ -13,6 +13,8 @@ deploy is rolled back, a bad published version is on other people's machines).
   the level before it left the process, so the level the caller chose never
   reached the server: the line was stored as `debug`, and `level_raw`
   recorded `debug` too.
+- `prepack` builds before npm packs or publishes: `dist/` is gitignored and
+  is the only thing `files` ships.
 
 ## 2026-08-28 — upcontrol 0.1.3
 
@@ -35,6 +37,9 @@ deploy is rolled back, a bad published version is on other people's machines).
   was removed from the product).
 - `SDK_PIN` moves to `0.1.1`, so a fresh `init` pins `@upcontrol/sdk` exactly
   at the version that keeps `trace` intact.
+- `prepack` builds before npm packs or publishes. `dist/` and `skill/` are
+  gitignored and are the only things `files` ships, so a publish from a fresh
+  clone would otherwise have put an empty tarball on npm.
 - Publish order: `@upcontrol/sdk` must be published before `upcontrol`. The
   installer pins an exact SDK version, and a pin to an unpublished version
   fails every user's install.

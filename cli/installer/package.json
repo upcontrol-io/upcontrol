@@ -29,6 +29,7 @@
     "agent-skill"
   ],
   "scripts": {
+    "prepack": "npm run build",
     "build": "node scripts/copy-skill.ts && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "pretest": "npm run build",
