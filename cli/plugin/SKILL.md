@@ -6,7 +6,7 @@ description: Wire monitoring and logging into this app with upcontrol - uptime c
 # upcontrol
 
 upcontrol is monitoring that arrives with the "why", not just "down": the user's
-app pushes log points and canonical events; upcontrol correlates them into
+app pushes log points and named events; upcontrol correlates them into
 incidents with context. You (the coding agent) place the log points. The
 upcontrol CLI and SDK do everything else.
 
@@ -15,7 +15,7 @@ upcontrol CLI and SDK do everything else.
 **Required: before doing any upcontrol work, run `npx upcontrol skills` to list
 the current reference topics, then read the ones your task needs with
 `npx upcontrol skills <topic>`. Do not rely on memory or this file alone - the
-CLI ships the up-to-date dictionary and recipes.**
+CLI ships the up-to-date topics and recipes.**
 
 Check state first: `npx upcontrol status` prints one JSON line - endpoint, where
 the API key was found (env / .env / none), and whether data has been verified.
@@ -27,7 +27,7 @@ The user states a goal in plain language; you translate it to a topic:
 | The user says something like       | Read topic | You will                              |
 |------------------------------------|------------|---------------------------------------|
 | "send all my logs to upcontrol"    | `logs`     | wrap their existing logger, add SDK   |
-| "track user behavior / churn"      | `funnel`   | place tier-1/2 events in checkout, billing, auth |
+| "track user behavior / churn"      | `funnel`   | place events in checkout, billing, auth |
 | "tell me when my app is down"      | `uptime`   | no code - point them at the app       |
 | "my cron / queue died silently"    | `jobs`     | job_* events + heartbeat              |
 | "catch errors / exceptions"        | `logs`     | SDK auto-captures; add request_failed points |
@@ -43,11 +43,12 @@ mailer -> email events. Suggestions come from the repository, not a template.
    review` and the touched areas (`checkout · billing · dunning`).
 2. One line per log point. No wrappers around existing logic, no control-flow
    changes, no new `await`, never touch a `catch` block beyond adding one line.
-3. Event names come from the canonical dictionary (`npx upcontrol skills
-   dictionary`). No match -> use a free name (it lands as an ordinary log line);
-   never invent a near-canonical name.
-4. Required labels are required. `payment_succeeded` without `provider` is
-   useless to the detector - do not place it.
+3. Event names are free-form: pick a clear one and keep it stable (the same
+   moment, the same name at every call site). `deploy*` and `install_verified`
+   have machinery behind them, `uc.*` is reserved and refused
+   (`npx upcontrol skills dictionary`).
+4. Labels stay low-cardinality: no IDs, emails or concrete paths in a label
+   value - free detail belongs in the message.
 5. Nothing inside hot loops. Log the outcome of an operation, not its steps.
 6. The API key goes **only into `.env`, and only after you have checked `.env`
    is gitignored** - fix `.gitignore` first if not, and say you fixed it. Never

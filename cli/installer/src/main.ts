@@ -97,7 +97,7 @@ Verify flags:
   --timeout <sec>      how long to wait (default 120)
   --json               machine-readable output
 
-The skill teaches your agent the canonical event dictionary and placement
+The skill teaches your agent event names and placement
 rules; say what you want in plain language ("send all my logs to upcontrol")
 and review the diff it stages.`;
 
@@ -159,7 +159,7 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     sdk: { package: '@upcontrol/sdk', pinned: SDK_PIN, added: dep.added, inPackageJson: dep.present },
     key: { source: keySource, ...(claimUrl ? { claimUrl } : {}), ...(keyNote ? { note: keyNote } : {}) },
     endpoint,
-    hint: 'Run `npx upcontrol skills` for the event dictionary and placement rules; finish with `npx upcontrol verify`.',
+    hint: 'Run `npx upcontrol skills` for event names and placement rules; finish with `npx upcontrol verify`.',
   };
 
   if (det.mode !== 'interactive') {

@@ -14,14 +14,14 @@ diff; treat it accordingly.
 3. **Never touch `catch` blocks** except by adding one line inside. Changing
    error handling is changing behavior, not observability.
 
-4. **Names come from the dictionary** (`npx upcontrol skills dictionary`). If
-   nothing fits, use a free descriptive name - it lands as an ordinary log line
-   (tier 4), which is fine. Never invent a name that LOOKS canonical
-   (`payment_success`, `job_error`): near-misses are worse than free names.
+4. **Names are free-form; keep them stable.** Pick a name that reads well
+   (`payment_succeeded`, not `pay_ok`) and reuse it for the same moment at
+   every call site. `deploy*` and `install_verified` have machinery behind
+   them (topic `dictionary`); `uc.*` is reserved and refused.
 
-5. **Required labels are required.** An event without them must not be placed.
-   If the value is not available at the call site, that call site is wrong -
-   find the one where it is.
+5. **Labels stay low-cardinality.** `route` is a pattern (`/users/:id`), never
+   a concrete path; no IDs, emails or free text in a label value - free detail
+   belongs in the message.
 
 6. **The key goes only into `.env`, only after checking `.gitignore` covers it.**
    Prefer `npx upcontrol init`, which does this for you and never shows the key.

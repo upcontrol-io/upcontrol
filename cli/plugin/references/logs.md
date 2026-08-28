@@ -5,9 +5,9 @@ automatic events. Do NOT replace the user's logger - wrap it. Their console/file
 output keeps working; upcontrol receives a copy, scrubbed client-side.
 
 Ordinary log lines land in the log window (a ring of the last N lines) and in
-incident slices. They are tier 4: kept, searchable, never alerting. Canonical
-events (topic `dictionary`) are what alert - offer to add those as a second
-pass once the logs flow.
+incident slices: kept, searchable. What alerts is the level (`error`) and the
+fingerprint, never the name. Named events (topic `dictionary`) add correlation,
+not detection - offer them as a second pass once the logs flow.
 
 ## Step 1 - SDK
 

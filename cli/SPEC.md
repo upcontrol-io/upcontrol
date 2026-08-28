@@ -17,10 +17,10 @@ code, it is **somebody else's agent following the instructions from the plugin**
 version 1.0's S0–S10 flow is not resurrected: it described our deterministic installer, and now the
 user's agent does the work.
 
-**What survived both changes, and why.** Five things were right regardless of the collection method:
-the canonical dictionary of 24 events (§4), the key and anonymous-project model (§7), live
-verification with a failure taxonomy (§8), the compatibility commitments (§9.4), the security
-contract (§10). The compatibility commitments **got stricter** in the process — §9.4.
+**What survived both changes, and why.** Four things were right regardless of the collection method:
+the key and anonymous-project model (§7), live verification with a failure taxonomy (§8), the
+compatibility commitments (§9.4), the security contract (§10). The compatibility commitments
+**got stricter** in the process — §9.4.
 
 **What was thrown out of version 2.0:** binary delivery through `optionalDependencies`, platform
 prebuilds, environment detection (systemd/docker/compose/k8s), the enrollment protocol, daemon
@@ -61,7 +61,7 @@ Claude Code, Cursor, Codex, Gemini CLI and Windsurf with one file (this is the "
 
 | Artifact | What | Language |
 |---|---|---|
-| **`cli/plugin/`** | the plugin for Claude Code, Cursor, Codex: the `/upcontrol:add` command, instructions, the dictionary, the instrumentation rules | markdown + manifest |
+| **`cli/plugin/`** | the plugin for Claude Code, Cursor, Codex: the `/upcontrol:add` command, instructions, the event-naming reference, the instrumentation rules | markdown + manifest |
 | **`cli/sdk/`** | the push library: `track`, batching, buffer, retry, scrubbing, `POST /i` | TypeScript; Python next |
 
 The `ucagent` daemon from version 2.0 is deferred, not canceled (plan v4 §5.6). While it does not
@@ -88,7 +88,7 @@ question as unasked:
 |---|---|
 | **Zero edits to somebody else's code** | Does not hold. Compensation: the diff goes to a human review, the point counter, `track()` never throws, not a single exception of the library escapes outside (§5.3). This bounds the risk, it does not remove it |
 | **Works where there is no code** | Does not hold for code — **holds through door 1** (URL): availability, SSL, domain, dependencies, a status page without a single line |
-| **Collects what an SDK does not see** (disk, OOM, restart loop) | Does not hold. Partly covered by the `app_started` event (restart storm); `saturation` and `oom` are lost entirely |
+| **Collects what an SDK does not see** (disk, OOM, restart loop) | Does not hold. Partly covered by the `app_started` event; `saturation` and `oom` are lost entirely |
 | **A vantage point inside the perimeter** | Does not hold. Comes back with the daemon |
 | **One update surface** | Does not hold: the customer updates with their own release. Compensation — §9.4 |
 
@@ -108,7 +108,7 @@ What is **gained** in exchange, and what the trade was made for:
 |---|---|
 | **We edit somebody else's production** | The main risk, back from version 1.0. Bounded by: the diff always goes to review, we never commit ourselves, one line per point, no wrappers around somebody else's logic, no edits to `catch` blocks |
 | **Our call inside somebody else's handler** | `track()` **never** throws; a network failure does not block the thread; a serialization error is swallowed inside. A library that brings down somebody else's payment handler shuts the project down |
-| **The quality of the instrumentation is the quality of somebody else's agent** | Tier T4 (§4.4) makes a mistake in a name cheap: a non-canonical name breaks nothing, it simply gets no baseline. Plus the dictionary travels in the plugin, not in the agent's head |
+| **The quality of the instrumentation is the quality of somebody else's agent** | A mistake in a name is cheap (§4): every name is ordinary now, so there is nothing to get wrong beyond readability. Plus the naming guidance travels in the plugin, not in the agent's head |
 | **Updating the library is the customer's release** | §9.4: ingest accepts any version ever released, old shapes are never removed |
 | **The library has to be written for every language** | TS first (the segment writes in it), Python second. The rest is covered by a direct `POST /i`, tolerant by construction |
 | **A process restart loses the buffer** | Up to 8 MB. A deliberate narrowing against the daemon's disk spool: an application in a container often has no writable disk |
@@ -203,73 +203,27 @@ import marker, does not duplicate them and offers to **add** where it did not go
 
 ---
 
-## 4. The canonical event dictionary
+## 4. Event names
 
-A closed set, **24 names**, frozen. The set is carried over from version 1.0 unchanged: it was right
-regardless of the collection method, and renaming it today would cost a major version in somebody
-else's production (§9.4).
+Names are free-form: any name is accepted, and a name unlocks nothing. Detection runs on the level
+(`error`) and on the fingerprint (the hash of the message with numbers, hex runs and quoted strings
+masked), never on the name. Every line, whatever its name, is stored, searchable and part of
+incident log slices.
 
-Every canonical event lands as a row in `logs` **and** increments a series in `series_1m` (plan v3
-§3.5). That is exactly what makes detection `O(series)` and not `O(lines)`.
+Two names have machinery behind them today. The `deploy` family (prefix `deploy`, or containing
+`deployment`) is copied into the `events` table, which post-deploy alert suppression reads back.
+`install_verified` is copied there too and counted by the admin dashboard; the SDK emits it once at
+first successful connection (§8.2), and it is never placed by hand. The `uc.*` prefix is reserved:
+client-sent names carrying it are refused with the warning `reserved_prefix`, so the customer's
+names never collide with ours.
 
-**The counter plane is not affected by eviction from the raw window.** The window is a ring of
-capacity N lines: new ones evict old ones, there is no monthly reset, no exhaustion, no "ingest
-refused" state. Baselines, alerts and frozen incident snapshots live outside the ring. The
-consequence to keep in mind when reading §8: **`verify` cannot fail because a limit ran out, because
-the ring cannot go empty.**
-
-Reserved prefix: `uc.*` is ours. The customer's names are free and do not collide.
-
-### 4.1 Tier 1 — with a baseline, alertable, allowed to wake you up
-
-| Event | Required labels | Optional | Default rule |
-|---|---|---|---|
-| `payment_succeeded` | `provider`, `currency`, `livemode` | `amount_minor`, `plan` | **absence**: zero for longer than the backfill p99 gap for this hour of the week |
-| `payment_failed` | `provider`, `reason_code` | `currency` | share of attempts against the baseline, sustained |
-| `refund_issued` | `provider`, `currency` | `amount_minor` | a spike in the count against the 90-day baseline |
-| `subscription_cancelled` | `provider` | `plan` | a spike against the baseline |
-| `job_failed` | `job` | `error_type`, `duration_ms` | any occurrence for jobs with no prior failures; otherwise rate |
-| `heartbeat` | `job` | | **a missed window**, derived from the declared cron expression |
-| `unhandled_exception` | `error_type` | `route`, `fingerprint` | a new fingerprint or a spike on a known one |
-| `request_failed` | `status_class`, `route` | `duration_ms` | share of 5xx above the baseline, sustained |
-| `external_api_failed` | `provider`, `status_class` | `route` | a sustained failure of one provider says "this is Stripe, not you" |
-| `email_failed` | `provider` | `reason_code` | any occurrence — silently dying email is classically invisible |
-| `login_failed` | | `route` | a spike = credential stuffing |
-| `app_started` | `version`, `env` | `instance` | **a restart storm**: N starts in M minutes = crash loop |
-
-### 4.2 Tier 2 — with a baseline, on the dashboard, do not wake you by default
-
-`job_started`, `job_done`, `checkout_started`, `subscription_created`, `external_api_slow`,
-`email_sent`, `signup`, `upload_finished`, `import_finished`, `app_stopped` — labels and purpose
-as in version 1.0.
-
-### 4.3 Lifecycle — never alertable, the highest correlation value
-
-| Event | Required labels | Purpose |
-|---|---|---|
-| `deploy` | `version`, `env` (+`commit_sha`, `actor`) | the correlation axis for every incident screen |
-| `install_verified` | `version`, `env` | emitted once by the agent on the first successful connection. Proves the chain end to end (§8.2) |
-
-`install_verified` changed its source (the agent instead of the SDK), but not its meaning and not
-its name. The name is not touched: it is already frozen, and a rename for cosmetics is exactly the
-major version §9.4 forbids to be cheap.
-
-### 4.4 The tier ladder for everything that is not canonical
-
-| Tier | What it is | Baseline | Rule | Right to wake you | Where it is visible |
-|---|---|---|---|---|---|
-| **T1** | the 12 names of §4.1 | yes | yes, by default | **yes** | alert, digest, incident, window |
-| **T2** | the 10 names of §4.2 | yes | only when explicitly configured | no | dashboard, digest, window |
-| **T3** | the 2 names of §4.3 | no | no | never | correlation axis, window |
-| **T4** | everything else | no | no | never | window and incident snapshot, as an ordinary line |
-| **T5** | `uc.*` | — | — | — | reserved; anything arriving from a client is dropped with the warning `reserved_prefix` |
-
-T4 makes a mistake in a name cheap: ingest never rejects content. A promotion T4 → canonical is a
-minor version; a demotion does not exist.
+Because no name is special, a naming mistake is cheap: nothing breaks and nothing loses a baseline.
+What still matters is stability: the same moment should carry the same name at every call site
+(§5.2).
 
 ### 4.5 New: rules for extracting events from tailed logs
 
-Version 1.0 got canonical events from instrumented code. The agent gets them from lines, and that
+Version 1.0 got named events from instrumented code. The agent gets them from lines, and that
 requires a mechanism that did not exist before.
 
 **A rule** is `(source, regular expression with named groups, event name, mapping of groups to
@@ -278,12 +232,12 @@ Express) and are extended by the customer. **The place where they are applied ch
 the entry surface: rules now execute at ingest, not on the customer's machine** — there is nothing
 left to tail somebody else's logs with. The audience narrowed too: it is whoever sends us the text
 of an already existing logger through a direct `POST /i`, not the one whose code the plugin
-instrumented (his names are canonical from the start).
+instrumented (his events carry their names from the code, not from a regex).
 
 Hard requirements, all three mandatory:
 
 1. **A rule cannot drop a line.** It only adds `event=` and labels. A line that matched no rule
-   arrives in full — as T4. A rule able to swallow would be silent data loss, and that is the worst
+   arrives in full, as an ordinary line. A rule able to swallow would be silent data loss, and that is the worst
    defect a monitoring tool can have (§5.4).
 2. **A time budget per line.** The rule set as a whole must fit under a ceiling; exceeding it
    disables the **rule**, not the acceptance of the line, and prints this as a warning in the
@@ -335,10 +289,9 @@ verbatim; an agent that violated any of them produced a bad diff.
    control flow, do not add `await` where there was none.
 3. **Do not touch `catch` blocks** other than by adding one line. Editing error handling is editing
    behavior, not observability.
-4. **Names come from the §4 dictionary.** If none fits — tier T4 and a free name; inventing
-   something that merely looks canonical is forbidden.
-5. **Required labels are required.** `payment_succeeded` without `provider` is useless to the
-   detector and must not appear.
+4. **Names are free-form (§4).** Keep them stable and readable; `uc.*` is reserved.
+5. **Labels stay low-cardinality.** No IDs, emails or concrete paths in label values; free detail
+   belongs in the message.
 6. **Nothing in hot loops.** A point inside a loop over elements is a thousand lines per request;
    what gets logged is the result of the operation, not its steps.
 7. **The key goes only into `.env`.** The repetition of §7 is deliberate: this is the only rule
@@ -508,7 +461,7 @@ arrive:
 | the application did not start | an import error, a version conflict, the build | the runtime's output straight into our answer to the agent, not "go and look yourself" |
 | the application is alive, there is no `install_verified` | the key was not picked up, or there is no connectivity | these are distinguishable: the key is missing from the environment / DNS / TCP / TLS / HTTP code — we print at which step it stopped |
 | there is `install_verified`, there are no events | the points were written into code that has not run yet | name exactly which ones we are waiting for and suggest a path that will trigger them |
-| there are events, but not the right ones | the agent picked names outside the dictionary | show what arrived against §4 — the mistake is cheap (T4), but it has to be seen |
+| there are events, but not the ones expected | the names drift: two names for one moment | show what arrived against §4: nothing is rejected, but the drift has to be seen |
 | data arrived **with a warning in the receipt** | a problem on the wire, invisible to the user | print the closed dictionary: `ts_absent`, `level_unknown`, `key_in_body`, `field_cap_exceeded`, `attr_key_capped`, `cardinality_capped`, `scrubbed`, `reserved_prefix` |
 
 The last row is the very mechanism that compensates for ingest's tolerance: a broken client forever
@@ -561,8 +514,7 @@ consequence of moving off the daemon (§1.3). The daemon updated with one comman
 deployed application may go a year without an update. That is why both of version 1.0's commitments
 are not merely kept but become load-bearing.
 
-- **Adding a canonical event is a minor version. A rename or a removal is a major one, and the old
-  name keeps working for 12 months.**
+- **A rename or a removal is a major version, and the old name keeps working for 12 months.**
 - **There is never a forced update.** The wire format is not the library version. Ingest accepts
   **any version ever released**: old body shapes are never removed, extensions only add fields. A
   2026 library works in 2029, because ingest is tolerant by contract. A library that stopped working
@@ -655,7 +607,7 @@ Contents:
 | Part | Content |
 |---|---|
 | Instructions | how to read a repository, how to tell business logic from infrastructure logic, where to put the points |
-| Dictionary | the 24 canonical names (§4) plus the tier ladder for the non-canonical |
+| Event naming | free-form names, the two with machinery behind them, the reserved `uc.*` (§4) |
 | Instrumentation rules | §5.2 verbatim |
 | Key rules | §7 verbatim |
 | Stack recipes | literal copyable initialization lines for Next.js, Express, Fastify, NestJS |

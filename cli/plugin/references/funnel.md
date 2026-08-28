@@ -1,11 +1,10 @@
 # "Track user behavior / reduce churn / watch my revenue"
 
-The goal decomposes into canonical events placed where the money and the users
+The goal decomposes into named events placed where the money and the users
 actually move. You find the places by reading the code - the user often cannot
 name them ("help me find where customers churn" is a complete, valid request).
 
-Default scope is conservative: tier 1/2 events only, at most ~20 points, tests
-untouched. The user can widen it in words ("only payments and crons", "no more
+Default scope is conservative: at most ~20 points, tests untouched. The user can widen it in words ("only payments and crons", "no more
 than 10 places"). Honor those words exactly.
 
 ## The map: goal fragments to events
@@ -57,6 +56,6 @@ track('external_api_failed', { provider: 'openai', status_class: String(res.stat
   is an integer in minor units.
 - A provider's own event enum (Stripe's `payment_intent.succeeded`) maps to our
   name via the table above - do not forward provider names as event names.
-- Absence detection is the point: `payment_succeeded` placed correctly means
-  upcontrol can alert on "payments stopped arriving", the incident this product
-  exists for. That is why required labels matter.
+- A stable name is the point: `payment_succeeded` at every success path gives
+  the money moments one searchable, correlatable name. That is why label
+  discipline matters.
