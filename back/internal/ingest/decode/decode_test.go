@@ -75,10 +75,41 @@ func TestDecodeJSONObject(t *testing.T) {
 }
 
 func TestDecodeEventObject(t *testing.T) {
-	// The SDK's {"event":"payment_failed"} shape: message is the event name.
+	// The SDK's {"event":"payment_failed"} shape: message is the event name,
+	// declared by construction.
 	r := Decode([]byte(`{"event":"payment_failed"}`), "")
 	if len(r.Records) != 1 || r.Records[0].Message != "payment_failed" {
 		t.Fatalf("event decode: %+v", r.Records)
+	}
+	if !r.Records[0].Named {
+		t.Error("event object should be Named")
+	}
+}
+
+func TestDecodeUCEventMarker(t *testing.T) {
+	// true marks the line as a declared event name and is NOT stored as an attr.
+	r := Decode([]byte(`{"msg":"checkout","uc.event":true}`), "")
+	if len(r.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(r.Records))
+	}
+	rec := r.Records[0]
+	if rec.Message != "checkout" || !rec.Named {
+		t.Errorf("rec = %+v, want msg checkout Named", rec)
+	}
+	if _, ok := rec.Attrs["uc.event"]; ok {
+		t.Errorf("uc.event leaked into attrs: %+v", rec.Attrs)
+	}
+	// Absent, false and non-boolean values all leave the line unmarked.
+	for _, body := range []string{
+		`{"msg":"checkout"}`,
+		`{"msg":"checkout","uc.event":false}`,
+		`{"msg":"checkout","uc.event":"true"}`,
+		`{"msg":"checkout","uc.event":1}`,
+	} {
+		r := Decode([]byte(body), "")
+		if len(r.Records) != 1 || r.Records[0].Named {
+			t.Errorf("%s: records = %+v, want unmarked", body, r.Records)
+		}
 	}
 }
 

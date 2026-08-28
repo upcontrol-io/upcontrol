@@ -2376,6 +2376,11 @@ export interface paths {
          * The schemaless ingest endpoint. Body form is decided by a sniffer, not a
          *     header. Always 2xx on sane input with a structured receipt; 401/429/503
          *     only. Implemented by hand — the generator's validation is forbidden.
+         *
+         *     A JSON line may carry an optional boolean field `uc.event`: true means
+         *     the sender is declaring an event name (the message) rather than sending
+         *     a log message. Unmarked lines are identified by their fingerprint, not
+         *     by a name. The `uc.` prefix is reserved.
          */
         post: {
             parameters: {
@@ -2432,7 +2437,7 @@ export interface paths {
         put?: never;
         /**
          * The ingest endpoint the docs promise (audit §6): an alias over the same
-         *     pipeline as POST /i — spool, batcher, ClickHouse — never a second
+         *     pipeline as POST /i (spool, batcher, Postgres), never a second
          *     one. The key is accepted "anywhere", literally: Authorization: Bearer,
          *     ?key=, or a top-level `key` field in the body, whichever is found first.
          *     The body is any shape the /i sniffer knows (NDJSON, JSON array, JSON

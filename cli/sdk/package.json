@@ -1,6 +1,6 @@
 {
   "name": "@upcontrol/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "upcontrol push library: track() canonical events and mirror logs. Zero dependencies; track() never throws.",
   "license": "MIT",
   "homepage": "https://upcontrol.io",

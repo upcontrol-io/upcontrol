@@ -26,6 +26,8 @@ export function track(event: string, attrs?: Attrs): void {
       level: 'info',
       msg: String(event),
       ...attrs,
+      // After the spread: the marker is ours, and a caller attribute may not unset it.
+      'uc.event': true,
     };
     if (host) fields.host = host;
     client.enqueue(scrubFields(fields), 'info');
@@ -99,8 +101,9 @@ function normalizeLevel(level: unknown): string {
     case 'warn':
     case 'warning':
       return 'warn';
-    case 'debug':
     case 'trace':
+      return 'trace';
+    case 'debug':
       return 'debug';
     default:
       return 'info';

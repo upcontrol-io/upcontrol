@@ -22,7 +22,7 @@ import (
 // MaxBodyBytes caps a single POST /i body before auth; oversized never reach decode.
 const MaxBodyBytes = 16 << 20
 
-// Attribute caps. Bytes, not runes: the limit is what ClickHouse stores. Over
+// Attribute caps. Bytes, not runes: the cap is on what gets stored. Over
 // the cap the value is trimmed and tallied, never a reason to refuse a batch.
 const (
 	MaxAttrKeys     = 64
@@ -286,7 +286,7 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		}
 		// A message that names an event something queries is also stored as an
 		// event row; the reserved uc.* prefix warns and stores no name.
-		if ev := normalize.Classify(rec.Message); ev.Reserved {
+		if ev := normalize.Classify(rec.Message, rec.Named); ev.Reserved {
 			ws.add("reserved_prefix", 1)
 		} else if ev.Name != "" {
 			env.Event = ev.Name

@@ -5,6 +5,17 @@ deploy is rolled back, a bad published version is on other people's machines).
 
 ## Unreleased
 
+## 2026-08-28 — @upcontrol/sdk 0.1.1
+
+- `trace` is no longer rewritten to `debug`. A `trace` line sent through the
+  SDK now arrives and is stored as `trace`, a level of its own on the server
+  alongside `debug`, `info`, `warn` and `error`. Before 0.1.1 the SDK rewrote
+  the level before it left the process, so the level the caller chose never
+  reached the server: the line was stored as `debug`, and `level_raw`
+  recorded `debug` too.
+
+## 2026-08-28 — upcontrol 0.1.3
+
 - `init` stops lying about success (self-host cold-install rehearsal,
   finding 7): a run that tried to establish a key and could not — a failed
   or unreachable `--token` redeem, a refused or throttled anonymous mint —
@@ -20,6 +31,13 @@ deploy is rolled back, a bad published version is on other people's machines).
   by contract (a refused or unreachable PUT never failed an install), so an
   older installer pointed at a current server keeps working exactly as
   before; its spec is simply ignored.
+- The bundled agent skill no longer teaches the frozen event dictionary (it
+  was removed from the product).
+- `SDK_PIN` moves to `0.1.1`, so a fresh `init` pins `@upcontrol/sdk` exactly
+  at the version that keeps `trace` intact.
+- Publish order: `@upcontrol/sdk` must be published before `upcontrol`. The
+  installer pins an exact SDK version, and a pin to an unpublished version
+  fails every user's install.
 
 ## 2026-08-17 — upcontrol 0.1.2
 

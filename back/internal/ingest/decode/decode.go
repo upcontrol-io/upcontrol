@@ -52,6 +52,9 @@ type Record struct {
 	Message  string
 	Attrs    map[string]string
 	Raw      []byte
+	// Named: the sender marked the line with "uc.event": true, declaring an
+	// event name rather than sending a log message.
+	Named bool
 }
 
 // warningSet accumulates per-code counts without allocations for the common path.
@@ -280,6 +283,9 @@ func recordsFromObject(obj map[string]any) []Record {
 			r.Host = toString(v)
 		case "msg", "message":
 			r.Message = toString(v)
+		case "uc.event":
+			// The event marker is consumed here, never stored as an attr.
+			r.Named = v == true
 		default:
 			r.Attrs[k] = toString(v)
 		}
@@ -332,6 +338,7 @@ func decodeJSONObject(body []byte, ws *warningSet) []Record {
 	if ev, ok := obj["event"]; ok && len(obj) <= 4 {
 		r := Record{Attrs: map[string]string{}}
 		r.Message = toString(ev)
+		r.Named = true
 		if name, ok := obj["name"]; ok {
 			r.Attrs["name"] = toString(name)
 		}

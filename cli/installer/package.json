@@ -1,6 +1,6 @@
 {
   "name": "upcontrol",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "One command to wire upcontrol monitoring into your app through the coding agent you already use: installs the agent skill, pins the SDK, provisions a key, verifies data is flowing.",
   "license": "MIT",
   "homepage": "https://upcontrol.io",

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
+import { SDK_PIN } from '../src/files.ts';
 
 interface MockServer {
   url: string;
@@ -99,7 +100,7 @@ test('init in agent mode: skill + dep + minted key, key never in stdout', async 
   assert.ok(existsSync(join(cwd, '.agents', 'skills', 'upcontrol', 'SKILL.md')));
   assert.equal(
     JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')).dependencies['@upcontrol/sdk'],
-    '0.1.0',
+    SDK_PIN,
   );
   const env = readFileSync(join(cwd, '.env'), 'utf8');
   assert.ok(env.includes('UPCONTROL_API_KEY=' + KEY));

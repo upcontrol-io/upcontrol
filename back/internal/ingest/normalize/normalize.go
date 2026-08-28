@@ -1,8 +1,8 @@
 // Package normalize decides whether a line's message is a NAMED event -- one
-// something queries -- rather than an ordinary log line. The frozen 24-name
-// dictionary and its tiers are gone: a name earns its place here by having an
-// engine behind it: the deploy family, which post-deploy suppression reads
-// back, and install_verified, which the admin dashboard counts.
+// something queries -- rather than an ordinary log line. A name is declared by
+// the sender (the uc.event wire marker) or it does not exist: an unmarked line
+// is identified by its fingerprint, and a derived identity is not addressable
+// as a name in alert rules.
 package normalize
 
 import "strings"
@@ -16,14 +16,20 @@ type Event struct {
 	Reserved bool // the client used the uc.* prefix
 }
 
-// Classify reports whether the message names an event we store as one.
-func Classify(name string) Event {
+// Classify reports whether the message names an event we store as one. A
+// marked line declares its own name; an unmarked one falls to the heuristic.
+func Classify(name string, named bool) Event {
 	n := trimLower(name)
 	// Reserved first: a client cannot claim the upcontrol namespace even where
 	// the rest of the name would otherwise name a real event (uc.deploy).
 	if strings.HasPrefix(n, ReservedPrefix) {
 		return Event{Reserved: true}
 	}
+	if named {
+		return Event{Name: n}
+	}
+	// Textual fallback: every already-published SDK predates the marker, and
+	// deploy suppression and ucadmin's install_verified count still read these.
 	if strings.HasPrefix(n, "deploy") || strings.Contains(n, "deployment") || n == "install_verified" {
 		return Event{Name: n}
 	}

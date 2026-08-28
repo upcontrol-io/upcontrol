@@ -10,6 +10,7 @@ import {
   writeDotenvKey,
   readDotenvKey,
   pinSdkDependency,
+  SDK_PIN,
 } from '../src/files.ts';
 import { detect } from '../src/detect.ts';
 
@@ -82,7 +83,7 @@ test('pinSdkDependency pins exactly and leaves an existing entry alone', () => {
   const r = pinSdkDependency(cwd);
   assert.equal(r.added, true);
   const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
-  assert.equal(pkg.dependencies['@upcontrol/sdk'], '0.1.0');
+  assert.equal(pkg.dependencies['@upcontrol/sdk'], SDK_PIN);
   assert.match(pkg.dependencies['@upcontrol/sdk'], /^\d/, 'exact pin, no range');
   const r2 = pinSdkDependency(cwd);
   assert.equal(r2.added, false);
