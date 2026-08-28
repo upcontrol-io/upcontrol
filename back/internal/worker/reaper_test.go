@@ -4,7 +4,7 @@
 // an unclaimed tenant older than 24 h has its monitors paused, one older than
 // 7 days is deleted (cascade), and a claimed tenant is never touched. Run
 // with -tags=integration, UC_TEST_POSTGRES set.
-package main
+package worker
 
 import (
 	"context"
@@ -132,7 +132,6 @@ func TestReapUnclaimedPausesAtADayDeletesAtAWeek(t *testing.T) {
 			t.Fatalf("%s: running monitors on the claimed tenant = %d, want 1", tag, n)
 		}
 	}
-
 	run()
 	assertState("first run")
 

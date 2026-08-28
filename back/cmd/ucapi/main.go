@@ -26,6 +26,7 @@ import (
 	"go.upcontrol.io/back/internal/source/webhook"
 	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/worker"
 
 	probev1connect "go.upcontrol.io/back/gen/rpc/probe/v1/probev1connect"
 
@@ -322,8 +323,13 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 		}
 	}()
 
-	// Delivery worker lives in ucworker, NOT ucapi: two ucapi replicas with
-	// an inline worker would duplicate deliveries. ucapi only enqueues.
+	// The background jobs run here too when --with-worker (UC_WITH_WORKER) is
+	// set: every job's advisory lock is what makes that safe with replicas.
+	if d.Config.WithWorker {
+		if err := worker.Start(ctx, d, pgPool); err != nil {
+			d.Logger.Error("in-process worker failed to start", "err", err)
+		}
+	}
 
 	d.Logger.Info("routes mounted",
 		"ingest", "POST /i",

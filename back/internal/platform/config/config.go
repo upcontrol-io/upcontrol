@@ -53,6 +53,11 @@ type Config struct {
 	// land on the 'Self-hosted' plan instead of 'Free'.
 	SelfHosted bool
 
+	// WithWorker runs the background jobs inside ucapi (--with-worker, or
+	// UC_WITH_WORKER=1). Defaults ON for a self-hosted install, where one
+	// container is the point, and OFF otherwise, where ucworker runs separately.
+	WithWorker bool
+
 	// UCAuth selects the sign-in door: "magic-link" (default) or "none" —
 	// single-user mode acting as the boot-provisioned OwnerEmail account.
 	UCAuth     string
@@ -135,6 +140,11 @@ func Load(service string) (Config, error) {
 			c.Warnings = append(c.Warnings,
 				"UC_SCRUB=0 ignored: secret scrubbing is optional only on a self-hosted instance (UC_SELF_HOSTED=1)")
 		}
+	}
+	// UC_WITH_WORKER forces the choice either way; unset keeps the default.
+	c.WithWorker = c.SelfHosted
+	if v := os.Getenv("UC_WITH_WORKER"); v == "1" || v == "0" {
+		c.WithWorker = v == "1"
 	}
 	c.UCAuth = getenv("UC_AUTH", "magic-link")
 	if c.UCAuth != "magic-link" && c.UCAuth != "none" {
