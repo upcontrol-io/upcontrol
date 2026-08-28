@@ -5,7 +5,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -230,9 +229,11 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	monRows, _ := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID)
 	monitors := make([]map[string]any, 0, len(monRows))
 	for _, row := range monRows {
+		// The overview tile carries no ping URL: the checks list is where the
+		// customer copies it from.
 		monitors = append(monitors, monitorRowToAPI(row.Kind, row.Name, row.Target,
 			ptrStrSafe(row.Keyword), row.IntervalSec, ptrStrSafe(row.Status),
-			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID))
+			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID, ""))
 	}
 	// Sources and ladder both derive from what the tenant has actually connected
 	// (same signals as /v1/sources), never from a fixed list.
@@ -559,21 +560,18 @@ func agoLabel(t time.Time) string {
 func (h *readAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListIncidentsByTenantRow) map[string]any {
 	inc := incidentToAPI(row)
 
-	var lifecycle []map[string]any
+	var lifecycle []timelineMark
 	if updates, err := h.pool.Queries().ListIncidentUpdates(ctx, row.ID); err == nil {
-		lifecycle = make([]map[string]any, 0, len(updates))
+		lifecycle = make([]timelineMark, 0, len(updates))
 		for _, u := range updates {
-			entry := map[string]any{
-				"kind": timelineKind(u.Kind),
-				"text": u.Text,
-				"time": "",
-				"ago":  "",
+			mark := timelineMark{
+				Kind: timelineKind(u.Kind),
+				Text: u.Text,
 			}
 			if u.At.Valid {
-				entry["time"] = u.At.Time.Format("15:04")
-				entry["ago"] = agoLabel(u.At.Time)
+				mark.At = u.At.Time
 			}
-			lifecycle = append(lifecycle, entry)
+			lifecycle = append(lifecycle, mark)
 		}
 	}
 
@@ -648,26 +646,64 @@ func eventText(e ch.EventRow) string {
 	return e.Name
 }
 
-// mergeTimeline folds the tenant's events into the lifecycle marks, oldest
-// first. An absent feed adds nothing: never a placeholder row.
-func mergeTimeline(lifecycle []map[string]any, events []ch.EventRow) []map[string]any {
+// timelineMark is one lifecycle row before rendering; a zero At renders as
+// an empty time, as before, and sorts first.
+type timelineMark struct {
+	At   time.Time
+	Kind string
+	Text string
+}
+
+// mergeTimeline folds events into the lifecycle marks, oldest first by timestamp.
+// The old sort on the display string put midnight before eleven.
+func mergeTimeline(lifecycle []timelineMark, events []ch.EventRow) []map[string]any {
 	if len(lifecycle) == 0 && len(events) == 0 {
 		return nil
 	}
-	out := make([]map[string]any, 0, len(lifecycle)+len(events))
+
+	type entry struct {
+		at time.Time
+		m  map[string]any
+	}
+	out := make([]entry, 0, len(lifecycle)+len(events))
+
 	for _, e := range events {
-		out = append(out, map[string]any{
-			"time": e.TS.Format("15:04"),
-			"ago":  agoLabel(e.TS),
-			"kind": eventKind(e.Name),
-			"text": eventText(e),
+		out = append(out, entry{
+			at: e.TS,
+			m: map[string]any{
+				"time": e.TS.Format("15:04"),
+				"ago":  agoLabel(e.TS),
+				"kind": eventKind(e.Name),
+				"text": eventText(e),
+			},
 		})
 	}
-	out = append(out, lifecycle...)
+	for _, mark := range lifecycle {
+		timeStr, agoStr := "", ""
+		if !mark.At.IsZero() {
+			timeStr = mark.At.Format("15:04")
+			agoStr = agoLabel(mark.At)
+		}
+		out = append(out, entry{
+			at: mark.At,
+			m: map[string]any{
+				"time": timeStr,
+				"ago":  agoStr,
+				"kind": mark.Kind,
+				"text": mark.Text,
+			},
+		})
+	}
+
 	sort.SliceStable(out, func(i, j int) bool {
-		return fmt.Sprint(out[i]["time"]) < fmt.Sprint(out[j]["time"])
+		return out[i].at.Before(out[j].at)
 	})
-	return out
+
+	maps := make([]map[string]any, len(out))
+	for i, e := range out {
+		maps[i] = e.m
+	}
+	return maps
 }
 
 // incidentToAPI builds the front's Incident shape. `timeline` and `logSlice`

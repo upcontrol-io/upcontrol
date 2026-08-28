@@ -35,7 +35,7 @@ func TestValidateMonitorCreate(t *testing.T) {
 // this pins the helper the caller passes real facts through.
 func TestMonitorPatchKeepsStatus(t *testing.T) {
 	got := monitorRowToAPI("website", "Renamed", "https://example.com", "", 300,
-		"ok", pgtype.Timestamptz{}, pgtype.Timestamptz{}, pgtype.UUID{Valid: true})
+		"ok", pgtype.Timestamptz{}, pgtype.Timestamptz{}, pgtype.UUID{Valid: true}, "")
 	if got["status"] != "ok" {
 		t.Fatalf("status = %v, want ok", got["status"])
 	}

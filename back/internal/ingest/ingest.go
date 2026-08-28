@@ -1,5 +1,5 @@
 // Package ingest is the POST /i coordinator (decode → scrub → normalize → seq
-// → cardinality → batcher → WAL → receipt); sane input always gets 2xx.
+// → cardinality → batcher → receipt); sane input always gets 2xx.
 package ingest
 
 import (
@@ -56,11 +56,6 @@ type SpoolFiller interface {
 	FillPercent(ctx context.Context) (int, error)
 }
 
-// WALAppender appends a serialized batch and fsyncs it before the receipt is sent.
-type WALAppender interface {
-	AppendSync(ctx context.Context, payload []byte) error
-}
-
 // Deps bundles the coordinator's dependencies. A nil member is a programmer
 // error caught at Handle time (the handler degrades to 503 rather than panic).
 type Deps struct {
@@ -69,7 +64,6 @@ type Deps struct {
 	Sink  BatchSink
 	Idem  Idempotency
 	Spool SpoolFiller
-	WAL   WALAppender
 	Card  *cardinality.Limiter // per-request is also fine; shared is normal
 }
 
@@ -152,15 +146,6 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 	logRecs, metricRows := h.splitMetrics(tenant, dec.Records)
 	rows := h.buildRows(ctx, tenant, logRecs, decision, ws)
 
-	// WAL: append and fsync BEFORE accepting, so an accepted batch is on disk.
-	// No replay path exists yet; the file is a durability record, not recovery.
-	if h.d.WAL != nil && (len(rows) > 0 || len(metricRows) > 0) {
-		if err := h.walAppend(ctx, tenant, rows, metricRows); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, receiptErr("wal_failed"))
-			return
-		}
-	}
-
 	// Claim: an already-accepted body returns the stored count without
 	// re-writing; accepted counts every line that landed (logs + metrics).
 	if h.d.Idem != nil {
@@ -228,20 +213,22 @@ func keyFromBody(body []byte) string {
 	return ""
 }
 
-// RowEnvelope is the per-row payload handed to the batcher and the WAL; the
-// CH sink decodes it back into native column form on flush.
+// RowEnvelope is the per-row payload handed to the batcher; the CH sink
+// decodes it back into native column form on flush.
 type RowEnvelope struct {
-	TenantID  int64             `json:"tenant_id"`
-	ProjectID int64             `json:"project_id"`
-	Seq       int64             `json:"seq,omitempty"`
-	TS        string            `json:"ts,omitempty"`
-	Level     string            `json:"level"`
-	Service   string            `json:"service,omitempty"`
-	Host      string            `json:"host,omitempty"`
-	Message   string            `json:"message"`
-	Attrs     map[string]string `json:"attrs,omitempty"`
-	Event     string            `json:"event,omitempty"` // canonical name if T1-T3
-	EventTier int               `json:"event_tier,omitempty"`
+	TenantID    int64             `json:"tenant_id"`
+	ProjectID   int64             `json:"project_id"`
+	Seq         int64             `json:"seq,omitempty"`
+	TS          string            `json:"ts,omitempty"`
+	Level       string            `json:"level"`
+	LevelRaw    string            `json:"level_raw,omitempty"`
+	Service     string            `json:"service,omitempty"`
+	Host        string            `json:"host,omitempty"`
+	Message     string            `json:"message"`
+	Fingerprint uint64            `json:"fingerprint,omitempty"`
+	Attrs       map[string]string `json:"attrs,omitempty"`
+	Event       string            `json:"event,omitempty"` // canonical name if T1-T3
+	EventTier   int               `json:"event_tier,omitempty"`
 }
 
 func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record, d overloadDecision, ws *warningAccumulator) [][]byte {
@@ -252,14 +239,22 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		if len(scrubbed.Counts) > 0 {
 			ws.add("scrubbed", sumCounts(scrubbed.Counts))
 		}
+		for k, v := range rec.Attrs {
+			if s := scrub.Scrub(v); len(s.Counts) > 0 {
+				rec.Attrs[k] = s.Cleaned
+				ws.add("scrubbed", sumCounts(s.Counts))
+			}
+		}
 		env := RowEnvelope{
-			TenantID:  t.TenantID,
-			ProjectID: t.ProjectID,
-			Message:   scrubbed.Cleaned,
-			Level:     rec.Level,
-			Service:   rec.Service,
-			Host:      rec.Host,
-			Attrs:     rec.Attrs,
+			TenantID:    t.TenantID,
+			ProjectID:   t.ProjectID,
+			Message:     scrubbed.Cleaned,
+			Fingerprint: Fingerprint(scrubbed.Cleaned),
+			Level:       rec.Level,
+			LevelRaw:    rec.LevelRaw,
+			Service:     rec.Service,
+			Host:        rec.Host,
+			Attrs:       rec.Attrs,
 		}
 		if !rec.Time.IsZero() {
 			env.TS = rec.Time.UTC().Format("2006-01-02T15:04:05.000Z07:00")
@@ -293,21 +288,6 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		out = append(out, b)
 	}
 	return out
-}
-
-// walAppend serializes the (tenant, rows) batch and appends+fsyncs it via
-// the WAL seam; a nil WAL (unit tests) makes it a no-op.
-func (h *Ingester) walAppend(ctx context.Context, t Tenant, rows, metricRows [][]byte) error {
-	if h.d.WAL == nil {
-		return nil
-	}
-	payload, _ := json.Marshal(struct {
-		Tenant  int64
-		Project int64
-		Rows    [][]byte
-		Metrics [][]byte
-	}{Tenant: t.TenantID, Project: t.ProjectID, Rows: rows, Metrics: metricRows})
-	return h.d.WAL.AppendSync(ctx, payload)
 }
 
 // overloadDecision is the stepped response to spool fill.

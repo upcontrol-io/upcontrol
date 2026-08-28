@@ -43,13 +43,15 @@ type Warning struct {
 // Record is the unified shape every format decodes to. Time zero = the source
 // carried none (caller stamps now); Raw re-marshals JSON for the metric sniffer.
 type Record struct {
-	Time    time.Time
-	Level   string
-	Service string
-	Host    string
-	Message string
-	Attrs   map[string]string
-	Raw     []byte
+	Time  time.Time
+	Level string
+	// LevelRaw is the level exactly as sent (capped at 32 bytes); Level is the mapped one.
+	LevelRaw string
+	Service  string
+	Host     string
+	Message  string
+	Attrs    map[string]string
+	Raw      []byte
 }
 
 // warningSet accumulates per-code counts without allocations for the common path.
@@ -185,16 +187,25 @@ func Decode(body []byte, contentType string) Result {
 	return Result{Records: recs, Format: format, Warnings: ws.slice()}
 }
 
-// normalizeLevel maps a free-form level to info|warn|error|debug. Unknown levels
+// normalizeLevel keeps the client's spelling on LevelRaw (capped at 32 bytes)
+// and maps Level to the canonical info|warn|error|debug|trace. Unknown levels
 // default to info and raise level_unknown (the receipt's job to explain).
 func normalizeLevel(r *Record, ws *warningSet) {
-	if r.Level == "" {
-		r.Level = "info"
-		return
+	r.LevelRaw = r.Level
+	if len(r.LevelRaw) > 32 {
+		r.LevelRaw = r.LevelRaw[:32]
 	}
-	switch strings.ToLower(r.Level) {
-	case "info", "warn", "warning", "error", "err", "debug", "trace":
-		// keep (collapse warning/warn, err/error)
+	switch strings.ToLower(strings.TrimSpace(r.Level)) {
+	case "", "info", "notice":
+		r.Level = "info"
+	case "warn", "warning":
+		r.Level = "warn"
+	case "error", "err", "fatal", "critical", "crit", "panic", "emerg", "emergency", "alert":
+		r.Level = "error"
+	case "debug":
+		r.Level = "debug"
+	case "trace":
+		r.Level = "trace"
 	default:
 		ws.add(WarnLevelUnknown)
 		r.Level = "info"

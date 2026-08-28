@@ -114,12 +114,13 @@ services:
         limits:
           memory: 512M
     volumes:
-      # The ingest WAL. A named volume, not container scratch: the spool is
-      # the durability promise behind POST /i's receipt, and it must survive
-      # container recreation. Mounted at /spool because the image prepares
-      # THAT directory with the right owner (uc:uc) — a first-use volume
-      # copies its ownership. Any other mount point is created root:root and
-      # the API boots dead with "permission denied" on the WAL.
+      # The spool directory (UC_SPOOL_DIR), mounted at /spool: the overload
+      # gauge the ingest door reads, as the fill percentage of the directory.
+      # A named volume, not container scratch: it must survive container
+      # recreation, and the image prepares THAT directory with the right
+      # owner (uc:uc) — a first-use volume copies its ownership. Any other
+      # mount point is created root:root and the API boots dead with
+      # "permission denied" on the spool.
       - spool:/spool
       # Optional country database for product analytics: drop an MMDB file at
       # geoip/country.mmdb next to this compose file. An empty directory means

@@ -30,7 +30,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/analytics"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
-	"go.upcontrol.io/back/internal/probe/discover"
+	"go.upcontrol.io/back/internal/discover"
 	"go.upcontrol.io/back/internal/probe/executor"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/ch"
@@ -1237,7 +1237,8 @@ func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[stri
 	err := h.ch.Raw().QueryRow(ctx, `
 		SELECT median(dns_ms), median(connect_ms), median(total_ms), count()
 		  FROM checks
-		 WHERE tenant_id = ? AND ts >= now() - INTERVAL 24 HOUR AND ok = 1`,
+		 WHERE tenant_id = ? AND ts >= now() - INTERVAL 24 HOUR AND ok = 1
+		   AND region <> 'heartbeat'`,
 		uint64(tenantID)).Scan(&dns, &connect, &total, &samples)
 	if err != nil || samples == 0 {
 		// Nothing measured in the window: no tiles. An empty section is the
@@ -1633,7 +1634,7 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 		meta = "blocked — internal address refused"
 	}
 	// Facts one request cannot answer, on the same host and behind the same
-	// guard. Bounded, not a crawl: see internal/probe/discover.
+	// guard. Bounded, not a crawl: see internal/discover.
 	facts := discover.Run(r.Context(), h.exec, net.DefaultResolver, host, res)
 	network := append(networkRowsFrom(res, status), discoveredRows(facts)...)
 

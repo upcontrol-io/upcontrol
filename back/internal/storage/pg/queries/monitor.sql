@@ -1,6 +1,6 @@
 -- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
-       m.interval_sec, m.availability_target, m.paused, m.created_at,
+       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
        mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
   FROM monitor m
   LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
@@ -8,19 +8,26 @@ SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
  ORDER BY m.created_at;
 
 -- name: CreateMonitor :one
-INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec)
+INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec, ping_token)
 VALUES (sqlc.arg(public_id), sqlc.arg(tenant_id), sqlc.arg(project_id),
         sqlc.arg(kind), sqlc.arg(name), sqlc.arg(target), sqlc.arg(keyword),
-        sqlc.arg(interval_sec))
-RETURNING id, public_id, kind, name, target, keyword, interval_sec, created_at;
+        sqlc.arg(interval_sec), sqlc.narg(ping_token))
+RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, created_at;
 
 -- name: GetMonitorByPublicID :one
 SELECT m.id, m.public_id, m.tenant_id, m.project_id, m.kind, m.name, m.target,
-       m.keyword, m.interval_sec, m.paused, m.created_at,
+       m.keyword, m.interval_sec, m.paused, m.ping_token, m.created_at,
        mf.status, mf.ssl_expires_at, mf.domain_expires_at
   FROM monitor m
   LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
  WHERE m.public_id = $1 AND m.tenant_id = $2;
+
+-- name: GetMonitorByPingToken :one
+-- The token is the credential: a miss is a 404, never a hint.
+SELECT m.id, m.tenant_id, m.name, m.paused, m.interval_sec,
+       COALESCE(m.grace_sec, m.interval_sec)::int AS grace_sec
+  FROM monitor m
+ WHERE m.ping_token = $1 AND m.kind = 'heartbeat';
 
 -- name: PatchMonitor :one
 UPDATE monitor SET

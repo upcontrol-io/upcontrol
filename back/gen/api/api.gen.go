@@ -860,8 +860,11 @@ type Monitor struct {
 	Interval string `json:"interval"`
 
 	// Keyword Optional assertion on the response body ("Page must contain").
-	Keyword *string      `json:"keyword,omitempty"`
-	Name    string       `json:"name"`
+	Keyword *string `json:"keyword,omitempty"`
+	Name    string  `json:"name"`
+
+	// PingUrl Heartbeat only. The URL the job calls on every run (GET or POST); absent for a website check.
+	PingUrl *string      `json:"pingUrl,omitempty"`
 	Status  HealthStatus `json:"status"`
 
 	// Target Example: https://example.com

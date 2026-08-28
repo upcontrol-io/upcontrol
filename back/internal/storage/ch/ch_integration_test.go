@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -55,24 +56,33 @@ func startClickHouse(t *testing.T) string {
 	return endpoint
 }
 
-// applyMigration execs the Up block of db/clickhouse/001_init.sql statement by
-// statement. The native driver runs one statement per Exec.
+// applyMigration execs every db/clickhouse/*.sql in name order, statement by
+// statement — the same glob-and-sort migrate.runClickHouse does in production.
+// Applying 001 alone would leave the container a migration behind the schema
+// the code writes against, which is invisible until one ALTERs a table.
 func applyMigration(t *testing.T, c *Conn) {
 	t.Helper()
-	// Resolve the migration file relative to back/ (the test cwd).
-	path := filepath.Join("..", "..", "..", "..", "db", "clickhouse", "001_init.sql")
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
+	// Resolve the migration dir relative to back/ (the test cwd).
+	dir := filepath.Join("..", "..", "..", "..", "db", "clickhouse")
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("find migrations in %s: %v", dir, err)
 	}
-	up := splitUp(string(body))
-	for _, stmt := range splitStatements(up) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
+	sort.Strings(files)
+	for _, path := range files {
+		body, rerr := os.ReadFile(path)
+		if rerr != nil {
+			t.Fatalf("read migration %s: %v", filepath.Base(path), rerr)
 		}
-		if err := c.Raw().Exec(context.Background(), stmt); err != nil {
-			t.Fatalf("exec migration statement (%s…): %v", firstLine(stmt), err)
+		up := splitUp(string(body))
+		for _, stmt := range splitStatements(up) {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if err := c.Raw().Exec(context.Background(), stmt); err != nil {
+				t.Fatalf("exec %s statement (%s…): %v", filepath.Base(path), firstLine(stmt), err)
+			}
 		}
 	}
 }
@@ -125,7 +135,8 @@ func TestInsertLogsRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	rows := []LogRow{
 		{TenantID: 1, ProjectID: 1, TS: now, Seq: 1, Source: "sdk", Service: "app",
-			Host: "h1", Level: "error", Message: "boom", Attrs: map[string]string{"k": "v"}},
+			Host: "h1", Level: "error", LevelRaw: "FATAL", Message: "boom",
+			Fingerprint: 42, Attrs: map[string]string{"k": "v"}},
 		{TenantID: 1, ProjectID: 1, TS: now, Seq: 2, Source: "sdk", Service: "app",
 			Host: "h1", Level: "info", Message: "ok"},
 	}
@@ -149,14 +160,20 @@ func TestInsertLogsRoundTrip(t *testing.T) {
 		t.Fatalf("row count = %d, want 2", got)
 	}
 
-	var msg, lvl string
+	var msg, lvl, lvlRaw string
+	var fp uint64
 	var attrs map[string]string
 	if err := c.Raw().QueryRow(context.Background(),
-		"SELECT message, level, attrs FROM logs WHERE seq=1").Scan(&msg, &lvl, &attrs); err != nil {
+		"SELECT message, level, level_raw, fingerprint, attrs FROM logs WHERE seq=1").
+		Scan(&msg, &lvl, &lvlRaw, &fp, &attrs); err != nil {
 		t.Fatalf("select seq=1: %v", err)
 	}
 	if msg != "boom" || lvl != "error" {
 		t.Errorf("seq=1 got msg=%q lvl=%q", msg, lvl)
+	}
+	// The client's own spelling is annotated, never rewritten over.
+	if lvlRaw != "FATAL" || fp != 42 {
+		t.Errorf("seq=1 got level_raw=%q fingerprint=%d, want FATAL/42", lvlRaw, fp)
 	}
 	if attrs["k"] != "v" {
 		t.Errorf("attrs = %v, want k=v", attrs)

@@ -1,6 +1,8 @@
 -- name: LeaseDueMonitors :many
 -- Find monitors due for a check that are not currently leased. The caller
 -- (Lease handler) then atomically leases the returned IDs via SetLease.
+-- Heartbeats are excluded: they have no target, the ping route records their
+-- passes and the worker's miss sweep their failures.
 SELECT ms.monitor_id, m.public_id, m.kind, m.target, m.keyword,
        m.interval_sec, m.availability_target
   FROM monitor_schedule ms
@@ -8,6 +10,7 @@ SELECT ms.monitor_id, m.public_id, m.kind, m.target, m.keyword,
  WHERE ms.next_due_at <= now()
    AND ms.leased_by IS NULL
    AND m.paused = false
+   AND m.kind <> 'heartbeat'
  ORDER BY ms.next_due_at
  LIMIT $1;
 
@@ -66,3 +69,24 @@ UPDATE monitor_schedule SET leased_by = NULL, lease_until = NULL WHERE leased_by
 INSERT INTO monitor_schedule (monitor_id, region, next_due_at)
 VALUES ($1, $2, now())
 ON CONFLICT (monitor_id) DO NOTHING;
+
+-- name: ListMissedHeartbeats :many
+-- Heartbeats whose window closed. next_due_at is "missed after": a ping sets
+-- it to now + interval + grace, a recorded miss to now + interval.
+SELECT m.id, m.tenant_id, m.name, m.interval_sec,
+       COALESCE(mf.status, 'nodata')::text AS status,
+       COALESCE(mf.consecutive_failures, 0)::int AS consecutive_failures
+  FROM monitor_schedule ms
+  JOIN monitor m ON m.id = ms.monitor_id
+  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+ WHERE m.kind = 'heartbeat' AND m.paused = false AND ms.next_due_at <= now()
+ ORDER BY ms.next_due_at
+ LIMIT 500;
+
+-- name: SetHeartbeatDue :exec
+-- Push the miss deadline out by secs; also clears a lease left from before
+-- heartbeats stopped being handed to the probe.
+UPDATE monitor_schedule
+   SET next_due_at = now() + make_interval(secs => sqlc.arg(secs)::double precision),
+       leased_by = NULL, lease_until = NULL
+ WHERE monitor_id = sqlc.arg(monitor_id);

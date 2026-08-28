@@ -10,8 +10,8 @@ import (
 
 func TestMergeTimelinePutsADeployBeforeTheOutage(t *testing.T) {
 	opened := time.Date(2026, 8, 15, 14, 33, 0, 0, time.UTC)
-	lifecycle := []map[string]any{
-		{"time": "14:33", "ago": "40 min ago", "kind": "error", "text": "Checkout started failing"},
+	lifecycle := []timelineMark{
+		{At: opened, Kind: "error", Text: "Checkout started failing"},
 	}
 	events := []ch.EventRow{
 		{TS: opened.Add(-2 * time.Minute), Name: "deploy.succeeded",
@@ -37,10 +37,62 @@ func TestMergeTimelinePutsADeployBeforeTheOutage(t *testing.T) {
 }
 
 func TestMergeTimelineWithNoEventsIsTheLifecycleAlone(t *testing.T) {
-	lifecycle := []map[string]any{{"time": "14:33", "kind": "error", "text": "started failing"}}
+	opened := time.Date(2026, 8, 15, 14, 33, 0, 0, time.UTC)
+	lifecycle := []timelineMark{{At: opened, Kind: "error", Text: "started failing"}}
 	got := mergeTimeline(lifecycle, nil)
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1 — an absent feed must add nothing, never a placeholder", len(got))
+	}
+}
+
+func TestMergeTimelineSortsAcrossMidnight(t *testing.T) {
+	opened := time.Date(2026, 8, 27, 23, 58, 0, 0, time.UTC)
+	eventAt := time.Date(2026, 8, 28, 0, 3, 0, 0, time.UTC)
+	lifecycle := []timelineMark{
+		{At: opened, Kind: "error", Text: "Checkout started failing"},
+	}
+	events := []ch.EventRow{
+		{TS: eventAt, Name: "deploy.succeeded",
+			Labels: map[string]string{"sha": "deadbee", "service": "api"}},
+	}
+
+	got := mergeTimeline(lifecycle, events)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	// The event at 00:03 is AFTER the 23:58 mark, so it must render last.
+	// The old string sort would have reversed them (00:03 < 23:58).
+	if got[0]["kind"] != "error" {
+		t.Fatalf("first entry kind = %v, want error", got[0]["kind"])
+	}
+	if got[1]["kind"] != "deploy" {
+		t.Fatalf("second entry kind = %v, want deploy", got[1]["kind"])
+	}
+}
+
+func TestMergeTimelineZeroAtComesFirst(t *testing.T) {
+	opened := time.Date(2026, 8, 27, 23, 58, 0, 0, time.UTC)
+	lifecycle := []timelineMark{
+		{At: time.Time{}, Kind: "error", Text: "Opened at unknown time"},
+		{At: opened, Kind: "check", Text: "Resolved"},
+	}
+	events := []ch.EventRow{}
+
+	got := mergeTimeline(lifecycle, events)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	// A zero At renders as empty strings and sorts first.
+	if got[0]["time"] != "" {
+		t.Fatalf("first entry time = %v, want empty string", got[0]["time"])
+	}
+	if got[0]["ago"] != "" {
+		t.Fatalf("first entry ago = %v, want empty string", got[0]["ago"])
+	}
+	if got[1]["time"] != "23:58" {
+		t.Fatalf("second entry time = %v, want 23:58", got[1]["time"])
 	}
 }
 

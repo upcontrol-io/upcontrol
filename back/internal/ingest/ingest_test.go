@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,9 +25,16 @@ type fakeSeq struct{ n int64 }
 
 func (f *fakeSeq) Next(_ context.Context, _ int64) (int64, error) { f.n++; return f.n, nil }
 
-type fakeSink struct{ added int }
+type fakeSink struct {
+	added int
+	rows  [][]byte
+}
 
-func (f *fakeSink) Add(_ context.Context, _ string, _ []byte) error { f.added++; return nil }
+func (f *fakeSink) Add(_ context.Context, _ string, row []byte) error {
+	f.added++
+	f.rows = append(f.rows, row)
+	return nil
+}
 
 type fakeIdem struct{ seen map[string]int }
 
@@ -156,6 +164,59 @@ func TestScrubWarningInReceipt(t *testing.T) {
 	}
 	if contains(rr.Body.String(), "sk_live_abcdefghijklmnopqrstuvwxyz") {
 		t.Errorf("secret leaked into receipt: %s", rr.Body.String())
+	}
+}
+
+func TestRowCarriesFingerprintAndLevelRaw(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	body := `{"level":"ERROR","message":"user 42 not found"}` + "\n" +
+		`{"level":"ERROR","message":"user 7 not found"}` + "\n"
+	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if len(sink.rows) != 2 {
+		t.Fatalf("sink rows %d, want 2", len(sink.rows))
+	}
+	var fps [2]uint64
+	for i, raw := range sink.rows {
+		var env RowEnvelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("row %d: %v", i, err)
+		}
+		if env.Fingerprint == 0 {
+			t.Errorf("row %d fingerprint is 0", i)
+		}
+		if env.Level != "error" || env.LevelRaw != "ERROR" {
+			t.Errorf("row %d level=%q level_raw=%q", i, env.Level, env.LevelRaw)
+		}
+		fps[i] = env.Fingerprint
+	}
+	if fps[0] != fps[1] {
+		t.Errorf("same-shape messages fingerprinted apart: %d != %d", fps[0], fps[1])
+	}
+}
+
+func TestAttrValuesAreScrubbed(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	// The Bearer vector from scrub_test.go, riding an attr instead of the message.
+	body := `{"msg":"auth ok","auth":"Bearer supersecrettoken1234567890"}`
+	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), `"code":"scrubbed"`) {
+		t.Errorf("missing scrubbed warning: %s", rr.Body.String())
+	}
+	if contains(rr.Body.String(), "supersecrettoken1234567890") {
+		t.Errorf("secret leaked into receipt: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if contains(env.Attrs["auth"], "supersecrettoken1234567890") {
+		t.Errorf("secret survived in attr value: %q", env.Attrs["auth"])
 	}
 }
 

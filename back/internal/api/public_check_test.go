@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"go.upcontrol.io/back/internal/probe/discover"
+	"go.upcontrol.io/back/internal/discover"
 	"go.upcontrol.io/back/internal/probe/executor"
 )
 

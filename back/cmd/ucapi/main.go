@@ -15,6 +15,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/api"
+	"go.upcontrol.io/back/internal/heartbeat"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/notify/mailer"
@@ -207,7 +208,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// the endpoint stays a 501. A Settings token arrives on the next restart.
 	mux.Handle("POST /v1/auth/telegram", auth.NewTelegramMiniApp(pgPool, sm, tgToken(ctx), devMode))
 
-	mon := api.NewMonitors(pgPool, sm)
+	mon := api.NewMonitors(pgPool, sm, d.Config.PublicOrigin)
 	mux.Handle("GET /v1/monitors", mon)
 	mux.Handle("POST /v1/monitors", mon)
 	mux.Handle("PATCH /v1/monitors/{id}", mon)
@@ -278,12 +279,17 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/install/token", inst)
 	mux.Handle("POST /v1/install/redeem", inst)
 
+	lc := incident.New(pgPool, chConn)
 	mux.Handle("POST /public/check", wa)
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("POST /public/track", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
+	// The heartbeat ping door: anonymous, the token in the path is the whole
+	// credential, so an unknown one answers 404 and never a hint.
+	hb := heartbeat.New(pgPool, chConn, lc)
+	mux.Handle("GET /public/ping/{token}", hb)
+	mux.Handle("POST /public/ping/{token}", hb)
 
-	lc := incident.New(pgPool, chConn)
 	probeSvc := rpc.NewProbeService(pgPool, chConn, lc, d.Config.NodeToken)
 	probePath, probeHandler := probev1connect.NewProbeServiceHandler(probeSvc)
 	mux.Handle(probePath, probeHandler)

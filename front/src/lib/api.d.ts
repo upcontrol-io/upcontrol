@@ -1951,6 +1951,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/public/ping/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    token: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Recorded. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    token: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Recorded. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/public/check": {
         parameters: {
             query?: never;
@@ -2372,7 +2432,7 @@ export interface paths {
         put?: never;
         /**
          * The ingest endpoint the docs promise (audit §6): an alias over the same
-         *     pipeline as POST /i — spool, WAL, batcher, ClickHouse — never a second
+         *     pipeline as POST /i — spool, batcher, ClickHouse — never a second
          *     one. The key is accepted "anywhere", literally: Authorization: Bearer,
          *     ?key=, or a top-level `key` field in the body, whichever is found first.
          *     The body is any shape the /i sniffer knows (NDJSON, JSON array, JSON
@@ -2551,6 +2611,8 @@ export interface components {
                 /** @example domain Mar 14, in 217 days */
                 domain?: string;
             };
+            /** @description Heartbeat only. The URL the job calls on every run (GET or POST); absent for a website check. */
+            pingUrl?: string;
         };
         MonitorCreate: {
             /** @enum {string} */

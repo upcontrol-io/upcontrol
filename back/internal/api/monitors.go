@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -24,12 +25,13 @@ import (
 
 // monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
 type monitors struct {
-	pool *pg.Pool
-	sess *session.Manager
+	pool   *pg.Pool
+	sess   *session.Manager
+	origin string
 }
 
-func NewMonitors(p *pg.Pool, sm *session.Manager) *monitors {
-	return &monitors{pool: p, sess: sm}
+func NewMonitors(p *pg.Pool, sm *session.Manager, origin string) *monitors {
+	return &monitors{pool: p, sess: sm, origin: strings.TrimRight(origin, "/")}
 }
 
 // ServeHTTP routes by method + path pattern.
@@ -73,7 +75,8 @@ func (h *monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) 
 	for _, row := range rows {
 		out = append(out, monitorRowToAPI(row.Kind, row.Name, row.Target,
 			ptrStrSafe(row.Keyword), row.IntervalSec, ptrStrSafe(row.Status),
-			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID))
+			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID,
+			h.pingURL(row.Kind, row.PingToken)))
 	}
 	writeAPIJSON(w, http.StatusOK, out)
 }
@@ -120,10 +123,23 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	if req.Keyword != "" {
 		keyword = &req.Keyword
 	}
+	// A heartbeat's credential is its ping token; the URL built from it is the
+	// only thing the customer's job ever holds.
+	var pingToken *string
+	if kind == "heartbeat" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		t := hex.EncodeToString(b)
+		pingToken = &t
+	}
 	params := sqlc.CreateMonitorParams{
 		PublicID: pubID, TenantID: tenantID, ProjectID: projectID,
 		Kind: kind, Name: req.Name, Target: req.Target,
 		Keyword: keyword, IntervalSec: parseInterval(req.Interval),
+		PingToken: pingToken,
 	}
 	// Create the monitor AND seed its schedule row in one transaction: without
 	// EnsureMonitorSchedule the probe fleet never leases the monitor.
@@ -134,9 +150,21 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		if cerr != nil {
 			return cerr
 		}
-		return q.EnsureMonitorSchedule(r.Context(), sqlc.EnsureMonitorScheduleParams{
+		if cerr = q.EnsureMonitorSchedule(r.Context(), sqlc.EnsureMonitorScheduleParams{
 			MonitorID: row.ID,
 			Region:    scheduleRegion(),
+		}); cerr != nil {
+			return cerr
+		}
+		if kind != "heartbeat" {
+			return nil
+		}
+		// Open the first window at 2x the interval (grace defaults to the
+		// interval): a job that starts on its next cron tick is not "missed"
+		// the minute it is born.
+		return q.SetHeartbeatDue(r.Context(), sqlc.SetHeartbeatDueParams{
+			Secs:      float64(2 * params.IntervalSec),
+			MonitorID: row.ID,
 		})
 	})
 	if err != nil {
@@ -154,7 +182,8 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	writeAPIJSON(w, http.StatusCreated, monitorRowToAPI(
 		row.Kind, row.Name, row.Target, kw, row.IntervalSec,
 		"nodata", // new monitor has no checks yet
-		pgtype.Timestamptz{}, pgtype.Timestamptz{}, row.PublicID))
+		pgtype.Timestamptz{}, pgtype.Timestamptz{}, row.PublicID,
+		h.pingURL(row.Kind, row.PingToken)))
 }
 
 // nameProjectIfUnnamed sets project.domain from a website check's target, only
@@ -247,7 +276,8 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	}
 	writeAPIJSON(w, http.StatusOK, monitorRowToAPI(
 		full.Kind, full.Name, full.Target, kw, full.IntervalSec,
-		ptrStrSafe(full.Status), full.SslExpiresAt, full.DomainExpiresAt, full.PublicID))
+		ptrStrSafe(full.Status), full.SslExpiresAt, full.DomainExpiresAt, full.PublicID,
+		h.pingURL(full.Kind, full.PingToken)))
 }
 
 func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
@@ -301,11 +331,20 @@ func scheduleRegion() string {
 	return "default"
 }
 
+// pingURL builds the heartbeat's ping URL; "" for every other monitor and for
+// a heartbeat whose token never landed.
+func (h *monitors) pingURL(kind string, token *string) string {
+	if kind != "heartbeat" || token == nil || *token == "" {
+		return ""
+	}
+	return h.origin + "/public/ping/" + *token
+}
+
 // monitorRowToAPI builds the front-facing Monitor shape: interval as display
 // string, expiry dates omitted when no facts exist yet.
 func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 	status string, sslExp, domainExp pgtype.Timestamptz,
-	pubID pgtype.UUID) map[string]any {
+	pubID pgtype.UUID, pingURL string) map[string]any {
 
 	m := map[string]any{
 		"id":       uuidStr(pubID),
@@ -317,6 +356,9 @@ func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 	}
 	if keyword != "" {
 		m["keyword"] = keyword
+	}
+	if pingURL != "" {
+		m["pingUrl"] = pingURL
 	}
 	if kind == "website" && (sslExp.Valid || domainExp.Valid) {
 		// Only the half we have a date for: "domain —" says we have not looked,

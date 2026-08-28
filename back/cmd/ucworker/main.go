@@ -17,6 +17,7 @@ import (
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/detect"
 	"go.upcontrol.io/back/internal/detect/errorlog"
+	"go.upcontrol.io/back/internal/heartbeat"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/notify/mailer"
 	"go.upcontrol.io/back/internal/platform/app"
@@ -143,10 +144,19 @@ func wireJobs(ctx context.Context, d app.Deps) error {
 				}
 			})
 			jobs += "+errorlog"
+			// Heartbeat miss sweep, every minute: a window that closed without
+			// a ping is a failed check. Shares the lifecycle with detect below.
+			lc := incident.New(pool, chConn)
+			hb := heartbeat.New(pool, chConn, lc)
+			go runWithLock(ctx, pool, d, "heartbeat", time.Minute, func(ctx context.Context) {
+				if err := hb.Tick(ctx); err != nil {
+					d.Logger.Warn("heartbeat tick error", "err", err)
+				}
+			})
+			jobs += "+heartbeat"
 			// Detection (error-rate incidents), every minute; same advisory-lock
 			// pattern as every other job. On by default, UC_DETECT_ENABLED=0 kills.
 			if d.Config.DetectEnabled {
-				lc := incident.New(pool, chConn)
 				det := detect.New(pool, chConn, lc, d.Logger)
 				go runWithLock(ctx, pool, d, "detect", time.Minute, func(ctx context.Context) {
 					_ = det.Tick(ctx)

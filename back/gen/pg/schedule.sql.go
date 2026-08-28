@@ -85,6 +85,7 @@ SELECT ms.monitor_id, m.public_id, m.kind, m.target, m.keyword,
  WHERE ms.next_due_at <= now()
    AND ms.leased_by IS NULL
    AND m.paused = false
+   AND m.kind <> 'heartbeat'
  ORDER BY ms.next_due_at
  LIMIT $1
 `
@@ -101,6 +102,8 @@ type LeaseDueMonitorsRow struct {
 
 // Find monitors due for a check that are not currently leased. The caller
 // (Lease handler) then atomically leases the returned IDs via SetLease.
+// Heartbeats are excluded: they have no target, the ping route records their
+// passes and the worker's miss sweep their failures.
 func (q *Queries) LeaseDueMonitors(ctx context.Context, limit int32) ([]LeaseDueMonitorsRow, error) {
 	rows, err := q.db.Query(ctx, leaseDueMonitors, limit)
 	if err != nil {
@@ -129,12 +132,81 @@ func (q *Queries) LeaseDueMonitors(ctx context.Context, limit int32) ([]LeaseDue
 	return items, nil
 }
 
+const listMissedHeartbeats = `-- name: ListMissedHeartbeats :many
+SELECT m.id, m.tenant_id, m.name, m.interval_sec,
+       COALESCE(mf.status, 'nodata')::text AS status,
+       COALESCE(mf.consecutive_failures, 0)::int AS consecutive_failures
+  FROM monitor_schedule ms
+  JOIN monitor m ON m.id = ms.monitor_id
+  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+ WHERE m.kind = 'heartbeat' AND m.paused = false AND ms.next_due_at <= now()
+ ORDER BY ms.next_due_at
+ LIMIT 500
+`
+
+type ListMissedHeartbeatsRow struct {
+	ID                  int64
+	TenantID            int64
+	Name                string
+	IntervalSec         int32
+	Status              string
+	ConsecutiveFailures int32
+}
+
+// Heartbeats whose window closed. next_due_at is "missed after": a ping sets
+// it to now + interval + grace, a recorded miss to now + interval.
+func (q *Queries) ListMissedHeartbeats(ctx context.Context) ([]ListMissedHeartbeatsRow, error) {
+	rows, err := q.db.Query(ctx, listMissedHeartbeats)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMissedHeartbeatsRow
+	for rows.Next() {
+		var i ListMissedHeartbeatsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.Name,
+			&i.IntervalSec,
+			&i.Status,
+			&i.ConsecutiveFailures,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markProbeBlind = `-- name: MarkProbeBlind :exec
 UPDATE probe_node SET blind_since = now() WHERE id = $1 AND blind_since IS NULL
 `
 
 func (q *Queries) MarkProbeBlind(ctx context.Context, id string) error {
 	_, err := q.db.Exec(ctx, markProbeBlind, id)
+	return err
+}
+
+const setHeartbeatDue = `-- name: SetHeartbeatDue :exec
+UPDATE monitor_schedule
+   SET next_due_at = now() + make_interval(secs => $1::double precision),
+       leased_by = NULL, lease_until = NULL
+ WHERE monitor_id = $2
+`
+
+type SetHeartbeatDueParams struct {
+	Secs      float64
+	MonitorID int64
+}
+
+// Push the miss deadline out by secs; also clears a lease left from before
+// heartbeats stopped being handed to the probe.
+func (q *Queries) SetHeartbeatDue(ctx context.Context, arg SetHeartbeatDueParams) error {
+	_, err := q.db.Exec(ctx, setHeartbeatDue, arg.Secs, arg.MonitorID)
 	return err
 }
 

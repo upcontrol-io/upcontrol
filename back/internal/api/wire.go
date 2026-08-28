@@ -8,14 +8,12 @@ import (
 	"errors"
 	"maps"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/ingest/batcher"
 	"go.upcontrol.io/back/internal/ingest/cardinality"
-	"go.upcontrol.io/back/internal/ingest/wal"
 	"go.upcontrol.io/back/internal/ring/seq"
 	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
@@ -57,15 +55,17 @@ func decodeRows(rows [][]byte) ([]ch.LogRow, []ch.EventRow) {
 			continue // a corrupt row is dropped, not fatal
 		}
 		lr := ch.LogRow{
-			TenantID:  uint64(env.TenantID),
-			ProjectID: uint64(env.ProjectID),
-			Seq:       uint64(env.Seq),
-			Source:    "sdk",
-			Service:   env.Service,
-			Host:      env.Host,
-			Level:     env.Level,
-			Message:   env.Message,
-			Attrs:     env.Attrs,
+			TenantID:    uint64(env.TenantID),
+			ProjectID:   uint64(env.ProjectID),
+			Seq:         uint64(env.Seq),
+			Source:      "sdk",
+			Service:     env.Service,
+			Host:        env.Host,
+			Level:       env.Level,
+			LevelRaw:    env.LevelRaw,
+			Message:     env.Message,
+			Fingerprint: env.Fingerprint,
+			Attrs:       env.Attrs,
 		}
 		if env.TS != "" {
 			lr.TS, _ = time.Parse(time.RFC3339Nano, env.TS)
@@ -122,19 +122,6 @@ func (s *chLogSink) flushMetrics(ctx context.Context, rows [][]byte) error {
 	return s.conn.InsertMetrics(ctx, metricRows)
 }
 
-// walAdapter wraps ingest/wal.WAL to satisfy ingest.WALAppender.
-type walAdapter struct {
-	w *wal.WAL
-}
-
-func (a *walAdapter) AppendSync(_ context.Context, payload []byte) error {
-	if _, _, err := a.w.Append(payload); err != nil {
-		return err
-	}
-	_, err := a.w.Sync()
-	return err
-}
-
 // batcherSink wraps ingest/batcher.Batcher to satisfy ingest.BatchSink.
 type batcherSink struct {
 	b *batcher.Batcher
@@ -144,7 +131,7 @@ func (s *batcherSink) Add(ctx context.Context, table string, row []byte) error {
 	return s.b.Add(ctx, table, row)
 }
 
-// dirSpoolFiller computes the WAL/spool fill percentage from the directory size.
+// dirSpoolFiller computes the spool fill percentage from the directory size.
 type dirSpoolFiller struct {
 	dir string
 	max int64
@@ -179,12 +166,6 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 type Batcher = batcher.Batcher
 
 func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
-	// WAL: durable append+fsync before receipt.
-	w, err := wal.Open(filepath.Join(spoolDir, "ingest.wal"))
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// Batcher: flushes to ClickHouse on 8 MiB / 200 ms / 1-sec-per-key.
 	bs := batcher.New(&chLogSink{conn: chConn}, nil, batcher.Options{})
 
@@ -201,7 +182,6 @@ func WireIngest(spoolDir string, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Inge
 		Sink:  &batcherSink{b: bs},
 		Idem:  pg.NewIdempotency(pgPool),
 		Spool: &dirSpoolFiller{dir: spoolDir, max: 1 << 30},
-		WAL:   &walAdapter{w: w},
 		Card:  cardinality.New(1000),
 	})
 

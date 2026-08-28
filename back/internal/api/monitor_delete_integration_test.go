@@ -95,7 +95,7 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("DELETE /v1/monitors/{id}", NewMonitors(pool, sm))
+	mux.Handle("DELETE /v1/monitors/{id}", NewMonitors(pool, sm, ""))
 	return &orphanFixture{
 		pool: pool, projectID: projectID, monitorPubID: pubID,
 		incidentID: incidentID, incidentTitle: title,

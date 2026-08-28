@@ -26,11 +26,11 @@ func (q *Queries) CountMonitorsByTenant(ctx context.Context, tenantID int64) (in
 }
 
 const createMonitor = `-- name: CreateMonitor :one
-INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec)
+INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec, ping_token)
 VALUES ($1, $2, $3,
         $4, $5, $6, $7,
-        $8)
-RETURNING id, public_id, kind, name, target, keyword, interval_sec, created_at
+        $8, $9)
+RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, created_at
 `
 
 type CreateMonitorParams struct {
@@ -42,6 +42,7 @@ type CreateMonitorParams struct {
 	Target      string
 	Keyword     *string
 	IntervalSec int32
+	PingToken   *string
 }
 
 type CreateMonitorRow struct {
@@ -52,6 +53,7 @@ type CreateMonitorRow struct {
 	Target      string
 	Keyword     *string
 	IntervalSec int32
+	PingToken   *string
 	CreatedAt   pgtype.Timestamptz
 }
 
@@ -65,6 +67,7 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (C
 		arg.Target,
 		arg.Keyword,
 		arg.IntervalSec,
+		arg.PingToken,
 	)
 	var i CreateMonitorRow
 	err := row.Scan(
@@ -75,6 +78,7 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (C
 		&i.Target,
 		&i.Keyword,
 		&i.IntervalSec,
+		&i.PingToken,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -94,9 +98,40 @@ func (q *Queries) DeleteMonitor(ctx context.Context, arg DeleteMonitorParams) er
 	return err
 }
 
+const getMonitorByPingToken = `-- name: GetMonitorByPingToken :one
+SELECT m.id, m.tenant_id, m.name, m.paused, m.interval_sec,
+       COALESCE(m.grace_sec, m.interval_sec)::int AS grace_sec
+  FROM monitor m
+ WHERE m.ping_token = $1 AND m.kind = 'heartbeat'
+`
+
+type GetMonitorByPingTokenRow struct {
+	ID          int64
+	TenantID    int64
+	Name        string
+	Paused      bool
+	IntervalSec int32
+	GraceSec    int32
+}
+
+// The token is the credential: a miss is a 404, never a hint.
+func (q *Queries) GetMonitorByPingToken(ctx context.Context, pingToken *string) (GetMonitorByPingTokenRow, error) {
+	row := q.db.QueryRow(ctx, getMonitorByPingToken, pingToken)
+	var i GetMonitorByPingTokenRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Name,
+		&i.Paused,
+		&i.IntervalSec,
+		&i.GraceSec,
+	)
+	return i, err
+}
+
 const getMonitorByPublicID = `-- name: GetMonitorByPublicID :one
 SELECT m.id, m.public_id, m.tenant_id, m.project_id, m.kind, m.name, m.target,
-       m.keyword, m.interval_sec, m.paused, m.created_at,
+       m.keyword, m.interval_sec, m.paused, m.ping_token, m.created_at,
        mf.status, mf.ssl_expires_at, mf.domain_expires_at
   FROM monitor m
   LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
@@ -119,6 +154,7 @@ type GetMonitorByPublicIDRow struct {
 	Keyword         *string
 	IntervalSec     int32
 	Paused          bool
+	PingToken       *string
 	CreatedAt       pgtype.Timestamptz
 	Status          *string
 	SslExpiresAt    pgtype.Timestamptz
@@ -139,6 +175,7 @@ func (q *Queries) GetMonitorByPublicID(ctx context.Context, arg GetMonitorByPubl
 		&i.Keyword,
 		&i.IntervalSec,
 		&i.Paused,
+		&i.PingToken,
 		&i.CreatedAt,
 		&i.Status,
 		&i.SslExpiresAt,
@@ -180,7 +217,7 @@ func (q *Queries) GetPlanHTTPChecks(ctx context.Context, plan string) (int32, er
 
 const listMonitorsByTenant = `-- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
-       m.interval_sec, m.availability_target, m.paused, m.created_at,
+       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
        mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
   FROM monitor m
   LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
@@ -198,6 +235,7 @@ type ListMonitorsByTenantRow struct {
 	IntervalSec        int32
 	AvailabilityTarget pgtype.Numeric
 	Paused             bool
+	PingToken          *string
 	CreatedAt          pgtype.Timestamptz
 	Status             *string
 	SslExpiresAt       pgtype.Timestamptz
@@ -224,6 +262,7 @@ func (q *Queries) ListMonitorsByTenant(ctx context.Context, tenantID int64) ([]L
 			&i.IntervalSec,
 			&i.AvailabilityTarget,
 			&i.Paused,
+			&i.PingToken,
 			&i.CreatedAt,
 			&i.Status,
 			&i.SslExpiresAt,

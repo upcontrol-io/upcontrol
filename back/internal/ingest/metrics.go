@@ -16,8 +16,8 @@ type MetricLine struct {
 	Labels map[string]string
 }
 
-// MetricEnvelope is the metric row handed to the batcher and the WAL — the
-// metric twin of RowEnvelope. The CH sink adapter decodes it into ch.MetricRow.
+// MetricEnvelope is the metric row handed to the batcher — the metric twin
+// of RowEnvelope. The CH sink adapter decodes it into ch.MetricRow.
 type MetricEnvelope struct {
 	TenantID  int64             `json:"tenant_id"`
 	ProjectID int64             `json:"project_id"`

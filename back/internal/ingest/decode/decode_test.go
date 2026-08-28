@@ -149,6 +149,38 @@ func TestDecodeLevelUnknownWarning(t *testing.T) {
 	}
 }
 
+func TestNormalizeLevelKeepsRawAndMapsCanonical(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantRaw string
+		unknown bool
+	}{
+		{"fatal maps to error", "fatal", "error", "fatal", false},
+		{"casing collapsed", "ERROR", "error", "ERROR", false},
+		{"warning collapses to warn", "Warning", "warn", "Warning", false},
+		{"unknown defaults to info", "sev2", "info", "sev2", true},
+		{"empty is info, no warning", "", "info", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := Record{Level: c.in}
+			ws := &warningSet{}
+			normalizeLevel(&r, ws)
+			if r.Level != c.want {
+				t.Errorf("Level = %q, want %q", r.Level, c.want)
+			}
+			if r.LevelRaw != c.wantRaw {
+				t.Errorf("LevelRaw = %q, want %q", r.LevelRaw, c.wantRaw)
+			}
+			if got := hasWarning(ws.slice(), WarnLevelUnknown); got != c.unknown {
+				t.Errorf("level_unknown warning = %v, want %v", got, c.unknown)
+			}
+		})
+	}
+}
+
 func TestDecodeUnparseableLineIsWarning(t *testing.T) {
 	// A garbled line in an NDJSON stream is a warning, never a hard error.
 	body := []byte("{not json}\n{\"msg\":\"ok\"}\n")

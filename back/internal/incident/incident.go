@@ -80,11 +80,16 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 	}
 
 	// Timeline entry: "opened"; the text describes the event, not the
-	// incident (the card header already carries the title).
+	// incident (the card header already carries the title). A heartbeat has
+	// no target that stopped responding, so the line names the monitor.
+	text := mon.Target + " stopped responding"
+	if mon.Kind == "heartbeat" {
+		text = mon.Name + " has not checked in"
+	}
 	_ = q.AddIncidentUpdate(ctx, sqlc.AddIncidentUpdateParams{
 		IncidentID: row.ID,
 		Kind:       "opened",
-		Text:       mon.Target + " stopped responding",
+		Text:       text,
 	})
 
 	// Freeze the log slice while the lines are still inside the ring window;

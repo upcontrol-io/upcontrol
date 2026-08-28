@@ -188,6 +188,9 @@ components:
           properties:
             ssl: { type: string, example: "SSL Nov 2, in 84 days" }
             domain: { type: string, example: "domain Mar 14, in 217 days" }
+        pingUrl:
+          type: string
+          description: Heartbeat only. The URL the job calls on every run (GET or POST); absent for a website check.
     MonitorCreate:
       type: object
       required: [type, name, target, interval]
@@ -2173,6 +2176,38 @@ paths:
             }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /public/ping/{token}:
+    get:
+      tags: [public]
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            text/plain:
+              schema: { type: string, example: OK }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [public]
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            text/plain:
+              schema: { type: string, example: OK }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /public/check:
     post:
       tags: [public]
@@ -2424,7 +2459,7 @@ paths:
       tags: [ingest]
       summary: |
         The ingest endpoint the docs promise (audit §6): an alias over the same
-        pipeline as POST /i — spool, WAL, batcher, ClickHouse — never a second
+        pipeline as POST /i — spool, batcher, ClickHouse — never a second
         one. The key is accepted "anywhere", literally: Authorization: Bearer,
         ?key=, or a top-level `key` field in the body, whichever is found first.
         The body is any shape the /i sniffer knows (NDJSON, JSON array, JSON

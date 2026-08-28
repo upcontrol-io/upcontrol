@@ -105,7 +105,8 @@ exactly that.
 - **Website checks** from 1-minute intervals, with SSL and domain expiry
   watched for free on every check — measured uptime, never asserted.
 - **Log ingest** over one HTTP door (`POST /i`, NDJSON): the SDK and CLI wire
-  an app up in one command, and a WAL makes the receipt durable.
+  an app up in one command, and the receipt tells the sender what was accepted
+  and what was scrubbed or shed.
 - **Incidents with a "why"**: error-rate detection over your own logs, with
   deploys and webhooks correlated onto the timeline.
 - **Alerts** to Telegram, email (your SMTP), Slack, Discord or any webhook —
@@ -132,9 +133,9 @@ one place, running on one box.
 
 ## What this is and is not
 
-- **No telemetry.** The self-hosted package phones nothing home — no version
-  pings, no usage beacons. If that ever changes it will be opt-in and loudly
-  documented.
+- **We never collect anything about you.** The self-hosted package does not
+  call home: no version pings, no usage beacons. If that ever changes it will
+  be opt-in and loudly documented.
 - **Single-user by default.** `UC_AUTH=none` boots one owner account with no
   sign-in — right for a private box. Set `UC_AUTH=magic-link` before exposing
   the instance to the internet.
@@ -143,47 +144,17 @@ one place, running on one box.
 
 ## Repository layout
 
-```
-back/    Go services: ucapi (API + ingest), ucworker (delivery, detection), ucprobe (checks)
-front/   The web app (React + Vite)
-db/      Postgres migrations (goose) + ClickHouse schema
-cli/     npx upcontrol installer, @upcontrol/sdk, the agent skill  [MIT]
-infra/   docker-compose, Caddy, install.sh
-```
-
-`back/api/openapi.yaml` is the contract: both sides generate from it, and a
-hand-written type on either side is how the two start disagreeing silently.
+`back/` holds the Go services, `front/` the web app, `db/` the migrations and
+ClickHouse schema, `cli/` the installer, SDK and agent skill, `infra/` the
+self-host compose package. The folder map and the `openapi.yaml` contract
+live in [docs/architecture.md](docs/architecture.md).
 
 ## How the pieces talk
 
-Six runtime pieces, one contract, no hidden paths:
-
-```mermaid
-flowchart LR
-    Browser["Browser / status page"] --> Front["front, the web app"]
-    Front -->|"REST /v1, HttpOnly session cookie, one origin"| UCAPI["ucapi"]
-    SDK["SDK / CLI, npx upcontrol"] -->|"POST /i, NDJSON"| UCAPI
-    UCPROBE["ucprobe"] <-->|"connect-rpc: lease checks, submit results"| UCAPI
-    UCAPI -->|"tenants, monitors, incidents, deliveries"| PG[("Postgres")]
-    UCAPI -->|"logs, events, checks: ingest door + availability detector"| CH[("ClickHouse")]
-    UCWORKER["ucworker"] --> PG
-    UCWORKER -->|"log detectors, incident lifecycle, rollups"| CH
-    UCWORKER -->|"alerts"| CHANNELS["Telegram bot, SMTP email, webhooks"]
-```
-
-| Component | What it is responsible for |
-| --- | --- |
-| front | The web app (React + Vite): the account app and the public status pages. It talks to ucapi only, on the same origin, with an HttpOnly session cookie. |
-| ucapi | The public door: the `/v1/*` API, public and hook surfaces, the schemaless ingest endpoint `POST /i`, and the ProbeService the probe fleet calls. It owns the whole ingest pipeline into ClickHouse, all auth doors, and enqueues deliveries (never processes the queue, so replicas stay safe). |
-| ucworker | The background driver: the delivery queue (Telegram, Discord, Slack, email), retention recompute, expired-batch purging, the notification scanner and the log detector orchestrator. Every job runs under a Postgres advisory lock, so N replicas never duplicate work. |
-| ucprobe | The stateless check runner: leases checks from ucapi, runs each through the SSRF-guarded HTTP executor, submits results back. It holds no database credentials and stores nothing. |
-| Postgres | The system of record: tenants, monitors, incidents, deliveries, entitlements. |
-| ClickHouse | The telemetry store: logs, events, checks; the availability detector reads it on submit, ucworker's detectors read it on their ticker. |
-| SDK / CLI | `npx upcontrol` and `@upcontrol/sdk` (MIT): the installer wires an app up, the SDK's `track()` never throws and never blocks, everything goes to `POST /i` as NDJSON. |
-| Delivery channels | Telegram bot, SMTP email, Slack, Discord, any webhook. A channel is a destination, not a rule engine. |
-
-The full package map, data flows and storage writers live in
-[docs/architecture.md](docs/architecture.md).
+Three Go services (`ucapi`, `ucworker`, `ucprobe`) and two databases run
+behind one contract, with no hidden paths. The app talks to `ucapi` on one
+origin, with an HttpOnly session cookie. The map, the component table and
+the data flows live in [docs/architecture.md](docs/architecture.md).
 
 ## Development
 

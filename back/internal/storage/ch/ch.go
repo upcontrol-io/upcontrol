@@ -73,6 +73,7 @@ type LogRow struct {
 	Service     string
 	Host        string
 	Level       string
+	LevelRaw    string
 	Message     string
 	Fingerprint uint64
 	Attrs       map[string]string
@@ -100,11 +101,11 @@ func insert[T any](ctx context.Context, c *Conn, sql string, rows []T, app func(
 // batcher calls this per flush; one INSERT per call → one ClickHouse part.
 func (c *Conn) InsertLogs(ctx context.Context, rows []LogRow) error {
 	return insert(ctx, c, "INSERT INTO logs "+
-		"(tenant_id, project_id, ts, seq, source, service, host, level, message, fingerprint, attrs)",
+		"(tenant_id, project_id, ts, seq, source, service, host, level, level_raw, message, fingerprint, attrs)",
 		rows, func(b driver.Batch, r LogRow) error {
 			return b.Append(
 				r.TenantID, r.ProjectID, r.TS, r.Seq,
-				r.Source, r.Service, r.Host, r.Level, r.Message, r.Fingerprint, r.Attrs,
+				r.Source, r.Service, r.Host, r.Level, r.LevelRaw, r.Message, r.Fingerprint, r.Attrs,
 			)
 		})
 }
