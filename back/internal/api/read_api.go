@@ -621,17 +621,19 @@ func timelineKind(kind string) string {
 	}
 }
 
-// eventKind maps an event name to the front's timeline kinds: `triageOf` reads
-// `kind === 'deploy'` to build its hypothesis and rollback command.
+// eventKind maps an event name to the front's timeline kinds. The order is the
+// meaning: a failure outranks the subject it happened to, so `payment_failed`
+// reads as an error rather than as ordinary payment traffic. `deploy` stays
+// first — a failed deploy is still the suspect an incident wants attached.
 func eventKind(name string) string {
 	switch {
 	case strings.HasPrefix(name, "deploy"), strings.Contains(name, "deployment"):
 		return "deploy"
+	case strings.Contains(name, "error"), strings.Contains(name, "fail"):
+		return "error"
 	case strings.HasPrefix(name, "payment"), strings.HasPrefix(name, "charge"),
 		strings.HasPrefix(name, "invoice"):
 		return "payment"
-	case strings.Contains(name, "error"), strings.Contains(name, "fail"):
-		return "error"
 	default:
 		return "check"
 	}

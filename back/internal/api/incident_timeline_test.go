@@ -98,14 +98,19 @@ func TestMergeTimelineZeroAtComesFirst(t *testing.T) {
 
 func TestEventKindMapsTheNamesTheFrontKnows(t *testing.T) {
 	cases := map[string]string{
-		"deploy.succeeded":      "deploy",
-		"deployment_created":    "deploy",
-		"payment_intent.failed": "payment",
+		"deploy.succeeded":   "deploy",
+		"deployment_created": "deploy",
+		// A failure outranks its subject: this one read as ordinary payment
+		// traffic until the error arm moved above the payment arm.
+		"payment_intent.failed": "error",
 		"charge.refunded":       "payment",
 		"invoice.paid":          "payment",
 		"external_error":        "error",
 		"job_failed":            "error",
 		"github_push":           "check",
+		// A failed deploy stays a deploy: the error arm sits below it, because
+		// the suspect an incident wants attached is the deploy, not the word.
+		"deploy_failed": "deploy",
 	}
 	for name, want := range cases {
 		if got := eventKind(name); got != want {
