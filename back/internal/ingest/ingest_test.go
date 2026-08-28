@@ -199,6 +199,75 @@ func TestRowCarriesFingerprintAndLevelRaw(t *testing.T) {
 	}
 }
 
+// Post-deploy suppression reads deploy lines back through LastDeployAt; if a
+// deploy stops producing an events row, suppression silently stops working.
+func TestDeployStillBecomesAnEvent(t *testing.T) {
+	for _, msg := range []string{"deploy", "deploy.succeeded", "deployment_created"} {
+		h, sink, _ := newIngester(0, nil)
+		rr := post(t, h, `{"msg":"`+msg+`"}`, map[string]string{"X-Upcontrol-Key": "k"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: code %d body %s", msg, rr.Code, rr.Body.String())
+		}
+		var env RowEnvelope
+		if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+			t.Fatalf("%s: row: %v", msg, err)
+		}
+		if env.Event == "" {
+			t.Errorf("%s: Event empty, want the deploy family stored as an event", msg)
+		}
+	}
+}
+
+func TestOrdinaryLineIsNotAnEvent(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"user 42 not found"}`, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if env.Event != "" {
+		t.Errorf("ordinary line stored as event %q", env.Event)
+	}
+}
+
+// ucadmin (closed repo, admin/src/queries.ts) reads install_verified out of
+// the events table in three places; this is the producer side of that query.
+func TestInstallVerifiedStillBecomesAnEvent(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"install_verified"}`, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if env.Event == "" {
+		t.Error("install_verified did not become an event")
+	}
+}
+
+func TestReservedPrefixWarns(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"uc.internal"}`, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), `"code":"reserved_prefix"`) {
+		t.Errorf("missing reserved_prefix warning: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if env.Event != "" {
+		t.Errorf("reserved name stored as event %q", env.Event)
+	}
+}
+
 func TestAttrValuesAreScrubbed(t *testing.T) {
 	h, sink, _ := newIngester(0, nil)
 	// The Bearer vector from scrub_test.go, riding an attr instead of the message.

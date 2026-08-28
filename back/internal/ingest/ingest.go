@@ -240,8 +240,7 @@ type RowEnvelope struct {
 	Message     string            `json:"message"`
 	Fingerprint uint64            `json:"fingerprint,omitempty"`
 	Attrs       map[string]string `json:"attrs,omitempty"`
-	Event       string            `json:"event,omitempty"` // canonical name if T1-T3
-	EventTier   int               `json:"event_tier,omitempty"`
+	Event       string            `json:"event,omitempty"` // non-empty → wire.go also writes an events row
 }
 
 func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record, d overloadDecision, ws *warningAccumulator) [][]byte {
@@ -285,11 +284,12 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		if !rec.Time.IsZero() {
 			env.TS = rec.Time.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 		}
-		// Normalize an event name if present (the SDK's {"event":"..."} shape
-		// stores the event name on the message).
-		if ev := normalize.Classify(rec.Message); ev.Tier == normalize.Tier1 || ev.Tier == normalize.Tier2 || ev.Tier == normalize.Tier3 {
+		// A message that names an event something queries is also stored as an
+		// event row; the reserved uc.* prefix warns and stores no name.
+		if ev := normalize.Classify(rec.Message); ev.Reserved {
+			ws.add("reserved_prefix", 1)
+		} else if ev.Name != "" {
 			env.Event = ev.Name
-			env.EventTier = int(ev.Tier)
 		}
 		// Cardinality cap on host/service (a runaway field would blow up the CH
 		// LowCardinality dictionaries).

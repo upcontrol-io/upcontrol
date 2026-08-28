@@ -22,9 +22,8 @@ func TestDecodeRows(t *testing.T) {
 			env: &ingest.RowEnvelope{
 				TenantID: 7, ProjectID: 9, Seq: 42,
 				TS: "2026-08-18T12:00:00.000Z", Level: "info", Message: "deploy",
-				Attrs:     map[string]string{"commit_sha": "abc1234"},
-				Event:     "deploy",
-				EventTier: 3,
+				Attrs: map[string]string{"commit_sha": "abc1234"},
+				Event: "deploy",
 			},
 			wantLogRows:   1,
 			wantEventRows: 1,
