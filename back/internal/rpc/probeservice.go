@@ -18,23 +18,23 @@ import (
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/incident/triage"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // ProbeService implements probev1connect.ProbeServiceHandler.
 type ProbeService struct {
 	pool      *pg.Pool
-	ch        *ch.Conn
+	pgs       *pgstore.Store
 	detector  *availability.Detector
 	incidents *incident.Lifecycle
 	nodeToken string
 }
 
-func NewProbeService(pool *pg.Pool, chConn *ch.Conn, lc *incident.Lifecycle, nodeToken string) *ProbeService {
+func NewProbeService(pool *pg.Pool, pgs *pgstore.Store, lc *incident.Lifecycle, nodeToken string) *ProbeService {
 	return &ProbeService{
 		pool:      pool,
-		ch:        chConn,
+		pgs:       pgs,
 		detector:  availability.New(availability.DefaultThreshold),
 		incidents: lc,
 		nodeToken: nodeToken,
@@ -117,7 +117,7 @@ func (s *ProbeService) SubmitResults(
 	}
 
 	accepted := uint32(0)
-	var checkRows []ch.CheckRow
+	var checkRows []pgstore.CheckRow
 	for _, res := range req.Msg.Results {
 		monitorID := int64(res.MonitorId)
 
@@ -163,10 +163,10 @@ func (s *ProbeService) SubmitResults(
 			MonitorID: monitorID,
 		})
 
-		// Record the raw check in ClickHouse (feeds the status page + history).
+		// Record the raw check in Postgres (feeds the status page + history).
 		// A deleted monitor (tenantID 0) is dropped, not recorded.
 		if tenantID != 0 {
-			checkRows = append(checkRows, ch.CheckRow{
+			checkRows = append(checkRows, pgstore.CheckRow{
 				TenantID: uint64(tenantID), MonitorID: res.MonitorId, TS: time.Now(),
 				Region: req.Msg.Region, OK: res.Ok, StatusCode: uint16(res.StatusCode),
 				ErrorClass: errClassStr(res.ErrorClass),
@@ -190,9 +190,9 @@ func (s *ProbeService) SubmitResults(
 		accepted++
 	}
 
-	// Persist the raw check rows (best-effort: a CH hiccup must not fail submit).
-	if s.ch != nil {
-		_ = s.ch.InsertChecks(ctx, checkRows)
+	// Persist the raw check rows (best-effort: a Postgres hiccup must not fail submit).
+	if s.pgs != nil {
+		_ = s.pgs.InsertChecks(ctx, checkRows)
 	}
 	return connect.NewResponse(&probev1.SubmitResultsResponse{Accepted: accepted}), nil
 }

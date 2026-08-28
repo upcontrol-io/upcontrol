@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"go.upcontrol.io/back/internal/storage/ch"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // A metric with under 7 days of history has no computable range and must
 // produce no tile: a tile with no note is a bare number wearing a label.
 func TestMetricTilesCarryARangeOrDontShip(t *testing.T) {
-	stats := []ch.MetricStat{
+	stats := []pgstore.MetricStat{
 		{Name: "signups", Latest: 31, P10: 28, P90: 35, Days: 7, Spark: []float64{29, 30, 31}},
 		{Name: "checkout_latency_ms", Latest: 182.5, P10: 170, P90: 210, Days: 9, Spark: []float64{190, 185, 182.5}},
 		{Name: "brand_new_metric", Latest: 5, P10: 0, P90: 0, Days: 1, Spark: []float64{5}},

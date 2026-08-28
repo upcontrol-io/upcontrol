@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // Flush policy: writes are async and never block a response; the loop flushes
@@ -35,9 +35,9 @@ type visitorStore interface {
 	TouchVisitorLastSeen(ctx context.Context, visitorID int64, at time.Time, country, device string, nEvents int64) error
 }
 
-// eventSink is the ClickHouse half; *ch.Conn satisfies it.
+// eventSink is the web-events half; *pgstore.Store satisfies it.
 type eventSink interface {
-	InsertWebEvents(ctx context.Context, rows []ch.WebEventRow) error
+	InsertWebEvents(ctx context.Context, rows []pgstore.WebEventRow) error
 }
 
 // PoolStore adapts the sqlc queries to visitorStore over a pg.Pool.
@@ -318,7 +318,7 @@ func (r *Recorder) run() {
 }
 
 // flush groups the batch by visitor token, resolves each visitor once in
-// Postgres, applies links and the touch, and batch-inserts into ClickHouse.
+// Postgres, applies links and the touch, and batch-inserts the web events.
 func (r *Recorder) flush(list []track) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -352,13 +352,13 @@ func (r *Recorder) flush(list []track) {
 		mergeFirst(&g.first, t.first)
 	}
 
-	rows := make([]ch.WebEventRow, 0, len(list))
+	rows := make([]pgstore.WebEventRow, 0, len(list))
 	for _, g := range order {
 		if g.tokenHash != nil {
 			id, err := r.store.VisitorIDByToken(ctx, g.tokenHash, g.first, g.tracks[0].at)
 			if err != nil {
-				// The events still go to ClickHouse with visitor_id 0; the
-				// link/touch updates are skipped, there is no row.
+				// The events still land with visitor_id 0; the link/touch
+				// updates are skipped, there is no row.
 				r.log.Warn("analytics: visitor resolve failed", "err", err)
 				id = 0
 			}
@@ -393,7 +393,7 @@ func (r *Recorder) flush(list []track) {
 				nEvents += int64(len(t.events))
 			}
 			for _, e := range t.events {
-				rows = append(rows, ch.WebEventRow{
+				rows = append(rows, pgstore.WebEventRow{
 					TS: t.at, VisitorID: uint64(g.id), PersonID: uint64(t.personID), TenantID: uint64(t.tenantID),
 					Name: e.Name, Path: e.Path, Title: e.Title, Referrer: e.Referrer,
 					UTMSource: e.UTMSource, UTMMedium: e.UTMMedium, UTMCampaign: e.UTMCampaign,
@@ -415,8 +415,8 @@ func (r *Recorder) flush(list []track) {
 	// no-ops on zero rows, and callers get one completion signal per flush.
 	if err := r.sink.InsertWebEvents(ctx, rows); err != nil {
 		// The batch is lost (no retry queue): analytics is lossy by design
-		// under ClickHouse outage; the WARN is the honest record.
-		r.log.Warn("analytics: clickhouse insert failed", "err", err, "rows", len(rows))
+		// under a Postgres outage; the WARN is the honest record.
+		r.log.Warn("analytics: web insert failed", "err", err, "rows", len(rows))
 	}
 }
 

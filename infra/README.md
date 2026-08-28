@@ -1,15 +1,15 @@
 # Self-hosting UpControl
 
-One box, Docker Compose, five services: Postgres, ClickHouse, the API
-(`ucapi`), the worker (`ucworker`), one probe (`ucprobe`), plus the web app
-and a Caddy edge. Prod mode, HTTPS, single-user by default — no sign-in
-screen, no SMTP required.
+One box, Docker Compose: Postgres, the API (`ucapi`), the worker
+(`ucworker`), one probe (`ucprobe`), plus the web app and a Caddy edge. Prod
+mode, HTTPS, single-user by default — no sign-in screen, no SMTP required.
 
 ## Requirements
 
 - Docker with Compose v2 (`docker compose version`)
-- **4GB RAM recommended; 2GB + active swap is the minimum.** Below that
-  ClickHouse gets OOM-killed under merge load and the box is not usable.
+- **1GB RAM recommended; 512MB + active swap is the minimum.** Below ~900MB
+  without swap the stack cannot ride out load peaks, and the installer
+  refuses to start there.
 - 10GB+ free disk (logs and metrics grow with your traffic; see Retention).
 
 ## Quickstart
@@ -31,7 +31,6 @@ Manual equivalent:
 cp .env.example .env                       # edit to taste
 mkdir -p secrets
 openssl rand -hex 32 > secrets/pg_password
-openssl rand -hex 32 > secrets/ch_password
 openssl rand -hex 32 > secrets/node_token
 openssl rand -hex 32 > secrets/secret_key_hex
 : > secrets/telegram_bot_token             # empty = feature off
@@ -81,25 +80,13 @@ docker compose exec postgres psql -U upcontrol -d upcontrol -c "DELETE FROM magi
 
 ## Retention
 
-What the database keeps, straight from the schema:
-
-| Data | Table | Kept |
-| --- | --- | --- |
-| Raw log lines | `logs` | 31 days |
-| Raw probe checks | `checks` | 7 days |
-| Log rates, per minute | `series_1m` | 90 days |
-| Log rates, per hour | `series_1h` | 730 days |
-| Check aggregates, per minute | `checks_1m` | 365 days |
-| Check aggregates, per hour | `checks_1h` | 730 days |
-| Raw metrics | `metrics` | 31 days |
-| Metric aggregates | `metrics_5m` / `metrics_1h` | 90 / 730 days |
-| Product analytics | `web_events` | 730 days |
-| **Named events** | **`events`** | **forever — no TTL** |
-
-The `events` table (deploys, webhooks, custom `track()` events) has no TTL by
-design: events are the "why" next to an incident and are tiny compared to
-logs. If yours are not tiny, add a TTL yourself:
-`ALTER TABLE events MODIFY TTL toDateTime(ts) + INTERVAL 365 DAY;`
+Retention is the ring, not TTL: each plan carries a log window, and the
+worker recomputes `project_window.cutoff_seq` from the line ledger; every
+read filters `seq >= cutoff_seq`. Physically, `logs` is range-partitioned by
+day and partitions behind the 48-hour floor are dropped, so disk stays
+bounded no matter what the window says. `events` (deploys, webhooks, custom
+`track()` events) have no window by design: they are the "why" next to an
+incident and are tiny compared to logs.
 
 ## Country data (optional)
 
@@ -126,19 +113,13 @@ country database works — GeoLite2-Country is the other common choice.
 
 ## Backups
 
-Three things hold state; back up all three:
+Two things hold state; back up both:
 
 ```sh
-# 1. Postgres (accounts, monitors, incidents, channels)
+# 1. Postgres (accounts, monitors, incidents, channels, logs, checks, metrics)
 docker compose exec postgres pg_dump -U upcontrol upcontrol > upcontrol.sql
 
-# 2. ClickHouse (logs, checks, metrics) — cold copy of the volume
-docker compose stop clickhouse
-docker run --rm -v oss_chdata:/data -v "$PWD":/backup alpine \
-  tar czf /backup/chdata.tar.gz -C /data .
-docker compose start clickhouse
-
-# 3. secrets/ — without secret_key_hex the encrypted columns are unreadable
+# 2. secrets/ — without secret_key_hex the encrypted columns are unreadable
 cp -r secrets/ somewhere-safe/
 ```
 
@@ -148,15 +129,10 @@ cp -r secrets/ somewhere-safe/
 ./install.sh --update    # = git pull && docker compose pull && docker compose up -d
 ```
 
-ClickHouse is pinned to `clickhouse-server:24.8` and an update never jumps it
-across a major version on its own: when the pin moves in a release, the
-changelog says so and names the upgrade steps. Never edit the pin to `latest`.
-
 ## Resource tuning
 
-The compose ships memory limits sized for a 4GB box and a ClickHouse
-drop-in (`clickhouse/config.xml`) that caps the server at 800M. On a bigger
-machine raise `max_server_memory_usage` and the compose limits together.
+The compose ships memory limits per service, sized so the whole stack fits a
+1GB box. On a bigger machine raise the limits together.
 
 ## One box watching itself
 

@@ -8,7 +8,7 @@ import (
 func TestStream_AlwaysScopedToCutoff(t *testing.T) {
 	q := New(7, 11, 4242) // tenant 7, project 11, cutoff 4242
 	got := q.Stream(50, nil, nil, "", Range{})
-	if !contains(got.SQL, "tenant_id = ?") || !contains(got.SQL, "project_id = ?") || !contains(got.SQL, "seq >= ?") {
+	if !contains(got.SQL, "tenant_id = $1") || !contains(got.SQL, "project_id = $2") || !contains(got.SQL, "seq >= $3") {
 		t.Fatalf("Stream must always scope to tenant+project+cutoff; got:\n%s", got.SQL)
 	}
 	assertArgsHave(t, got.Args, int64(7), int64(11), int64(4242))
@@ -20,7 +20,7 @@ func TestStream_AlwaysScopedToCutoff(t *testing.T) {
 func TestStream_FiltersAppendConditions(t *testing.T) {
 	q := New(1, 2, 3)
 	got := q.Stream(10, []string{"error"}, []string{"api"}, "oom", Range{})
-	for _, want := range []string{"level = 'error'", "service IN (?)", "message ILIKE ?"} {
+	for _, want := range []string{"level = 'error'", "service IN ($4)", "message ILIKE $5"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("filter %q missing from SQL:\n%s", want, got.SQL)
 		}
@@ -42,7 +42,7 @@ func TestStream_MultiServiceBindsEveryName(t *testing.T) {
 	// Two picked services are one IN over both, and the unlabelled service
 	// rides as the empty string, a value like any other (not a dropped filter).
 	got := New(1, 2, 3).Stream(10, nil, []string{"api", ""}, "", Range{})
-	if !contains(got.SQL, "service IN (?, ?)") {
+	if !contains(got.SQL, "service IN ($4, $5)") {
 		t.Fatalf("two services must bind two placeholders; got:\n%s", got.SQL)
 	}
 	if got.Args[3] != "api" || got.Args[4] != "" {
@@ -71,7 +71,7 @@ func TestStream_UnknownLevelIsDroppedNotBound(t *testing.T) {
 func TestServices_ListsTheWindowsServicesWithCounts(t *testing.T) {
 	q := New(7, 11, 4242)
 	got := q.Services(0)
-	for _, want := range []string{"GROUP BY service", "count()", "tenant_id = ?", "project_id = ?", "seq >= ?"} {
+	for _, want := range []string{"GROUP BY service", "count(*)", "tenant_id = $1", "project_id = $2", "seq >= $3"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("Services must contain %q; got:\n%s", want, got.SQL)
 		}
@@ -83,7 +83,7 @@ func TestServices_IsNeverFilteredByService(t *testing.T) {
 	// Filtering the list by the service already picked would leave the picker
 	// holding one option, with no way back to the rest of the window.
 	got := New(1, 2, 3).Services(0)
-	if contains(got.SQL, "service = ?") {
+	if contains(got.SQL, "service = $") {
 		t.Fatalf("Services must not filter by service; got:\n%s", got.SQL)
 	}
 }
@@ -91,7 +91,7 @@ func TestServices_IsNeverFilteredByService(t *testing.T) {
 func TestVolume_GroupsByMinute(t *testing.T) {
 	q := New(1, 2, 3)
 	got := q.Volume(nil, nil)
-	if !contains(got.SQL, "toStartOfMinute(ts)") || !contains(got.SQL, "seq >= ?") {
+	if !contains(got.SQL, "date_trunc('minute', ts)") || !contains(got.SQL, "seq >= $3") {
 		t.Fatalf("volume must group by minute within the cutoff; got:\n%s", got.SQL)
 	}
 }
@@ -100,7 +100,7 @@ func TestVolume_FollowsTheFilters(t *testing.T) {
 	// The strip sits directly above the lines it describes; left unfiltered it
 	// drew the whole window's mass over a narrowed stream.
 	got := New(1, 2, 3).Volume([]string{"error"}, []string{"api"})
-	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
+	if !contains(got.SQL, "service IN ($4)") || !contains(got.SQL, "level = 'error'") {
 		t.Fatalf("volume must honour the stream's filters; got:\n%s", got.SQL)
 	}
 	if len(got.Args) != 4 || got.Args[3] != "api" {
@@ -150,18 +150,18 @@ func TestDetailBucketSeconds_SnapsAndRefuses(t *testing.T) {
 func TestVolumeDetail_BoundedAndFiltered(t *testing.T) {
 	within := Range{From: time.Unix(0, 0).UTC(), To: time.Unix(60, 0).UTC()}
 	got := New(1, 2, 3).VolumeDetail(5, within, []string{"error"}, []string{"api"})
-	if !contains(got.SQL, "toStartOfInterval(ts, INTERVAL 5 SECOND)") {
+	if !contains(got.SQL, "to_timestamp(floor(extract(epoch from ts) / 5) * 5)") {
 		t.Fatalf("detail must bucket at the snapped width; got:\n%s", got.SQL)
 	}
 	// Unlike Volume, this one IS bounded: it describes a range the reader picked,
 	// and unbounded it would group the whole ring one bucket at a time.
-	if !contains(got.SQL, "ts >= ?") || !contains(got.SQL, "ts < ?") {
+	if !contains(got.SQL, "ts >= $5") || !contains(got.SQL, "ts < $6") {
 		t.Fatalf("detail must be bounded by the range; got:\n%s", got.SQL)
 	}
-	if !contains(got.SQL, "service IN (?)") || !contains(got.SQL, "level = 'error'") {
+	if !contains(got.SQL, "service IN ($4)") || !contains(got.SQL, "level = 'error'") {
 		t.Fatalf("detail must honour the stream's filters; got:\n%s", got.SQL)
 	}
-	if !contains(got.SQL, "seq >= ?") {
+	if !contains(got.SQL, "seq >= $3") {
 		t.Fatalf("detail must stay inside the cutoff; got:\n%s", got.SQL)
 	}
 }
@@ -180,7 +180,7 @@ func TestSlice_RangeInclusiveOfCutoff(t *testing.T) {
 	got := q.Slice(1000, 2000, 500)
 	// Slice uses fromSeq/toSeq directly but still carries the cutoff so a query
 	// can't reach below the visible window even with a crafted range.
-	if !contains(got.SQL, "seq >= ?") {
+	if !contains(got.SQL, "seq >= $3") {
 		t.Fatalf("slice must still enforce the cutoff; got:\n%s", got.SQL)
 	}
 	assertArgsHave(t, got.Args, int64(1), int64(2), int64(1000), int64(2000))
@@ -216,7 +216,7 @@ func TestSummary_ScopedToCutoff(t *testing.T) {
 	// window, or a fully displaced project would still read as connected.
 	q := New(7, 11, 4242)
 	got := q.Summary()
-	for _, want := range []string{"count()", "max(ts)", "tenant_id = ?", "project_id = ?", "seq >= ?"} {
+	for _, want := range []string{"count(*)", "max(ts)", "tenant_id = $1", "project_id = $2", "seq >= $3"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("Summary must contain %q; got:\n%s", want, got.SQL)
 		}
@@ -229,7 +229,7 @@ func TestBeyondErrors_CountsOnlyTheDisplacedTail(t *testing.T) {
 	// no longer shown. Dropping either bound would count the visible window too.
 	q := New(3, 4, 900) // cutoff 900
 	got := q.BeyondErrors(100)
-	for _, want := range []string{"seq >= ?", "seq < ?", "level = 'error'"} {
+	for _, want := range []string{"seq >= $3", "seq < $4", "level = 'error'"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("BeyondErrors must contain %q; got:\n%s", want, got.SQL)
 		}
@@ -248,7 +248,7 @@ func TestCutoffSeq_IsReportedAsBuilt(t *testing.T) {
 func TestEventSeen_ScopedAndNamed(t *testing.T) {
 	q := New(7, 11, 4242)
 	got := q.EventSeen("install_verified")
-	for _, want := range []string{"tenant_id = ?", "project_id = ?", "seq >= ?", "message = ?"} {
+	for _, want := range []string{"tenant_id = $1", "project_id = $2", "seq >= $3", "message = $4"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("EventSeen must contain %q; got:\n%s", want, got.SQL)
 		}
@@ -262,7 +262,7 @@ func TestEventSeen_ScopedAndNamed(t *testing.T) {
 func TestRecentEvents_ScopedGroupedLimited(t *testing.T) {
 	q := New(7, 11, 4242)
 	got := q.RecentEvents(15*60*1e9, 12) // 15 minutes in time.Duration units
-	for _, want := range []string{"GROUP BY message", "LIMIT 12", "tenant_id = ?", "project_id = ?", "seq >= ?", "ts >= ?"} {
+	for _, want := range []string{"GROUP BY message", "LIMIT 12", "tenant_id = $1", "project_id = $2", "seq >= $3", "ts >= $4"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("RecentEvents must contain %q; got:\n%s", want, got.SQL)
 		}
@@ -295,7 +295,7 @@ func TestEvidence_RanksErrorsAndWarningsAboveTheTail(t *testing.T) {
 func TestEvidence_AlwaysScopedToCutoff(t *testing.T) {
 	q := New(7, 11, 4242)
 	got := q.Evidence(12)
-	for _, want := range []string{"tenant_id = ?", "project_id = ?", "seq >= ?"} {
+	for _, want := range []string{"tenant_id = $1", "project_id = $2", "seq >= $3"} {
 		if !contains(got.SQL, want) {
 			t.Fatalf("Evidence must scope like Stream (%s); got:\n%s", want, got.SQL)
 		}

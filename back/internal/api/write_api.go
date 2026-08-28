@@ -33,14 +33,14 @@ import (
 	"go.upcontrol.io/back/internal/discover"
 	"go.upcontrol.io/back/internal/probe/executor"
 	"go.upcontrol.io/back/internal/ring/query"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // writeAPI handles all the POST/PATCH/DELETE + public endpoints.
 type writeAPI struct {
 	pool *pg.Pool
-	ch   *ch.Conn
+	pgs  *pgstore.Store
 	sess *session.Manager
 	exec *executor.Executor
 	// selfHosted (UC_SELF_HOSTED=1): the anonymous watch door provisions
@@ -72,8 +72,8 @@ type cachedCheck struct {
 	at   time.Time
 }
 
-func NewWriteAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
-	return &writeAPI{pool: p, ch: chConn, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
+func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
+	return &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
 }
 
 func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1108,20 +1108,20 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 	// strip is on. Bounded by the retention window, which is all the table has.
 	type day struct{ ok, total uint64 }
 	oldest := map[int64]time.Time{}
-	if h.ch != nil {
-		chRows, cerr := h.ch.Raw().Query(ctx, `
+	if h.pgs != nil {
+		chRows, cerr := h.pgs.Raw().Query(ctx, `
 			SELECT monitor_id, min(ts) FROM checks
-			 WHERE tenant_id = ? AND ts >= now() - INTERVAL 7 DAY
-			 GROUP BY monitor_id`, uint64(tenantID))
+			 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
+			 GROUP BY monitor_id`, tenantID)
 		if cerr == nil {
 			for chRows.Next() {
-				var monID uint64
+				var monID int64
 				var first time.Time
 				if chRows.Scan(&monID, &first) == nil {
-					oldest[int64(monID)] = first.UTC()
+					oldest[monID] = first.UTC()
 				}
 			}
-			_ = chRows.Close()
+			chRows.Close()
 		}
 	}
 
@@ -1144,19 +1144,19 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 	// Buckets counted BACKWARDS from now: a probe is not clock-aligned, and
 	// wall-clock buckets would draw false gaps.
 	recent := map[int64]map[int]day{}
-	if h.ch != nil && !rawFrom.IsZero() {
-		chRows, cerr := h.ch.Raw().Query(ctx, `
+	if h.pgs != nil && !rawFrom.IsZero() {
+		chRows, cerr := h.pgs.Raw().Query(ctx, `
 			SELECT monitor_id, ts, ok FROM checks
-			 WHERE tenant_id = ? AND ts >= ?`, uint64(tenantID), rawFrom)
+			 WHERE tenant_id = $1 AND ts >= $2`, tenantID, rawFrom)
 		if cerr == nil {
 			for chRows.Next() {
-				var monID uint64
+				var monID int64
 				var ts time.Time
-				var okFlag uint8
+				var okFlag bool
 				if chRows.Scan(&monID, &ts, &okFlag) != nil {
 					continue
 				}
-				id := int64(monID)
+				id := monID
 				p := plans[id]
 				if p.bucket <= 0 {
 					continue
@@ -1172,12 +1172,12 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 				}
 				entry := m[bucket]
 				entry.total++
-				if okFlag == 1 {
+				if okFlag {
 					entry.ok++
 				}
 				m[bucket] = entry
 			}
-			_ = chRows.Close()
+			chRows.Close()
 		}
 	}
 
@@ -1229,17 +1229,20 @@ func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 // dropped by accident. tls_ms is still measured and still stored; it is only
 // not published here.
 func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[string]any {
-	if h.ch == nil {
+	if h.pgs == nil {
 		return []map[string]any{}
 	}
 	var dns, connect, total float64
 	var samples uint64
-	err := h.ch.Raw().QueryRow(ctx, `
-		SELECT median(dns_ms), median(connect_ms), median(total_ms), count()
+	err := h.pgs.Raw().QueryRow(ctx, `
+		SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY dns_ms),
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY connect_ms),
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms),
+		       count(*)
 		  FROM checks
-		 WHERE tenant_id = ? AND ts >= now() - INTERVAL 24 HOUR AND ok = 1
+		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '24 hours' AND ok
 		   AND region <> 'heartbeat'`,
-		uint64(tenantID)).Scan(&dns, &connect, &total, &samples)
+		tenantID).Scan(&dns, &connect, &total, &samples)
 	if err != nil || samples == 0 {
 		// Nothing measured in the window: no tiles. An empty section is the
 		// honest answer for an account whose first probe has not run yet.
@@ -1428,19 +1431,17 @@ func parseLogWindow(s string) time.Duration {
 // runWindowCount counts the window's lines before the stream limit. Same
 // filters and cutoff as Stream: a different predicate would make it a lie.
 func (h *writeAPI) runWindowCount(ctx context.Context, qb *query.QueryBuilder, within query.Range, levels, services []string, search string) int {
-	if h.ch == nil {
+	if h.pgs == nil {
 		return 0
 	}
 	// The builder owns the predicate so it cannot drift from Stream's.
 	lq := qb.WindowCount(within, levels, services, search)
-	rows, err := h.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+	rows, err := h.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return 0
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 	for rows.Next() {
-		// count() is UInt64 in ClickHouse and the native driver refuses to
-		// narrow it into int64 — the same reason logSummary scans uint64.
 		var n uint64
 		if err := rows.Scan(&n); err != nil {
 			continue
@@ -1453,14 +1454,14 @@ func (h *writeAPI) runWindowCount(ctx context.Context, qb *query.QueryBuilder, w
 // runLogRows executes a stream query and maps rows to the front's log-line
 // shape; nil on error, so the caller substitutes an empty array.
 func (h *writeAPI) runLogRows(ctx context.Context, lq query.LogQuery) []map[string]any {
-	if h.ch == nil {
+	if h.pgs == nil {
 		return nil
 	}
-	rows, err := h.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+	rows, err := h.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
 		var seq uint64
@@ -1482,19 +1483,17 @@ func (h *writeAPI) runLogRows(ctx context.Context, lq query.LogQuery) []map[stri
 
 // runServiceRows executes the window's service tally — the picker's options.
 func (h *writeAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[string]any {
-	if h.ch == nil {
+	if h.pgs == nil {
 		return nil
 	}
-	rows, err := h.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+	rows, err := h.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
 		var name string
-		// count() is UInt64 and the native driver refuses to narrow it, same as
-		// runWindowCount.
 		var lines uint64
 		if err := rows.Scan(&name, &lines); err != nil {
 			continue
@@ -1507,14 +1506,14 @@ func (h *writeAPI) runServiceRows(ctx context.Context, lq query.LogQuery) []map[
 // runBucketRows executes a histogram query and names the timestamp column for
 // the answer (`minute` vs `bucket`): the two measure different widths.
 func (h *writeAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key string) []map[string]any {
-	if h.ch == nil || lq.SQL == "" {
+	if h.pgs == nil || lq.SQL == "" {
 		return nil
 	}
-	rows, err := h.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+	rows, err := h.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
 		var at time.Time

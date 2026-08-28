@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"go.upcontrol.io/back/internal/storage/ch"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 func TestMergeTimelinePutsADeployBeforeTheOutage(t *testing.T) {
@@ -13,7 +13,7 @@ func TestMergeTimelinePutsADeployBeforeTheOutage(t *testing.T) {
 	lifecycle := []timelineMark{
 		{At: opened, Kind: "error", Text: "Checkout started failing"},
 	}
-	events := []ch.EventRow{
+	events := []pgstore.EventRow{
 		{TS: opened.Add(-2 * time.Minute), Name: "deploy.succeeded",
 			Labels: map[string]string{"sha": "a1b2c3d", "service": "api"}},
 	}
@@ -51,7 +51,7 @@ func TestMergeTimelineSortsAcrossMidnight(t *testing.T) {
 	lifecycle := []timelineMark{
 		{At: opened, Kind: "error", Text: "Checkout started failing"},
 	}
-	events := []ch.EventRow{
+	events := []pgstore.EventRow{
 		{TS: eventAt, Name: "deploy.succeeded",
 			Labels: map[string]string{"sha": "deadbee", "service": "api"}},
 	}
@@ -77,7 +77,7 @@ func TestMergeTimelineZeroAtComesFirst(t *testing.T) {
 		{At: time.Time{}, Kind: "error", Text: "Opened at unknown time"},
 		{At: opened, Kind: "check", Text: "Resolved"},
 	}
-	events := []ch.EventRow{}
+	events := []pgstore.EventRow{}
 
 	got := mergeTimeline(lifecycle, events)
 

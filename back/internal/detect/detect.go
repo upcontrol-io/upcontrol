@@ -16,8 +16,8 @@ import (
 	detector "go.upcontrol.io/back/internal/detect/detectors"
 	"go.upcontrol.io/back/internal/detect/suppression"
 	"go.upcontrol.io/back/internal/incident"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // madScale converts a MAD into a standard-deviation equivalent for the
@@ -28,17 +28,17 @@ const madScale = 1.4826
 // ("in the last 5 minutes"), so the sentence and the query must not drift.
 const scanWindow = 5 * time.Minute
 
-// Scanner wires the pure decisions to Postgres + ClickHouse; one
+// Scanner wires the pure decisions to Postgres + its telemetry store; one
 // implementation, no interface (the mock would be a second product).
 type Scanner struct {
 	pool *pg.Pool
-	ch   *ch.Conn
+	pgs  *pgstore.Store
 	inc  *incident.Lifecycle
 	log  *slog.Logger
 }
 
-func New(pool *pg.Pool, chConn *ch.Conn, lc *incident.Lifecycle, log *slog.Logger) *Scanner {
-	return &Scanner{pool: pool, ch: chConn, inc: lc, log: log}
+func New(pool *pg.Pool, pgs *pgstore.Store, lc *incident.Lifecycle, log *slog.Logger) *Scanner {
+	return &Scanner{pool: pool, pgs: pgs, inc: lc, log: log}
 }
 
 // windowBounds is the window the ErrorRate detector scores: [to-5m, to) with
@@ -110,7 +110,7 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 	fp := incident.KeyFingerprint(fmt.Sprintf("project:%d:errorrate", proj.ID))
 
 	wFrom, wTo := windowBounds(now)
-	errs, total, err := s.ch.ErrorWindow(ctx, proj.TenantID, proj.ID, wFrom, wTo)
+	errs, total, err := s.pgs.ErrorWindow(ctx, proj.TenantID, proj.ID, wFrom, wTo)
 	if err != nil {
 		return fmt.Errorf("error window: %w", err)
 	}
@@ -133,7 +133,7 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		dec = detector.NoFire()
 	} else {
 		bFrom, bTo := baselineBounds(now)
-		m, d, berr := s.ch.ErrorRateBaseline(ctx, proj.TenantID, proj.ID, bFrom, bTo)
+		m, d, berr := s.pgs.ErrorRateBaseline(ctx, proj.TenantID, proj.ID, bFrom, bTo)
 		if berr != nil {
 			return fmt.Errorf("error rate baseline: %w", berr)
 		}
@@ -155,7 +155,7 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("alert state lookup: %w", err)
 		}
-		lastDeploy, err := s.ch.LastDeployAt(ctx, proj.TenantID, proj.ID)
+		lastDeploy, err := s.pgs.LastDeployAt(ctx, proj.TenantID, proj.ID)
 		if err != nil {
 			return fmt.Errorf("last deploy: %w", err)
 		}

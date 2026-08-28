@@ -24,8 +24,8 @@ import (
 	"go.upcontrol.io/back/internal/platform/shutdown"
 	"go.upcontrol.io/back/internal/rpc"
 	"go.upcontrol.io/back/internal/source/webhook"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 	"go.upcontrol.io/back/internal/worker"
 
 	probev1connect "go.upcontrol.io/back/gen/rpc/probe/v1/probev1connect"
@@ -47,11 +47,7 @@ func runMigrate() int {
 		fmt.Fprintf(os.Stderr, "migrate: config: %v\n", err)
 		return 2
 	}
-	if err := migrate.Run(context.Background(),
-		cfg.PostgresURL,
-		cfg.ClickHouseAddr, cfg.ClickHouseDB, cfg.ClickHouseUser, cfg.ClickHousePass,
-		cfg.MigrationsPostgresDir, cfg.MigrationsClickHouseDir,
-	); err != nil {
+	if err := migrate.Run(context.Background(), cfg.PostgresURL, cfg.MigrationsPostgresDir); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 1
 	}
@@ -90,26 +86,12 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 		pgPool.Close()
 		return nil
 	}))
-
-	chConn, err := ch.Open(ctx, ch.Options{
-		Addr: []string{d.Config.ClickHouseAddr}, Database: d.Config.ClickHouseDB,
-		Username: d.Config.ClickHouseUser, Password: d.Config.ClickHousePass,
-	})
-	if err != nil {
-		pgPool.Close()
-		return err
-	}
-	d.Health.Register("clickhouse", chConn.Ping)
-	d.Shutdown.Register(st("ch-conn", func(ctx context.Context) error {
-		_ = recorder.Stop(ctx)
-		return chConn.Close()
-	}))
+	pgs := pgstore.New(pgPool.Raw())
 
 	_ = os.MkdirAll(d.Config.SpoolDir, 0o755)
 
-	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, d.Config.ScrubOff, pgPool, chConn)
+	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, d.Config.ScrubOff, pgPool, pgs)
 	if err != nil {
-		_ = chConn.Close()
 		pgPool.Close()
 		return err
 	}
@@ -122,7 +104,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 
 	// Product analytics recorder: async, buffered, never on the response
 	// path. Its drain is sequenced into the pg/ch teardown tasks above.
-	recorder = analytics.NewRecorder(analytics.PoolStore{Pool: pgPool}, chConn, d.Logger)
+	recorder = analytics.NewRecorder(analytics.PoolStore{Pool: pgPool}, pgs, d.Logger)
 	recorder.Start()
 
 	// Instance-settable secrets: values are sealed under UC_SECRET_KEY_HEX
@@ -218,7 +200,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("PATCH /v1/checks/{id}", mon)
 	mux.Handle("DELETE /v1/monitors/{id}", mon)
 
-	rd := api.NewReadAPI(pgPool, chConn, sm, tgUsername)
+	rd := api.NewReadAPI(pgPool, pgs, sm, tgUsername)
 	mux.Handle("GET /v1/plan", rd)
 	mux.Handle("GET /v1/sources", rd)
 	mux.Handle("GET /v1/channels", rd)
@@ -238,7 +220,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("PUT /v1/instance/smtp", instSettings)
 	mux.Handle("DELETE /v1/instance/smtp", instSettings)
 
-	wa := api.NewWriteAPI(pgPool, chConn, sm, devMode, mail, recorder, d.Config.SelfHosted)
+	wa := api.NewWriteAPI(pgPool, pgs, sm, devMode, mail, recorder, d.Config.SelfHosted)
 	mux.Handle("POST /v1/channels", wa)
 	// The gear's notification settings. The mux route is half the wiring:
 	// without it the PATCH answered 405 with the handler unreachable.
@@ -273,25 +255,25 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 
 	// Installer endpoints: anonymous mint is public (throttled); claim needs
 	// a session; status authenticates by the project API key.
-	inst := api.NewInstall(pgPool, chConn, sm, d.Config.PublicOrigin, d.Config.SelfHosted)
+	inst := api.NewInstall(pgPool, pgs, sm, d.Config.PublicOrigin, d.Config.SelfHosted)
 	mux.Handle("POST /v1/projects/anonymous", inst)
 	mux.Handle("POST /v1/claim", inst)
 	mux.Handle("GET /v1/install/status", inst)
 	mux.Handle("POST /v1/install/token", inst)
 	mux.Handle("POST /v1/install/redeem", inst)
 
-	lc := incident.New(pgPool, chConn)
+	lc := incident.New(pgPool, pgs)
 	mux.Handle("POST /public/check", wa)
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("POST /public/track", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
 	// The heartbeat ping door: anonymous, the token in the path is the whole
 	// credential, so an unknown one answers 404 and never a hint.
-	hb := heartbeat.New(pgPool, chConn, lc)
+	hb := heartbeat.New(pgPool, pgs, lc)
 	mux.Handle("GET /public/ping/{token}", hb)
 	mux.Handle("POST /public/ping/{token}", hb)
 
-	probeSvc := rpc.NewProbeService(pgPool, chConn, lc, d.Config.NodeToken)
+	probeSvc := rpc.NewProbeService(pgPool, pgs, lc, d.Config.NodeToken)
 	probePath, probeHandler := probev1connect.NewProbeServiceHandler(probeSvc)
 	mux.Handle(probePath, probeHandler)
 
@@ -300,7 +282,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 		"github": []byte(os.Getenv("UC_GITHUB_WEBHOOK_SECRET")),
 		"vercel": []byte(os.Getenv("UC_VERCEL_WEBHOOK_SECRET")),
 	}
-	whHandler := webhook.New(pgPool, chConn, whSecrets)
+	whHandler := webhook.New(pgPool, pgs, whSecrets)
 	mux.Handle("POST /hooks/", whHandler)
 	mux.Handle("POST /hooks/{provider}", whHandler)
 

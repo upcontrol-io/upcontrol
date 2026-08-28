@@ -16,19 +16,19 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // Handler dispatches webhooks by provider.
 type Handler struct {
 	pool    *pg.Pool
-	ch      *ch.Conn
+	pgs     *pgstore.Store
 	secrets map[string][]byte // provider → secret (HMAC key)
 }
 
-func New(pool *pg.Pool, chConn *ch.Conn, secrets map[string][]byte) *Handler {
-	return &Handler{pool: pool, ch: chConn, secrets: secrets}
+func New(pool *pg.Pool, pgs *pgstore.Store, secrets map[string][]byte) *Handler {
+	return &Handler{pool: pool, pgs: pgs, secrets: secrets}
 }
 
 // knownProviders are the legacy globally-secreted routes; any other segment is
@@ -96,9 +96,9 @@ func (h *Handler) serveLegacy(w http.ResponseWriter, r *http.Request, provider s
 		return
 	}
 
-	// Record the event in ClickHouse for the correlation detectors.
+	// Record the event in Postgres for the correlation detectors.
 	if evt.HasAmount {
-		_ = h.ch.InsertEvents(r.Context(), []ch.EventRow{{
+		_ = h.pgs.InsertEvents(r.Context(), []pgstore.EventRow{{
 			TenantID:    evt.TenantID,
 			ProjectID:   evt.ProjectID,
 			TS:          evt.Timestamp,
@@ -108,7 +108,7 @@ func (h *Handler) serveLegacy(w http.ResponseWriter, r *http.Request, provider s
 			Currency:    evt.Currency,
 		}})
 	} else {
-		_ = h.ch.InsertEvents(r.Context(), []ch.EventRow{{
+		_ = h.pgs.InsertEvents(r.Context(), []pgstore.EventRow{{
 			TenantID:  evt.TenantID,
 			ProjectID: evt.ProjectID,
 			TS:        evt.Timestamp,
@@ -189,7 +189,7 @@ func (h *Handler) serveToken(w http.ResponseWriter, r *http.Request, token strin
 
 	evt.TenantID = conn.TenantID
 	evt.ProjectID = conn.ProjectID
-	row := ch.EventRow{
+	row := pgstore.EventRow{
 		TenantID:  evt.TenantID,
 		ProjectID: evt.ProjectID,
 		TS:        evt.Timestamp,
@@ -200,7 +200,7 @@ func (h *Handler) serveToken(w http.ResponseWriter, r *http.Request, token strin
 		row.AmountMinor = evt.AmountMinor
 		row.Currency = evt.Currency
 	}
-	_ = h.ch.InsertEvents(r.Context(), []ch.EventRow{row})
+	_ = h.pgs.InsertEvents(r.Context(), []pgstore.EventRow{row})
 
 	_ = h.markSeen(r.Context(), scope, evt.EventID)
 

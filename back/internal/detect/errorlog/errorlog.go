@@ -13,8 +13,8 @@ import (
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/ring/query"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 const (
@@ -87,16 +87,16 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// Scanner wires the pure decisions above to Postgres + ClickHouse.
+// Scanner wires the pure decisions above to Postgres + its telemetry store.
 type Scanner struct {
 	pool *pg.Pool
-	ch   *ch.Conn
+	pgs  *pgstore.Store
 	log  *slog.Logger
 }
 
 // New builds a Scanner.
-func New(pool *pg.Pool, chConn *ch.Conn, log *slog.Logger) *Scanner {
-	return &Scanner{pool: pool, ch: chConn, log: log}
+func New(pool *pg.Pool, pgs *pgstore.Store, log *slog.Logger) *Scanner {
+	return &Scanner{pool: pool, pgs: pgs, log: log}
 }
 
 // subscription is one channel's resolved interest, grouped per tenant.
@@ -237,15 +237,19 @@ func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Ti
 			cutoff = info.CutoffSeq
 		}
 		lq := query.New(tenantID, projectID, cutoff).ErrorGroups(since)
-		rows, qerr := s.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+		rows, qerr := s.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 		if qerr != nil {
 			return nil, qerr
 		}
 		for rows.Next() {
+			// fingerprint is a wrapped bigint: scan signed, wrap in Go — pgx
+			// refuses a negative int8 into uint64, and half the hash space is.
 			var g Group
-			if err := rows.Scan(&g.Fingerprint, &g.Count, &g.Service, &g.Message, &g.LastTS); err != nil {
+			var fp int64
+			if err := rows.Scan(&fp, &g.Count, &g.Service, &g.Message, &g.LastTS); err != nil {
 				continue
 			}
+			g.Fingerprint = uint64(fp)
 			if have, ok := merged[g.Fingerprint]; ok {
 				g.Count += have.Count
 				if have.LastTS.After(g.LastTS) {
@@ -254,7 +258,7 @@ func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Ti
 			}
 			merged[g.Fingerprint] = g
 		}
-		_ = rows.Close()
+		rows.Close()
 	}
 	groups := make([]Group, 0, len(merged))
 	for _, g := range merged {

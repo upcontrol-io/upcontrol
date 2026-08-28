@@ -3,8 +3,8 @@
 # docker-compose.build.yml up -d --build` builds from source instead.
 #
 # ./install.sh writes .env and secrets/ and brings this up; the README's
-# quickstart is the manual equivalent. Memory limits are sized for a 4GB box
-# (2GB + active swap is the floor) — see README.md.
+# quickstart is the manual equivalent. Memory limits are sized for a 1GB box
+# (512MB + active swap is the floor); see README.md.
 services:
   postgres:
     image: postgres:18.6
@@ -29,56 +29,7 @@ services:
       timeout: 3s
       retries: 20
 
-  clickhouse:
-    # Pinned to a versioned tag on purpose: `latest` crossing a ClickHouse
-    # major on a routine pull is how a self-host loses its weekend. Updates
-    # move this pin deliberately, one major at a time (README, "Updating").
-    image: clickhouse/clickhouse-server:24.8
-    deploy:
-      resources:
-        limits:
-          memory: 1200M
-    volumes:
-      - chdata:/var/lib/clickhouse
-      # Low-memory drop-in: caps the server at 800M so it fits the limit above.
-      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/upcontrol.xml:ro
-      # db/clickhouse is NOT mounted as docker-entrypoint-initdb.d here: the
-      # `migrate` service below already applies it with the native driver,
-      # scoped to CLICKHOUSE_DB. The image's own init mechanism runs mounted
-      # .sql files through clickhouse-client with no --database, which lands
-      # every table in `default` instead — a second, uncoordinated copy of
-      # the same schema (rehearsal #2 finding, 2026-08-20).
-      #
-      # Measured, not assumed (rehearsal #4): on a stand installed under the
-      # old mount, all 18 tables carry the SAME metadata_modification_time —
-      # the second the volume was first initialised — and every one holds 0
-      # rows. Running `ucapi migrate` against a real 24.8 with this file's own
-      # environment creates 18 tables in `upcontrol` and none in `default`.
-      # So the migrate path never made duplicates and this mount always did.
-      #
-      # Removing the mount fixes new installs only. A stand that predates it
-      # keeps its empty copies forever: they are inert, but `SHOW TABLES FROM
-      # default` will show them, and the cleanup is a DROP per table after
-      # confirming 0 rows in system.parts.
-    environment:
-      CLICKHOUSE_DB: upcontrol
-      CLICKHOUSE_USER: upcontrol
-      CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
-    secrets:
-      - ch_password
-    ulimits:
-      nofile: 262144
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'clickhouse-client --user upcontrol --password "$$(cat /run/secrets/ch_password)" --query ''SELECT 1'' || exit 1',
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  # Runs `ucapi migrate` once before ucapi starts: PG (goose) + CH (raw SQL).
+  # Runs `ucapi migrate` once before ucapi starts: PG (goose).
   migrate:
     image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
     command: ["ucapi", "migrate"]
@@ -90,20 +41,12 @@ services:
       UC_ENVIRONMENT: dev
       UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
       UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-      UC_CLICKHOUSE_ADDR: clickhouse:9000
-      UC_CLICKHOUSE_DB: upcontrol
-      UC_CLICKHOUSE_USER: upcontrol
-      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
       UC_PG_MIGRATIONS_DIR: /db/postgres
-      UC_CH_MIGRATIONS_DIR: /db/clickhouse
     depends_on:
       postgres:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
     secrets:
       - pg_password
-      - ch_password
 
   ucapi:
     image: ghcr.io/upcontrol-io/upcontrol-back:${UC_VERSION:-latest}
@@ -132,10 +75,6 @@ services:
       UC_HTTP_ADDR: ":8080"
       UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
       UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-      UC_CLICKHOUSE_ADDR: clickhouse:9000
-      UC_CLICKHOUSE_DB: upcontrol
-      UC_CLICKHOUSE_USER: upcontrol
-      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
       UC_NODE_TOKEN_FILE: /run/secrets/node_token
       UC_SECRET_KEY_HEX_FILE: /run/secrets/secret_key_hex
       UC_SPOOL_DIR: /spool
@@ -171,13 +110,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     secrets:
       - pg_password
-      - ch_password
       - node_token
       - secret_key_hex
       - telegram_bot_token
@@ -196,10 +132,6 @@ services:
       UC_HTTP_ADDR: ":8090"
       UC_POSTGRES_URL: postgres://upcontrol@postgres/upcontrol?sslmode=disable
       UC_POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-      UC_CLICKHOUSE_ADDR: clickhouse:9000
-      UC_CLICKHOUSE_DB: upcontrol
-      UC_CLICKHOUSE_USER: upcontrol
-      UC_CLICKHOUSE_PASSWORD_FILE: /run/secrets/ch_password
       UC_NODE_TOKEN_FILE: /run/secrets/node_token
       UC_SECRET_KEY_HEX_FILE: /run/secrets/secret_key_hex
       # Alert email rides SMTP directly on a self-host (no email agent here):
@@ -217,13 +149,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     secrets:
       - pg_password
-      - ch_password
       - node_token
       - secret_key_hex
       - telegram_bot_token
@@ -280,15 +209,12 @@ services:
 
 volumes:
   pgdata: {}
-  chdata: {}
   caddydata: {}
   spool: {}
 
 secrets:
   pg_password:
     file: ./secrets/pg_password
-  ch_password:
-    file: ./secrets/ch_password
   node_token:
     file: ./secrets/node_token
   secret_key_hex:

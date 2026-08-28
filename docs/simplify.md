@@ -8,28 +8,43 @@ Written against the tree at `ae676cb`. Line counts are non-test unless stated.
 The repository is ~51k lines total: 18.4k backend Go, 12k backend tests, 6k
 generated, 10.7k front, 2.6k CLI, 1.8k SQL and infra.
 
+> **STATUS, 2026-08-28.** Worked through in four passes. Each item below carries
+> a status note; three landed differently from what is written here and say so.
+> Only item 1's group is on `master` so far: items 2, 3, 11 and 12 sit on
+> committed branches awaiting a merge, and item 8 is mid-flight.
+>
+> Three claims in this document turned out to be **wrong**, all the same way:
+> they judge the product from inside the public `core/` repo, which cannot see
+> the closed `admin/` dashboard. Corrected in place at items 2, 5 and 8.
+
 ## Summary
 
-| #    | Change                                                   | Wins                                             | Risk   |
-|------|----------------------------------------------------------|--------------------------------------------------|--------|
-| 1    | Split the README by audience                             | The first 30 seconds of every evaluation         | None   |
-| 2    | One entity: Event, named or derived; drop the dictionary | `normalize` gone, logs-vs-events vocabulary gone | Low    |
-| 3    | Fold ucworker into ucapi                                 | One container, one image, one deploy             | Low    |
-| 4    | Drop the second Caddy                                    | One container                                    | Low    |
-| 5    | Decide what analytics is for                             | ~500 lines + a table, or a missing page          | Low    |
-| 6    | Move `discover/` out of `internal/probe/`                | A package filed under the wrong binary           | None   |
-| 7    | Ship the WAL's replay path, or stop fsyncing             | Honesty, or latency                              | Medium |
-| 8    | Postgres by default; drop ClickHouse                     | The 2GB floor, one whole database                | Medium |
-| 9    | Keep: ucprobe as its own binary                          | —                                                | —      |
-| 10   | Store the client's level verbatim + `level_norm`         | Nothing rewritten behind the user's back         | Low    |
-| 11   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | Operator choice on their own box                 | Low    |
-| 12   | Implement fingerprinting (gap, not a cut)                | Error grouping that actually groups              | Medium |
+| #    | Change                                                   | Status |
+|------|----------------------------------------------------------|--------|
+| 1    | Split the README by audience                             | **DONE**, and then some: the heartbeat line was made true rather than deleted |
+| 2    | One entity: Event, named or derived; drop the dictionary | **PARTIAL** — dictionary and tiers deleted; the `named_by` model was not built |
+| 3    | Fold ucworker into ucapi                                 | **DONE** |
+| 4    | Drop the second Caddy                                    | **DECLINED** (owner, 2026-08-28) |
+| 5    | Decide what analytics is for                             | **DECLINED** — and the premise is false, see the item |
+| 6    | Move `discover/` out of `internal/probe/`                | **DONE** |
+| 7    | Ship the WAL's replay path, or stop fsyncing             | **DONE** — the WAL was deleted |
+| 8    | Postgres by default; drop ClickHouse                     | **IN PROGRESS** — group 1 of 5; risk is High, not Medium |
+| 9    | Keep: ucprobe as its own binary                          | Kept, untouched |
+| 10   | Store the client's level verbatim + `level_norm`         | **DONE, INVERTED** — `level` stayed normalized, raw went to `level_raw` |
+| 11   | Keep scrubbing, add a `UC_SCRUB=0` off switch            | **DONE**, including the attr-scrubbing gap |
+| 12   | Implement fingerprinting (gap, not a cut)                | **DONE**, including the attr caps; different warning codes |
 
 Guiding principles for all of these live in [philosophy.md](./internal/philosophy.md).
 
 ---
 
 ## 1. Split the README by audience
+
+> **DONE.** README split by audience; the diagram, component table and folder
+> map moved to `docs/architecture.md`. Both wrong claims fixed: "no telemetry"
+> reworded as a promise about us, and the nightly-cron line was made TRUE by
+> building the heartbeat vertical (ping route, missed-window job, migration 028)
+> rather than deleting it.
 
 The README opens with NDJSON, WALs, event tiers, advisory locks, MTTA/MTTR and
 connect-rpc. That vocabulary serves someone auditing the architecture. It
@@ -54,6 +69,29 @@ While rewriting, fix the two claims that are wrong today:
 **Trade-off:** none. No runtime behaviour changes.
 
 ## 2. One entity — Event; names declared or derived; drop the dictionary
+
+> **PARTIAL.** The dictionary and its five tiers are deleted (`normalize.go`,
+> 108 lines to 52) and `EventTier` is gone — it was written on every row and
+> read by nothing. The `named_by` model below was NOT built.
+>
+> Why: `track('payment_failed')` reaches the server as `{"msg":"payment_failed"}`,
+> shape-identical to a log line. The dictionary WAS the only declared-vs-derived
+> signal, so the model here needs a new wire marker, an SDK release and a
+> contract change. Owner chose the narrow path instead (2026-08-28): a name
+> earns an `events` row by having an engine behind it.
+>
+> Two names qualify, both guarded by a test because both failures are silent:
+> the `deploy` family (post-deploy suppression reads it), and **`install_verified`**
+> — which this document could not see, because its only consumer is the closed
+> `admin/` dashboard, outside this repo. `uc.*` stays reserved.
+>
+> Both sub-items below are DONE: `eventKind` reordered (a failure now outranks
+> its subject, though `deploy` stays first), and `mergeTimeline` sorts on
+> `time.Time`.
+>
+> Open, if this is ever finished: derived names must NOT be addressable in alert
+> rules — only the fingerprint. Otherwise retuning item 12's masking silently
+> rewrites people's rules. That contradiction is not resolved in the text below.
 
 Decision taken 2026-08-27, refined same day. There is one domain entity:
 
@@ -97,6 +135,12 @@ invalid timestamps sort first. `EventsAround` already returns correct
 
 ## 3. Fold ucworker into ucapi
 
+> **DONE.** Jobs extracted to `internal/worker`, called by both binaries;
+> `cmd/ucworker/main.go` 296 lines to 39. `UC_WITH_WORKER` defaults on for
+> self-host, off otherwise. The count below is stale: 8 jobs, not five. The
+> stale rationale in `architecture.md` is corrected in two places, one of which
+> a grep missed because the phrase wraps across a line break.
+
 `ucworker` is a 246-line main that runs five looping jobs. Every one of them —
 including delivery — is wrapped in `runWithLock`, a non-blocking
 `pg_try_advisory_lock` that skips when another instance holds it
@@ -118,6 +162,10 @@ building so the hosted deployment can still run it separately.
 
 ## 4. Drop the second Caddy
 
+> **DECLINED (owner, 2026-08-28).** The trade is bad: minus one container that
+> shares a base layer, plus a shared-volume coupling and a `front` image that
+> stops being independently runnable.
+
 `front/Dockerfile` builds the static bundle and serves it from `caddy:2-alpine`.
 `infra/docker-compose.yml` then puts *another* Caddy in front as the TLS edge.
 The edge can serve `/srv` directly from a volume.
@@ -130,6 +178,16 @@ Combined with #3, the compose file goes from 8 services to 5: postgres,
 clickhouse, migrate (one-shot), ucapi, caddy — plus ucprobe where used.
 
 ## 5. Decide what analytics is for
+
+> **DECLINED (owner, 2026-08-28) — and the premise below is FALSE.**
+>
+> "Nobody in this repository can read it" is true of `core/` and wrong about the
+> product. `admin/src/queries.ts` reads `web_events` in 20 places; the ucadmin
+> dashboard is the consumer. This is hosted-serving, not dead code, and "stop
+> collecting" would have broken it.
+>
+> This is the first of three places where judging from inside the public repo
+> missed the closed one. Do not action this item as a cut.
 
 `internal/analytics` is a complete first-party web analytics engine — visitor
 IDs via a `uc_vid` cookie, user-agent parsing, GeoIP, UTM capture, IP hashed
@@ -148,6 +206,9 @@ different repo, it is not dead and should simply be documented as
 hosted-serving. Confirm before deleting.
 
 ## 6. Move `discover/` out of `internal/probe/`
+
+> **DONE.** `internal/probe/discover` moved to `internal/discover`, a pure
+> rename; one importer, no behaviour change.
 
 `internal/probe/discover` is ~1,000 lines that crawl robots.txt, sitemaps,
 hosts and page links to *suggest what to monitor*. It is filed under
@@ -173,6 +234,12 @@ least one reader about where the code runs.
 
 ## 7. Ship the WAL's replay path, or stop fsyncing
 
+> **DONE - the WAL was deleted** (owner, 2026-08-28), replay not built. Worth
+> recording why it was more than latency: nothing truncated `ingest.wal`, and
+> `dirSpoolFiller` sizes the spool directory as the overload gauge, so every
+> long-lived install was drifting toward the 60/75/90/100% shed steps and
+> eventually refusing ingest with `spool_full`.
+
 `ingest.go:155` appends and fsyncs every accepted batch before returning a
 receipt. The comment directly above it is candid: *"No replay path exists yet;
 the file is a durability record, not recovery."*
@@ -189,6 +256,36 @@ simplification, and it costs you the guarantee. Pick deliberately — the one
 thing not to do is keep paying for a guarantee you don't deliver.
 
 ## 8. Postgres by default; drop ClickHouse
+
+> **IN PROGRESS — group 1 of 5.** Branch `fire/postgres-only`. Nothing merges
+> until all five land: half a storage migration does not run.
+>
+> **The risk rating below is wrong: this is High, not Medium.** The survey found
+> materially more than "22 queries": **14 non-test files** import `storage/ch`,
+> **14 more raw-SQL sites** reach past it via `.Raw()`, `ring/query` is 291 lines
+> with 12 log queries, and the ClickHouse schema is **18 objects** — 9 tables and
+> 7 materialized views — not the 4 counted here. Plus `admin/`, in another repo.
+>
+> Owner decisions (2026-08-28) that make it tractable:
+> - **The seq ring survives.** `project_window.cutoff_seq`/`retain_seq` keep
+>   their exact meaning and every read keeps filtering `seq >= cutoffSeq`. Day
+>   partitions are only the physical floor. Replacing the ring with time-based
+>   partitions would have made retention global, silently gutting a paid axis.
+> - **No data is worth keeping** (no customers, no OSS users), so there is no
+>   migration path and the 28 migrations collapse to a fresh `001`.
+> - **The prod reset is a manual, documented drop.** goose records version 28, so
+>   a fresh `001` would be treated as already applied and skipped. An automated
+>   `DROP DATABASE` in the deploy path would eventually wipe a self-hoster.
+> - `admin/`'s ClickHouse queries get ported too, not dropped.
+>
+> Groups: (1) fresh schema + `pgstore` writer, (2) write path, (3) read path and
+> the detector, (4) `admin/`, (5) teardown — delete `storage/ch`, drop the
+> service from both compose files, lift `install.sh`'s 2GB floor, rewrite docs.
+>
+> Undecided: `checks_1m`, `series_1h`, `checks_1h`, `metrics_5m`, `metrics_1h`
+> and `baselines` are deliberately NOT ported. Re-creating seven materialized
+> views as Postgres triggers rebuilds the complexity this item exists to delete;
+> each needs a call on re-derive-on-demand versus drop.
 
 Decision taken 2026-08-27: Postgres is the storage engine. ClickHouse is at
 minimum optional and OFF by default; the working intent is to remove it
@@ -236,6 +333,8 @@ maintaining two storage backends forever.
 
 ## 9. Keep: ucprobe as its own binary
 
+> **KEPT**, untouched, as intended.
+
 Listed so it isn't revisited. The probe leases checks, runs them, submits
 results, and holds no database credentials. That last property is the point: it
 is the component most exposed to hostile input, it is the one you would run in
@@ -251,6 +350,18 @@ The binary is ~610 lines and there is nothing in it to cut. See #6 for the
 package that made it look larger.
 
 ## 10. Store the client's level verbatim, normalize into a second column
+
+> **DONE, WITH THE COLUMNS INVERTED.** `level` stays the normalized value and
+> the client string goes to a new `level_raw` (capped at 32 bytes). Same
+> guarantee, opposite naming: `level` is what 14 readers, a set index and both
+> rollup views group by, so renaming it meant rewriting all of them for nothing.
+>
+> `fatal`, `critical`, `panic`, `crit`, `emerg` and `alert` now map to `error`.
+> Known levels are also lowercased, which incidentally fixed the overload shed
+> mask: it keys on `level` and had been missing `ERROR` entirely.
+>
+> The SDK already mapped `fatal` to `error` client-side, so this bug only ever
+> hit Loki, syslog, OTLP and hand-rolled senders.
 
 Decision taken 2026-08-27. Today `normalizeLevel` (`decode.go:190`) rewrites
 whatever the client sent into `info|warn|error|debug|trace`, and anything it
@@ -271,6 +382,14 @@ read time on every query. What is bought: the user's data is never rewritten,
 only annotated.
 
 ## 11. Keep scrubbing, add an off switch
+
+> **DONE.** `UC_SCRUB=0`, honoured only with `UC_SELF_HOSTED=1`; set without it
+> the variable is ignored and the boot log says so. The attr-scrubbing gap is
+> closed, so the comment is finally true.
+>
+> The config field is `ScrubOff`, negative on purpose: `Deps` is built from
+> literals, so a positive `Scrub bool` would mean any literal that forgets it
+> silently stops redacting. The zero value must scrub.
 
 Decision taken 2026-08-27. Secret scrubbing (`internal/ingest/scrub`) stays —
 the hosted service cannot store other people's bearer tokens and connection
@@ -295,6 +414,19 @@ a real but small cost on the hot path; the scrubber is already a single-pass
 matcher built for exactly this.
 
 ## 12. Implement fingerprinting — a gap, not a cut
+
+> **DONE.** `ingest.Fingerprint` is FNV-64a over the scrubbed message with digit
+> runs, hex runs of 8+ and quoted strings masked. Every row stored 0 before, so
+> one group cooldown suppressed every other error in the project.
+>
+> Attr caps shipped too: 64 keys, 256B per key, 8192B per value, kept in SORTED
+> key order. Go randomises map iteration, so an unsorted cap would keep a
+> different 64 each time and an idempotency replay would disagree with its own
+> original write.
+>
+> Warning codes differ from the text below: `attr_key_capped` and
+> `field_cap_exceeded` were already in the contract and never emitted, so using
+> them meant zero contract change instead of a third dead code.
 
 Decision taken 2026-08-27. The `fingerprint` column exists in the schema with
 a bloom-filter index, `ErrorGroups` consumes it, and the errorlog detector's

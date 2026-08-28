@@ -19,8 +19,8 @@ import (
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/ring/query"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // anonCooldown throttles the anonymous mint per IP, in-memory and therefore
@@ -30,7 +30,7 @@ const anonCooldown = 30 * time.Second
 // install carries the three handlers' dependencies.
 type install struct {
 	pool         *pg.Pool
-	chc          *ch.Conn
+	pgs          *pgstore.Store
 	keys         *pg.KeyResolver
 	sess         *session.Manager
 	publicOrigin string
@@ -43,10 +43,10 @@ type install struct {
 	last map[string]time.Time
 }
 
-func NewInstall(pool *pg.Pool, chc *ch.Conn, sm *session.Manager, publicOrigin string, selfHosted bool) *install {
+func NewInstall(pool *pg.Pool, pgs *pgstore.Store, sm *session.Manager, publicOrigin string, selfHosted bool) *install {
 	return &install{
 		pool:         pool,
-		chc:          chc,
+		pgs:          pgs,
 		keys:         pg.NewKeyResolver(pool, nil),
 		sess:         sm,
 		publicOrigin: strings.TrimRight(publicOrigin, "/"),
@@ -440,19 +440,19 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 	var verifiedAt time.Time
 	var lines uint64
 	recent := make([]map[string]any, 0, 12)
-	if h.chc != nil {
+	if h.pgs != nil {
 		var times uint64
 		var firstTS, lastTS time.Time
 		eq := qb.EventSeen("install_verified")
-		if err := h.chc.Raw().QueryRow(ctx, eq.SQL, eq.Args...).Scan(&times, &firstTS, &lastTS); err == nil && times > 0 {
+		if err := h.pgs.Raw().QueryRow(ctx, eq.SQL, eq.Args...).Scan(&times, &firstTS, &lastTS); err == nil && times > 0 {
 			verified = true
 			verifiedAt = firstTS
 		}
 		sq := qb.Summary()
 		var lastLine time.Time
-		_ = h.chc.Raw().QueryRow(ctx, sq.SQL, sq.Args...).Scan(&lines, &lastLine)
+		_ = h.pgs.Raw().QueryRow(ctx, sq.SQL, sq.Args...).Scan(&lines, &lastLine)
 		rq := qb.RecentEvents(15*time.Minute, 12)
-		if rows, err := h.chc.Raw().Query(ctx, rq.SQL, rq.Args...); err == nil {
+		if rows, err := h.pgs.Raw().Query(ctx, rq.SQL, rq.Args...); err == nil {
 			for rows.Next() {
 				var msg string
 				var times uint64
@@ -465,7 +465,7 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 			}
-			_ = rows.Close()
+			rows.Close()
 		}
 	}
 

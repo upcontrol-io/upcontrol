@@ -18,8 +18,8 @@ import (
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/ring/query"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // detectStatus is what a detection incident opens as, on the row AND in the
@@ -36,13 +36,13 @@ const (
 // Lifecycle manages incident open/close against the Postgres tables.
 type Lifecycle struct {
 	pool *pg.Pool
-	// ch is optional: without it the incident still opens, it just carries no
+	// pgs is optional: without it the incident still opens, it just carries no
 	// frozen log slice. The probe path always has one; tests do not.
-	ch *ch.Conn
+	pgs *pgstore.Store
 }
 
-// New builds a Lifecycle; chConn is optional (no connection, no frozen slice).
-func New(p *pg.Pool, chConn *ch.Conn) *Lifecycle { return &Lifecycle{pool: p, ch: chConn} }
+// New builds a Lifecycle; pgs is optional (no store, no frozen slice).
+func New(p *pg.Pool, pgs *pgstore.Store) *Lifecycle { return &Lifecycle{pool: p, pgs: pgs} }
 
 // Open creates an incident for a monitor that crossed the availability
 // threshold; an already-open incident is returned, not duplicated.
@@ -363,7 +363,7 @@ const sliceLines = 12
 // freezeSlice copies the tail of the visible window into incident_slice via
 // ring.QueryBuilder; it runs at open because the ring displaces lines.
 func (l *Lifecycle) freezeSlice(ctx context.Context, incidentID, tenantID, projectID int64) error {
-	if l.ch == nil {
+	if l.pgs == nil {
 		return nil
 	}
 	q := l.pool.Queries()
@@ -377,15 +377,15 @@ func (l *Lifecycle) freezeSlice(ctx context.Context, incidentID, tenantID, proje
 	// The slice is bounded by seq, not the clock, and Evidence fills the budget
 	// with failing lines first instead of the tail's healthy traffic.
 	lq := qb.Evidence(sliceLines)
-	rows, err := l.ch.Raw().Query(ctx, lq.SQL, lq.Args...)
+	rows, err := l.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return fmt.Errorf("incident: slice query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
 	for rows.Next() {
-		// seq is UInt64 in ClickHouse and bigint in Postgres; a silent scan
-		// error here once returned an empty slice.
+		// seq is a bigint in Postgres and always positive; a silent scan error
+		// here once returned an empty slice, so errors are returned now.
 		var seq uint64
 		var ts time.Time
 		var level, service, message string

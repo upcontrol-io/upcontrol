@@ -36,9 +36,10 @@ fi
 command -v docker >/dev/null 2>&1 || fail "docker is not installed (https://docs.docker.com/engine/install/)"
 docker compose version >/dev/null 2>&1 || fail "docker compose v2 is not available (the 'docker-compose' v1 binary is not enough)"
 
-# RAM floor: 3.5GB, or 1.5GB with active swap. Below that ClickHouse gets
-# OOM-killed under merge load and the box is not usable — better to refuse
-# now than to fall over on the first busy hour.
+# RAM floor: the whole stack (Postgres, ucapi, ucworker, ucprobe, caddy,
+# front) fits in 1GB. Below ~900MB it needs active swap to ride out load
+# peaks, and under 512MB even swap does not save it, so it is better to
+# refuse now than to fall over on the first busy hour.
 if [ -r /proc/meminfo ]; then
 	mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
 	swap_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
@@ -50,8 +51,8 @@ else
 	say "warning: cannot read total RAM on this OS; skipping the memory check"
 fi
 if [ "$mem_kb" -gt 0 ]; then
-	if [ "$mem_kb" -lt 3670016 ] && { [ "$mem_kb" -lt 1572864 ] || [ "${swap_kb:-0}" -eq 0 ]; }; then
-		fail "not enough memory: 4GB RAM recommended, 2GB + active swap minimum (found $((mem_kb / 1024))MB RAM, $((${swap_kb:-0} / 1024))MB swap)"
+	if [ "$mem_kb" -lt 917504 ] && { [ "$mem_kb" -lt 524288 ] || [ "${swap_kb:-0}" -eq 0 ]; }; then
+		fail "not enough memory: 1GB RAM recommended, 512MB + active swap minimum (found $((mem_kb / 1024))MB RAM, $((${swap_kb:-0} / 1024))MB swap)"
 	fi
 fi
 
@@ -123,7 +124,7 @@ if [ "$MODE" = update ]; then
 	update_checkout
 	$COMPOSE $COMPOSE_FILES pull
 	$COMPOSE $COMPOSE_FILES up -d
-	say "Updated. The ClickHouse pin only moves when a release moves it — majors never jump on their own."
+	say "Updated."
 	exit 0
 fi
 
@@ -131,7 +132,7 @@ fi
 
 command -v openssl >/dev/null 2>&1 || fail "openssl is required to generate secrets"
 mkdir -p secrets
-for s in pg_password ch_password node_token secret_key_hex; do
+for s in pg_password node_token secret_key_hex; do
 	if [ ! -s "secrets/$s" ]; then
 		openssl rand -hex 32 > "secrets/$s"
 		say "secrets/$s: generated"

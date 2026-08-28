@@ -139,7 +139,7 @@ func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
 		t.Skip("UC_TEST_POSTGRES not set; skipping close-wording test")
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "", "", "", "", "../../../db/postgres", ""); err != nil {
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	pool, err := pg.Open(ctx, dsn)

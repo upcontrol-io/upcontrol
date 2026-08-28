@@ -16,8 +16,8 @@ import (
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/incident"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // region tags the synthetic check rows; readers that measure milliseconds
@@ -27,17 +27,17 @@ const region = "heartbeat"
 // Service answers the ping route (ucapi) and sweeps closed windows (ucworker).
 type Service struct {
 	pool *pg.Pool
-	ch   *ch.Conn // optional: nil records no check rows
+	pgs  *pgstore.Store // optional: nil records no check rows
 	det  *availability.Detector
 	lc   *incident.Lifecycle
 }
 
 // New builds the service. Threshold 1: the window already carries the grace,
 // so one miss is a miss, not a blip.
-func New(pool *pg.Pool, chConn *ch.Conn, lc *incident.Lifecycle) *Service {
+func New(pool *pg.Pool, pgs *pgstore.Store, lc *incident.Lifecycle) *Service {
 	return &Service{
 		pool: pool,
-		ch:   chConn,
+		pgs:  pgs,
 		det:  availability.New(1),
 		lc:   lc,
 	}
@@ -141,12 +141,12 @@ func (s *Service) apply(ctx context.Context, monitorID, tenantID int64, name str
 	}
 	// The raw row feeds uptime and history; its ms columns stay 0 and the
 	// millisecond readers exclude the region.
-	if s.ch != nil {
+	if s.pgs != nil {
 		errClass := ""
 		if !ok {
 			errClass = "missed"
 		}
-		_ = s.ch.InsertChecks(ctx, []ch.CheckRow{{
+		_ = s.pgs.InsertChecks(ctx, []pgstore.CheckRow{{
 			TenantID: uint64(tenantID), MonitorID: uint64(monitorID), TS: now,
 			Region: region, OK: ok, ErrorClass: errClass,
 		}})

@@ -33,7 +33,7 @@ instance: website checks every minute, a log ingest endpoint, and Telegram and
 email alerts. No account with us, no phone home — [no telemetry of any
 kind](#what-this-is-and-is-not).
 
-**Requirements:** Docker with Compose v2, 4GB RAM recommended (2GB + active
+**Requirements:** Docker with Compose v2, 1GB RAM recommended (512MB + active
 swap minimum), 10GB free disk.
 
 ## One command wires your app up
@@ -139,13 +139,14 @@ one place, running on one box.
 - **Single-user by default.** `UC_AUTH=none` boots one owner account with no
   sign-in — right for a private box. Set `UC_AUTH=magic-link` before exposing
   the instance to the internet.
-- **Honest floors.** ClickHouse under 2GB of RAM without swap gets OOM-killed;
-  the installer refuses to start there rather than fall over later.
+- **Honest floors.** The whole stack fits in 1GB of RAM; under ~900MB without
+  swap it cannot ride out load peaks, and the installer refuses to start
+  there rather than fall over later.
 
 ## Repository layout
 
-`back/` holds the Go services, `front/` the web app, `db/` the migrations and
-ClickHouse schema, `cli/` the installer, SDK and agent skill, `infra/` the
+`back/` holds the Go services, `front/` the web app, `db/` the Postgres
+migrations, `cli/` the installer, SDK and agent skill, `infra/` the
 self-host compose package. The folder map and the `openapi.yaml` contract
 live in [docs/architecture.md](docs/architecture.md).
 

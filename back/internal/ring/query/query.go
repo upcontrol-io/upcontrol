@@ -1,4 +1,4 @@
-// Package query is the only SQL path to the ClickHouse logs table (depguard's
+// Package query is the only SQL path to the Postgres logs table (depguard's
 // `logs-only-via-ring` enforces it); every query appends `seq >= cutoff_seq`.
 package query
 
@@ -25,10 +25,27 @@ func New(tenantID, projectID, cutoffSeq int64) *QueryBuilder {
 func (q *QueryBuilder) CutoffSeq() int64 { return q.cutoffSeq }
 
 // LogQuery is a parameterised logs query. The caller passes the SQL and args to
-// the ClickHouse driver; the builder guarantees the cutoff is present.
+// pgx; the builder guarantees the cutoff is present.
 type LogQuery struct {
 	SQL  string
 	Args []any
+}
+
+// bind rewrites each ? placeholder to $1, $2, … in order and freezes the query:
+// conditions append with ? and the numbering is assigned here, so a placeholder
+// can never drift from the args slice.
+func bind(sql string, args []any) LogQuery {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(sql); i++ {
+		if sql[i] == '?' {
+			n++
+			fmt.Fprintf(&b, "$%d", n)
+			continue
+		}
+		b.WriteByte(sql[i])
+	}
+	return LogQuery{SQL: b.String(), Args: args}
 }
 
 // Range optionally bounds a query to a half-open [From, To) time slice; a zero
@@ -41,8 +58,8 @@ type Range struct {
 // Bounded reports whether either side of the range is set.
 func (r Range) Bounded() bool { return !r.From.IsZero() || !r.To.IsZero() }
 
-// appendRangeFilter binds the range's ends as parameters: ClickHouse cannot
-// take a bound parameter inside an INTERVAL, so no range text reaches the engine.
+// appendRangeFilter binds the range's ends as parameters after the constants,
+// so no range text reaches the engine.
 func appendRangeFilter(conditions []string, args []any, within Range) ([]string, []any) {
 	if !within.From.IsZero() {
 		conditions = append(conditions, "ts >= ?")
@@ -75,7 +92,7 @@ func (q *QueryBuilder) Stream(limit int, levels, services []string, search strin
 
 	sql := fmt.Sprintf("SELECT seq, ts, level, service, message FROM logs WHERE %s ORDER BY seq DESC LIMIT %d",
 		strings.Join(conditions, " AND "), limit)
-	return LogQuery{SQL: sql, Args: args}
+	return bind(sql, args)
 }
 
 // Evidence is the incident slice's read: error and warn lines fill the budget
@@ -84,7 +101,7 @@ func (q *QueryBuilder) Evidence(limit int) LogQuery {
 	sql := fmt.Sprintf("SELECT seq, ts, level, service, message FROM logs "+
 		"WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
 		"ORDER BY level IN ('error', 'warn') DESC, seq DESC LIMIT %d", limit)
-	return LogQuery{SQL: sql, Args: []any{q.tenantID, q.projectID, q.cutoffSeq}}
+	return bind(sql, []any{q.tenantID, q.projectID, q.cutoffSeq})
 }
 
 // appendLevelFilter narrows to the picked buckets: `info` means "not error
@@ -136,10 +153,7 @@ func (q *QueryBuilder) WindowCount(within Range, levels, services []string, sear
 	}
 	conditions, args = appendRangeFilter(conditions, args, within)
 
-	return LogQuery{
-		SQL:  "SELECT count() FROM logs WHERE " + strings.Join(conditions, " AND "),
-		Args: args,
-	}
+	return bind("SELECT count(*) FROM logs WHERE "+strings.Join(conditions, " AND "), args)
 }
 
 // Services lists services present in the window with line counts; window <= 0
@@ -151,12 +165,9 @@ func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 		conditions = append(conditions, "ts >= ?")
 		args = append(args, time.Now().UTC().Add(-window))
 	}
-	return LogQuery{
-		SQL: "SELECT service, count() AS lines FROM logs WHERE " +
-			strings.Join(conditions, " AND ") +
-			" GROUP BY service ORDER BY lines DESC",
-		Args: args,
-	}
+	return bind("SELECT service, count(*) AS lines FROM logs WHERE "+
+		strings.Join(conditions, " AND ")+
+		" GROUP BY service ORDER BY lines DESC", args)
 }
 
 // Volume returns per-minute line counts for the histogram, taking Stream's
@@ -166,12 +177,9 @@ func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
 	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
-	return LogQuery{
-		SQL: "SELECT toStartOfMinute(ts) AS minute, level, count() AS lines " +
-			"FROM logs WHERE " + strings.Join(conditions, " AND ") +
-			" GROUP BY minute, level ORDER BY minute",
-		Args: args,
-	}
+	return bind("SELECT date_trunc('minute', ts) AS minute, level, count(*) AS lines "+
+		"FROM logs WHERE "+strings.Join(conditions, " AND ")+
+		" GROUP BY minute, level ORDER BY minute", args)
 }
 
 // detailBuckets are the resolutions VolumeDetail answers at, finest first;
@@ -215,77 +223,63 @@ func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, ser
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
 	conditions, args = appendRangeFilter(conditions, args, within)
-	return LogQuery{
-		SQL: fmt.Sprintf(
-			"SELECT toStartOfInterval(ts, INTERVAL %d SECOND) AS bucket, level, count() AS lines "+
-				"FROM logs WHERE %s GROUP BY bucket, level ORDER BY bucket",
-			size, strings.Join(conditions, " AND ")),
-		Args: args,
-	}
+	return bind(fmt.Sprintf(
+		"SELECT to_timestamp(floor(extract(epoch from ts) / %d) * %d) AS bucket, level, count(*) AS lines "+
+			"FROM logs WHERE %s GROUP BY bucket, level ORDER BY bucket",
+		size, size, strings.Join(conditions, " AND ")), args)
 }
 
 // Slice returns log lines in a [from, to) seq range for the incident's frozen slice.
 func (q *QueryBuilder) Slice(fromSeq, toSeq int64, limit int) LogQuery {
-	return LogQuery{
-		SQL: fmt.Sprintf(
-			"SELECT ts, level, service, message FROM logs "+
-				"WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND seq < ? "+
-				"ORDER BY seq LIMIT %d", limit),
-		Args: []any{q.tenantID, q.projectID, fromSeq, toSeq},
-	}
+	return bind(fmt.Sprintf(
+		"SELECT ts, level, service, message FROM logs "+
+			"WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND seq < ? "+
+			"ORDER BY seq LIMIT %d", limit),
+		[]any{q.tenantID, q.projectID, fromSeq, toSeq})
 }
 
 // Summary returns how many lines the window holds and when the last arrived:
 // "is this project sending anything, and is it still sending?"
 func (q *QueryBuilder) Summary() LogQuery {
-	return LogQuery{
-		SQL: "SELECT count() AS lines, max(ts) AS last_ts FROM logs " +
-			"WHERE tenant_id = ? AND project_id = ? AND seq >= ?",
-		Args: []any{q.tenantID, q.projectID, q.cutoffSeq},
-	}
+	return bind("SELECT count(*) AS lines, max(ts) AS last_ts FROM logs "+
+		"WHERE tenant_id = ? AND project_id = ? AND seq >= ?",
+		[]any{q.tenantID, q.projectID, q.cutoffSeq})
 }
 
 // BeyondErrors counts errors with seq < cutoff (displaced by the ring); the
 // field is absent when 0 (zero is silence).
 func (q *QueryBuilder) BeyondErrors(retainSeq int64) LogQuery {
-	return LogQuery{
-		SQL: "SELECT count() AS errors, " +
-			"dateDiff('hour', min(ts), now()) AS hours " +
-			"FROM logs WHERE tenant_id = ? AND project_id = ? " +
-			"AND seq >= ? AND seq < ? AND level = 'error'",
-		Args: []any{q.tenantID, q.projectID, retainSeq, q.cutoffSeq},
-	}
+	return bind("SELECT count(*) AS errors, "+
+		"COALESCE(extract(epoch from (now() - min(ts))) / 3600, 0)::bigint AS hours "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? "+
+		"AND seq >= ? AND seq < ? AND level = 'error'",
+		[]any{q.tenantID, q.projectID, retainSeq, q.cutoffSeq})
 }
 
 // ErrorGroups aggregates recent error lines by fingerprint (count, sample,
 // last seen) for the notification scanner; still behind the cutoff.
 func (q *QueryBuilder) ErrorGroups(since time.Time) LogQuery {
-	return LogQuery{
-		SQL: "SELECT fingerprint, count() AS lines, anyLast(service) AS service, " +
-			"anyLast(message) AS message, max(ts) AS last_ts " +
-			"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? " +
-			"AND level = 'error' AND ts >= ? GROUP BY fingerprint",
-		Args: []any{q.tenantID, q.projectID, q.cutoffSeq, since},
-	}
+	return bind("SELECT fingerprint, count(*) AS lines, "+
+		"(array_agg(service ORDER BY ts DESC))[1] AS service, "+
+		"(array_agg(message ORDER BY ts DESC))[1] AS message, max(ts) AS last_ts "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
+		"AND level = 'error' AND ts >= ? GROUP BY fingerprint",
+		[]any{q.tenantID, q.projectID, q.cutoffSeq, since})
 }
 
 // EventSeen reports how many times a named event arrived inside the window;
 // an event the ring displaced no longer counts.
 func (q *QueryBuilder) EventSeen(name string) LogQuery {
-	return LogQuery{
-		SQL: "SELECT count() AS times, min(ts) AS first_ts, max(ts) AS last_ts " +
-			"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND message = ?",
-		Args: []any{q.tenantID, q.projectID, q.cutoffSeq, name},
-	}
+	return bind("SELECT count(*) AS times, min(ts) AS first_ts, max(ts) AS last_ts "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND message = ?",
+		[]any{q.tenantID, q.projectID, q.cutoffSeq, name})
 }
 
 // RecentEvents groups the trailing window's lines by message, so a name
 // drifted off the dictionary shows up next to the expected ones.
 func (q *QueryBuilder) RecentEvents(window time.Duration, limit int) LogQuery {
-	return LogQuery{
-		SQL: fmt.Sprintf("SELECT message, count() AS times, max(ts) AS last_ts "+
-			"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND ts >= ? "+
-			"GROUP BY message ORDER BY times DESC LIMIT %d", limit),
-		Args: []any{q.tenantID, q.projectID, q.cutoffSeq, time.Now().UTC().Add(-window)},
-	}
+	return bind(fmt.Sprintf("SELECT message, count(*) AS times, max(ts) AS last_ts "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND ts >= ? "+
+		"GROUP BY message ORDER BY times DESC LIMIT %d", limit),
+		[]any{q.tenantID, q.projectID, q.cutoffSeq, time.Now().UTC().Add(-window)})
 }

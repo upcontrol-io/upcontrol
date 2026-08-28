@@ -18,22 +18,22 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/ring/query"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // readAPI serves all the GET endpoints that don't need their own file.
 type readAPI struct {
 	pool *pg.Pool
-	ch   *ch.Conn
+	pgs  *pgstore.Store
 	sess *session.Manager
 	// botUsername resolves to "" when no bot is configured: no Telegram
 	// destination is offered. A func: the username arrives at runtime.
 	botUsername func(context.Context) string
 }
 
-func NewReadAPI(p *pg.Pool, chConn *ch.Conn, sm *session.Manager, botUsername func(context.Context) string) *readAPI {
-	return &readAPI{pool: p, ch: chConn, sess: sm, botUsername: botUsername}
+func NewReadAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, botUsername func(context.Context) string) *readAPI {
+	return &readAPI{pool: p, pgs: pgs, sess: sm, botUsername: botUsername}
 }
 
 func (h *readAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -277,13 +277,13 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 // logSummary reads "is this project sending lines, and when was the last one"
 // through ring.QueryBuilder, the only permitted path to the logs table.
 func (h *readAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantSignalsRow) (uint64, time.Time) {
-	if h.ch == nil || s.ProjectID == 0 {
+	if h.pgs == nil || s.ProjectID == 0 {
 		return 0, time.Time{}
 	}
 	lq := query.New(tenantID, s.ProjectID, s.CutoffSeq).Summary()
 	var lines uint64
 	var last time.Time
-	if err := h.ch.Raw().QueryRow(ctx, lq.SQL, lq.Args...).Scan(&lines, &last); err != nil {
+	if err := h.pgs.Raw().QueryRow(ctx, lq.SQL, lq.Args...).Scan(&lines, &last); err != nil {
 		return 0, time.Time{}
 	}
 	return lines, last
@@ -299,26 +299,26 @@ const (
 // availability computes the uptime tile and the 7-day health line from the
 // checks table; nil/empty when nothing has been checked.
 func (h *readAPI) availability(ctx context.Context, tenantID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
-	// The product tiles are the events pipeline's output, read from
-	// ClickHouse; under 7 days of history produces no tile.
+	// The product tiles are the events pipeline's output, read from the
+	// telemetry store; under 7 days of history produces no tile.
 	metrics = []map[string]any{}
-	if h.ch == nil {
+	if h.pgs == nil {
 		return metrics, nil, nil
 	}
-	if stats, err := h.ch.MetricSummary(ctx, tenantID); err == nil {
+	if stats, err := h.pgs.MetricSummary(ctx, tenantID); err == nil {
 		metrics = metricTiles(stats)
 	}
-	rows, err := h.ch.Raw().Query(ctx, `
-		SELECT toStartOfInterval(ts, INTERVAL 4 HOUR) AS bucket,
-		       countIf(ok = 1) AS ok_count,
-		       count() AS total_count
+	rows, err := h.pgs.Raw().Query(ctx, `
+		SELECT to_timestamp(floor(extract(epoch from ts) / 14400) * 14400) AS bucket,
+		       count(*) FILTER (WHERE ok) AS ok_count,
+		       count(*) AS total_count
 		  FROM checks
-		 WHERE tenant_id = ? AND ts >= now() - INTERVAL 7 DAY
-		 GROUP BY bucket ORDER BY bucket`, uint64(tenantID))
+		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
+		 GROUP BY bucket ORDER BY bucket`, tenantID)
 	if err != nil {
 		return metrics, nil, nil
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
 	type bucket struct{ ok, total uint64 }
 	byBucket := map[time.Time]bucket{}
@@ -377,10 +377,10 @@ func (h *readAPI) availability(ctx context.Context, tenantID int64) (metrics []m
 
 // metricTiles turns metric stats into the Dashboard's tile shape; under 7 days
 // of history ships no tile. Only names metricTileUnits knows are shown.
-func metricTiles(stats []ch.MetricStat) []map[string]any {
+func metricTiles(stats []pgstore.MetricStat) []map[string]any {
 	tiles := make([]map[string]any, 0, len(stats))
 	for _, s := range stats {
-		unit, known := ch.MetricTileUnits()[s.Name]
+		unit, known := pgstore.MetricTileUnits()[s.Name]
 		if !known || s.Days < 7 {
 			continue
 		}
@@ -396,7 +396,7 @@ func metricTiles(stats []ch.MetricStat) []map[string]any {
 
 // sparkOf is the 12-point series the tile draws, never nil: the front maps
 // over it and an absent key is a crash.
-func sparkOf(s ch.MetricStat) []float64 {
+func sparkOf(s pgstore.MetricStat) []float64 {
 	if len(s.Spark) == 0 {
 		return []float64{}
 	}
@@ -577,13 +577,13 @@ func (h *readAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListInciden
 
 	// 30 minutes before the open through the close; `detectedAt` is the pivot,
 	// so the 50-row budget goes to the events NEAREST the break.
-	var events []ch.EventRow
-	if h.ch != nil && row.DetectedAt.Valid {
+	var events []pgstore.EventRow
+	if h.pgs != nil && row.DetectedAt.Valid {
 		end := time.Now()
 		if row.ResolvedAt.Valid {
 			end = row.ResolvedAt.Time
 		}
-		events, _ = h.ch.EventsAround(ctx, row.TenantID,
+		events, _ = h.pgs.EventsAround(ctx, row.TenantID,
 			row.DetectedAt.Time.Add(-30*time.Minute), end, row.DetectedAt.Time, 50)
 	}
 	if merged := mergeTimeline(lifecycle, events); len(merged) > 0 {
@@ -641,7 +641,7 @@ func eventKind(name string) string {
 
 // eventText is the line the card prints. A deploy names its sha: the triage's
 // fix is `vercel rollback <sha>`.
-func eventText(e ch.EventRow) string {
+func eventText(e pgstore.EventRow) string {
 	if sha := e.Labels["sha"]; sha != "" {
 		return "Deploy " + sha
 	}
@@ -658,7 +658,7 @@ type timelineMark struct {
 
 // mergeTimeline folds events into the lifecycle marks, oldest first by timestamp.
 // The old sort on the display string put midnight before eleven.
-func mergeTimeline(lifecycle []timelineMark, events []ch.EventRow) []map[string]any {
+func mergeTimeline(lifecycle []timelineMark, events []pgstore.EventRow) []map[string]any {
 	if len(lifecycle) == 0 && len(events) == 0 {
 		return nil
 	}

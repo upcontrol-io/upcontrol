@@ -24,10 +24,9 @@ import (
 	"go.upcontrol.io/back/internal/notify/mailer"
 	"go.upcontrol.io/back/internal/platform/app"
 	"go.upcontrol.io/back/internal/platform/config"
-	"go.upcontrol.io/back/internal/platform/shutdown"
 	"go.upcontrol.io/back/internal/ring/cutoff"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // Start wires and launches every background job against an already-open pool.
@@ -106,44 +105,34 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	})
 
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
-	// "Error logs" / "Repeating error logs" settings. No ClickHouse, no job.
+	// "Error logs" / "Repeating error logs" settings.
 	jobs := "delivery+cutoff+purge+reaper"
-	if d.Config.ClickHouseAddr != "" {
-		chConn, cherr := ch.Open(ctx, ch.Options{
-			Addr: []string{d.Config.ClickHouseAddr}, Database: d.Config.ClickHouseDB,
-			Username: d.Config.ClickHouseUser, Password: d.Config.ClickHousePass,
-		})
-		if cherr != nil {
-			d.Logger.Error("ucworker: clickhouse unreachable; error-log scanner disabled", "err", cherr)
-		} else {
-			d.Shutdown.Register(shutdown.Task{Name: "ch-conn", Stop: func(context.Context) error { return chConn.Close() }})
-			scanner := errorlog.New(pool, chConn, d.Logger)
-			go runWithLock(ctx, pool, d, "errorlog-scan", time.Minute, func(ctx context.Context) {
-				if err := scanner.Tick(ctx); err != nil {
-					d.Logger.Warn("errorlog scan tick error", "err", err)
-				}
-			})
-			jobs += "+errorlog"
-			// Heartbeat miss sweep, every minute: a window that closed without
-			// a ping is a failed check. Shares the lifecycle with detect below.
-			lc := incident.New(pool, chConn)
-			hb := heartbeat.New(pool, chConn, lc)
-			go runWithLock(ctx, pool, d, "heartbeat", time.Minute, func(ctx context.Context) {
-				if err := hb.Tick(ctx); err != nil {
-					d.Logger.Warn("heartbeat tick error", "err", err)
-				}
-			})
-			jobs += "+heartbeat"
-			// Detection (error-rate incidents), every minute; same advisory-lock
-			// pattern as every other job. On by default, UC_DETECT_ENABLED=0 kills.
-			if d.Config.DetectEnabled {
-				det := detect.New(pool, chConn, lc, d.Logger)
-				go runWithLock(ctx, pool, d, "detect", time.Minute, func(ctx context.Context) {
-					_ = det.Tick(ctx)
-				})
-				jobs += "+detect"
-			}
+	pgs := pgstore.New(pool.Raw())
+	scanner := errorlog.New(pool, pgs, d.Logger)
+	go runWithLock(ctx, pool, d, "errorlog-scan", time.Minute, func(ctx context.Context) {
+		if err := scanner.Tick(ctx); err != nil {
+			d.Logger.Warn("errorlog scan tick error", "err", err)
 		}
+	})
+	jobs += "+errorlog"
+	// Heartbeat miss sweep, every minute: a window that closed without
+	// a ping is a failed check. Shares the lifecycle with detect below.
+	lc := incident.New(pool, pgs)
+	hb := heartbeat.New(pool, pgs, lc)
+	go runWithLock(ctx, pool, d, "heartbeat", time.Minute, func(ctx context.Context) {
+		if err := hb.Tick(ctx); err != nil {
+			d.Logger.Warn("heartbeat tick error", "err", err)
+		}
+	})
+	jobs += "+heartbeat"
+	// Detection (error-rate incidents), every minute; same advisory-lock
+	// pattern as every other job. On by default, UC_DETECT_ENABLED=0 kills.
+	if d.Config.DetectEnabled {
+		det := detect.New(pool, pgs, lc, d.Logger)
+		go runWithLock(ctx, pool, d, "detect", time.Minute, func(ctx context.Context) {
+			_ = det.Tick(ctx)
+		})
+		jobs += "+detect"
 	}
 
 	d.Logger.Info("background jobs started", "jobs", jobs)

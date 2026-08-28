@@ -15,14 +15,14 @@ import (
 	"go.upcontrol.io/back/internal/ingest/batcher"
 	"go.upcontrol.io/back/internal/ingest/cardinality"
 	"go.upcontrol.io/back/internal/ring/seq"
-	"go.upcontrol.io/back/internal/storage/ch"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // chLogSink adapts batcher.Sink: decoded RowEnvelopes batch-insert into
-// ClickHouse. The JSON roundtrip is the seam that keeps the batcher CH-agnostic.
+// Postgres. The JSON roundtrip is the seam that keeps the batcher DB-agnostic.
 type chLogSink struct {
-	conn *ch.Conn
+	pgs *pgstore.Store
 }
 
 func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error {
@@ -34,27 +34,62 @@ func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error 
 		return s.flushMetrics(ctx, rows)
 	}
 	logRows, eventRows := decodeRows(rows)
-	logErr := s.conn.InsertLogs(ctx, logRows)
+	logErr := s.pgs.InsertLogs(ctx, logRows)
 	var evErr error
 	if len(eventRows) > 0 {
-		evErr = s.conn.InsertEvents(ctx, eventRows)
+		evErr = s.pgs.InsertEvents(ctx, eventRows)
+	}
+	// The per-minute upsert replaces ClickHouse's series_1m_mv: one aggregated
+	// statement per flush, and only for rows that actually landed.
+	var seriesErr error
+	if logErr == nil {
+		seriesErr = s.pgs.BumpSeries(ctx, aggregateSeries(logRows))
 	}
 	// The batcher swaps the batch out before calling Flush and never retries a
 	// failed flush, so a partial insert cannot duplicate on a later attempt.
-	return errors.Join(logErr, evErr)
+	return errors.Join(logErr, evErr, seriesErr)
+}
+
+// aggregateSeries folds a flushed log batch into per-(tenant, project, minute,
+// source, level) counts: one row per line, len(message) per byte.
+func aggregateSeries(rows []pgstore.LogRow) []pgstore.SeriesBump {
+	type key struct {
+		tenant, project uint64
+		minute          time.Time
+		source, level   string
+	}
+	agg := make(map[key]pgstore.SeriesBump, len(rows))
+	for _, r := range rows {
+		k := key{r.TenantID, r.ProjectID, r.TS.Truncate(time.Minute), r.Source, r.Level}
+		b, ok := agg[k]
+		if !ok {
+			b = pgstore.SeriesBump{
+				TenantID: r.TenantID, ProjectID: r.ProjectID,
+				Minute: k.minute, Source: k.source, Level: k.level,
+			}
+		}
+		b.Lines++
+		b.Bytes += int64(len(r.Message))
+		agg[k] = b
+	}
+	out := make([]pgstore.SeriesBump, 0, len(agg))
+	for _, b := range agg {
+		out = append(out, b)
+	}
+	return out
 }
 
 // decodeRows decodes RowEnvelopes into LogRows plus promoted EventRows; an
 // event-named row is double-written. Labels are cloned: sha aliasing stays out.
-func decodeRows(rows [][]byte) ([]ch.LogRow, []ch.EventRow) {
-	logRows := make([]ch.LogRow, 0, len(rows))
-	var eventRows []ch.EventRow
+func decodeRows(rows [][]byte) ([]pgstore.LogRow, []pgstore.EventRow) {
+	logRows := make([]pgstore.LogRow, 0, len(rows))
+	var eventRows []pgstore.EventRow
 	for _, raw := range rows {
 		var env ingest.RowEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue // a corrupt row is dropped, not fatal
 		}
-		lr := ch.LogRow{
+		lr := pgstore.LogRow{
 			TenantID:    uint64(env.TenantID),
 			ProjectID:   uint64(env.ProjectID),
 			Seq:         uint64(env.Seq),
@@ -81,7 +116,7 @@ func decodeRows(rows [][]byte) ([]ch.LogRow, []ch.EventRow) {
 			if labels["sha"] == "" && labels["commit_sha"] != "" {
 				labels["sha"] = labels["commit_sha"]
 			}
-			eventRows = append(eventRows, ch.EventRow{
+			eventRows = append(eventRows, pgstore.EventRow{
 				TenantID:    uint64(env.TenantID),
 				ProjectID:   uint64(env.ProjectID),
 				TS:          lr.TS,
@@ -95,16 +130,16 @@ func decodeRows(rows [][]byte) ([]ch.LogRow, []ch.EventRow) {
 	return logRows, eventRows
 }
 
-// flushMetrics decodes MetricEnvelopes into ch.MetricRows — the metric twin of
-// the log path above.
+// flushMetrics decodes MetricEnvelopes into pgstore.MetricRows — the metric
+// twin of the log path above.
 func (s *chLogSink) flushMetrics(ctx context.Context, rows [][]byte) error {
-	metricRows := make([]ch.MetricRow, 0, len(rows))
+	metricRows := make([]pgstore.MetricRow, 0, len(rows))
 	for _, raw := range rows {
 		var env ingest.MetricEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue // a corrupt row is dropped, not fatal
 		}
-		mr := ch.MetricRow{
+		mr := pgstore.MetricRow{
 			TenantID:  uint64(env.TenantID),
 			ProjectID: uint64(env.ProjectID),
 			Name:      env.Name,
@@ -119,7 +154,7 @@ func (s *chLogSink) flushMetrics(ctx context.Context, rows [][]byte) error {
 		}
 		metricRows = append(metricRows, mr)
 	}
-	return s.conn.InsertMetrics(ctx, metricRows)
+	return s.pgs.InsertMetrics(ctx, metricRows)
 }
 
 // batcherSink wraps ingest/batcher.Batcher to satisfy ingest.BatchSink.
@@ -165,9 +200,9 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 
 type Batcher = batcher.Batcher
 
-func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, chConn *ch.Conn) (*ingest.Ingester, *Batcher, error) {
-	// Batcher: flushes to ClickHouse on 8 MiB / 200 ms / 1-sec-per-key.
-	bs := batcher.New(&chLogSink{conn: chConn}, nil, batcher.Options{})
+func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, pgs *pgstore.Store) (*ingest.Ingester, *Batcher, error) {
+	// Batcher: flushes to Postgres on 8 MiB / 200 ms / 1-sec-per-key.
+	bs := batcher.New(&chLogSink{pgs: pgs}, nil, batcher.Options{})
 
 	// Seq allocators: one per project, created on first use, each leasing
 	// 10k-value blocks from its own project_seq row.

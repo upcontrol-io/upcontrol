@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"go.upcontrol.io/back/internal/storage/ch"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
 // fakeStore records every visitorStore call; VisitorIDByToken hands out
@@ -94,15 +94,15 @@ func (f *fakeStore) TouchVisitorLastSeen(_ context.Context, id int64, _ time.Tim
 // the async flush without sleeping.
 type fakeSink struct {
 	mu    sync.Mutex
-	rows  []ch.WebEventRow
-	batch chan []ch.WebEventRow
+	rows  []pgstore.WebEventRow
+	batch chan []pgstore.WebEventRow
 }
 
 func newFakeSink() *fakeSink {
-	return &fakeSink{batch: make(chan []ch.WebEventRow, 8)}
+	return &fakeSink{batch: make(chan []pgstore.WebEventRow, 8)}
 }
 
-func (f *fakeSink) InsertWebEvents(_ context.Context, rows []ch.WebEventRow) error {
+func (f *fakeSink) InsertWebEvents(_ context.Context, rows []pgstore.WebEventRow) error {
 	f.mu.Lock()
 	f.rows = append(f.rows, rows...)
 	f.mu.Unlock()
@@ -118,7 +118,7 @@ func newTestRecorder(t *testing.T) (*Recorder, *fakeStore, *fakeSink) {
 	return r, store, sink
 }
 
-func waitBatch(t *testing.T, sink *fakeSink) []ch.WebEventRow {
+func waitBatch(t *testing.T, sink *fakeSink) []pgstore.WebEventRow {
 	t.Helper()
 	select {
 	case rows := <-sink.batch:
