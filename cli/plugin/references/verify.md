@@ -32,7 +32,7 @@ needed.
 | app runs, no `install_verified` | key not picked up, or no connectivity | `npx upcontrol status` shows where the key was found; if `none`, the env/.env is not loaded by the app's runner (dotenv not read? different working dir?). If key ok, verify prints which network step failed |
 | `install_verified` arrived, no events after | points sit in code paths that have not executed yet | name the events you are waiting for and suggest the user action that triggers each ("open /checkout once") |
 | events arrive, but not the expected names | names drifted from the dictionary | compare what arrived (verify prints recent names) against what you placed; a free name is fine, a near-canonical typo is not - fix the diff |
-| data arrives with receipt warnings | a wire-level problem invisible to the user | verify surfaces the closed warning list (`ts_absent`, `level_unknown`, `key_in_body`, `scrubbed`, `reserved_prefix`, `cardinality_capped`); explain the specific one and fix the emitting side if it is your diff |
+| data arrives with receipt warnings | a wire-level problem invisible to the user | verify surfaces the closed warning list (`ts_absent`, `level_unknown`, `key_in_body`, `scrubbed`, `reserved_prefix`, `cardinality_capped`, `attr_key_capped`, `field_cap_exceeded`); explain the specific one and fix the emitting side if it is your diff |
 
 ## Reporting
 

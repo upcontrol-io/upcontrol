@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"go.upcontrol.io/back/internal/ingest/cardinality"
@@ -217,6 +219,124 @@ func TestAttrValuesAreScrubbed(t *testing.T) {
 	}
 	if contains(env.Attrs["auth"], "supersecrettoken1234567890") {
 		t.Errorf("secret survived in attr value: %q", env.Attrs["auth"])
+	}
+}
+
+func TestAttrsCappedAtSixtyFourKeys(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	var b strings.Builder
+	b.WriteString(`{"msg":"cap"`)
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&b, `,"k%02d":"v%02d"`, i, i)
+	}
+	b.WriteString("}")
+	rr := post(t, h, b.String(), map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), `"code":"attr_key_capped"`) {
+		t.Errorf("missing attr_key_capped warning: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if len(env.Attrs) != 64 {
+		t.Fatalf("stored %d attrs, want 64", len(env.Attrs))
+	}
+	for i := 0; i < 100; i++ {
+		_, ok := env.Attrs[fmt.Sprintf("k%02d", i)]
+		if ok != (i < 64) {
+			t.Errorf("k%02d present=%v, want %v (sorted-order keep)", i, ok, i < 64)
+		}
+	}
+}
+
+func TestAttrCapIsDeterministic(t *testing.T) {
+	attrs := make(map[string]string, 100)
+	for i := 0; i < 100; i++ {
+		attrs[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	kept := func() map[string]bool {
+		out, _, _ := capAttrs(attrs)
+		set := make(map[string]bool, len(out))
+		for k := range out {
+			set[k] = true
+		}
+		return set
+	}
+	a, b := kept(), kept()
+	if len(a) != 64 {
+		t.Fatalf("kept %d keys, want 64", len(a))
+	}
+	for k := range a {
+		if !b[k] {
+			t.Fatalf("two caps disagree on key %q", k)
+		}
+	}
+}
+
+func TestLongAttrValueTruncated(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	body := `{"msg":"cap","big":"` + strings.Repeat("a", 20000) + `"}`
+	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), `"code":"field_cap_exceeded"`) {
+		t.Errorf("missing field_cap_exceeded warning: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if v, ok := env.Attrs["big"]; !ok || len(v) != MaxAttrValBytes {
+		t.Errorf("attr big present=%v len=%d, want len %d", ok, len(v), MaxAttrValBytes)
+	}
+}
+
+func TestLongAttrKeyTruncated(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	longKey := strings.Repeat("k", 300)
+	body := `{"msg":"cap","` + longKey + `":"v"}`
+	rr := post(t, h, body, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), `"code":"attr_key_capped"`) {
+		t.Errorf("missing attr_key_capped warning: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if len(env.Attrs) != 1 {
+		t.Fatalf("stored %d attrs, want 1", len(env.Attrs))
+	}
+	for k := range env.Attrs {
+		if k != longKey[:MaxAttrKeyBytes] {
+			t.Errorf("key len %d, want the %d-byte prefix", len(k), MaxAttrKeyBytes)
+		}
+	}
+}
+
+func TestNormalAttrsProduceNoCapWarning(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"ok","a":"1","b":"2","c":"3"}`, map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	if contains(rr.Body.String(), `"code":"attr_key_capped"`) || contains(rr.Body.String(), `"code":"field_cap_exceeded"`) {
+		t.Errorf("cap fired on normal attrs: %s", rr.Body.String())
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	for k, want := range map[string]string{"a": "1", "b": "2", "c": "3"} {
+		if env.Attrs[k] != want {
+			t.Errorf("attr %q = %q, want %q", k, env.Attrs[k], want)
+		}
 	}
 }
 

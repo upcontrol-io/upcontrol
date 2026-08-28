@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"go.upcontrol.io/back/internal/ingest/cardinality"
@@ -20,6 +21,14 @@ import (
 
 // MaxBodyBytes caps a single POST /i body before auth; oversized never reach decode.
 const MaxBodyBytes = 16 << 20
+
+// Attribute caps. Bytes, not runes: the limit is what ClickHouse stores. Over
+// the cap the value is trimmed and tallied, never a reason to refuse a batch.
+const (
+	MaxAttrKeys     = 64
+	MaxAttrKeyBytes = 256
+	MaxAttrValBytes = 8192
+)
 
 // Tenant identifies the authenticated source of a batch.
 type Tenant struct {
@@ -245,6 +254,13 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 				ws.add("scrubbed", sumCounts(s.Counts))
 			}
 		}
+		cappedAttrs, keysCapped, valsCapped := capAttrs(rec.Attrs)
+		if keysCapped > 0 {
+			ws.add("attr_key_capped", keysCapped)
+		}
+		if valsCapped > 0 {
+			ws.add("field_cap_exceeded", valsCapped)
+		}
 		env := RowEnvelope{
 			TenantID:    t.TenantID,
 			ProjectID:   t.ProjectID,
@@ -254,7 +270,7 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 			LevelRaw:    rec.LevelRaw,
 			Service:     rec.Service,
 			Host:        rec.Host,
-			Attrs:       rec.Attrs,
+			Attrs:       cappedAttrs,
 		}
 		if !rec.Time.IsZero() {
 			env.TS = rec.Time.UTC().Format("2006-01-02T15:04:05.000Z07:00")
@@ -288,6 +304,51 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		out = append(out, b)
 	}
 	return out
+}
+
+// capAttrs bounds a record's attributes and reports what it trimmed. Keys are
+// kept in sorted order so the same record always keeps the same 64: Go map
+// iteration is randomised, and a non-deterministic cap would make an
+// idempotency replay disagree with the original write.
+func capAttrs(attrs map[string]string) (out map[string]string, keysCapped, valsCapped int) {
+	if len(attrs) == 0 {
+		return attrs, 0, 0
+	}
+	over := len(attrs) > MaxAttrKeys
+	if !over {
+		for k, v := range attrs {
+			if len(k) > MaxAttrKeyBytes || len(v) > MaxAttrValBytes {
+				over = true
+				break
+			}
+		}
+	}
+	if !over {
+		return attrs, 0, 0
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out = make(map[string]string, len(keys))
+	for i, k := range keys {
+		if i >= MaxAttrKeys {
+			keysCapped++
+			continue
+		}
+		if len(k) > MaxAttrKeyBytes {
+			k = k[:MaxAttrKeyBytes]
+			keysCapped++
+		}
+		v := attrs[keys[i]]
+		if len(v) > MaxAttrValBytes {
+			v = v[:MaxAttrValBytes]
+			valsCapped++
+		}
+		out[k] = v
+	}
+	return out, keysCapped, valsCapped
 }
 
 // overloadDecision is the stepped response to spool fill.

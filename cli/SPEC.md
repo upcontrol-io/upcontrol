@@ -509,7 +509,7 @@ arrive:
 | the application is alive, there is no `install_verified` | the key was not picked up, or there is no connectivity | these are distinguishable: the key is missing from the environment / DNS / TCP / TLS / HTTP code — we print at which step it stopped |
 | there is `install_verified`, there are no events | the points were written into code that has not run yet | name exactly which ones we are waiting for and suggest a path that will trigger them |
 | there are events, but not the right ones | the agent picked names outside the dictionary | show what arrived against §4 — the mistake is cheap (T4), but it has to be seen |
-| data arrived **with a warning in the receipt** | a problem on the wire, invisible to the user | print the closed dictionary: `ts_absent`, `level_unknown`, `key_in_body`, `field_cap_exceeded`, `scrubbed`, `reserved_prefix` |
+| data arrived **with a warning in the receipt** | a problem on the wire, invisible to the user | print the closed dictionary: `ts_absent`, `level_unknown`, `key_in_body`, `field_cap_exceeded`, `attr_key_capped`, `cardinality_capped`, `scrubbed`, `reserved_prefix` |
 
 The last row is the very mechanism that compensates for ingest's tolerance: a broken client forever
 gets 2xx and never finds out, if nobody looks. `verify` looks.
