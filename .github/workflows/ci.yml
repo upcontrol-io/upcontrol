@@ -180,6 +180,8 @@ jobs:
   cli:
     runs-on: ubuntu-latest
     strategy:
+      # Both packages report, rather than the first failure hiding the other.
+      fail-fast: false
       matrix:
         pkg: [sdk, installer]
     steps:
@@ -187,6 +189,14 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: cli/${{ matrix.pkg }}/package-lock.json
+      # The packages ship zero runtime deps, but typescript and @types/node are
+      # devDependencies and the build is a tsc run: without an install, tsc
+      # cannot find `process`.
+      - name: Install
+        working-directory: cli/${{ matrix.pkg }}
+        run: npm ci
       - name: Test
         working-directory: cli/${{ matrix.pkg }}
         run: npm test
