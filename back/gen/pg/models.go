@@ -272,6 +272,7 @@ type PlanEntitlement struct {
 	MinIntervalSec     int32
 	TelegramRecipients int32
 	Projects           *int32
+	CustomDomain       bool
 }
 
 type ProbeNode struct {

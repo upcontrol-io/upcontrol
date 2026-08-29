@@ -740,6 +740,12 @@ components:
         domain:
           type: string
           description: Custom domain, from the first paid plan. Empty until set.
+        domainVerified:
+          type: boolean
+          description: >
+            Whether the stored domain's DNS has been proven to point where we
+            do. A domain that just changed starts false and is re-proven by
+            POST /v1/status-page/domain/verify.
         components:
           type: array
           items: { $ref: "#/components/schemas/PublicComponent" }
@@ -748,7 +754,13 @@ components:
           items: { $ref: "#/components/schemas/NetworkTile" }
         showNetwork: { type: boolean }
         showIncidents: { type: boolean }
-        showPoweredBy: { type: boolean }
+        showPoweredBy:
+          type: boolean
+          description: >-
+            Whether the "Powered by UpControl" credit is published. Honoured
+            only on a self-hosted instance, where the AGPL copy is the
+            operator's own to brand. The hosted service always publishes it:
+            a plan buys the page's address, never the branding.
     NetworkTile:
       description: >
         One phase of the request, as a median over the last 24 h of successful
@@ -768,14 +780,27 @@ components:
       type: object
       properties:
         title: { type: string }
-        domain: { type: string }
+        domain:
+          type: string
+          description: >-
+            The host to serve the page on. Normalized server-side (scheme,
+            path and port dropped); must be a subdomain — at least three
+            labels — and not our own host. Empty clears it. Changing it
+            re-locks verification; 402 when the plan carries no custom
+            domains, 409 when another page already rides that host.
         shown:
           type: object
           additionalProperties: { type: boolean }
           description: Component key → published. Absent keys default to published.
         showNetwork: { type: boolean }
         showIncidents: { type: boolean }
-        showPoweredBy: { type: boolean }
+        showPoweredBy:
+          type: boolean
+          description: >-
+            Whether the "Powered by UpControl" credit is published. Honoured
+            only on a self-hosted instance, where the AGPL copy is the
+            operator's own to brand. The hosted service always publishes it:
+            a plan buys the page's address, never the branding.
     PublicIncident:
       type: object
       required: [title, since, ongoing]
@@ -806,7 +831,12 @@ components:
             removes the heading too, which is what the owner's switch means.
           type: boolean
         updatedAt: { type: string, format: date-time }
-        poweredBy: { type: boolean }
+        poweredBy:
+          description: >
+            Whether the credit line is published. Only a self-hosted instance
+            can answer false: on the hosted service a plan buys the page's
+            address, never the branding, so this is always true there.
+          type: boolean
         claimed:
           description: >
             Whether the page belongs to an account. Clients treat ABSENT as
@@ -2153,8 +2183,62 @@ paths:
                 { schema: { $ref: "#/components/schemas/StatusPageResponse" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/status-page/domain/verify:
+    post:
+      tags: [statuspage]
+      summary: Re-check the stored domain's DNS against our own host.
+      description: >
+        Resolves the stored domain and our own origin's host and compares the
+        answers: verified means they intersect, so a CNAME a DNS provider
+        flattens still passes. DNS that is not ready yet answers 200 with
+        verified:false — the customer re-runs it, nothing is broken.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                {
+                  schema:
+                    {
+                      type: object,
+                      required: [domain, verified],
+                      properties:
+                        {
+                          domain: { type: string },
+                          verified: { type: boolean },
+                        },
+                    },
+                },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- public (no auth) ----------------------------------------------------
+  /public/status:
+    get:
+      tags: [public]
+      security: []
+      summary: The status page for a custom domain, resolved by the Host header.
+      description: >
+        The tenant is the one whose domain column equals the request's Host
+        header (lowercased, port stripped), and only a verified domain
+        answers. A host that matches nothing — or matches a domain we have
+        not proven — gets the same 404 as an unknown slug.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                {
+                  schema: { $ref: "#/components/schemas/PublicStatusResponse" },
+                },
+            }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /public/status/{slug}:
     get:
       tags: [public]

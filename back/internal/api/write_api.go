@@ -16,12 +16,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -83,6 +86,14 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Caddy's on-demand TLS ask. The production Caddyfile does not proxy the
+	// /internal/ prefix, so this door answers only inside the compose network;
+	// it sits before the session gate because the ask carries no cookie.
+	if r.URL.Path == "/internal/domain-allowed" && r.Method == http.MethodGet {
+		h.domainAllowed(w, r)
+		return
+	}
+
 	// Everything else needs a session.
 	s, err := h.sess.FromRequest(r.Context(), r)
 	if err != nil {
@@ -134,6 +145,9 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeAPIErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		}
+
+	case r.URL.Path == "/v1/status-page/domain/verify" && r.Method == http.MethodPost:
+		h.verifyStatusPageDomain(w, r, tenantID)
 
 	case r.URL.Path == "/v1/export" && r.Method == http.MethodGet:
 		h.exportAll(w, r, tenantID)
@@ -891,17 +905,8 @@ func sourceID(s string) int64 {
 func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
-	cfg := h.statusConfig(ctx, s, tenantID)
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"slug":          cfg.Slug,
-		"title":         cfg.Title,
-		"domain":        cfg.Domain,
-		"components":    h.statusComponents(ctx, tenantID, cfg, false),
-		"network":       h.statusNetwork(ctx, tenantID),
-		"showNetwork":   cfg.ShowNetwork,
-		"showIncidents": cfg.ShowIncidents,
-		"showPoweredBy": cfg.ShowPoweredBy,
-	})
+	cfg, domain, verified := h.statusConfig(ctx, s, tenantID)
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, cfg, domain, verified))
 }
 
 // PUT /v1/status-page: persist the settings. Components are not stored: they
@@ -920,8 +925,13 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusBadRequest, "bad_body")
 		return
 	}
+	domain, err := normalizeStatusDomain(req.Domain)
+	if err != nil {
+		writeAPIErr(w, http.StatusBadRequest, "bad_domain")
+		return
+	}
 	s, _ := h.sess.FromRequest(ctx, r)
-	cfg := h.statusConfig(ctx, s, tenantID)
+	cfg, current, verified := h.statusConfig(ctx, s, tenantID)
 	if req.Shown != nil {
 		cfg.Shown = req.Shown
 	}
@@ -935,8 +945,27 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		cfg.ShowPoweredBy = *req.ShowPoweredBy
 	}
 	cfg.Title = req.Title
-	cfg.Domain = req.Domain
-
+	// PAID ONLY: the domain is the one setting a plan pays for. Only a CHANGE
+	// pays — re-saving the domain already stored is free, like every setting.
+	if domain != "" && domain != current {
+		var allowed bool
+		_ = h.pool.Raw().QueryRow(ctx,
+			`SELECT custom_domain FROM plan_entitlement
+			  WHERE plan = (SELECT plan FROM tenant WHERE id = $1)`, tenantID).Scan(&allowed)
+		if !allowed {
+			writeAPIJSON(w, http.StatusPaymentRequired, map[string]any{
+				"error": map[string]any{
+					"code":    "upgrade_required",
+					"message": "A status page on your own domain is on every paid plan.",
+					"upgrade": map[string]string{"reason": "A status page on your own domain is on every paid plan."},
+				},
+			})
+			return
+		}
+	}
+	// A proof survives only an unchanged domain: the upsert below resets it
+	// when the host moves.
+	verified = verified && domain == current
 	raw, _ := json.Marshal(cfg)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var projectDomain string
@@ -949,52 +978,80 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 			cfg.Slug = claimed
 		}
 	}
+	// "" is stored as NULL: pages without a domain must never collide on the
+	// UNIQUE index.
+	var domainVal any
+	if domain != "" {
+		domainVal = domain
+	}
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO status_page (tenant_id, project_id, slug, title, config)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (slug) DO UPDATE SET title = EXCLUDED.title, config = EXCLUDED.config`,
-		tenantID, projectID, cfg.Slug, cfg.Title, raw); err != nil {
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (slug) DO UPDATE SET
+		   title = EXCLUDED.title,
+		   domain = EXCLUDED.domain,
+		   domain_verified_at = CASE WHEN EXCLUDED.domain = status_page.domain
+		                             THEN status_page.domain_verified_at END,
+		   config = EXCLUDED.config`,
+		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw); err != nil {
+		// The slug conflict is arbitrated above, so a unique violation here is
+		// the domain: another page already rides that host.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeAPIErr(w, http.StatusConflict, "domain_taken")
+			return
+		}
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeAPIJSON(w, http.StatusOK, map[string]any{
-		"slug":          cfg.Slug,
-		"title":         cfg.Title,
-		"domain":        cfg.Domain,
-		"components":    h.statusComponents(ctx, tenantID, cfg, false),
-		"network":       h.statusNetwork(ctx, tenantID),
-		"showNetwork":   cfg.ShowNetwork,
-		"showIncidents": cfg.ShowIncidents,
-		"showPoweredBy": cfg.ShowPoweredBy,
-	})
+	// DNS that was already in place needs no second step: verify once, so a
+	// customer who pre-configured their records saves and is done. Skipped
+	// when already verified — a resolver hiccup must not wipe a standing proof.
+	if domain != "" && !verified {
+		verified = h.verifyStatusDomain(ctx, tenantID, domain)
+	}
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, cfg, domain, verified))
 }
 
 // statusPageConfig is the owner's decisions about the page. Everything else on
-// it is measured.
+// it is measured. The domain is deliberately absent: it is not a display
+// setting but the host we route by, so it lives in its own column.
 type statusPageConfig struct {
 	Slug          string          `json:"slug"`
 	Title         string          `json:"title"`
-	Domain        string          `json:"domain"`
 	Shown         map[string]bool `json:"shown"`
 	ShowNetwork   bool            `json:"showNetwork"`
 	ShowIncidents bool            `json:"showIncidents"`
-	ShowPoweredBy bool            `json:"showPoweredBy"`
+	// Honoured only on a self-hosted instance. Somebody running their own copy
+	// under the AGPL may take our name off it; a cloud tenant may not, because
+	// there the plan buys the page's address and nothing about the branding
+	// (owner decision, 2026-08-29). poweredBy() is the one reader.
+	ShowPoweredBy bool `json:"showPoweredBy"`
+}
+
+// poweredBy answers whether the credit line is published. On the cloud it is
+// always yes, whatever is stored or submitted, so a hand-written API call
+// cannot buy what no plan sells.
+func (h *writeAPI) poweredBy(cfg statusPageConfig) bool {
+	return !h.selfHosted || cfg.ShowPoweredBy
 }
 
 // statusConfig loads the saved settings, defaulting a page that has never been
 // configured to "publish everything" — the page exists to be public. The
 // project it reads is the session's current one (the tenant's first as the
 // fallback); the gate-authenticated tenantID decides the tenant, so a failed
-// session re-read cannot send the lookup to tenant 0.
-func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID int64) statusPageConfig {
+// session re-read cannot send the lookup to tenant 0. The domain and its proof
+// come from the columns, never the config blob.
+func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID int64) (statusPageConfig, string, bool) {
 	cfg := statusPageConfig{ShowNetwork: true, ShowIncidents: true, ShowPoweredBy: true, Shown: map[string]bool{}}
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var domain, title, slug *string
+	var verifiedAt *time.Time
 	var raw []byte
 	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT p.id, s.slug, s.title, s.domain, s.config
+		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config
 		   FROM project p LEFT JOIN status_page s ON s.tenant_id = p.tenant_id
-		  WHERE p.id = $1`, projectID).Scan(&projectID, &slug, &title, &domain, &raw)
+		  WHERE p.id = $1`, projectID).Scan(&projectID, &slug, &title, &domain, &verifiedAt, &raw)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
@@ -1010,10 +1067,119 @@ func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID in
 	if title != nil && cfg.Title == "" {
 		cfg.Title = *title
 	}
-	if domain != nil && cfg.Domain == "" {
-		cfg.Domain = *domain
+	stored := ""
+	if domain != nil {
+		stored = *domain
 	}
-	return cfg
+	return cfg, stored, verifiedAt != nil
+}
+
+// statusPageResponse is the one shape both /v1/status-page handlers answer
+// with: the stored decisions plus the measured components and network.
+func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID int64, cfg statusPageConfig, domain string, verified bool) map[string]any {
+	return map[string]any{
+		"slug":           cfg.Slug,
+		"title":          cfg.Title,
+		"domain":         domain,
+		"domainVerified": verified,
+		"components":     h.statusComponents(ctx, tenantID, cfg, false),
+		"network":        h.statusNetwork(ctx, tenantID),
+		"showNetwork":    cfg.ShowNetwork,
+		"showIncidents":  cfg.ShowIncidents,
+		"showPoweredBy":  h.poweredBy(cfg),
+	}
+}
+
+var errBadStatusDomain = errors.New("unusable status domain")
+
+// normalizeStatusDomain canonicalizes what the owner typed into the host we
+// would route and issue a certificate for: scheme, path and port dropped, case
+// folded, trailing dot gone. Empty means "no domain" and is valid. Everything
+// else is refused: a page here is a SUBDOMAIN (status.example.com), never the
+// apex the customer's own site lives on, and our own host is not theirs to
+// claim — neither outright nor as a subdomain of it.
+func normalizeStatusDomain(raw string) (string, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSuffix(s, ".")
+	if s == "" {
+		return "", nil
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) < 3 {
+		return "", errBadStatusDomain
+	}
+	for _, label := range labels {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return "", errBadStatusDomain
+		}
+		for _, c := range label {
+			if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' {
+				continue
+			}
+			return "", errBadStatusDomain
+		}
+	}
+	if u, err := url.Parse(os.Getenv("UC_PUBLIC_ORIGIN")); err == nil {
+		if ours := strings.ToLower(u.Hostname()); ours != "" && (s == ours || strings.HasSuffix(s, "."+ours)) {
+			return "", errBadStatusDomain
+		}
+	}
+	return s, nil
+}
+
+// POST /v1/status-page/domain/verify — re-check the stored domain's DNS and
+// stamp the proof. DNS that is not ready yet is an expected answer, not a
+// server fault: it returns verified:false, never a 500.
+func (h *writeAPI) verifyStatusPageDomain(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	_, domain, _ := h.statusConfig(ctx, s, tenantID)
+	if domain == "" {
+		writeAPIErr(w, http.StatusBadRequest, "no_domain")
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"domain":   domain,
+		"verified": h.verifyStatusDomain(ctx, tenantID, domain),
+	})
+}
+
+// verifyStatusDomain resolves the stored domain and our own host and stamps
+// domain_verified_at when the two answers intersect. LookupHost, deliberately
+// not LookupCNAME: several DNS providers flatten the CNAME away and would
+// fail this check while serving the traffic correctly.
+func (h *writeAPI) verifyStatusDomain(ctx context.Context, tenantID int64, domain string) bool {
+	verified := false
+	if u, err := url.Parse(os.Getenv("UC_PUBLIC_ORIGIN")); err == nil && u.Hostname() != "" {
+		if ours, err := net.DefaultResolver.LookupHost(ctx, u.Hostname()); err == nil {
+			if theirs, err := net.DefaultResolver.LookupHost(ctx, domain); err == nil {
+				verified = ipsIntersect(ours, theirs)
+			}
+		}
+	}
+	// The CASE with no ELSE yields NULL, so a failed resolve clears the proof
+	// in the same statement that would have stamped it.
+	_, _ = h.pool.Raw().Exec(ctx,
+		`UPDATE status_page SET domain_verified_at = CASE WHEN $1 THEN now() END
+		  WHERE tenant_id = $2 AND domain = $3`,
+		verified, tenantID, domain)
+	return verified
+}
+
+// ipsIntersect reports whether two DNS answers share an address: the
+// customer's record points where ours does. Linear scans on purpose - a host
+// answers with a handful of addresses, and a set would cost more to build.
+func ipsIntersect(a, b []string) bool {
+	return slices.ContainsFunc(a, func(ip string) bool { return slices.Contains(b, ip) })
 }
 
 // The strip's window climbs a ladder as history accumulates (owner decision,
@@ -1567,11 +1733,34 @@ func (h *writeAPI) public(w http.ResponseWriter, r *http.Request) {
 		h.publicWatch(w, r)
 	case r.URL.Path == "/public/track" && r.Method == http.MethodPost:
 		h.publicTrack(w, r)
+	case r.URL.Path == "/public/status" && r.Method == http.MethodGet:
+		h.publicStatus(w, r)
 	case strings.HasPrefix(r.URL.Path, "/public/status/") && r.Method == http.MethodGet:
 		h.publicStatus(w, r)
 	default:
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// GET /internal/domain-allowed?domain=... — Caddy's on-demand TLS ask: may a
+// certificate be issued for this host? 200 with an empty body only when this
+// exact domain is stored, verified, and owned by a plan that pays for it;
+// anything else is 404. The strictness is load-bearing — no prefix matching,
+// no wildcards, no unverified shortcut — because this one answer is what
+// keeps Let's Encrypt's rate limits from being spent on hosts nobody proved.
+func (h *writeAPI) domainAllowed(w http.ResponseWriter, r *http.Request) {
+	var allowed bool
+	if err := h.pool.Raw().QueryRow(r.Context(),
+		`SELECT EXISTS (
+		   SELECT 1 FROM status_page sp
+		   JOIN tenant t ON t.id = sp.tenant_id
+		   JOIN plan_entitlement pe ON pe.plan = t.plan
+		    WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL AND pe.custom_domain)`,
+		r.URL.Query().Get("domain")).Scan(&allowed); err != nil || !allowed {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
@@ -2359,9 +2548,27 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	// The public page shows the same measured components as the config screen,
 	// minus the ones the owner unpublished. Nothing here is typed in by hand.
 	ctx := r.Context()
-	slug := pathLast(r.URL.Path)
 	var tenantID int64
 	var claimed bool
+	// A request without a slug arrives on somebody's custom domain: the Host
+	// header (lowercased, port stripped) is the address, and only a domain we
+	// have verified answers — an unverified row must render nothing.
+	if r.URL.Path == "/public/status" {
+		host := strings.ToLower(r.Host)
+		if bare, _, err := net.SplitHostPort(host); err == nil {
+			host = bare
+		}
+		if err := h.pool.Raw().QueryRow(ctx,
+			`SELECT sp.tenant_id, (t.claim_token_hash IS NULL)
+			   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
+			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &claimed); err != nil {
+			writeAPIErr(w, http.StatusNotFound, "no_such_page")
+			return
+		}
+		h.renderPublicStatus(w, r, tenantID, claimed)
+		return
+	}
+	slug := pathLast(r.URL.Path)
 	if err := h.pool.Raw().QueryRow(ctx,
 		`SELECT sp.tenant_id, (t.claim_token_hash IS NULL)
 		   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
@@ -2381,19 +2588,27 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	h.renderPublicStatus(w, r, tenantID, claimed)
+}
+
+// renderPublicStatus is the tail both doors share once the tenant is found:
+// the config load, the components, the incidents, the response map. A slug in
+// the path and a Host header differ only in how the tenant is looked up.
+func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, tenantID int64, claimed bool) {
+	ctx := r.Context()
 	// The public door has no viewer session to honour: the page's tenant
 	// decides, and a tenant-only session lands on the lowest project id —
 	// exactly the pre-projects pick. A signed-in viewer's own session must
 	// not bend somebody else's page toward their current project.
-	cfg := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
+	cfg, _, _ := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
 	resp := map[string]any{
 		"title":      cfg.Title,
 		"components": h.statusComponents(ctx, tenantID, cfg, true),
 		"incidents":  []map[string]any{},
 		"network":    []map[string]any{},
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
-		"poweredBy":  cfg.ShowPoweredBy,
 		"claimed":    claimed,
+		"poweredBy":  h.poweredBy(cfg),
 		// Whether the SECTION is published, not whether it is empty: the owner
 		// who hid a section must not get a heading under it.
 		"showIncidents": cfg.ShowIncidents,

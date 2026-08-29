@@ -243,6 +243,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("PATCH /v1/sources/{id}", wa)
 	mux.Handle("GET /v1/status-page", wa)
 	mux.Handle("PUT /v1/status-page", wa)
+	mux.Handle("POST /v1/status-page/domain/verify", wa)
 	mux.Handle("GET /v1/logs", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
 	mux.Handle("GET /v1/export", wa)
@@ -267,6 +268,14 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("POST /public/track", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
+	// The same page with no slug: the tenant comes from the Host header, which is
+	// how a status page answers on the customer's own domain. A separate pattern
+	// because "/public/status/{slug}" does not match a path with nothing after it.
+	mux.Handle("GET /public/status", wa)
+	// Caddy's on-demand TLS ask, for the same custom domains. The production
+	// Caddyfile proxies no /internal/ path, so this door answers only inside the
+	// compose network: it decides whether a certificate may be issued at all.
+	mux.Handle("GET /internal/domain-allowed", wa)
 	// The heartbeat ping door: anonymous, the token in the path is the whole
 	// credential, so an unknown one answers 404 and never a hint.
 	hb := heartbeat.New(pgPool, pgs, lc)

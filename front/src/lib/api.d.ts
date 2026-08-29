@@ -1904,8 +1904,93 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                409: components["responses"]["Conflict"];
             };
         };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/status-page/domain/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-check the stored domain's DNS against our own host.
+         * @description Resolves the stored domain and our own origin's host and compares the answers: verified means they intersect, so a CNAME a DNS provider flattens still passes. DNS that is not ready yet answers 200 with verified:false — the customer re-runs it, nothing is broken.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            domain: string;
+                            verified: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/public/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The status page for a custom domain, resolved by the Host header.
+         * @description The tenant is the one whose domain column equals the request's Host header (lowercased, port stripped), and only a verified domain answers. A host that matches nothing — or matches a domain we have not proven — gets the same 404 as an unknown slug.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PublicStatusResponse"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -2950,10 +3035,13 @@ export interface components {
             title: string;
             /** @description Custom domain, from the first paid plan. Empty until set. */
             domain?: string;
+            /** @description Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify. */
+            domainVerified?: boolean;
             components: components["schemas"]["PublicComponent"][];
             network?: components["schemas"]["NetworkTile"][];
             showNetwork: boolean;
             showIncidents: boolean;
+            /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy: boolean;
         };
         /** @description One phase of the request, as a median over the last 24 h of successful probes: dns, tcp and response. Measured from the checks table (dns_ms / connect_ms / total_ms), never sample data — a phase that never ran (no lookup on a reused connection) is absent rather than reported as zero. The TLS handshake is measured and stored but deliberately NOT published as a tile (owner decision, 2026-08-27). */
@@ -2968,6 +3056,7 @@ export interface components {
         };
         StatusPageUpdate: {
             title?: string;
+            /** @description The host to serve the page on. Normalized server-side (scheme, path and port dropped); must be a subdomain — at least three labels — and not our own host. Empty clears it. Changing it re-locks verification; 402 when the plan carries no custom domains, 409 when another page already rides that host. */
             domain?: string;
             /** @description Component key → published. Absent keys default to published. */
             shown?: {
@@ -2975,6 +3064,7 @@ export interface components {
             };
             showNetwork?: boolean;
             showIncidents?: boolean;
+            /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy?: boolean;
         };
         PublicIncident: {
@@ -2993,6 +3083,7 @@ export interface components {
             showIncidents?: boolean;
             /** Format: date-time */
             updatedAt: string;
+            /** @description Whether the credit line is published. Only a self-hosted instance can answer false: on the hosted service a plan buys the page's address, never the branding, so this is always true there. */
             poweredBy?: boolean;
             /** @description Whether the page belongs to an account. Clients treat ABSENT as claimed (an older backend knows no claim controls): fail closed. */
             claimed?: boolean;
