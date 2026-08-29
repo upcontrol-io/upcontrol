@@ -329,7 +329,7 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Burn conditionally: the first claim of this tenant wins, a concurrent
 	// or replayed one matches no row. The row is deleted below anyway — the
 	// WHERE on the hash is the point, not the columns it sets.

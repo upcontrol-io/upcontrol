@@ -255,7 +255,7 @@ func (q *Queries) GetPersonByEmail(ctx context.Context, email *string) (GetPerso
 }
 
 const getSessionByToken = `-- name: GetSessionByToken :one
-SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at, project_id
+SELECT id, token_hash, person_id, tenant_id, project_id, created_at, last_seen_at, expires_at
   FROM session
  WHERE token_hash = $1
    AND expires_at > now()
@@ -264,6 +264,8 @@ SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_a
 // Only non-expired sessions match. last_seen_at is touched separately.
 // project_id rides along: every /v1/* request resolves the current project
 // off the session (docs/plans/projects-axis.md), so it must survive this read.
+// Column order follows the table, so sqlc returns the Session model itself
+// rather than a one-off row struct.
 func (q *Queries) GetSessionByToken(ctx context.Context, tokenHash []byte) (Session, error) {
 	row := q.db.QueryRow(ctx, getSessionByToken, tokenHash)
 	var i Session
@@ -272,10 +274,10 @@ func (q *Queries) GetSessionByToken(ctx context.Context, tokenHash []byte) (Sess
 		&i.TokenHash,
 		&i.PersonID,
 		&i.TenantID,
+		&i.ProjectID,
 		&i.CreatedAt,
 		&i.LastSeenAt,
 		&i.ExpiresAt,
-		&i.ProjectID,
 	)
 	return i, err
 }

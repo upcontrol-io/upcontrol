@@ -9,7 +9,9 @@ VALUES (sqlc.arg(token_hash), sqlc.arg(person_id), sqlc.arg(tenant_id),
 -- Only non-expired sessions match. last_seen_at is touched separately.
 -- project_id rides along: every /v1/* request resolves the current project
 -- off the session (docs/plans/projects-axis.md), so it must survive this read.
-SELECT id, token_hash, person_id, tenant_id, created_at, last_seen_at, expires_at, project_id
+-- Column order follows the table, so sqlc returns the Session model itself
+-- rather than a one-off row struct.
+SELECT id, token_hash, person_id, tenant_id, project_id, created_at, last_seen_at, expires_at
   FROM session
  WHERE token_hash = $1
    AND expires_at > now();

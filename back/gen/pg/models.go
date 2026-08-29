@@ -14,13 +14,13 @@ type AlertChannel struct {
 	TenantID          int64
 	Kind              string
 	Target            string
+	Label             *string
+	RecipientPersonID *int64
+	MutedUntil        pgtype.Timestamptz
+	Notify            []byte
 	SecretEnc         []byte
 	BreakerOpenUntil  pgtype.Timestamptz
 	CreatedAt         pgtype.Timestamptz
-	Notify            []byte
-	RecipientPersonID *int64
-	MutedUntil        pgtype.Timestamptz
-	Label             *string
 }
 
 type ApiKey struct {
@@ -45,6 +45,22 @@ type BillingSubscription struct {
 	EndsAt           pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
+}
+
+type Check struct {
+	TenantID   *int64
+	MonitorID  *int64
+	Ts         pgtype.Timestamptz
+	Region     *string
+	Ok         *bool
+	StatusCode *int32
+	ErrorClass *string
+	DnsMs      *int32
+	ConnectMs  *int32
+	TlsMs      *int32
+	TtfbMs     *int32
+	TotalMs    *int32
+	BodyHash   *int64
 }
 
 type DeliveryAttempt struct {
@@ -76,6 +92,16 @@ type ErrorAlertState struct {
 	Fingerprint int64
 	Kind        string
 	LastAlerted pgtype.Timestamptz
+}
+
+type Event struct {
+	TenantID    *int64
+	ProjectID   *int64
+	Ts          pgtype.Timestamptz
+	Name        *string
+	Labels      []byte
+	AmountMinor *int64
+	Currency    *string
 }
 
 type Incident struct {
@@ -120,9 +146,9 @@ type IncidentUpdate struct {
 type IngestBatch struct {
 	BatchKey   string
 	BodyHash   []byte
+	Accepted   int32
 	AcceptedAt pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
-	Accepted   int32
 }
 
 type InstallToken struct {
@@ -150,6 +176,21 @@ type KeyUsageLog struct {
 	Outcome  string
 }
 
+type Log struct {
+	TenantID    int64
+	ProjectID   int64
+	Ts          pgtype.Timestamptz
+	Seq         int64
+	Source      *string
+	Service     *string
+	Host        *string
+	Level       *string
+	LevelRaw    *string
+	Message     *string
+	Fingerprint *int64
+	Attrs       []byte
+}
+
 type MagicLinkCode struct {
 	Email      string
 	CodeHash   []byte
@@ -163,6 +204,15 @@ type MagicLinkIp struct {
 	Ip      string
 	FirstAt pgtype.Timestamptz
 	Count   int32
+}
+
+type Metric struct {
+	TenantID  *int64
+	ProjectID *int64
+	Ts        pgtype.Timestamptz
+	Name      *string
+	Labels    []byte
+	Value     *float64
 }
 
 type Monitor struct {
@@ -207,8 +257,8 @@ type Person struct {
 	TelegramID       *int64
 	GoogleSub        *string
 	Name             string
-	CreatedAt        pgtype.Timestamptz
 	TelegramUsername *string
+	CreatedAt        pgtype.Timestamptz
 }
 
 type PlanEntitlement struct {
@@ -253,15 +303,25 @@ type ProjectWindow struct {
 	ComputedAt   pgtype.Timestamptz
 }
 
+type Series1m struct {
+	TenantID  int64
+	ProjectID int64
+	Minute    pgtype.Timestamptz
+	Source    string
+	Level     string
+	Lines     *int64
+	Bytes     *int64
+}
+
 type Session struct {
 	ID         int64
 	TokenHash  []byte
 	PersonID   int64
 	TenantID   int64
+	ProjectID  *int64
 	CreatedAt  pgtype.Timestamptz
 	LastSeenAt pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
-	ProjectID  *int64
 }
 
 type SourceConnection struct {
@@ -271,11 +331,11 @@ type SourceConnection struct {
 	Kind         string
 	ExternalID   *string
 	TokenEnc     []byte
+	HookToken    *string
+	LastEvent    *string
 	Status       string
 	LastSignalAt pgtype.Timestamptz
 	Paused       bool
-	HookToken    *string
-	LastEvent    *string
 }
 
 type StatusPage struct {
@@ -295,11 +355,11 @@ type TelegramInvite struct {
 	TenantID   int64
 	Role       string
 	InvitedBy  int64
+	PersonID   *int64
 	TokenHash  []byte
 	CreatedAt  pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
 	RedeemedAt pgtype.Timestamptz
-	PersonID   *int64
 }
 
 type Tenant struct {
@@ -308,9 +368,9 @@ type Tenant struct {
 	Name           string
 	Plan           string
 	Billing        string
-	CreatedAt      pgtype.Timestamptz
 	ClaimTokenHash []byte
 	ClaimedAt      pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
 }
 
 type TenantLineLedger struct {
@@ -326,6 +386,26 @@ type TenantMember struct {
 	PersonID int64
 	Role     string
 	Status   string
+}
+
+type WebEvent struct {
+	VisitorID   *int64
+	PersonID    *int64
+	TenantID    *int64
+	Ts          pgtype.Timestamptz
+	Name        *string
+	Path        *string
+	Title       *string
+	Referrer    *string
+	UtmSource   *string
+	UtmMedium   *string
+	UtmCampaign *string
+	Country     *string
+	IpHash      []byte
+	Device      *string
+	Os          *string
+	Browser     *string
+	Props       []byte
 }
 
 type WebVisitor struct {

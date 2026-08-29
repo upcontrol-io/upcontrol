@@ -708,7 +708,7 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if projectID != 0 {
 		if err := releaseProject(ctx, tx, projectID); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -1531,13 +1531,6 @@ func (h *writeAPI) runBucketRows(ctx context.Context, lq query.LogQuery, key str
 	return out
 }
 
-// tenantPlan reads the tenant's plan name (Free|Indie|Growth|Agency).
-func tenantPlan(ctx context.Context, pool *pg.Pool, tenantID int64) (string, error) {
-	var plan string
-	err := pool.Raw().QueryRow(ctx, `SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
-	return plan, err
-}
-
 func (h *writeAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	idStr := pathLast(r.URL.Path)
 	// The public id: `incidentToAPI` only ever sends the uuid; the serial id
@@ -2224,7 +2217,7 @@ func createTenantProject(ctx context.Context, pool *pg.Pool, tenantID int64, dom
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var projectID int64
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, $3) RETURNING id`,

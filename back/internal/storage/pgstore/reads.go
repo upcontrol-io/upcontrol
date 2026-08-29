@@ -1,6 +1,7 @@
 // The read half of the store, mirroring the ch.Conn read methods one for one
 // so a caller that switches type keeps everything else — including the Go
 // arithmetic over the detector's baseline.
+
 package pgstore
 
 import (

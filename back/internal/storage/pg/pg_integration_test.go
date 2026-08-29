@@ -74,6 +74,9 @@ func splitPGUp(s string) string {
 	return rest[:j]
 }
 
+// splitPGStatements splits on `;`, except where one sits inside a dollar-quoted
+// block, which is body text rather than a terminator. 001_init.sql bootstraps
+// its log partitions in a DO $$ ... $$ holding four.
 func splitPGStatements(s string) []string {
 	var keep []string
 	for _, line := range strings.Split(s, "\n") {
@@ -82,7 +85,49 @@ func splitPGStatements(s string) []string {
 		}
 		keep = append(keep, line)
 	}
-	return strings.Split(strings.Join(keep, "\n"), ";")
+	s = strings.Join(keep, "\n")
+
+	var out []string
+	start, tag := 0, ""
+	for i := 0; i < len(s); i++ {
+		if tag != "" {
+			if strings.HasPrefix(s[i:], tag) {
+				i += len(tag) - 1
+				tag = ""
+			}
+			continue
+		}
+		if t := dollarTag(s[i:]); t != "" {
+			tag = t
+			i += len(t) - 1
+			continue
+		}
+		if s[i] == ';' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
+}
+
+// dollarTag returns the $$ or $tag$ opener at the head of s, or "". A bare
+// placeholder like $1 is not one: a tag may not start with a digit.
+func dollarTag(s string) string {
+	if len(s) < 2 || s[0] != '$' {
+		return ""
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c == '$' {
+			return s[:i+1]
+		}
+		letter := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		digit := i > 1 && c >= '0' && c <= '9'
+		if !letter && !digit {
+			return ""
+		}
+	}
+	return ""
 }
 
 // openPool builds a *Pool with the generated Queries wired in.

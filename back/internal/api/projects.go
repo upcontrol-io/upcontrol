@@ -150,7 +150,7 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// The tenant row is the lock: the gate counts projects, and two creates
 	// arriving together would each count the other's row as absent and both
 	// pass, putting a Free account on two projects. Counting inside the
