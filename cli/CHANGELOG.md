@@ -5,6 +5,15 @@ deploy is rolled back, a bad published version is on other people's machines).
 
 ## Unreleased
 
+## 2026-08-29 — upcontrol 0.1.4
+
+- `status`, `--version` and the `cli_version` field every install sends report
+  the real version again. `CLI_VERSION` is a constant of its own, because the
+  built `dist` cannot import `package.json` (deliberately outside the package
+  exports), and nothing enforced the two matching: 0.1.3 shipped announcing
+  itself as 0.1.2. A test now asserts they are equal, and cli/ has a CI job for
+  the first time, so neither package can be published untested again.
+
 ## 2026-08-28 — @upcontrol/sdk 0.1.1
 
 - `trace` is no longer rewritten to `debug`. A `trace` line sent through the

@@ -172,6 +172,25 @@ jobs:
           npm run prod
           npm run test
 
+  # cli/ is the only published folder, and a bad published version is on other
+  # people's machines. Nothing here ran in CI until 0.1.3 shipped reporting
+  # itself as 0.1.2 in `status` and in the cli_version every install sends, so
+  # both packages now build (npm test runs pretest -> build) and test on every
+  # push.
+  cli:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pkg: [sdk, installer]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Test
+        working-directory: cli/${{ matrix.pkg }}
+        run: npm test
+
   infra:
     runs-on: ubuntu-latest
     steps:
