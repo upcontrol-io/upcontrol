@@ -26,11 +26,13 @@ deploy is rolled back, a bad published version is on other people's machines).
   `"success": true` while the key never arrived wired an app that silently
   sent nothing — the one defect a monitoring tool may not have.
 - `init` no longer collects or sends a project spec, and `--no-meta` is gone
-  with it. The five-field upload existed for exactly one reader — the Explain
-  prompt, so that an answer about a log line knew the stack it came from —
-  and Explain has been removed from the product, endpoint included: there is
-  no `PUT /v1/project/meta` on a current server. The upload was best effort
-  by contract (a refused or unreachable PUT never failed an install), so an
+  with it. Nothing is taken away from anyone: that code only ever existed in
+  the unpublished 0.1.2. The five-field upload existed for exactly one reader,
+  the Explain prompt, so that an answer about a log line knew the stack it
+  came from, and Explain has been removed from the product, endpoint
+  included: there is no `PUT /v1/project/meta` on a current server. The
+  upload was best effort by contract (a refused or unreachable PUT never
+  failed an install), so an
   older installer pointed at a current server keeps working exactly as
   before; its spec is simply ignored.
 - The bundled agent skill no longer teaches the frozen event dictionary (it
@@ -44,7 +46,11 @@ deploy is rolled back, a bad published version is on other people's machines).
   installer pins an exact SDK version, and a pin to an unpublished version
   fails every user's install.
 
-## 2026-08-17 — upcontrol 0.1.2
+## 2026-08-17 — upcontrol 0.1.2 (never published)
+
+This version was tagged in the repository and never reached npm, which went
+0.1.1 straight to 0.1.3. Everything below was written and then removed again
+before any release carried it, so no user ever ran it. Kept for the record.
 
 - `init` collects a five-field project spec — `{name, description, framework,
   runtime, language}` from `package.json`, an ordered framework map
