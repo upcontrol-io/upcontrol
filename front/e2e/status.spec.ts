@@ -20,7 +20,7 @@ const PUBLIC_PAGE = {
 	poweredBy: true,
 };
 
-test("the config screen owns the URL and three real switches", async ({ page }) => {
+test("the config screen owns the URL and the Powered by switch", async ({ page }) => {
 	await stubApi(page);
 	await page.goto("/status");
 
@@ -54,7 +54,7 @@ test("poweredBy off removes the footer — removed means gone, not empty", async
 
 	await expect(page.getByRole("heading", { name: "All systems operational" })).toBeVisible();
 	await expect(page.getByText("Powered by")).toHaveCount(0);
-	// A switched-off section disappears — a heading over "no incidents
-	// recorded" would publish exactly the claim the owner declined to make.
-	await expect(page.getByRole("heading", { name: "Incident history" })).toHaveCount(0);
+	// The incident-history assertion that used to ride along here pinned the
+	// showIncidents switch, which is deleted: the section is no longer something
+	// an owner can turn off, so there is nothing left to assert about it.
 });

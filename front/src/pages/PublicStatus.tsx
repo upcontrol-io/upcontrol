@@ -238,11 +238,19 @@ export function PublicStatus() {
 					</section>
 				)}
 
-				{/* The incident section is no longer switchable; an empty list still
-				    publishes nothing. */}
-				{incidents.length > 0 && (
-					<section id="history" className={styles.history} data-reveal="">
-						<h2 className={styles.sectionTitle}>Incident history</h2>
+				{/* No longer switchable. The flag that hid this section also stopped the
+				    API from sending the incidents the banner reads its state from, so a
+				    page could call itself operational during an outage. What the section
+				    says when it is empty is unchanged: this app is somebody's own
+				    instance, and saying so plainly is not the hosted service's upsell. */}
+				<section id="history" className={styles.history} data-reveal="">
+					<h2 className={styles.sectionTitle}>Incident history</h2>
+					{incidents.length === 0 && (
+						<p className={styles.noIncidents}>
+							No incidents recorded. Nothing has gone down since this page was created.
+						</p>
+					)}
+					{incidents.length > 0 && (
 						<div className={styles.incidentList}>
 							{incidents.map((incident, index) => (
 								<div
@@ -263,8 +271,8 @@ export function PublicStatus() {
 								</div>
 							))}
 						</div>
-					</section>
-				)}
+					)}
+				</section>
 
 				{poweredBy && (
 					<footer className={styles.footer}>
