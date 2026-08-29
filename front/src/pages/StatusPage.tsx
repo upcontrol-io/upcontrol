@@ -15,7 +15,6 @@ export function StatusPage() {
 	const { data: monitorRows, live: monitorsLive } = useApiData('monitors', () => monitorsApi.list());
 	const [components, setComponents] = useState<Record<string, boolean>>({});
 	const [showNetwork, setShowNetwork] = useState(true);
-	const [showIncidents, setShowIncidents] = useState(true);
 	const [showPoweredBy, setShowPoweredBy] = useState(true);
 	const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -23,7 +22,6 @@ export function StatusPage() {
 	useEffect(() => {
 		if (!page) return;
 		setShowNetwork(page.showNetwork);
-		setShowIncidents(page.showIncidents);
 		setShowPoweredBy(page.showPoweredBy !== false);
 		setComponents(Object.fromEntries(page.components.map((c) => [c.key, c.shown])));
 	}, [page]);
@@ -37,7 +35,6 @@ export function StatusPage() {
 	function save(next: {
 		shown?: Record<string, boolean>;
 		showNetwork?: boolean;
-		showIncidents?: boolean;
 		showPoweredBy?: boolean;
 	}) {
 		if (!live || !page) return;
@@ -50,8 +47,7 @@ export function StatusPage() {
 				domain: page.domain ?? '',
 				shown: next.shown ?? components,
 				showNetwork: next.showNetwork ?? showNetwork,
-				showIncidents: next.showIncidents ?? showIncidents,
-				showPoweredBy: next.showPoweredBy ?? showPoweredBy,
+						showPoweredBy: next.showPoweredBy ?? showPoweredBy,
 			})
 			.catch(() => setSaveError('That setting did not save. The public page is unchanged.'));
 	}
@@ -156,23 +152,6 @@ export function StatusPage() {
 					<span className={styles.toggleKnob} />
 				</button>
 				<span className={styles.toggleLabel}>Show the Network section, covering pings, latency and response checks</span>
-			</div>
-
-			<div className={styles.toggleRow}>
-				<button
-					type="button"
-					role="switch"
-					aria-checked={showIncidents}
-					aria-label="Show past incidents"
-					className={[styles.toggle, showIncidents && styles.toggleOn].filter(Boolean).join(' ')}
-					onClick={() => {
-						setShowIncidents(!showIncidents);
-						save({ showIncidents: !showIncidents });
-					}}
-				>
-					<span className={styles.toggleKnob} />
-				</button>
-				<span className={styles.toggleLabel}>Show past incidents, not just current status</span>
 			</div>
 
 			<div className={styles.toggleRow}>

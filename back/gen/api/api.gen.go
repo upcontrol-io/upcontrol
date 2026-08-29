@@ -1066,12 +1066,9 @@ type PublicStatusResponse struct {
 	Network *[]NetworkTile `json:"network,omitempty"`
 
 	// PoweredBy Whether the credit line is published. Only a self-hosted instance can answer false: on the hosted service a plan buys the page's address, never the branding, so this is always true there.
-	PoweredBy *bool `json:"poweredBy,omitempty"`
-
-	// ShowIncidents Whether the incident-history SECTION is published — a different question from whether it is empty. Absent (or true) draws it; false removes the heading too, which is what the owner's switch means.
-	ShowIncidents *bool     `json:"showIncidents,omitempty"`
-	Title         *string   `json:"title,omitempty"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	PoweredBy *bool     `json:"poweredBy,omitempty"`
+	Title     *string   `json:"title,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Recipient defines model for Recipient.
@@ -1170,7 +1167,6 @@ type StatusPageResponse struct {
 	// DomainVerified Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify.
 	DomainVerified *bool          `json:"domainVerified,omitempty"`
 	Network        *[]NetworkTile `json:"network,omitempty"`
-	ShowIncidents  bool           `json:"showIncidents"`
 	ShowNetwork    bool           `json:"showNetwork"`
 
 	// ShowPoweredBy Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding.
@@ -1184,9 +1180,8 @@ type StatusPageResponse struct {
 // StatusPageUpdate defines model for StatusPageUpdate.
 type StatusPageUpdate struct {
 	// Domain The host to serve the page on. Normalized server-side (scheme, path and port dropped); must be a subdomain — at least three labels — and not our own host. Empty clears it. Changing it re-locks verification; 402 when the plan carries no custom domains, 409 when another page already rides that host.
-	Domain        *string `json:"domain,omitempty"`
-	ShowIncidents *bool   `json:"showIncidents,omitempty"`
-	ShowNetwork   *bool   `json:"showNetwork,omitempty"`
+	Domain      *string `json:"domain,omitempty"`
+	ShowNetwork *bool   `json:"showNetwork,omitempty"`
 
 	// ShowPoweredBy Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding.
 	ShowPoweredBy *bool `json:"showPoweredBy,omitempty"`

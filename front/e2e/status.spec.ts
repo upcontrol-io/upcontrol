@@ -16,7 +16,6 @@ const PUBLIC_PAGE = {
 	],
 	incidents: [],
 	network: [],
-	showIncidents: true,
 	updatedAt: new Date().toISOString(),
 	poweredBy: true,
 };
@@ -49,7 +48,7 @@ test("the public page renders the banner, the bars and the footer", async ({ pag
 });
 
 test("poweredBy off removes the footer — removed means gone, not empty", async ({ page }) => {
-	await servePublicStatus(page, "example-com", { ...PUBLIC_PAGE, poweredBy: false, showIncidents: false });
+	await servePublicStatus(page, "example-com", { ...PUBLIC_PAGE, poweredBy: false });
 	await page.route("**/public/track", (route) => route.fulfill({ status: 204, body: "" }));
 	await page.goto("/status/example-com");
 

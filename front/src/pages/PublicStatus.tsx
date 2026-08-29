@@ -238,38 +238,31 @@ export function PublicStatus() {
 					</section>
 				)}
 
-				{/* Switched off means gone: "No incidents recorded" under a heading
-				    publishes the claim the owner declined to make. */}
-				{page.showIncidents !== false && (
+				{/* The incident section is no longer switchable; an empty list still
+				    publishes nothing. */}
+				{incidents.length > 0 && (
 					<section id="history" className={styles.history} data-reveal="">
 						<h2 className={styles.sectionTitle}>Incident history</h2>
-						{incidents.length === 0 && (
-							<p className={styles.noIncidents}>
-								No incidents recorded. Nothing has gone down since this page was created.
-							</p>
-						)}
-						{incidents.length > 0 && (
-							<div className={styles.incidentList}>
-								{incidents.map((incident, index) => (
-									<div
-										key={index}
-										className={`${styles.incident} ${incident.ongoing ? styles.incidentOngoing : ''}`}
-									>
-										<div className={styles.incidentHead}>
-											<span className={styles.incidentTitle}>{incident.title}</span>
-											<span className={styles.incidentDate}>{incident.since}</span>
-										</div>
-										<div className={styles.updates}>
-											<div className={styles.update}>
-												<span className={styles.updateText}>
-													<span className={styles.updateState}>{incident.ongoing ? 'ongoing' : 'resolved'}</span>
-												</span>
-											</div>
+						<div className={styles.incidentList}>
+							{incidents.map((incident, index) => (
+								<div
+									key={index}
+									className={`${styles.incident} ${incident.ongoing ? styles.incidentOngoing : ''}`}
+								>
+									<div className={styles.incidentHead}>
+										<span className={styles.incidentTitle}>{incident.title}</span>
+										<span className={styles.incidentDate}>{incident.since}</span>
+									</div>
+									<div className={styles.updates}>
+										<div className={styles.update}>
+											<span className={styles.updateText}>
+												<span className={styles.updateState}>{incident.ongoing ? 'ongoing' : 'resolved'}</span>
+											</span>
 										</div>
 									</div>
-								))}
-							</div>
-						)}
+								</div>
+							))}
+						</div>
 					</section>
 				)}
 

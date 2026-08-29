@@ -108,7 +108,6 @@ export function Settings() {
 				domain: page.domain ?? '',
 				shown: Object.fromEntries(page.components.map((c) => [c.key, c.shown])),
 				showNetwork: page.showNetwork,
-				showIncidents: page.showIncidents,
 				showPoweredBy: page.showPoweredBy !== false,
 			})
 			.then(() => {

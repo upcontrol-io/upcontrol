@@ -3040,7 +3040,6 @@ export interface components {
             components: components["schemas"]["PublicComponent"][];
             network?: components["schemas"]["NetworkTile"][];
             showNetwork: boolean;
-            showIncidents: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy: boolean;
         };
@@ -3063,7 +3062,6 @@ export interface components {
                 [key: string]: boolean;
             };
             showNetwork?: boolean;
-            showIncidents?: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy?: boolean;
         };
@@ -3079,8 +3077,6 @@ export interface components {
             incidents: components["schemas"]["PublicIncident"][];
             /** @description Empty when the owner has the section switched off, or when nothing has been measured yet. */
             network?: components["schemas"]["NetworkTile"][];
-            /** @description Whether the incident-history SECTION is published — a different question from whether it is empty. Absent (or true) draws it; false removes the heading too, which is what the owner's switch means. */
-            showIncidents?: boolean;
             /** Format: date-time */
             updatedAt: string;
             /** @description Whether the credit line is published. Only a self-hosted instance can answer false: on the hosted service a plan buys the page's address, never the branding, so this is always true there. */

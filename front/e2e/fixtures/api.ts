@@ -129,7 +129,6 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 		title: DOMAIN,
 		domain: "",
 		showNetwork: true,
-		showIncidents: true,
 		showPoweredBy: true,
 	};
 
@@ -213,7 +212,6 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 		if (route.request().method() === "PUT") {
 			const body = parseBody(route);
 			statusPage.showNetwork = body.showNetwork ?? statusPage.showNetwork;
-			statusPage.showIncidents = body.showIncidents ?? statusPage.showIncidents;
 			statusPage.showPoweredBy = body.showPoweredBy ?? statusPage.showPoweredBy;
 			statusPage.title = body.title ?? statusPage.title;
 		}

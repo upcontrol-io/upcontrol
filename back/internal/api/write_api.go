@@ -918,7 +918,6 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		Domain        string          `json:"domain"`
 		Shown         map[string]bool `json:"shown"`
 		ShowNetwork   *bool           `json:"showNetwork"`
-		ShowIncidents *bool           `json:"showIncidents"`
 		ShowPoweredBy *bool           `json:"showPoweredBy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -937,9 +936,6 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	if req.ShowNetwork != nil {
 		cfg.ShowNetwork = *req.ShowNetwork
-	}
-	if req.ShowIncidents != nil {
-		cfg.ShowIncidents = *req.ShowIncidents
 	}
 	if req.ShowPoweredBy != nil {
 		cfg.ShowPoweredBy = *req.ShowPoweredBy
@@ -1017,11 +1013,11 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 // it is measured. The domain is deliberately absent: it is not a display
 // setting but the host we route by, so it lives in its own column.
 type statusPageConfig struct {
-	Slug          string          `json:"slug"`
-	Title         string          `json:"title"`
-	Shown         map[string]bool `json:"shown"`
-	ShowNetwork   bool            `json:"showNetwork"`
-	ShowIncidents bool            `json:"showIncidents"`
+	Slug  string `json:"slug"`
+	Title string
+	Shown map[string]bool `json:"shown"`
+	// The network section switch is real: the owner may hide performance metrics.
+	ShowNetwork bool `json:"showNetwork"`
 	// Honoured only on a self-hosted instance. Somebody running their own copy
 	// under the AGPL may take our name off it; a cloud tenant may not, because
 	// there the plan buys the page's address and nothing about the branding
@@ -1043,7 +1039,7 @@ func (h *writeAPI) poweredBy(cfg statusPageConfig) bool {
 // session re-read cannot send the lookup to tenant 0. The domain and its proof
 // come from the columns, never the config blob.
 func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID int64) (statusPageConfig, string, bool) {
-	cfg := statusPageConfig{ShowNetwork: true, ShowIncidents: true, ShowPoweredBy: true, Shown: map[string]bool{}}
+	cfg := statusPageConfig{ShowNetwork: true, ShowPoweredBy: true, Shown: map[string]bool{}}
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var domain, title, slug *string
 	var verifiedAt *time.Time
@@ -1085,7 +1081,6 @@ func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID int64, cfg s
 		"components":     h.statusComponents(ctx, tenantID, cfg, false),
 		"network":        h.statusNetwork(ctx, tenantID),
 		"showNetwork":    cfg.ShowNetwork,
-		"showIncidents":  cfg.ShowIncidents,
 		"showPoweredBy":  h.poweredBy(cfg),
 	}
 }
@@ -2609,9 +2604,6 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
 		"claimed":    claimed,
 		"poweredBy":  h.poweredBy(cfg),
-		// Whether the SECTION is published, not whether it is empty: the owner
-		// who hid a section must not get a heading under it.
-		"showIncidents": cfg.ShowIncidents,
 	}
 	// The viewer's own page says so: mine is present and true only when a
 	// session resolves AND belongs to the page's tenant. Absent = not the
@@ -2625,29 +2617,27 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 	if cfg.ShowNetwork {
 		resp["network"] = h.statusNetwork(ctx, tenantID)
 	}
-	if cfg.ShowIncidents {
-		incidents := []map[string]any{}
-		if rows, rerr := h.pool.Raw().Query(ctx,
-			// monitor_id IS NOT NULL drops incidents of DELETED checks: the
-			// component is gone from the page; the detector filter does the rest.
-			`SELECT title, status, detected_at FROM incident
-			  WHERE tenant_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
-			  ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
-			for rows.Next() {
-				var title, status string
-				var at time.Time
-				if rows.Scan(&title, &status, &at) == nil {
-					incidents = append(incidents, map[string]any{
-						"title": title, "status": status,
-						"since":   at.UTC().Format("Jan 2, 15:04"),
-						"ongoing": status == "down" || status == "check",
-					})
-				}
+	incidents := []map[string]any{}
+	if rows, rerr := h.pool.Raw().Query(ctx,
+		// monitor_id IS NOT NULL drops incidents of DELETED checks: the
+		// component is gone from the page; the detector filter does the rest.
+		`SELECT title, status, detected_at FROM incident
+		  WHERE tenant_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
+		  ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
+		for rows.Next() {
+			var title, status string
+			var at time.Time
+			if rows.Scan(&title, &status, &at) == nil {
+				incidents = append(incidents, map[string]any{
+					"title": title, "status": status,
+					"since":   at.UTC().Format("Jan 2, 15:04"),
+					"ongoing": status == "down" || status == "check",
+				})
 			}
-			rows.Close()
 		}
-		resp["incidents"] = incidents
+		rows.Close()
 	}
+	resp["incidents"] = incidents
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 

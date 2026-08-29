@@ -731,7 +731,7 @@ components:
     StatusPageResponse:
       type: object
       required:
-        [slug, title, components, showNetwork, showIncidents, showPoweredBy]
+        [slug, title, components, showNetwork, showPoweredBy]
       properties:
         slug:
           type: string
@@ -753,7 +753,6 @@ components:
           type: array
           items: { $ref: "#/components/schemas/NetworkTile" }
         showNetwork: { type: boolean }
-        showIncidents: { type: boolean }
         showPoweredBy:
           type: boolean
           description: >-
@@ -793,7 +792,6 @@ components:
           additionalProperties: { type: boolean }
           description: Component key → published. Absent keys default to published.
         showNetwork: { type: boolean }
-        showIncidents: { type: boolean }
         showPoweredBy:
           type: boolean
           description: >-
@@ -824,12 +822,6 @@ components:
           description: Empty when the owner has the section switched off, or when nothing has been measured yet.
           type: array
           items: { $ref: "#/components/schemas/NetworkTile" }
-        showIncidents:
-          description: >
-            Whether the incident-history SECTION is published — a different
-            question from whether it is empty. Absent (or true) draws it; false
-            removes the heading too, which is what the owner's switch means.
-          type: boolean
         updatedAt: { type: string, format: date-time }
         poweredBy:
           description: >
