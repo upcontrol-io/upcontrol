@@ -1057,7 +1057,10 @@ type PublicStatusResponse struct {
 	// Claimed Whether the page belongs to an account. Clients treat ABSENT as claimed (an older backend knows no claim controls): fail closed.
 	Claimed    *bool             `json:"claimed,omitempty"`
 	Components []PublicComponent `json:"components"`
-	Incidents  []PublicIncident  `json:"incidents"`
+
+	// HasCustomDomain Present and true only for the OWNER (same rule as `mine`), when this page already has a custom domain stored, verified or not. It exists so the owner's own view of the page on our link can stop offering an address they have already bought. A boolean rather than the domain itself: nothing on a public page needs to print that address, and a field that carries it invites a caller to.
+	HasCustomDomain *bool            `json:"hasCustomDomain,omitempty"`
+	Incidents       []PublicIncident `json:"incidents"`
 
 	// Mine Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page.
 	Mine *bool `json:"mine,omitempty"`

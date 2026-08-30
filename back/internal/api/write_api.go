@@ -2595,7 +2595,7 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 	// decides, and a tenant-only session lands on the lowest project id —
 	// exactly the pre-projects pick. A signed-in viewer's own session must
 	// not bend somebody else's page toward their current project.
-	cfg, _, _ := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
+	cfg, storedDomain, _ := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
 	resp := map[string]any{
 		"title":      cfg.Title,
 		"components": h.statusComponents(ctx, tenantID, cfg, true),
@@ -2611,6 +2611,12 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 	// the door is public and must answer the same either way.
 	if vs, verr := h.sess.FromRequest(ctx, r); verr == nil && vs.TenantID == tenantID {
 		resp["mine"] = true
+		// Same visibility rule, one purpose: the owner reading their own page on
+		// our link is the one viewer the upgrade banner speaks to, and it must
+		// not sell an address they already own. A visitor never learns this.
+		if storedDomain != "" {
+			resp["hasCustomDomain"] = true
+		}
 	}
 	// The owner's switch decides whether the section is published at all; what it
 	// then shows is measured, never sample data.

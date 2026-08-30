@@ -269,6 +269,25 @@ func TestPublicStatusAnswersMineOnlyForTheOwner(t *testing.T) {
 		t.Fatalf("owner's mine = %v, want true (body %v)", resp["mine"], resp)
 	}
 
+	// hasCustomDomain rides the same visibility rule as mine, and answers a different
+	// question: the owner's banner on OUR link sells the custom domain, and must stop
+	// selling one they already have. No domain stored yet, so the field is absent.
+	if resp := get(f.ownerCookie); resp["hasCustomDomain"] != nil {
+		t.Fatalf("owner with no domain reads hasCustomDomain = %v, want the field absent",
+			resp["hasCustomDomain"])
+	}
+	if _, err := f.pool.Raw().Exec(ctx,
+		`UPDATE status_page SET domain = $2 WHERE slug = $1`,
+		slug, fmt.Sprintf("status.mine-%d.example.com", time.Now().UnixNano())); err != nil {
+		t.Fatalf("set domain: %v", err)
+	}
+	// Stored but NOT verified, which is the state a customer sits in while DNS
+	// propagates: they have bought the address, so the offer is already wrong.
+	if resp := get(f.ownerCookie); resp["hasCustomDomain"] != true {
+		t.Fatalf("owner with a domain reads hasCustomDomain = %v, want true",
+			resp["hasCustomDomain"])
+	}
+
 	// A different account's session: same public answer, no mine field.
 	uniq := time.Now().UnixNano()
 	var otherTenant, otherPerson int64
@@ -296,8 +315,18 @@ func TestPublicStatusAnswersMineOnlyForTheOwner(t *testing.T) {
 	if _, ok := resp["mine"]; ok {
 		t.Fatalf("another account reads mine = %v, want the field absent", resp["mine"])
 	}
+	// The domain set above is the owner's business. A stranger learning this page has one
+	// would also silence the pitch that stranger is meant to see.
+	if _, ok := resp["hasCustomDomain"]; ok {
+		t.Fatalf("another account reads hasCustomDomain = %v, want the field absent",
+			resp["hasCustomDomain"])
+	}
 	resp = get(nil)
 	if _, ok := resp["mine"]; ok {
 		t.Fatalf("a signed-out visitor reads mine = %v, want the field absent", resp["mine"])
+	}
+	if _, ok := resp["hasCustomDomain"]; ok {
+		t.Fatalf("a signed-out visitor reads hasCustomDomain = %v, want the field absent",
+			resp["hasCustomDomain"])
 	}
 }
