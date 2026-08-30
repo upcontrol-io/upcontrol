@@ -96,6 +96,14 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		_ = pool.Queries().PurgeExpiredBatches(ctx)
 	})
 
+	// Day partitions of logs: every hour. 001 made two and left the rolling to
+	// a job that never existed, so once the calendar passed them every flush
+	// failed and the lines were lost. Migration 003 seeds four days, which is
+	// why an hourly tick is soon enough.
+	go runWithLock(ctx, pool, d, "log-partitions", time.Hour, func(ctx context.Context) {
+		rollLogPartitions(ctx, pool, d)
+	})
+
 	// Unclaimed anonymous tenants: monitors pause after 24 h, the tenant dies
 	// after 7 days (Decision 10, docs/plans/projects-axis.md).
 	go runWithLock(ctx, pool, d, "unclaimed-reaper", 10*time.Minute, func(ctx context.Context) {
@@ -253,6 +261,30 @@ func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
 		                      JOIN api_key ak    ON ak.project_id = p.id
 		                     WHERE p.tenant_id = t.id AND ps.next > 1)`)
 	return err
+}
+
+// rollLogPartitions keeps the logs day partitions covering the widest plan
+// window plus a day. The window is read from plan_entitlement on every run:
+// partitions are global while the window is per plan, so the floor has to sit
+// under the widest one or the largest plan silently loses days it paid for.
+// A window it cannot read drops nothing: a missing floor is not a floor of
+// zero.
+func rollLogPartitions(ctx context.Context, pool *pg.Pool, d app.Deps) {
+	var hours int
+	if err := pool.Raw().QueryRow(ctx, `SELECT max(window_hours) FROM plan_entitlement`).Scan(&hours); err != nil {
+		d.Logger.Warn("log-partitions: plan window lookup failed", "err", err)
+		return
+	}
+	keep := time.Duration(hours)*time.Hour + 24*time.Hour
+	created, dropped, err := pgstore.New(pool.Raw()).RollLogPartitions(ctx, time.Now(), 3, keep)
+	if err != nil {
+		d.Logger.Warn("log-partitions: roll failed", "err", err, "created", created, "dropped", dropped)
+		return
+	}
+	if len(created) > 0 || len(dropped) > 0 {
+		d.Logger.Info("log-partitions rolled",
+			"created", created, "dropped", dropped, "keep_hours", int(keep.Hours()))
+	}
 }
 
 // hashJobName produces a stable int64 for the advisory lock key.

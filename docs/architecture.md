@@ -211,8 +211,12 @@ core).
 
 **Postgres, telemetry** (written through internal/storage/pgstore):
 
-- `logs`: range-partitioned by `ts`, today and tomorrow at install time;
-  dropping partitions behind the 48-hour floor is the physical bound.
+- `logs`: range-partitioned by `ts`, one partition per UTC day
+  (`logs_YYYYMMDD`). ucworker's hourly `log-partitions` job covers the days
+  from the widest `plan_entitlement.window_hours` plus a day up to three days
+  ahead, and drops the ones behind that floor; the floor is physical, the seq
+  ring is what actually bounds a project's window. A partition it cannot name
+  (001's `logs_today`, an operator's own) is never dropped.
   `level_raw` keeps the level exactly as the client sent it, capped at 32
   bytes, and `fingerprint` is computed at ingest as FNV-64a of the masked
   scrubbed message.
