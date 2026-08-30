@@ -3,7 +3,7 @@
 
 import { scrub } from './scrub.js';
 
-export const SDK_VERSION = '0.1.0';
+export const SDK_VERSION = '0.2.0';
 
 const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const FLUSH_AFTER_MS = 1500;
@@ -22,6 +22,7 @@ interface Line {
 export class Client {
   private key: string | undefined;
   private endpoint: string;
+  readonly service: string | undefined;
   private lines: Line[] = [];
   private bytes = 0;
   private dropped = 0;
@@ -38,6 +39,7 @@ export class Client {
   constructor(env: NodeJS.ProcessEnv = process.env) {
     this.key = env.UPCONTROL_API_KEY?.trim() || undefined;
     this.endpoint = (env.UPCONTROL_ENDPOINT?.trim() || 'https://upcontrol.io').replace(/\/+$/, '');
+    this.service = env.UPCONTROL_SERVICE?.trim() || undefined;
   }
 
   get hasKey(): boolean {
@@ -130,28 +132,28 @@ export class Client {
     const parts: string[] = [];
     let size = 0;
     if (this.dropped > 0) {
-      parts.push(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          level: 'warn',
-          msg: 'upcontrol_buffer_dropped',
-          dropped: this.dropped,
-        }),
-      );
+      const droppedLine: Record<string, unknown> = {
+        ts: new Date().toISOString(),
+        level: 'warn',
+        msg: 'upcontrol_buffer_dropped',
+        dropped: this.dropped,
+      };
+      if (this.service) droppedLine.service = this.service;
+      parts.push(JSON.stringify(droppedLine));
       this.dropped = 0;
     }
     if (!this.sentInstallVerified) {
       // First batch of this process carries the install proof. If the batch
       // fails it is retried whole, so the event cannot be lost.
-      parts.push(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          level: 'info',
-          msg: 'install_verified',
-          version: SDK_VERSION,
-          env: process.env.NODE_ENV || 'production',
-        }),
-      );
+      const verifiedLine: Record<string, unknown> = {
+        ts: new Date().toISOString(),
+        level: 'info',
+        msg: 'install_verified',
+        version: SDK_VERSION,
+        env: process.env.NODE_ENV || 'production',
+      };
+      if (this.service) verifiedLine.service = this.service;
+      parts.push(JSON.stringify(verifiedLine));
     }
     let count = 0;
     while (this.lines.length > 0 && size < MAX_BATCH_BYTES) {

@@ -9,6 +9,7 @@ export { SDK_VERSION } from './client.js';
 
 const client = new Client();
 const host = safeHostname();
+const service = client.service;
 
 function safeHostname(): string {
   try {
@@ -30,6 +31,7 @@ export function track(event: string, attrs?: Attrs): void {
       'uc.event': true,
     };
     if (host) fields.host = host;
+    if (service && fields.service === undefined) fields.service = service;
     client.enqueue(scrubFields(fields), 'info');
   } catch {
     /* track never throws */
@@ -60,6 +62,7 @@ export function upcontrolLine(level: string, msg: unknown, extra?: unknown): voi
       fields.msg = String(msg);
     }
     if (host) fields.host = host;
+    if (service && fields.service === undefined) fields.service = service;
     client.enqueue(scrubFields(fields), String(fields.level));
   } catch {
     /* never throws */

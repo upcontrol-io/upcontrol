@@ -18,6 +18,10 @@ the key in `.env`. In the app entry point, first line:
 import '@upcontrol/sdk/auto';
 ```
 
+Set `UPCONTROL_SERVICE` in the same `.env` as the key - one short lowercase
+name per deployable (`api`, `worker`, `front`) - so every line names its
+sender; without it the dashboard shows the line with no service.
+
 ## Step 2 - mirror the existing logger
 
 ### pino

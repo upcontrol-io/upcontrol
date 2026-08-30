@@ -20,6 +20,7 @@ test('a trace line reaches the wire as trace, not debug', async () => {
   // index.js builds its client from process.env at import time; set first.
   process.env.UPCONTROL_API_KEY = 'uc_live_test';
   process.env.UPCONTROL_ENDPOINT = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  delete process.env.UPCONTROL_SERVICE;
   const { upcontrolLine, flush } = await import('../dist/esm/index.js');
 
   upcontrolLine('trace', 'deep trace line');
@@ -30,4 +31,5 @@ test('a trace line reaches the wire as trace, not debug', async () => {
   const lines = bodies.join('\n').split('\n').map((l) => JSON.parse(l));
   assert.equal(lines.find((l) => l.msg === 'deep trace line')?.level, 'trace');
   assert.equal(lines.find((l) => l.msg === 'plain debug line')?.level, 'debug');
+  for (const line of lines) assert.equal('service' in line, false);
 });

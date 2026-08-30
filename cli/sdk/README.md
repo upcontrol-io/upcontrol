@@ -22,6 +22,10 @@ Configuration is environment-only:
 - `UPCONTROL_API_KEY` - the project key (`uc_live_...`). Belongs in `.env`,
   which must be gitignored. `npx upcontrol init` places it for you.
 - `UPCONTROL_ENDPOINT` - optional, defaults to `https://upcontrol.io`.
+- `UPCONTROL_SERVICE` - optional. A short name for the process that sends the
+  line (`api`, `worker`, `front`); the dashboard's service column and filter
+  read it. A `service` attribute passed to `track()` or `upcontrolLine()` wins
+  over it. Unset, the line carries no service.
 
 What it does on the wire: batches lines (1.5 s / 64 KB), keeps at most 8 MB in
 memory (oldest lines are evicted WITH an explicit drop line - silent loss is

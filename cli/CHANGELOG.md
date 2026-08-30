@@ -5,6 +5,23 @@ deploy is rolled back, a bad published version is on other people's machines).
 
 ## Unreleased
 
+## 2026-08-30 — upcontrol 0.1.5
+
+- `SDK_PIN` moves to `0.2.0`, so a fresh `init` pins the `@upcontrol/sdk` that sends
+  `UPCONTROL_SERVICE`, the variable the bundled skill now documents. Publish the SDK
+  first: the pin names a version that must already be on npm.
+
+## 2026-08-30 — @upcontrol/sdk 0.2.0
+
+- `UPCONTROL_SERVICE` names the process on every line the SDK sends (`track()`,
+  `upcontrolLine()`, the console and winston mirrors, and the SDK's own
+  `install_verified` / `upcontrol_buffer_dropped` lines). A `service` attribute the
+  caller passes wins over it. Unset, nothing changes: the line has no `service` and is
+  byte-identical to 0.1.1. The dashboard's service column and filter already read the
+  field; only the SDK never sent it.
+- `SDK_VERSION` is `0.2.0` and a test now asserts it equals `package.json`: 0.1.1 shipped
+  reporting `js/0.1.0` in the `X-UpControl-Sdk` header and in `install_verified`.
+
 ## 2026-08-29 — upcontrol 0.1.4
 
 - `status`, `--version` and the `cli_version` field every install sends report

@@ -14,7 +14,7 @@ import {
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const SDK_PIN = '0.1.1';
+export const SDK_PIN = '0.2.0';
 
 export function bundledSkillDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'skill');

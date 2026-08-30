@@ -43,8 +43,10 @@ import '@upcontrol/sdk/auto';
 That single line installs the automatic pieces: `app_started` on boot,
 `unhandled_exception` on crashes (observed via `uncaughtExceptionMonitor` - the
 process still crashes exactly as before), and a best-effort flush when the
-event loop drains. Configuration is environment-only: `UPCONTROL_API_KEY` and
-optionally `UPCONTROL_ENDPOINT`. No config object, no init call.
+event loop drains. Configuration is environment-only: `UPCONTROL_API_KEY`,
+optionally `UPCONTROL_ENDPOINT`, and `UPCONTROL_SERVICE` - one short lowercase
+name per deployable (`api`, `worker`, `front`) that every line carries and the
+dashboard filters by. No config object, no init call.
 
 Without a key the SDK stays silent: `track()` becomes a no-op, one warning is
 printed at startup, nothing accumulates. The app is never affected.
