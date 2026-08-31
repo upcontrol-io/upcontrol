@@ -3013,6 +3013,10 @@ export interface components {
             /** @description Absent when there are zero errors beyond the window. */
             beyondWindow?: components["schemas"]["BeyondWindow"];
             incidentHistoryDays: number;
+            /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. */
+            projects?: components["schemas"]["UsedMax"];
+            /** @description Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time. */
+            telegramRooms?: boolean;
         };
         PublicComponent: {
             /** @description The monitor's public id — a component IS a check. */
@@ -3085,6 +3089,8 @@ export interface components {
             claimed?: boolean;
             /** @description Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page. */
             mine?: boolean;
+            /** @description Present and true only for the OWNER (same rule as `mine`), when this page already has a custom domain stored, verified or not. It exists so the owner's own view of the page on our link can stop offering an address they have already bought. A boolean rather than the domain itself: nothing on a public page needs to print that address, and a field that carries it invites a caller to. */
+            hasCustomDomain?: boolean;
         };
         /** @enum {string} */
         WatchStatus: "ok" | "check" | "down" | "nodata";

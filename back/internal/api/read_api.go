@@ -84,6 +84,14 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 		// Telegram recipients are the one counted human axis: both numbers
 		// are measured here, never hardcoded client-side.
 		"telegramRecipients": map[string]int{"used": tgUsed, "max": tgMax},
+		// Whether groups/channels may connect at all (false on Free): the
+		// invite screen words its copy from this, never from the plan name.
+		"telegramRooms": ent.TelegramRooms,
+	}
+	// Absent when the plan is unlimited (Self-hosted): a bar needs a remainder.
+	if ent.Projects != nil {
+		projUsed, _ := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)
+		resp["projects"] = map[string]int{"used": int(projUsed), "max": int(*ent.Projects)}
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
@@ -193,13 +201,37 @@ func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 
-// GET /v1/incidents — incident history (newest first).
+// GET /v1/incidents — incident history (newest first), clamped to the plan's
+// window. Closed incidents past incident_days are hidden, never deleted below
+// the widest plan's window — an upgrade restores them at once.
 func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	rows, _ := h.pool.Queries().ListIncidentsByTenant(r.Context(),
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, Limit: 20})
+	ctx := r.Context()
+	plan, _ := h.pool.Queries().GetTenantPlan(ctx, tenantID)
+	if plan == "" {
+		plan = "Free"
+	}
+	// A dead entitlement read fails open (SinceDays 0 = no clamp), like every
+	// other wall: hiding history over a transient error is the worse answer.
+	windowDays := 0
+	if ent, err := h.pool.Queries().GetPlanEntitlement(ctx, plan); err == nil {
+		windowDays = int(ent.IncidentDays)
+	}
+	rows, _ := h.pool.Queries().ListIncidentsByTenant(ctx,
+		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, RowLimit: 20, SinceDays: int32(windowDays)})
 	items := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, h.incidentWithEvidence(r.Context(), row))
+		inc := h.incidentWithEvidence(ctx, row)
+		// The record's real deletion-from-view date, for the Dashboard's "keep
+		// it longer" teaser. Only closed incidents age out, and only when the
+		// window is known.
+		if row.ResolvedAt.Valid && row.DetectedAt.Valid && windowDays > 0 {
+			left := windowDays - int(time.Since(row.DetectedAt.Time).Hours()/24)
+			if left < 0 {
+				left = 0
+			}
+			inc["historyDaysLeft"] = left
+		}
+		items = append(items, inc)
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -263,9 +295,10 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	if health != nil {
 		resp["health"] = health
 	}
-	// Open incident (if any).
+	// Open incident (if any). SinceDays 1: only the ongoing incident is
+	// consumed below, and an open one passes any clamp (resolved_at IS NULL).
 	incRows, _ := h.pool.Queries().ListIncidentsByTenant(ctx,
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, Limit: 1})
+		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, RowLimit: 1, SinceDays: 1})
 	if len(incRows) > 0 && (incRows[0].Status == "down" || incRows[0].Status == "check") {
 		// Same shape as /v1/incidents: the Dashboard branches on `ongoing`, and a
 		// three-field incident silently read as "nothing is wrong".

@@ -51,7 +51,7 @@ func (q *Queries) GetAPIKeyForTenant(ctx context.Context, tenantID int64) (GetAP
 }
 
 const getPlanEntitlement = `-- name: GetPlanEntitlement :one
-SELECT plan, http_checks, regions, window_lines, window_hours, retain_mult, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain FROM plan_entitlement WHERE plan = $1
+SELECT plan, http_checks, regions, window_lines, window_hours, retain_mult, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms FROM plan_entitlement WHERE plan = $1
 `
 
 func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEntitlement, error) {
@@ -69,6 +69,7 @@ func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEnti
 		&i.TelegramRecipients,
 		&i.Projects,
 		&i.CustomDomain,
+		&i.TelegramRooms,
 	)
 	return i, err
 }
@@ -162,12 +163,18 @@ func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]L
 
 const listIncidentsByTenant = `-- name: ListIncidentsByTenant :many
 SELECT id, tenant_id, public_id, title, status, detected_at, resolved_at, affected_count, close_reason
-  FROM incident WHERE tenant_id = $1 ORDER BY detected_at DESC LIMIT $2
+  FROM incident
+ WHERE tenant_id = $1
+   AND (resolved_at IS NULL
+        OR $2::int <= 0
+        OR detected_at >= now() - make_interval(days => $2::int))
+ ORDER BY detected_at DESC LIMIT $3
 `
 
 type ListIncidentsByTenantParams struct {
-	TenantID int64
-	Limit    int32
+	TenantID  int64
+	SinceDays int32
+	RowLimit  int32
 }
 
 type ListIncidentsByTenantRow struct {
@@ -183,9 +190,13 @@ type ListIncidentsByTenantRow struct {
 }
 
 // tenant_id is selected back so incidentWithEvidence can scope the events read
-// to the same tenant without a second lookup.
+// to the same tenant without a second lookup. since_days is the plan's incident
+// window (plan_entitlement.incident_days): closed incidents past it are hidden,
+// an OPEN incident always shows, and 0 means no clamp (the export takeout).
+// Hidden, not deleted — an upgrade instantly restores the history; the worker's
+// purge deletes only past the widest plan's window.
 func (q *Queries) ListIncidentsByTenant(ctx context.Context, arg ListIncidentsByTenantParams) ([]ListIncidentsByTenantRow, error) {
-	rows, err := q.db.Query(ctx, listIncidentsByTenant, arg.TenantID, arg.Limit)
+	rows, err := q.db.Query(ctx, listIncidentsByTenant, arg.TenantID, arg.SinceDays, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

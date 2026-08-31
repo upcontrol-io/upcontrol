@@ -698,6 +698,19 @@ components:
           allOf:
             - $ref: "#/components/schemas/BeyondWindow"
         incidentHistoryDays: { type: integer }
+        projects:
+          description: >
+            Absent when the plan is unlimited (Self-hosted): a usage bar needs
+            a remainder, and an unlimited axis has none to draw.
+          allOf:
+            - $ref: "#/components/schemas/UsedMax"
+        telegramRooms:
+          type: boolean
+          description: >
+            Whether Telegram groups and channels may connect as broadcast
+            destinations (false on Free). The invite screen words its copy from
+            this capability, never from the plan name; the enforcing wall is the
+            bot's own refusal at redeem time.
 
     # --- status page / public ----------------------------------------------
     PublicComponent:

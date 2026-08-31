@@ -345,6 +345,24 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 			b.send(msg.Chat.ID, "This link is personal. Open it in a private chat with the bot.")
 			return
 		}
+		// Broadcast destinations are a paid capability (plan_entitlement.
+		// telegram_rooms, false on Free only). Refuse BEFORE any row exists:
+		// the rollback keeps the invite valid for a private chat, and the bot
+		// leaves so a dead membership does not read as a connected group. A
+		// failed entitlement read fails open, like every other wall.
+		var rooms bool
+		if err := tx.QueryRow(ctx,
+			`SELECT pe.telegram_rooms FROM plan_entitlement pe
+			  JOIN tenant t ON t.plan = pe.plan WHERE t.id = $1`,
+			tenantID).Scan(&rooms); err != nil {
+			rooms = true
+		}
+		if !rooms {
+			b.send(msg.Chat.ID, "Telegram groups and channels are available on paid plans. This link still works in a private chat with the bot.")
+			_ = b.call("leaveChat", map[string]any{"chat_id": msg.Chat.ID})
+			b.log.Info("telegram group refused by plan", "tenant_id", tenantID, "chat_id", msg.Chat.ID)
+			return
+		}
 		// The channel's label is the group's own title; a titleless group
 		// stores NULL, so the row falls back to the target.
 		if _, err := tx.Exec(ctx,

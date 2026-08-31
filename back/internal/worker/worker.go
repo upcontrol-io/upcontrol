@@ -112,9 +112,23 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		}
 	})
 
+	// Incident hard purge: hourly, and only past the WIDEST plan window — below
+	// it closed incidents are merely hidden by the read clamp (ListIncidents-
+	// ByTenant.since_days), so an upgrade restores them at once. The ceiling
+	// comes from plan_entitlement, never a constant: the table decides.
+	// Cascades take slices, updates and queue rows with the incident.
+	go runWithLock(ctx, pool, d, "incident-purge", time.Hour, func(ctx context.Context) {
+		if _, err := pool.Raw().Exec(ctx,
+			`DELETE FROM incident
+			  WHERE resolved_at IS NOT NULL
+			    AND detected_at < now() - make_interval(days => (SELECT max(incident_days)::int FROM plan_entitlement))`); err != nil {
+			d.Logger.Warn("incident purge tick error", "err", err)
+		}
+	})
+
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
 	// "Error logs" / "Repeating error logs" settings.
-	jobs := "delivery+cutoff+purge+reaper"
+	jobs := "delivery+cutoff+purge+reaper+incident-purge"
 	pgs := pgstore.New(pool.Raw())
 	scanner := errorlog.New(pool, pgs, d.Logger)
 	go runWithLock(ctx, pool, d, "errorlog-scan", time.Minute, func(ctx context.Context) {
