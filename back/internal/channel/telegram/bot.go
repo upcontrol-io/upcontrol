@@ -368,21 +368,53 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	}
 
 	// A BOUND link (person_id set) links the account to that person; an
-	// UNBOUND link finds-or-creates by telegram_id. Merging is a non-goal.
+	// UNBOUND link finds-or-creates by telegram_id. The one merge is the fork
+	// an unbound redeem leaves behind (mergeFork), never two real accounts.
 	name := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
 	var personID int64
 	if invitePersonID != nil {
 		personID = *invitePersonID
-		// Refusal one: this Telegram account is already somebody else's —
-		// linking it here would hand this person the other's presses and pages.
-		var otherID int64
-		if err := tx.QueryRow(ctx,
-			`SELECT id FROM person WHERE telegram_id = $1 AND id <> $2`,
-			msg.From.ID, personID).Scan(&otherID); err == nil {
+		// Refusal one, or a merge: another person row may hold this
+		// telegram_id. A row is a FORK only when telegram_id is its ONLY
+		// identity — person carries e-mail, telegram_id AND google_sub, and
+		// the table's CHECK lets a google_sub row live without an e-mail, so
+		// either one is a login identity somebody signs in with and is never
+		// absorbed. A tenant_member row ANYWHERE, this tenant included, says
+		// the same thing: that row is a live teammate, and absorbing it would
+		// delete their person row, cascade their membership and session, and
+		// hand their Telegram to the invitee — who would then sign in AS them
+		// through /v1/auth/telegram, which resolves a session by telegram_id
+		// alone. What is left is the ORPHAN: deleteRecipient drops the
+		// membership, both channels, the unused invites and the sessions and
+		// deliberately keeps the person row, so the fork this merge recovers
+		// from has ZERO memberships anywhere — and since telegram_id is
+		// UNIQUE, refusing that one would leave the account permanently
+		// unlinkable. It costs the reader a step: after an unbound redeem
+		// forked them, they remove the duplicate from the team FIRST, and
+		// only then does Link Telegram absorb the leftover row. That step is
+		// deliberate — silently absorbing a live teammate is the worse answer.
+		var holderID int64
+		var holderHasLogin, holderIsMember bool
+		holderErr := tx.QueryRow(ctx,
+			`SELECT p.id, p.email IS NOT NULL OR p.google_sub IS NOT NULL,
+			        EXISTS (SELECT 1 FROM tenant_member tm WHERE tm.person_id = p.id)
+			   FROM person p WHERE p.telegram_id = $1 AND p.id <> $2`,
+			msg.From.ID, personID).Scan(&holderID, &holderHasLogin, &holderIsMember)
+		switch {
+		case holderErr == nil && (holderHasLogin || holderIsMember):
 			b.send(msg.Chat.ID, "This Telegram account already belongs to someone else on the project.")
 			return
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			b.log.Warn("telegram: bound person telegram read failed", "err", err)
+		case holderErr == nil:
+			if err := mergeFork(ctx, tx, tenantID, holderID, personID); err != nil {
+				b.log.Warn("telegram: fork merge failed", "err", err,
+					"tenant_id", tenantID, "person_id", personID, "merged_person_id", holderID)
+				b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
+				return
+			}
+			b.log.Info("telegram fork merged into the invited person",
+				"tenant_id", tenantID, "person_id", personID, "merged_person_id", holderID)
+		case !errors.Is(holderErr, pgx.ErrNoRows):
+			b.log.Warn("telegram: bound person telegram read failed", "err", holderErr)
 			b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 			return
 		}
@@ -412,7 +444,11 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 			return
 		}
 		// No membership INSERT: the mint already resolved membership; a link
-		// is not a way to re-role anybody.
+		// is not a way to re-role anybody. No status write either: a Telegram
+		// redeem proves control of a Telegram account and says nothing about
+		// an address, while status is the field createChannel gates e-mail
+		// channels on. The seat this once repaired is counted where the axis
+		// is defined instead — countTelegramRecipients filters on no status.
 	} else {
 		personID, err = b.personByTelegramID(ctx, tx, msg.From)
 		if err != nil {
@@ -447,6 +483,60 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 	}
 	b.sendWithApp(msg.Chat.ID, "Connected. Alerts for "+tenantName+" will arrive here — and the buttons on them work from this chat.")
 	b.log.Info("telegram chat connected", "tenant_id", tenantID, "person_id", personID)
+}
+
+// mergeFork folds a telegram-only person row into the person the invite is
+// bound to, inside the caller's transaction. Seven FKs reference person(id):
+// tenant_member.person_id, session.person_id, telegram_invite.invited_by and
+// telegram_invite.person_id all CASCADE and leave with the row, and
+// web_visitor.person_id is ON DELETE SET NULL, so the analytics row survives
+// the DELETE and reads as anonymous again. The merge does NOT carry that
+// identity across: web_events.person_id holds the same human with no FK and
+// nothing to null it, so moving only the directory row would leave the two
+// disagreeing, and admin's only reader asks whether person_id is set, not
+// which person it names. The two that block the DELETE outright are
+// incident.acked_by and alert_channel.recipient_person_id — no action at all,
+// so each is dealt with by hand below.
+//
+// An invite grants authority over ONE tenant, so identity does not follow the
+// fork into tenants the invite never named — deleteRecipient drops a member's
+// tenant_member row and telegram channel while leaving their acks behind, so
+// a fork CAN still hold rows in a tenant this invite says nothing about.
+// Inside tenantID rows are repointed at the survivor; outside it the channel
+// is deleted and the ack is NULLed, each for the reason at its statement.
+func mergeFork(ctx context.Context, tx pgx.Tx, tenantID, forkID, keepID int64) error {
+	// Outside the invite's tenant the destination is DELETED, not NULLed: a
+	// NULL recipient_person_id is not "unowned", it is "broadcast group" —
+	// what the delivery worker reads it as (payload.Group) — so NULLing would
+	// silently re-type somebody's private chat into a group destination
+	// instead of merely unblocking the DELETE. A private destination whose
+	// person row is going away has no owner left, and deleteRecipient already
+	// drops exactly this shape for exactly that reason.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM alert_channel WHERE recipient_person_id = $1 AND tenant_id <> $2`,
+		forkID, tenantID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE alert_channel SET recipient_person_id = $2
+		  WHERE recipient_person_id = $1 AND tenant_id = $3`,
+		forkID, keepID, tenantID); err != nil {
+		return err
+	}
+	// Outside the invite's tenant this is a destructive write into a second
+	// tenant's incident history, decided by a link that tenant's owner never
+	// saw. NULL is still the only honest answer: the person who acked is being
+	// deleted, so the ack keeps its timestamp and loses its name — attributing
+	// it to somebody from another tenant would be worse. acked_by has no
+	// reader in back/ today; only this statement and the ack button write it.
+	if _, err := tx.Exec(ctx,
+		`UPDATE incident SET acked_by = CASE WHEN tenant_id = $3 THEN $2::bigint END
+		  WHERE acked_by = $1`,
+		forkID, keepID, tenantID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM person WHERE id = $1`, forkID)
+	return err
 }
 
 // personByTelegramID finds-or-creates the person by telegram_id inside the
