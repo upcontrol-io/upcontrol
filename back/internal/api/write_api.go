@@ -655,8 +655,10 @@ func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID in
 		}
 		out["monitors"] = mons
 	}
+	// SinceDays 0 = no clamp: the export is the tenant's own data — the plan
+	// window clamps the screens, never the takeout.
 	if rows, err := h.pool.Queries().ListIncidentsByTenant(ctx,
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, Limit: 1000}); err == nil {
+		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, RowLimit: 1000, SinceDays: 0}); err == nil {
 		incs := make([]map[string]any, 0, len(rows))
 		for _, row := range rows {
 			inc := map[string]any{"title": row.Title, "status": row.Status, "affected": row.AffectedCount}

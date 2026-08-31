@@ -27,9 +27,18 @@ SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id, p.
 
 -- name: ListIncidentsByTenant :many
 -- tenant_id is selected back so incidentWithEvidence can scope the events read
--- to the same tenant without a second lookup.
+-- to the same tenant without a second lookup. since_days is the plan's incident
+-- window (plan_entitlement.incident_days): closed incidents past it are hidden,
+-- an OPEN incident always shows, and 0 means no clamp (the export takeout).
+-- Hidden, not deleted — an upgrade instantly restores the history; the worker's
+-- purge deletes only past the widest plan's window.
 SELECT id, tenant_id, public_id, title, status, detected_at, resolved_at, affected_count, close_reason
-  FROM incident WHERE tenant_id = $1 ORDER BY detected_at DESC LIMIT $2;
+  FROM incident
+ WHERE tenant_id = sqlc.arg(tenant_id)
+   AND (resolved_at IS NULL
+        OR sqlc.arg(since_days)::int <= 0
+        OR detected_at >= now() - make_interval(days => sqlc.arg(since_days)::int))
+ ORDER BY detected_at DESC LIMIT sqlc.arg(row_limit);
 
 -- name: GetAPIKeyForTenant :one
 SELECT id, prefix, state, created_at, last_used_at

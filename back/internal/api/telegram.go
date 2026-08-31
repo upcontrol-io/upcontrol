@@ -137,7 +137,10 @@ func (h *telegram) deleteInvite(w http.ResponseWriter, r *http.Request, tenantID
 }
 
 // countTelegramRecipients is THE definition of the telegram_recipients axis:
-// active members with a linked telegram_id, plus pending unredeemed invites.
+// active members with a linked telegram_id, pending unredeemed invites, plus
+// connected broadcast destinations (a group or channel is a seat too — before
+// they counted, a redeemed group FREED the seat its invite had held, and one
+// group paged an unlimited team through a 3-seat plan).
 func countTelegramRecipients(ctx context.Context, pool *pg.Pool, tenantID int64) (used, max int, err error) {
 	var usedI, maxI int
 	err = pool.Raw().QueryRow(ctx,
@@ -145,7 +148,9 @@ func countTelegramRecipients(ctx context.Context, pool *pg.Pool, tenantID int64)
 		          FROM tenant_member tm JOIN person p ON p.id = tm.person_id
 		         WHERE tm.tenant_id = $1 AND tm.status = 'active' AND p.telegram_id IS NOT NULL)
 		     + (SELECT count(*) FROM telegram_invite
-		         WHERE tenant_id = $1 AND redeemed_at IS NULL AND expires_at > now()),
+		         WHERE tenant_id = $1 AND redeemed_at IS NULL AND expires_at > now())
+		     + (SELECT count(*) FROM alert_channel
+		         WHERE tenant_id = $1 AND kind = 'telegram' AND recipient_person_id IS NULL),
 		       (SELECT telegram_recipients FROM plan_entitlement WHERE plan = (SELECT plan FROM tenant WHERE id = $1))`,
 		tenantID).Scan(&usedI, &maxI)
 	return usedI, maxI, err

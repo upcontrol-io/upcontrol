@@ -273,6 +273,7 @@ type PlanEntitlement struct {
 	TelegramRecipients int32
 	Projects           *int32
 	CustomDomain       bool
+	TelegramRooms      bool
 }
 
 type ProbeNode struct {

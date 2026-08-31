@@ -977,9 +977,15 @@ type PlanResponse struct {
 	//
 	//
 	// Example: 300
-	MinIntervalSec     *int     `json:"minIntervalSec,omitempty"`
-	Plan               Plan     `json:"plan"`
+	MinIntervalSec *int `json:"minIntervalSec,omitempty"`
+	Plan           Plan `json:"plan"`
+
+	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw.
+	Projects           *UsedMax `json:"projects,omitempty"`
 	TelegramRecipients *UsedMax `json:"telegramRecipients,omitempty"`
+
+	// TelegramRooms Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time.
+	TelegramRooms *bool `json:"telegramRooms,omitempty"`
 }
 
 // ProbeResult The raw outcome of the live request. Field names are snake_case here because that is the shape already on the wire; the rest of /v1 is camelCase.
