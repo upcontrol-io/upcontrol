@@ -6,10 +6,6 @@ SELECT * FROM plan_entitlement WHERE plan = $1;
 -- one is the number the sidebar and the Plan page print, that one is the gate.
 SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat';
 
--- name: GetProjectWindowInfo :one
-SELECT cutoff_seq, retain_seq, window_hours, beyond_errors, computed_at
-  FROM project_window WHERE project_id = $1;
-
 -- name: ListChannelsByTenant :many
 SELECT id, public_id, kind, target, notify, breaker_open_until, created_at,
        muted_until, label, recipient_person_id
@@ -52,10 +48,9 @@ SELECT at, source, outcome FROM key_usage_log
 -- What the tenant has actually connected, in one round trip: the source list,
 -- the effort ladder and the "no data yet" copy all derive from these counters
 -- rather than from a static list that says "Site checks" to an account with no
--- checks at all. Log volume is deliberately NOT here: tenant_line_ledger is not
--- written yet, so it would answer "no lines" to a project that is streaming.
--- The line count comes from ring.QueryBuilder.Summary instead, which is why this
--- row carries the project id and its cutoff.
+-- checks at all. Log volume is deliberately NOT here: it would answer "no lines"
+-- to a project that is streaming. The line count comes from
+-- ring.QueryBuilder.Summary instead, which is why this row carries the project id.
 SELECT
   (SELECT count(*)::int FROM monitor m WHERE m.tenant_id = $1) AS monitor_count,
   (SELECT count(*)::int FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
@@ -63,9 +58,6 @@ SELECT
   (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
     WHERE m.tenant_id = $1) AS last_check_at,
   (SELECT p.id FROM project p WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1) AS project_id,
-  (SELECT coalesce(pw.cutoff_seq, 0) FROM project p
-     LEFT JOIN project_window pw ON pw.project_id = p.id
-    WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1)::bigint AS cutoff_seq,
   (SELECT count(*)::int FROM alert_channel c WHERE c.tenant_id = $1) AS channel_count;
 
 -- name: ListSourceConnections :many

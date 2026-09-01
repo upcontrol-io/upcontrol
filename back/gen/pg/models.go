@@ -296,15 +296,6 @@ type ProjectSeq struct {
 	Next      int64
 }
 
-type ProjectWindow struct {
-	ProjectID    int64
-	CutoffSeq    int64
-	RetainSeq    int64
-	WindowHours  pgtype.Numeric
-	BeyondErrors *int64
-	ComputedAt   pgtype.Timestamptz
-}
-
 type Series1m struct {
 	TenantID  int64
 	ProjectID int64
@@ -375,14 +366,6 @@ type Tenant struct {
 	CreatedAt      pgtype.Timestamptz
 }
 
-type TenantLineLedger struct {
-	ProjectID int64
-	Bucket5m  pgtype.Timestamptz
-	Rows      int64
-	MinSeq    int64
-	MaxSeq    int64
-}
-
 type TenantMember struct {
 	TenantID int64
 	PersonID int64
@@ -437,4 +420,21 @@ type WebhookSeen struct {
 	Provider string
 	EventID  string
 	SeenAt   pgtype.Timestamptz
+}
+
+type ZzDeadProjectWindow struct {
+	ProjectID    int64
+	CutoffSeq    int64
+	RetainSeq    int64
+	WindowHours  pgtype.Numeric
+	BeyondErrors *int64
+	ComputedAt   pgtype.Timestamptz
+}
+
+type ZzDeadTenantLineLedger struct {
+	ProjectID int64
+	Bucket5m  pgtype.Timestamptz
+	Rows      int64
+	MinSeq    int64
+	MaxSeq    int64
 }

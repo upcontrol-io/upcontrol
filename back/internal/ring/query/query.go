@@ -1,5 +1,5 @@
 // Package query is the only SQL path to the Postgres logs table (depguard's
-// `logs-only-via-ring` enforces it); every query appends `seq >= cutoff_seq`.
+// `logs-only-via-ring` enforces it); every query is scoped to a tenant and project.
 package query
 
 import (
@@ -8,24 +8,20 @@ import (
 	"time"
 )
 
-// QueryBuilder is the single entry point to the logs table; it carries the
-// project's cutoff_seq so every query is scoped to the visible window.
+// QueryBuilder is the single entry point to the logs table; every query it
+// builds is scoped to one tenant and project.
 type QueryBuilder struct {
-	cutoffSeq int64
 	projectID int64
 	tenantID  int64
 }
 
-// New builds a QueryBuilder for a project with the given cutoff boundary.
-func New(tenantID, projectID, cutoffSeq int64) *QueryBuilder {
-	return &QueryBuilder{tenantID: tenantID, projectID: projectID, cutoffSeq: cutoffSeq}
+// New builds a QueryBuilder for a project.
+func New(tenantID, projectID int64) *QueryBuilder {
+	return &QueryBuilder{tenantID: tenantID, projectID: projectID}
 }
 
-// CutoffSeq returns the visibility boundary (for the caller's /v1/plan response).
-func (q *QueryBuilder) CutoffSeq() int64 { return q.cutoffSeq }
-
 // LogQuery is a parameterised logs query. The caller passes the SQL and args to
-// pgx; the builder guarantees the cutoff is present.
+// pgx; the builder guarantees the tenant and project scope is present.
 type LogQuery struct {
 	SQL  string
 	Args []any
@@ -49,7 +45,7 @@ func bind(sql string, args []any) LogQuery {
 }
 
 // Range optionally bounds a query to a half-open [From, To) time slice; a zero
-// side is the ring's edge. A Range never widens past the cutoff.
+// side is unbounded.
 type Range struct {
 	From time.Time
 	To   time.Time
@@ -78,9 +74,9 @@ func (q *QueryBuilder) Stream(limit int, levels, services []string, search strin
 	var conditions []string
 	var args []any
 
-	// Always-present: tenant + project + cutoff.
-	conditions = append(conditions, "tenant_id = ?", "project_id = ?", "seq >= ?")
-	args = append(args, q.tenantID, q.projectID, q.cutoffSeq)
+	// Always-present: tenant + project.
+	conditions = append(conditions, "tenant_id = ?", "project_id = ?")
+	args = append(args, q.tenantID, q.projectID)
 
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
@@ -99,9 +95,9 @@ func (q *QueryBuilder) Stream(limit int, levels, services []string, search strin
 // first, ordinary traffic tops up the rest (info-only projects still get context).
 func (q *QueryBuilder) Evidence(limit int) LogQuery {
 	sql := fmt.Sprintf("SELECT seq, ts, level, service, message FROM logs "+
-		"WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
+		"WHERE tenant_id = ? AND project_id = ? "+
 		"ORDER BY level IN ('error', 'warn') DESC, seq DESC LIMIT %d", limit)
-	return bind(sql, []any{q.tenantID, q.projectID, q.cutoffSeq})
+	return bind(sql, []any{q.tenantID, q.projectID})
 }
 
 // appendLevelFilter narrows to the picked buckets: `info` means "not error
@@ -137,13 +133,13 @@ func appendServiceFilter(conditions []string, args []any, services []string) ([]
 }
 
 // WindowCount counts the window before the stream limit with the SAME filters,
-// cutoff and range as Stream; a different predicate would make `total` a lie.
+// and range as Stream; a different predicate would make `total` a lie.
 func (q *QueryBuilder) WindowCount(within Range, levels, services []string, search string) LogQuery {
 	var conditions []string
 	var args []any
 
-	conditions = append(conditions, "tenant_id = ?", "project_id = ?", "seq >= ?")
-	args = append(args, q.tenantID, q.projectID, q.cutoffSeq)
+	conditions = append(conditions, "tenant_id = ?", "project_id = ?")
+	args = append(args, q.tenantID, q.projectID)
 
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
@@ -157,10 +153,10 @@ func (q *QueryBuilder) WindowCount(within Range, levels, services []string, sear
 }
 
 // Services lists services present in the window with line counts; window <= 0
-// means the whole ring. Not service-filtered: the picker must describe the window.
+// means no time bound. Not service-filtered: the picker must describe the window.
 func (q *QueryBuilder) Services(window time.Duration) LogQuery {
-	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
-	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
+	conditions := []string{"tenant_id = ?", "project_id = ?"}
+	args := []any{q.tenantID, q.projectID}
 	if window > 0 {
 		conditions = append(conditions, "ts >= ?")
 		args = append(args, time.Now().UTC().Add(-window))
@@ -173,8 +169,8 @@ func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 // Volume returns per-minute line counts for the histogram, taking Stream's
 // filters (the strip describes the lines below it). The bucket is a minute.
 func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
-	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
-	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
+	conditions := []string{"tenant_id = ?", "project_id = ?"}
+	args := []any{q.tenantID, q.projectID}
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
 	return bind("SELECT date_trunc('minute', ts) AS minute, level, count(*) AS lines "+
@@ -218,8 +214,8 @@ func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, ser
 	if size == 0 {
 		return LogQuery{}
 	}
-	conditions := []string{"tenant_id = ?", "project_id = ?", "seq >= ?"}
-	args := []any{q.tenantID, q.projectID, q.cutoffSeq}
+	conditions := []string{"tenant_id = ?", "project_id = ?"}
+	args := []any{q.tenantID, q.projectID}
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
 	conditions, args = appendRangeFilter(conditions, args, within)
@@ -229,57 +225,37 @@ func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, ser
 		size, size, strings.Join(conditions, " AND ")), args)
 }
 
-// Slice returns log lines in a [from, to) seq range for the incident's frozen slice.
-func (q *QueryBuilder) Slice(fromSeq, toSeq int64, limit int) LogQuery {
-	return bind(fmt.Sprintf(
-		"SELECT ts, level, service, message FROM logs "+
-			"WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND seq < ? "+
-			"ORDER BY seq LIMIT %d", limit),
-		[]any{q.tenantID, q.projectID, fromSeq, toSeq})
-}
-
 // Summary returns how many lines the window holds and when the last arrived:
 // "is this project sending anything, and is it still sending?"
 func (q *QueryBuilder) Summary() LogQuery {
 	return bind("SELECT count(*) AS lines, max(ts) AS last_ts FROM logs "+
-		"WHERE tenant_id = ? AND project_id = ? AND seq >= ?",
-		[]any{q.tenantID, q.projectID, q.cutoffSeq})
-}
-
-// BeyondErrors counts errors with seq < cutoff (displaced by the ring); the
-// field is absent when 0 (zero is silence).
-func (q *QueryBuilder) BeyondErrors(retainSeq int64) LogQuery {
-	return bind("SELECT count(*) AS errors, "+
-		"COALESCE(extract(epoch from (now() - min(ts))) / 3600, 0)::bigint AS hours "+
-		"FROM logs WHERE tenant_id = ? AND project_id = ? "+
-		"AND seq >= ? AND seq < ? AND level = 'error'",
-		[]any{q.tenantID, q.projectID, retainSeq, q.cutoffSeq})
+		"WHERE tenant_id = ? AND project_id = ?",
+		[]any{q.tenantID, q.projectID})
 }
 
 // ErrorGroups aggregates recent error lines by fingerprint (count, sample,
-// last seen) for the notification scanner; still behind the cutoff.
+// last seen) for the notification scanner.
 func (q *QueryBuilder) ErrorGroups(since time.Time) LogQuery {
 	return bind("SELECT fingerprint, count(*) AS lines, "+
 		"(array_agg(service ORDER BY ts DESC))[1] AS service, "+
 		"(array_agg(message ORDER BY ts DESC))[1] AS message, max(ts) AS last_ts "+
-		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? "+
 		"AND level = 'error' AND ts >= ? GROUP BY fingerprint",
-		[]any{q.tenantID, q.projectID, q.cutoffSeq, since})
+		[]any{q.tenantID, q.projectID, since})
 }
 
-// EventSeen reports how many times a named event arrived inside the window;
-// an event the ring displaced no longer counts.
+// EventSeen reports how many times a named event arrived for this project.
 func (q *QueryBuilder) EventSeen(name string) LogQuery {
 	return bind("SELECT count(*) AS times, min(ts) AS first_ts, max(ts) AS last_ts "+
-		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND message = ?",
-		[]any{q.tenantID, q.projectID, q.cutoffSeq, name})
+		"FROM logs WHERE tenant_id = ? AND project_id = ? AND message = ?",
+		[]any{q.tenantID, q.projectID, name})
 }
 
 // RecentEvents groups the trailing window's lines by message, so a name
 // drifted off the dictionary shows up next to the expected ones.
 func (q *QueryBuilder) RecentEvents(window time.Duration, limit int) LogQuery {
 	return bind(fmt.Sprintf("SELECT message, count(*) AS times, max(ts) AS last_ts "+
-		"FROM logs WHERE tenant_id = ? AND project_id = ? AND seq >= ? AND ts >= ? "+
+		"FROM logs WHERE tenant_id = ? AND project_id = ? AND ts >= ? "+
 		"GROUP BY message ORDER BY times DESC LIMIT %d", limit),
-		[]any{q.tenantID, q.projectID, q.cutoffSeq, time.Now().UTC().Add(-window)})
+		[]any{q.tenantID, q.projectID, time.Now().UTC().Add(-window)})
 }

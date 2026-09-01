@@ -74,32 +74,6 @@ func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEnti
 	return i, err
 }
 
-const getProjectWindowInfo = `-- name: GetProjectWindowInfo :one
-SELECT cutoff_seq, retain_seq, window_hours, beyond_errors, computed_at
-  FROM project_window WHERE project_id = $1
-`
-
-type GetProjectWindowInfoRow struct {
-	CutoffSeq    int64
-	RetainSeq    int64
-	WindowHours  pgtype.Numeric
-	BeyondErrors *int64
-	ComputedAt   pgtype.Timestamptz
-}
-
-func (q *Queries) GetProjectWindowInfo(ctx context.Context, projectID int64) (GetProjectWindowInfoRow, error) {
-	row := q.db.QueryRow(ctx, getProjectWindowInfo, projectID)
-	var i GetProjectWindowInfoRow
-	err := row.Scan(
-		&i.CutoffSeq,
-		&i.RetainSeq,
-		&i.WindowHours,
-		&i.BeyondErrors,
-		&i.ComputedAt,
-	)
-	return i, err
-}
-
 const getTenantPlan = `-- name: GetTenantPlan :one
 SELECT plan FROM tenant WHERE id = $1
 `
@@ -377,9 +351,6 @@ SELECT
   (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
     WHERE m.tenant_id = $1) AS last_check_at,
   (SELECT p.id FROM project p WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1) AS project_id,
-  (SELECT coalesce(pw.cutoff_seq, 0) FROM project p
-     LEFT JOIN project_window pw ON pw.project_id = p.id
-    WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1)::bigint AS cutoff_seq,
   (SELECT count(*)::int FROM alert_channel c WHERE c.tenant_id = $1) AS channel_count
 `
 
@@ -388,17 +359,15 @@ type TenantSignalsRow struct {
 	MonitorsDown int32
 	LastCheckAt  pgtype.Timestamptz
 	ProjectID    int64
-	CutoffSeq    int64
 	ChannelCount int32
 }
 
 // What the tenant has actually connected, in one round trip: the source list,
 // the effort ladder and the "no data yet" copy all derive from these counters
 // rather than from a static list that says "Site checks" to an account with no
-// checks at all. Log volume is deliberately NOT here: tenant_line_ledger is not
-// written yet, so it would answer "no lines" to a project that is streaming.
-// The line count comes from ring.QueryBuilder.Summary instead, which is why this
-// row carries the project id and its cutoff.
+// checks at all. Log volume is deliberately NOT here: it would answer "no lines"
+// to a project that is streaming. The line count comes from
+// ring.QueryBuilder.Summary instead, which is why this row carries the project id.
 func (q *Queries) TenantSignals(ctx context.Context, tenantID int64) (TenantSignalsRow, error) {
 	row := q.db.QueryRow(ctx, tenantSignals, tenantID)
 	var i TenantSignalsRow
@@ -407,7 +376,6 @@ func (q *Queries) TenantSignals(ctx context.Context, tenantID int64) (TenantSign
 		&i.MonitorsDown,
 		&i.LastCheckAt,
 		&i.ProjectID,
-		&i.CutoffSeq,
 		&i.ChannelCount,
 	)
 	return i, err

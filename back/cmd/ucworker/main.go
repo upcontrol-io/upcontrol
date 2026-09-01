@@ -1,5 +1,5 @@
-// Command ucworker is the background driver: ring/cutoff recomputation,
-// delivery dispatch, purge jobs, compaction. Advisory locks make it N-replica safe.
+// Command ucworker is the background driver: delivery dispatch, purge jobs,
+// compaction. Advisory locks make it N-replica safe.
 package main
 
 import (

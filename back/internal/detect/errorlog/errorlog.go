@@ -231,12 +231,7 @@ func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Ti
 
 	merged := map[uint64]Group{}
 	for _, projectID := range projectIDs {
-		// No window row yet means nothing was displaced: cutoff 0.
-		var cutoff int64
-		if info, werr := s.pool.Queries().GetProjectWindowInfo(ctx, projectID); werr == nil {
-			cutoff = info.CutoffSeq
-		}
-		lq := query.New(tenantID, projectID, cutoff).ErrorGroups(since)
+		lq := query.New(tenantID, projectID).ErrorGroups(since)
 		rows, qerr := s.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 		if qerr != nil {
 			return nil, qerr

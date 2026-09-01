@@ -2995,11 +2995,6 @@ export interface components {
             /** @description The plan's window in hours (plan_entitlement.window_hours) — a plan fact, not a measurement of this tenant's log rate. */
             approxHours: number;
         };
-        BeyondWindow: {
-            /** @description 0 = the field is omitted (zero is silence). */
-            errors: number;
-            hours: number;
-        };
         PlanResponse: {
             plan: components["schemas"]["Plan"];
             /**
@@ -3010,8 +3005,6 @@ export interface components {
             httpChecks: components["schemas"]["UsedMax"];
             logWindow: components["schemas"]["LogWindow"];
             telegramRecipients?: components["schemas"]["UsedMax"];
-            /** @description Absent when there are zero errors beyond the window. */
-            beyondWindow?: components["schemas"]["BeyondWindow"];
             incidentHistoryDays: number;
             /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. */
             projects?: components["schemas"]["UsedMax"];

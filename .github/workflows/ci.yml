@@ -211,7 +211,7 @@ jobs:
           # The secret files must exist for compose to resolve them; CI uses
           # placeholders — nothing here is a real credential.
           mkdir -p secrets
-          for s in pg_password ch_password node_token secret_key_hex \
+          for s in pg_password node_token secret_key_hex \
                    telegram_bot_token smtp_password; do
             echo ci-placeholder > "secrets/$s"
           done

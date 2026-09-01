@@ -1448,17 +1448,11 @@ func msLabel(ms float64) string {
 	return fmt.Sprintf("%d ms", int(ms+0.5))
 }
 
-// logQueryBuilder binds the tenant's ring cutoff: the window is whatever
-// project_window.cutoff_seq is; below it is displaced, not served.
+// logQueryBuilder scopes every log read to the session's current project.
 func (h *writeAPI) logQueryBuilder(ctx context.Context, r *http.Request, tenantID int64) *query.QueryBuilder {
 	s, _ := h.sess.FromRequest(ctx, r)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
-	var cutoffSeq int64
-	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT p.id, COALESCE(pw.cutoff_seq, 0)
-		   FROM project p LEFT JOIN project_window pw ON pw.project_id = p.id
-		  WHERE p.id = $1`, projectID).Scan(&projectID, &cutoffSeq)
-	return query.New(tenantID, projectID, cutoffSeq)
+	return query.New(tenantID, projectID)
 }
 
 func (h *writeAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
