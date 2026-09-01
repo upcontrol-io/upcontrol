@@ -7,15 +7,11 @@ package worker
 
 import (
 	"context"
-	"math/big"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
-
-	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/detect"
 	"go.upcontrol.io/back/internal/detect/errorlog"
@@ -24,7 +20,6 @@ import (
 	"go.upcontrol.io/back/internal/notify/mailer"
 	"go.upcontrol.io/back/internal/platform/app"
 	"go.upcontrol.io/back/internal/platform/config"
-	"go.upcontrol.io/back/internal/ring/cutoff"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
 )
@@ -86,11 +81,6 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	}
 	go dw.Run(ctx)
 
-	// Cutoff recompute: every 1 minute per project.
-	go runWithLock(ctx, pool, d, "cutoff", time.Minute, func(ctx context.Context) {
-		recomputeCutoff(ctx, pool, d)
-	})
-
 	// Purge expired ingest batches: every 5 minutes.
 	go runWithLock(ctx, pool, d, "purge-batches", 5*time.Minute, func(ctx context.Context) {
 		_ = pool.Queries().PurgeExpiredBatches(ctx)
@@ -128,7 +118,7 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
 	// "Error logs" / "Repeating error logs" settings.
-	jobs := "delivery+cutoff+purge+reaper+incident-purge"
+	jobs := "delivery+purge+reaper+incident-purge"
 	pgs := pgstore.New(pool.Raw())
 	scanner := errorlog.New(pool, pgs, d.Logger)
 	go runWithLock(ctx, pool, d, "errorlog-scan", time.Minute, func(ctx context.Context) {
@@ -193,55 +183,6 @@ func runWithLock(ctx context.Context, pool *pg.Pool, _ app.Deps, jobName string,
 				fn(ctx)
 			}()
 		}
-	}
-}
-
-// recomputeCutoff walks every project's ledger and updates project_window.
-func recomputeCutoff(ctx context.Context, pool *pg.Pool, d app.Deps) {
-	// Get all projects.
-	rows, err := pool.Raw().Query(ctx, `SELECT id, tenant_id FROM project`)
-	if err != nil {
-		d.Logger.Warn("cutoff: list projects", "err", err)
-		return
-	}
-	type proj struct{ id, tenantID int64 }
-	var projects []proj
-	for rows.Next() {
-		var p proj
-		if err := rows.Scan(&p.id, &p.tenantID); err != nil {
-			continue
-		}
-		projects = append(projects, p)
-	}
-	rows.Close()
-
-	for _, p := range projects {
-		// Get the tenant's plan.
-		var plan string
-		_ = pool.Raw().QueryRow(ctx,
-			`SELECT t.plan FROM tenant t JOIN project p ON p.tenant_id = t.id WHERE p.id = $1`,
-			p.id).Scan(&plan)
-		if plan == "" {
-			plan = "Free"
-		}
-		ent, ok := cutoff.PlanEntitlements[plan]
-		if !ok {
-			ent = cutoff.PlanEntitlements["Free"]
-		}
-
-		result, err := cutoff.Recompute(ctx, pool, p.id, ent)
-		if err != nil {
-			d.Logger.Warn("cutoff recompute", "project", p.id, "err", err)
-			continue
-		}
-
-		// Persist to project_window.
-		_ = pool.Queries().UpsertProjectWindow(ctx, sqlc.UpsertProjectWindowParams{
-			ProjectID:   p.id,
-			CutoffSeq:   result.CutoffSeq,
-			RetainSeq:   result.RetainSeq,
-			WindowHours: pgtype.Numeric{Int: new(big.Int).SetUint64(uint64(result.WindowHours * 100)), Exp: -2, Valid: true},
-		})
 	}
 }
 

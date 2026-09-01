@@ -576,13 +576,6 @@ type ApiKey struct {
 	Prefix string `json:"prefix"`
 }
 
-// BeyondWindow defines model for BeyondWindow.
-type BeyondWindow struct {
-	// Errors 0 = the field is omitted (zero is silence).
-	Errors int `json:"errors"`
-	Hours  int `json:"hours"`
-}
-
 // Billing defines model for Billing.
 type Billing string
 
@@ -967,11 +960,9 @@ type Plan string
 
 // PlanResponse defines model for PlanResponse.
 type PlanResponse struct {
-	// BeyondWindow Absent when there are zero errors beyond the window.
-	BeyondWindow        *BeyondWindow `json:"beyondWindow,omitempty"`
-	HttpChecks          UsedMax       `json:"httpChecks"`
-	IncidentHistoryDays int           `json:"incidentHistoryDays"`
-	LogWindow           LogWindow     `json:"logWindow"`
+	HttpChecks          UsedMax   `json:"httpChecks"`
+	IncidentHistoryDays int       `json:"incidentHistoryDays"`
+	LogWindow           LogWindow `json:"logWindow"`
 
 	// MinIntervalSec The fastest a check may run on this plan — 300 on Free, 60 on every paid one. The picker still offers the faster options and opens the upgrade prompt when one is chosen (a paid wall is never a disabled control); this number is only how it knows where the wall is.
 	//

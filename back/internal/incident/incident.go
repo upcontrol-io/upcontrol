@@ -360,20 +360,16 @@ func (l *Lifecycle) CloseByFingerprint(ctx context.Context, tenantID, fp int64, 
 // an explorer, which this product deliberately is not.
 const sliceLines = 12
 
-// freezeSlice copies the tail of the visible window into incident_slice via
-// ring.QueryBuilder; it runs at open because the ring displaces lines.
+// freezeSlice copies the tail of the project's lines into incident_slice via
+// ring.QueryBuilder; it runs at open so the slice is the state at detection.
 func (l *Lifecycle) freezeSlice(ctx context.Context, incidentID, tenantID, projectID int64) error {
 	if l.pgs == nil {
 		return nil
 	}
 	q := l.pool.Queries()
-	var cutoff int64
-	if win, werr := q.GetProjectWindowInfo(ctx, projectID); werr == nil {
-		cutoff = win.CutoffSeq
-	}
-	// The tail of the visible window IS the slice. Not a [from, to) range from
-	// project_seq: its counter is not a row count, arithmetic points at nothing.
-	qb := query.New(tenantID, projectID, cutoff)
+	// The tail IS the slice. Not a [from, to) range from project_seq: its
+	// counter is not a row count, so arithmetic on it points at nothing.
+	qb := query.New(tenantID, projectID)
 	// The slice is bounded by seq, not the clock, and Evidence fills the budget
 	// with failing lines first instead of the tail's healthy traffic.
 	lq := qb.Evidence(sliceLines)

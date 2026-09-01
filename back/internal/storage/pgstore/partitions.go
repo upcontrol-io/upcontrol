@@ -1,7 +1,6 @@
 // Day partitions of the logs table: created ahead of the clock, dropped once
-// they fall behind the physical floor. The seq ring (project_window) is the
-// retention model; partitions are only the floor underneath it, so the floor
-// must sit below the widest plan window or a paid axis loses days it sold.
+// they fall behind the floor. These partitions ARE the retention model — the
+// floor is the widest plan window plus a day, so no plan loses days it sold.
 
 package pgstore
 

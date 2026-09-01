@@ -7,8 +7,6 @@ package pg
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const ensureProjectSeq = `-- name: EnsureProjectSeq :exec
@@ -22,24 +20,6 @@ ON CONFLICT (project_id) DO NOTHING
 func (q *Queries) EnsureProjectSeq(ctx context.Context, projectID int64) error {
 	_, err := q.db.Exec(ctx, ensureProjectSeq, projectID)
 	return err
-}
-
-const getProjectWindow = `-- name: GetProjectWindow :one
-SELECT project_id, cutoff_seq, retain_seq, window_hours, beyond_errors, computed_at FROM project_window WHERE project_id = $1
-`
-
-func (q *Queries) GetProjectWindow(ctx context.Context, projectID int64) (ProjectWindow, error) {
-	row := q.db.QueryRow(ctx, getProjectWindow, projectID)
-	var i ProjectWindow
-	err := row.Scan(
-		&i.ProjectID,
-		&i.CutoffSeq,
-		&i.RetainSeq,
-		&i.WindowHours,
-		&i.BeyondErrors,
-		&i.ComputedAt,
-	)
-	return i, err
 }
 
 const leaseSeqBlock = `-- name: LeaseSeqBlock :one
@@ -62,112 +42,4 @@ func (q *Queries) LeaseSeqBlock(ctx context.Context, arg LeaseSeqBlockParams) (i
 	var start_seq int64
 	err := row.Scan(&start_seq)
 	return start_seq, err
-}
-
-const ledgerBucketsBackward = `-- name: LedgerBucketsBackward :many
-SELECT project_id, bucket_5m, rows, min_seq, max_seq
-  FROM tenant_line_ledger
- WHERE project_id = $1
-   AND bucket_5m <= $2
- ORDER BY bucket_5m DESC
-`
-
-type LedgerBucketsBackwardParams struct {
-	ProjectID int64
-	Until     pgtype.Timestamptz
-}
-
-// Read ledger buckets from `until` backward, oldest-needed first, so the cutoff
-// walker sums rows until it reaches the window line count. Ordered by bucket
-// descending so the walker consumes newest-first.
-func (q *Queries) LedgerBucketsBackward(ctx context.Context, arg LedgerBucketsBackwardParams) ([]TenantLineLedger, error) {
-	rows, err := q.db.Query(ctx, ledgerBucketsBackward, arg.ProjectID, arg.Until)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []TenantLineLedger
-	for rows.Next() {
-		var i TenantLineLedger
-		if err := rows.Scan(
-			&i.ProjectID,
-			&i.Bucket5m,
-			&i.Rows,
-			&i.MinSeq,
-			&i.MaxSeq,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const upsertLedgerBucket = `-- name: UpsertLedgerBucket :exec
-INSERT INTO tenant_line_ledger (project_id, bucket_5m, rows, min_seq, max_seq)
-VALUES ($1, $2, $3,
-        $4, $5)
-ON CONFLICT (project_id, bucket_5m) DO UPDATE
-   SET rows    = tenant_line_ledger.rows    + EXCLUDED.rows,
-       min_seq = LEAST(tenant_line_ledger.min_seq, EXCLUDED.min_seq),
-       max_seq = GREATEST(tenant_line_ledger.max_seq, EXCLUDED.max_seq)
-`
-
-type UpsertLedgerBucketParams struct {
-	ProjectID int64
-	Bucket5m  pgtype.Timestamptz
-	Rows      int64
-	MinSeq    int64
-	MaxSeq    int64
-}
-
-// Add a 5-minute bucket's row count and seq extent to the per-project ledger.
-// The ring walks this backward to derive cutoff_seq and retain_seq.
-func (q *Queries) UpsertLedgerBucket(ctx context.Context, arg UpsertLedgerBucketParams) error {
-	_, err := q.db.Exec(ctx, upsertLedgerBucket,
-		arg.ProjectID,
-		arg.Bucket5m,
-		arg.Rows,
-		arg.MinSeq,
-		arg.MaxSeq,
-	)
-	return err
-}
-
-const upsertProjectWindow = `-- name: UpsertProjectWindow :exec
-INSERT INTO project_window (project_id, cutoff_seq, retain_seq, window_hours,
-                            beyond_errors, computed_at)
-VALUES ($1, $2, $3,
-        $4, $5, now())
-ON CONFLICT (project_id) DO UPDATE
-   SET cutoff_seq    = EXCLUDED.cutoff_seq,
-       retain_seq    = EXCLUDED.retain_seq,
-       window_hours  = EXCLUDED.window_hours,
-       beyond_errors = EXCLUDED.beyond_errors,
-       computed_at   = now()
-`
-
-type UpsertProjectWindowParams struct {
-	ProjectID    int64
-	CutoffSeq    int64
-	RetainSeq    int64
-	WindowHours  pgtype.Numeric
-	BeyondErrors *int64
-}
-
-// Recompute the window each minute: cutoff_seq (visibility), retain_seq
-// (deletion), the actual depth for the screen, and beyond_errors (NULL = the
-// "zero is silence" rule: a field absent from the response).
-func (q *Queries) UpsertProjectWindow(ctx context.Context, arg UpsertProjectWindowParams) error {
-	_, err := q.db.Exec(ctx, upsertProjectWindow,
-		arg.ProjectID,
-		arg.CutoffSeq,
-		arg.RetainSeq,
-		arg.WindowHours,
-		arg.BeyondErrors,
-	)
-	return err
 }

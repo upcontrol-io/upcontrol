@@ -667,16 +667,6 @@ components:
         approxHours:
           type: number
           description: "The plan's window in hours (plan_entitlement.window_hours) — a plan fact, not a measurement of this tenant's log rate."
-    BeyondWindow:
-      type: object
-      required: [errors, hours]
-      properties:
-        errors:
-          {
-            type: integer,
-            description: "0 = the field is omitted (zero is silence).",
-          }
-        hours: { type: integer }
     PlanResponse:
       type: object
       required: [plan, httpChecks, logWindow, incidentHistoryDays]
@@ -693,10 +683,6 @@ components:
         httpChecks: { $ref: "#/components/schemas/UsedMax" }
         logWindow: { $ref: "#/components/schemas/LogWindow" }
         telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
-        beyondWindow:
-          description: "Absent when there are zero errors beyond the window."
-          allOf:
-            - $ref: "#/components/schemas/BeyondWindow"
         incidentHistoryDays: { type: integer }
         projects:
           description: >

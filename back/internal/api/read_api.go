@@ -313,7 +313,7 @@ func (h *readAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantS
 	if h.pgs == nil || s.ProjectID == 0 {
 		return 0, time.Time{}
 	}
-	lq := query.New(tenantID, s.ProjectID, s.CutoffSeq).Summary()
+	lq := query.New(tenantID, s.ProjectID).Summary()
 	var lines uint64
 	var last time.Time
 	if err := h.pgs.Raw().QueryRow(ctx, lq.SQL, lq.Args...).Scan(&lines, &last); err != nil {

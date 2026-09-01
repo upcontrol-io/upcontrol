@@ -434,7 +434,7 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	qb := query.New(tenant.TenantID, sig.ProjectID, sig.CutoffSeq)
+	qb := query.New(tenant.TenantID, sig.ProjectID)
 
 	verified := false
 	var verifiedAt time.Time
