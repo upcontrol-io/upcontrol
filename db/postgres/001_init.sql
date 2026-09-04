@@ -1,9 +1,11 @@
 -- +goose Up
 -- +goose StatementBegin
 -- upcontrol Postgres schema, relational half + telemetry, in one migration.
--- This replaces migrations 001-028 wholesale: nobody has data, so every ALTER
--- that patched an earlier statement is folded into the CREATE it patched and
--- every data-only repair is gone (there is no data to repair).
+-- This replaces the earlier 001-006 wholesale (owner decision, 2026-09-04):
+-- nobody has data, so every ALTER that patched an earlier statement is folded
+-- into the CREATE it patched, every seed carries its final numbers, and the
+-- tables nothing reads any more are simply absent. Billing lives outside this
+-- schema entirely: the hosted product's sidecar owns its own tables.
 -- Types: bigint for internal keys, uuid v7 for anything shown outside,
 -- timestamptz always, text over varchar. Every tenant-scoped table carries
 -- tenant_id (invariant 3); the exempt reference tables (plan_entitlement,
@@ -15,7 +17,6 @@ CREATE TABLE tenant (
   public_id     uuid NOT NULL UNIQUE,
   name          text NOT NULL,
   plan          text NOT NULL DEFAULT 'Free',       -- Free|Indie|Growth|Agency|Self-hosted
-  billing       text NOT NULL DEFAULT 'annual',     -- monthly|annual
   claim_token_hash bytea,                           -- sha256 of the anonymous-init claim token
   claimed_at    timestamptz,
   created_at    timestamptz NOT NULL DEFAULT now()
@@ -88,27 +89,11 @@ CREATE TABLE key_usage_log (
   outcome       text NOT NULL                        -- accepted|rejected
 );
 
+-- Sequence allocation is live and load bearing; the ring-retention ledger and
+-- window tables that once sat next to it were inert end to end and are gone.
 CREATE TABLE project_seq (
   project_id    bigint PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
   next          bigint NOT NULL DEFAULT 1
-);
-
-CREATE TABLE tenant_line_ledger (
-  project_id    bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  bucket_5m     timestamptz NOT NULL,
-  rows          bigint NOT NULL,
-  min_seq       bigint NOT NULL,
-  max_seq       bigint NOT NULL,
-  PRIMARY KEY (project_id, bucket_5m)
-);
-
-CREATE TABLE project_window (
-  project_id    bigint PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
-  cutoff_seq    bigint NOT NULL,
-  retain_seq    bigint NOT NULL,
-  window_hours  numeric NOT NULL,        -- actual depth, for the screen
-  beyond_errors bigint,                  -- NULL = stay silent (zero-is-silence)
-  computed_at   timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE ingest_batch (
@@ -264,6 +249,8 @@ CREATE UNIQUE INDEX source_connection_project_kind_key
 CREATE UNIQUE INDEX source_connection_hook_token_key
   ON source_connection (hook_token);
 
+-- Webhook dedup for every provider that delivers more than once; keyed by the
+-- provider's own event id.
 CREATE TABLE webhook_seen (
   provider      text NOT NULL,
   event_id      text NOT NULL,
@@ -302,28 +289,34 @@ CREATE TABLE status_page (
   config        jsonb NOT NULL DEFAULT '{}'::jsonb    -- what is shown, vs components = the published list
 );
 
+-- The plan ladder's numbers: every gate and every figure on the Plan screen
+-- reads this row, never a constant. telegram_recipients counts destinations
+-- (people, groups, channels alike); telegram_rooms is whether groups and
+-- channels may connect at all; custom_domain is whether a status page may sit
+-- on the customer's own host; incident_days is how long closed incidents stay
+-- readable. Self-hosted is the OSS install's one generous row, never sold.
 CREATE TABLE plan_entitlement (
   plan          text PRIMARY KEY,
   http_checks   int NOT NULL,
-  regions       int NOT NULL,
   window_lines  bigint NOT NULL,
   window_hours  int NOT NULL,
-  retain_mult   numeric NOT NULL,      -- R
   incident_days int NOT NULL,
   min_interval_sec int NOT NULL DEFAULT 60,
   telegram_recipients int NOT NULL DEFAULT 3,
-  projects      int                    -- NULL = unlimited (Self-hosted)
+  projects      int,                   -- NULL = unlimited (Self-hosted)
+  custom_domain boolean NOT NULL DEFAULT false,
+  telegram_rooms boolean NOT NULL DEFAULT true
 );
 
 INSERT INTO plan_entitlement
-  (plan, http_checks, regions, window_lines, window_hours, retain_mult,
-   incident_days, min_interval_sec, telegram_recipients, projects)
+  (plan, http_checks, window_lines, window_hours, incident_days,
+   min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms)
 VALUES
-  ('Free',          3, 1,    25000,  24, 2.0,  30, 300,   3,    1),
-  ('Indie',        10, 2,   150000,  48, 1.0, 365,  60,  10,    2),
-  ('Growth',       30, 2,  3000000, 168, 1.0, 730,  60,  30,    5),
-  ('Agency',      100, 2, 45000000, 720, 1.0, 730,  60, 100,   10),
-  ('Self-hosted',1000,10, 45000000, 720, 1.0, 730,  60,1000, NULL);
+  ('Free',          3,    25000,  24,   10, 300,    3,    1, false, false),
+  ('Indie',        10,   150000,  48,  365,  60,   10,    2, true,  true),
+  ('Growth',       30,  3000000, 168,  730,  60,   20,    5, true,  true),
+  ('Agency',      100, 45000000, 720, 1460,  60,   30,   10, true,  true),
+  ('Self-hosted',1000, 45000000, 720,  730,  60, 1000, NULL, true,  true);
 
 -- The error-log scanner's memory of what it already alerted: without it a
 -- persisting error would page again on every 60s scan. kind is which category
@@ -364,23 +357,6 @@ CREATE TABLE telegram_invite (
   expires_at    timestamptz NOT NULL,
   redeemed_at   timestamptz
 );
-
--- LemonSqueezy billing state, one row per tenant. The webhook is the only
--- writer: tenant.plan / tenant.billing are derived from it on every
--- subscription event, so the entitlement gates read the same facts the money
--- side wrote (measured, not asserted — a plan a webhook never confirmed is Free).
-CREATE TABLE billing_subscription (
-  tenant_id          bigint PRIMARY KEY REFERENCES tenant(id) ON DELETE CASCADE,
-  ls_customer_id     bigint NOT NULL,
-  ls_subscription_id bigint NOT NULL UNIQUE,
-  variant_id         bigint NOT NULL,
-  status             text NOT NULL,              -- LS status verbatim: on_trial|active|paused|past_due|unpaid|cancelled|expired
-  renews_at          timestamptz,
-  ends_at            timestamptz,
-  updated_at         timestamptz NOT NULL DEFAULT now(),
-  created_at         timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX ON billing_subscription (ls_customer_id);
 
 -- The Postgres half of product analytics: a directory of current visitor
 -- state — first-touch attribution, identity, counters. web_events below is the
@@ -453,17 +429,21 @@ CREATE INDEX ON logs (tenant_id, project_id, seq);        -- the ring window
 CREATE INDEX ON logs (tenant_id, project_id, ts);         -- range reads
 CREATE INDEX ON logs (tenant_id, project_id, fingerprint); -- ErrorGroups
 CREATE INDEX ON logs USING gin (attrs);                   -- bounded by the ingest attribute cap
--- Today and tomorrow only: a fresh install can write immediately, and the
--- job that rolls partitions forward from here lands with the swap-in. The
--- bounds are install-time dates, so the DDL is built in a DO block.
+-- Partitions are named after the UTC day they hold, which is what lets
+-- ucworker's log-partitions job create ahead and drop behind. Today and the
+-- next three days, so a fresh install can write immediately and the hourly
+-- job has a full day of slack before the first one it must make.
 DO $$
 DECLARE
-  d timestamptz := date_trunc('day', now());
+  d date := (now() AT TIME ZONE 'UTC')::date;
+  i int;
 BEGIN
-  EXECUTE format('CREATE TABLE logs_today PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
-                 d, d + interval '1 day');
-  EXECUTE format('CREATE TABLE logs_tomorrow PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
-                 d + interval '1 day', d + interval '2 days');
+  FOR i IN 0..3 LOOP
+    EXECUTE format('CREATE TABLE IF NOT EXISTS %I PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
+                   'logs_' || to_char(d + i, 'YYYYMMDD'),
+                   (d + i)::timestamp AT TIME ZONE 'UTC',
+                   (d + i + 1)::timestamp AT TIME ZONE 'UTC');
+  END LOOP;
 END $$;
 
 -- events are never displaced by the ring; the absence detector lives on them.
@@ -557,7 +537,6 @@ DROP TABLE IF EXISTS events;
 DROP TABLE IF EXISTS logs;
 DROP TABLE IF EXISTS instance_setting;
 DROP TABLE IF EXISTS web_visitor;
-DROP TABLE IF EXISTS billing_subscription;
 DROP TABLE IF EXISTS telegram_invite;
 DROP TABLE IF EXISTS install_token;
 DROP TABLE IF EXISTS error_alert_state;
@@ -578,8 +557,6 @@ DROP TABLE IF EXISTS monitor_facts;
 DROP TABLE IF EXISTS monitor_schedule;
 DROP TABLE IF EXISTS monitor;
 DROP TABLE IF EXISTS ingest_batch;
-DROP TABLE IF EXISTS project_window;
-DROP TABLE IF EXISTS tenant_line_ledger;
 DROP TABLE IF EXISTS project_seq;
 DROP TABLE IF EXISTS key_usage_log;
 DROP TABLE IF EXISTS api_key;

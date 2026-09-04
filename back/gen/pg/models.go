@@ -35,19 +35,6 @@ type ApiKey struct {
 	LastUsedAt    pgtype.Timestamptz
 }
 
-type BillingSubscription struct {
-	TenantID               int64
-	Provider               string
-	ProviderCustomerID     string
-	ProviderSubscriptionID string
-	ProductID              string
-	Status                 string
-	PeriodEnd              pgtype.Timestamptz
-	CanceledAt             pgtype.Timestamptz
-	UpdatedAt              pgtype.Timestamptz
-	CreatedAt              pgtype.Timestamptz
-}
-
 type Check struct {
 	TenantID   *int64
 	MonitorID  *int64
@@ -265,10 +252,8 @@ type Person struct {
 type PlanEntitlement struct {
 	Plan               string
 	HttpChecks         int32
-	Regions            int32
 	WindowLines        int64
 	WindowHours        int32
-	RetainMult         pgtype.Numeric
 	IncidentDays       int32
 	MinIntervalSec     int32
 	TelegramRecipients int32
@@ -361,7 +346,6 @@ type Tenant struct {
 	PublicID       pgtype.UUID
 	Name           string
 	Plan           string
-	Billing        string
 	ClaimTokenHash []byte
 	ClaimedAt      pgtype.Timestamptz
 	CreatedAt      pgtype.Timestamptz
@@ -421,21 +405,4 @@ type WebhookSeen struct {
 	Provider string
 	EventID  string
 	SeenAt   pgtype.Timestamptz
-}
-
-type ZzDeadProjectWindow struct {
-	ProjectID    int64
-	CutoffSeq    int64
-	RetainSeq    int64
-	WindowHours  pgtype.Numeric
-	BeyondErrors *int64
-	ComputedAt   pgtype.Timestamptz
-}
-
-type ZzDeadTenantLineLedger struct {
-	ProjectID int64
-	Bucket5m  pgtype.Timestamptz
-	Rows      int64
-	MinSeq    int64
-	MaxSeq    int64
 }

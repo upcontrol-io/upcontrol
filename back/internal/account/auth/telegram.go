@@ -87,7 +87,6 @@ func (h *telegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"email":    email,
 		"initials": initials(name, email),
 		"plan":     "Free",
-		"billing":  "annual",
 	})
 }
 

@@ -27,24 +27,6 @@ func (e AccountRole) Valid() bool {
 	}
 }
 
-// Defines values for Billing.
-const (
-	Annual  Billing = "annual"
-	Monthly Billing = "monthly"
-)
-
-// Valid indicates whether the value is a known member of the Billing enum.
-func (e Billing) Valid() bool {
-	switch e {
-	case Annual:
-		return true
-	case Monthly:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for ChannelKind.
 const (
 	Discord  ChannelKind = "discord"
@@ -518,8 +500,7 @@ func (e GetV1LogsParamsLevel) Valid() bool {
 
 // Account defines model for Account.
 type Account struct {
-	Billing Billing             `json:"billing"`
-	Email   openapi_types.Email `json:"email"`
+	Email openapi_types.Email `json:"email"`
 
 	// Id Example: usr_1
 	Id string `json:"id"`
@@ -569,9 +550,6 @@ type ApiKey struct {
 	// Prefix Example: uc_live_8f2ac41d9b0e
 	Prefix string `json:"prefix"`
 }
-
-// Billing defines model for Billing.
-type Billing string
 
 // ChannelKind defines model for ChannelKind.
 type ChannelKind string

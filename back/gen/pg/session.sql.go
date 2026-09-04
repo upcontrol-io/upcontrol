@@ -103,7 +103,6 @@ SELECT
   tm.role    AS member_role,
   t.id       AS tenant_id,
   t.plan,
-  t.billing,
   s.project_id AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
@@ -127,7 +126,6 @@ type GetMeRow struct {
 	MemberRole       string
 	TenantID         int64
 	Plan             string
-	Billing          string
 	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
@@ -150,7 +148,6 @@ func (q *Queries) GetMe(ctx context.Context, tokenHash []byte) (GetMeRow, error)
 		&i.MemberRole,
 		&i.TenantID,
 		&i.Plan,
-		&i.Billing,
 		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,
@@ -169,7 +166,6 @@ SELECT
   tm.role    AS member_role,
   t.id       AS tenant_id,
   t.plan,
-  t.billing,
   NULL::bigint AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
@@ -197,7 +193,6 @@ type GetMeByIdentityRow struct {
 	MemberRole       string
 	TenantID         int64
 	Plan             string
-	Billing          string
 	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
@@ -221,7 +216,6 @@ func (q *Queries) GetMeByIdentity(ctx context.Context, arg GetMeByIdentityParams
 		&i.MemberRole,
 		&i.TenantID,
 		&i.Plan,
-		&i.Billing,
 		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,

@@ -1,8 +1,8 @@
 //go:build integration
 
 // Integration test for the logs partition roll against a real Postgres with
-// 001 applied, so logs_today and logs_tomorrow sit in the way exactly as they
-// do on an install that has never seen 003.
+// 001 applied: its install-day partitions are ours by name and fall behind the
+// window, while two an operator made by hand sit in the way.
 // Run: go test -tags=integration ./internal/storage/pgstore/...
 package pgstore
 
@@ -16,8 +16,16 @@ import (
 func TestRollLogPartitionsCoversTheWindowAndDropsBehindIt(t *testing.T) {
 	s, _ := openStore(t)
 	ctx := context.Background()
-	// A clock far from install day: 001 has just made logs_today over the real
-	// today, and a second partition over the same day would be refused.
+	// Not ours by name: the roll must never touch them, however far behind they fall.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS logs_today PARTITION OF logs FOR VALUES FROM ('2020-01-01') TO ('2020-01-02')`,
+		`CREATE TABLE IF NOT EXISTS logs_tomorrow PARTITION OF logs FOR VALUES FROM ('2020-01-02') TO ('2020-01-03')`,
+	} {
+		if _, err := s.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("operator partition: %v", err)
+		}
+	}
+	// A clock far from install day, so 001's own partitions are all behind the window.
 	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
 	const keep = 48 * time.Hour
 
@@ -33,8 +41,12 @@ func TestRollLogPartitionsCoversTheWindowAndDropsBehindIt(t *testing.T) {
 	if !slices.Equal(created, want) {
 		t.Fatalf("created %v, want %v", created, want)
 	}
-	if len(dropped) != 0 {
-		t.Fatalf("dropped %v on a fresh roll, want none", dropped)
+	// What goes on the first roll is 001's install-day partitions and nothing newer.
+	for _, name := range dropped {
+		day, ok := partitionDay(name)
+		if !ok || !day.Before(time.Date(2029, 12, 30, 0, 0, 0, 0, time.UTC)) {
+			t.Fatalf("dropped %v on a fresh roll, want only the install-day partitions", dropped)
+		}
 	}
 
 	// The job runs hourly: the same day twice must be a no-op, not an error.
@@ -67,7 +79,7 @@ func TestRollLogPartitionsCoversTheWindowAndDropsBehindIt(t *testing.T) {
 		t.Fatalf("created %v, want %v", created, wantCreated)
 	}
 
-	// 001's own partitions are not ours to drop, however far behind they fall.
+	// The operator's partitions are not ours to drop, however far behind they fall.
 	names, err := s.logPartitions(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)

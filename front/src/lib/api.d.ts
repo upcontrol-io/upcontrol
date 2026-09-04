@@ -2494,7 +2494,6 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
-                429: components["responses"]["TooManyRequests"];
                 /** @description Spool full (always with Retry-After). */
                 503: {
                     headers: {
@@ -2559,7 +2558,6 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
-                429: components["responses"]["TooManyRequests"];
                 /** @description Spool full (always with Retry-After). */
                 503: {
                     headers: {
@@ -2642,8 +2640,6 @@ export interface components {
         };
         /** @enum {string} */
         Plan: "Free" | "Indie" | "Growth" | "Agency" | "Self-hosted";
-        /** @enum {string} */
-        Billing: "monthly" | "annual";
         Account: {
             /** @example usr_1 */
             id: string;
@@ -2654,7 +2650,6 @@ export interface components {
             /** @example AK */
             initials: string;
             plan: components["schemas"]["Plan"];
-            billing: components["schemas"]["Billing"];
             /** @enum {string} */
             role?: "notify" | "login";
         };
@@ -2711,14 +2706,14 @@ export interface components {
             target: string;
             keyword?: string;
             /** @enum {string} */
-            interval: "1m" | "5m" | "15m" | "30m" | "1h";
+            interval: "1m" | "5m" | "30m" | "1h";
         };
         MonitorPatch: {
             name?: string;
             target?: string;
             keyword?: string;
             /** @enum {string} */
-            interval?: "1m" | "5m" | "15m" | "30m" | "1h";
+            interval?: "1m" | "5m" | "30m" | "1h";
             paused?: boolean;
         };
         Source: {
@@ -3273,7 +3268,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description Idempotent replay with a different body, or state conflict. */
+        /** @description State conflict, for example a domain already connected to another account. */
         Conflict: {
             headers: {
                 [name: string]: unknown;

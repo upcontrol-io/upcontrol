@@ -6,15 +6,24 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-04
+
 ### Changed
-- **The billing table is provider-neutral.** Migration `006_billing_provider_neutral`
-  recreates `billing_subscription` with string provider ids (`provider`,
-  `provider_customer_id`, `provider_subscription_id`, `product_id`, `period_end`,
-  `canceled_at`) in place of the LemonSqueezy integer columns. The table never held
-  a production row, so nothing is migrated; the Down recreates the old shape empty.
-  The core still reads none of it — the hosted billing sidecar is its only writer.
+- **The schema starts over at one migration.** `001_init` now carries the
+  whole schema and replaces the earlier 001–006: every ALTER is folded into the
+  CREATE it patched, `plan_entitlement` seeds its final numbers, and the log
+  partitions are dated from install day. Nobody has data, so there is no upgrade
+  path: an existing database is dropped and migrated afresh (`goose_db_version`
+  included). Self-host installs made after this release never see the difference.
 
 ### Removed
+- **Everything about money.** `billing_subscription` and `tenant.billing` are
+  gone, and so is `billing` on `/v1/me`'s account: the core knows the plan word
+  and nothing about how it is paid for. The hosted product's billing sidecar
+  owns its own tables outside this schema.
+- **The retired ring-retention tables** (`tenant_line_ledger`, `project_window`,
+  renamed `zz_dead_*` since 0.12.0) and the unread `plan_entitlement.regions`
+  and `retain_mult` columns. Nothing read them; nothing changes.
 - **AI Explain, in full.** The button that read a log selection or an
   incident's own evidence and answered what broke is gone from the product,
   and so is everything behind it: the OpenAI-compatible client, the scenario

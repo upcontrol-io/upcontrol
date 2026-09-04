@@ -238,7 +238,6 @@ func writeAccount(w http.ResponseWriter, person personInfo) {
 		"email":    person.Email,
 		"initials": initials(person.Name, person.Email),
 		"plan":     "Free",
-		"billing":  "annual",
 	})
 }
 
@@ -435,7 +434,6 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"email":    ptrStr(row.Email),
 			"initials": initials(row.PersonName, ptrStr(row.Email)),
 			"plan":     row.Plan,
-			"billing":  row.Billing,
 			// The member's role: notify = read-only everywhere, login/owner =
 			// full /app. Web and Mini App gate off this one field.
 			"role": row.MemberRole,

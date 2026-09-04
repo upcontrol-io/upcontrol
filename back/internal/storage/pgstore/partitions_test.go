@@ -14,7 +14,7 @@ func TestPartitionDayReadsOnlyItsOwnNames(t *testing.T) {
 	}
 	for _, name := range []string{
 		"logs",           // the parent itself
-		"logs_today",     // 001's install-time partitions
+		"logs_today",     // an operator's own names
 		"logs_tomorrow",  //
 		"logs_2026083",   // one digit short
 		"logs_20260830x", // trailing junk

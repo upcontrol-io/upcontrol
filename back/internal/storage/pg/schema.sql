@@ -3,7 +3,6 @@ CREATE TABLE tenant (
   public_id     uuid NOT NULL UNIQUE,
   name          text NOT NULL,
   plan          text NOT NULL DEFAULT 'Free',       -- Free|Indie|Growth|Agency|Self-hosted
-  billing       text NOT NULL DEFAULT 'annual',     -- monthly|annual
   claim_token_hash bytea,                           -- sha256 of the anonymous-init claim token
   claimed_at    timestamptz,
   created_at    timestamptz NOT NULL DEFAULT now()
@@ -76,27 +75,11 @@ CREATE TABLE key_usage_log (
   outcome       text NOT NULL                        -- accepted|rejected
 );
 
+-- Sequence allocation is live and load bearing; the ring-retention ledger and
+-- window tables that once sat next to it were inert end to end and are gone.
 CREATE TABLE project_seq (
   project_id    bigint PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
   next          bigint NOT NULL DEFAULT 1
-);
-
-CREATE TABLE tenant_line_ledger (
-  project_id    bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-  bucket_5m     timestamptz NOT NULL,
-  rows          bigint NOT NULL,
-  min_seq       bigint NOT NULL,
-  max_seq       bigint NOT NULL,
-  PRIMARY KEY (project_id, bucket_5m)
-);
-
-CREATE TABLE project_window (
-  project_id    bigint PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
-  cutoff_seq    bigint NOT NULL,
-  retain_seq    bigint NOT NULL,
-  window_hours  numeric NOT NULL,        -- actual depth, for the screen
-  beyond_errors bigint,                  -- NULL = stay silent (zero-is-silence)
-  computed_at   timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE ingest_batch (
@@ -252,6 +235,8 @@ CREATE UNIQUE INDEX source_connection_project_kind_key
 CREATE UNIQUE INDEX source_connection_hook_token_key
   ON source_connection (hook_token);
 
+-- Webhook dedup for every provider that delivers more than once; keyed by the
+-- provider's own event id.
 CREATE TABLE webhook_seen (
   provider      text NOT NULL,
   event_id      text NOT NULL,
@@ -290,28 +275,34 @@ CREATE TABLE status_page (
   config        jsonb NOT NULL DEFAULT '{}'::jsonb    -- what is shown, vs components = the published list
 );
 
+-- The plan ladder's numbers: every gate and every figure on the Plan screen
+-- reads this row, never a constant. telegram_recipients counts destinations
+-- (people, groups, channels alike); telegram_rooms is whether groups and
+-- channels may connect at all; custom_domain is whether a status page may sit
+-- on the customer's own host; incident_days is how long closed incidents stay
+-- readable. Self-hosted is the OSS install's one generous row, never sold.
 CREATE TABLE plan_entitlement (
   plan          text PRIMARY KEY,
   http_checks   int NOT NULL,
-  regions       int NOT NULL,
   window_lines  bigint NOT NULL,
   window_hours  int NOT NULL,
-  retain_mult   numeric NOT NULL,      -- R
   incident_days int NOT NULL,
   min_interval_sec int NOT NULL DEFAULT 60,
   telegram_recipients int NOT NULL DEFAULT 3,
-  projects      int                    -- NULL = unlimited (Self-hosted)
+  projects      int,                   -- NULL = unlimited (Self-hosted)
+  custom_domain boolean NOT NULL DEFAULT false,
+  telegram_rooms boolean NOT NULL DEFAULT true
 );
 
 INSERT INTO plan_entitlement
-  (plan, http_checks, regions, window_lines, window_hours, retain_mult,
-   incident_days, min_interval_sec, telegram_recipients, projects)
+  (plan, http_checks, window_lines, window_hours, incident_days,
+   min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms)
 VALUES
-  ('Free',          3, 1,    25000,  24, 2.0,  30, 300,   3,    1),
-  ('Indie',        10, 2,   150000,  48, 1.0, 365,  60,  10,    2),
-  ('Growth',       30, 2,  3000000, 168, 1.0, 730,  60,  30,    5),
-  ('Agency',      100, 2, 45000000, 720, 1.0, 730,  60, 100,   10),
-  ('Self-hosted',1000,10, 45000000, 720, 1.0, 730,  60,1000, NULL);
+  ('Free',          3,    25000,  24,   10, 300,    3,    1, false, false),
+  ('Indie',        10,   150000,  48,  365,  60,   10,    2, true,  true),
+  ('Growth',       30,  3000000, 168,  730,  60,   20,    5, true,  true),
+  ('Agency',      100, 45000000, 720, 1460,  60,   30,   10, true,  true),
+  ('Self-hosted',1000, 45000000, 720,  730,  60, 1000, NULL, true,  true);
 
 -- The error-log scanner's memory of what it already alerted: without it a
 -- persisting error would page again on every 60s scan. kind is which category
@@ -352,23 +343,6 @@ CREATE TABLE telegram_invite (
   expires_at    timestamptz NOT NULL,
   redeemed_at   timestamptz
 );
-
--- LemonSqueezy billing state, one row per tenant. The webhook is the only
--- writer: tenant.plan / tenant.billing are derived from it on every
--- subscription event, so the entitlement gates read the same facts the money
--- side wrote (measured, not asserted — a plan a webhook never confirmed is Free).
-CREATE TABLE billing_subscription (
-  tenant_id          bigint PRIMARY KEY REFERENCES tenant(id) ON DELETE CASCADE,
-  ls_customer_id     bigint NOT NULL,
-  ls_subscription_id bigint NOT NULL UNIQUE,
-  variant_id         bigint NOT NULL,
-  status             text NOT NULL,              -- LS status verbatim: on_trial|active|paused|past_due|unpaid|cancelled|expired
-  renews_at          timestamptz,
-  ends_at            timestamptz,
-  updated_at         timestamptz NOT NULL DEFAULT now(),
-  created_at         timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX ON billing_subscription (ls_customer_id);
 
 -- The Postgres half of product analytics: a directory of current visitor
 -- state — first-touch attribution, identity, counters. web_events below is the
@@ -441,17 +415,21 @@ CREATE INDEX ON logs (tenant_id, project_id, seq);        -- the ring window
 CREATE INDEX ON logs (tenant_id, project_id, ts);         -- range reads
 CREATE INDEX ON logs (tenant_id, project_id, fingerprint); -- ErrorGroups
 CREATE INDEX ON logs USING gin (attrs);                   -- bounded by the ingest attribute cap
--- Today and tomorrow only: a fresh install can write immediately, and the
--- job that rolls partitions forward from here lands with the swap-in. The
--- bounds are install-time dates, so the DDL is built in a DO block.
+-- Partitions are named after the UTC day they hold, which is what lets
+-- ucworker's log-partitions job create ahead and drop behind. Today and the
+-- next three days, so a fresh install can write immediately and the hourly
+-- job has a full day of slack before the first one it must make.
 DO $$
 DECLARE
-  d timestamptz := date_trunc('day', now());
+  d date := (now() AT TIME ZONE 'UTC')::date;
+  i int;
 BEGIN
-  EXECUTE format('CREATE TABLE logs_today PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
-                 d, d + interval '1 day');
-  EXECUTE format('CREATE TABLE logs_tomorrow PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
-                 d + interval '1 day', d + interval '2 days');
+  FOR i IN 0..3 LOOP
+    EXECUTE format('CREATE TABLE IF NOT EXISTS %I PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
+                   'logs_' || to_char(d + i, 'YYYYMMDD'),
+                   (d + i)::timestamp AT TIME ZONE 'UTC',
+                   (d + i + 1)::timestamp AT TIME ZONE 'UTC');
+  END LOOP;
 END $$;
 
 -- events are never displaced by the ring; the absence detector lives on them.
@@ -533,92 +511,4 @@ CREATE TABLE series_1m (
   bytes         bigint,
   PRIMARY KEY (tenant_id, project_id, minute, source, level)
 );
-
--- Custom domains for status pages. The page's own columns (domain,
--- domain_verified_at) already exist in 001; this adds only the plan axis —
--- which plans may point a page at their own host. No index is added on
--- status_page.domain: the UNIQUE constraint from 001 already provides one,
--- and NULLs do not collide there, which is exactly what the many pages
--- without a domain need.
-ALTER TABLE plan_entitlement ADD COLUMN custom_domain boolean NOT NULL DEFAULT false;
-UPDATE plan_entitlement SET custom_domain = true WHERE plan <> 'Free';
-
--- 001 created logs_today and logs_tomorrow at install time and left rolling
--- them forward to a job that never landed. Once the calendar passed their
--- upper bound every flush failed with "no partition of relation logs found
--- for row": the batcher swaps a batch out before writing it and never retries,
--- so those lines were accepted with a 200 and then dropped on the floor.
--- Partitions are named after the UTC day they hold from here, which is what
--- lets ucworker's log-partitions job create ahead and drop behind. The two
--- install-time partitions go with their rows (owner decision, 2026-08-30).
-DROP TABLE IF EXISTS logs_today;
-DROP TABLE IF EXISTS logs_tomorrow;
--- Today and the next three days, so a fresh install can write immediately and
--- the hourly job has a full day of slack before the first one it must make.
-DO $$
-DECLARE
-  d date := (now() AT TIME ZONE 'UTC')::date;
-  i int;
-BEGIN
-  FOR i IN 0..3 LOOP
-    EXECUTE format('CREATE TABLE IF NOT EXISTS %I PARTITION OF logs FOR VALUES FROM (%L) TO (%L)',
-                   'logs_' || to_char(d + i, 'YYYYMMDD'),
-                   (d + i)::timestamp AT TIME ZONE 'UTC',
-                   (d + i + 1)::timestamp AT TIME ZONE 'UTC');
-  END LOOP;
-END $$;
-
--- Monetization v2 (owner decisions, 2026-08-31). Two changes to the plan axes:
---
---   1. Telegram groups and channels become paid destinations. telegram_rooms
---      gates the broadcast redeem (a group/channel chat pressing an invite);
---      personal connects stay on every plan. The recipients ladder flattens to
---      3/10/20/30 — the axis now counts destinations (people, groups, channels),
---      so the old 100-seat Agency cell priced a different thing.
---
---   2. Incident history becomes a real window. Reads clamp closed incidents to
---      incident_days (open ones always show); the worker hard-deletes only past
---      the widest plan's window, so an upgrade instantly restores history.
-ALTER TABLE plan_entitlement ADD COLUMN telegram_rooms boolean NOT NULL DEFAULT true;
-UPDATE plan_entitlement SET telegram_rooms = false WHERE plan = 'Free';
-UPDATE plan_entitlement SET telegram_recipients = 20 WHERE plan = 'Growth';
-UPDATE plan_entitlement SET telegram_recipients = 30 WHERE plan = 'Agency';
-UPDATE plan_entitlement SET incident_days = 10 WHERE plan = 'Free';
-UPDATE plan_entitlement SET incident_days = 1460 WHERE plan = 'Agency';
-
--- The ring retention subsystem is retired (reduction wave 7). It was inert end
--- to end: nothing ever wrote tenant_line_ledger, so cutoff.Recompute always
--- derived cutoff_seq = retain_seq = 0, every log query's `seq >= 0` filter was a
--- no-op, and no row was ever deleted by retain_seq. Real retention is, and was,
--- the daily logs partitions dropped by the log-partitions worker at
--- max(plan_entitlement.window_hours) + 24 h.
---
--- This is the REVERSIBLE half of a two-phase removal. The tables are renamed
--- rather than dropped so a week of production proves nothing reads them; the
--- Down section renames them straight back. The drop belongs in a LATER
--- migration, written only after that week is clean (reduction wave 8) — do not
--- add a DROP here.
---
--- project_seq is untouched and stays: sequence allocation is live and load
--- bearing.
-ALTER TABLE tenant_line_ledger RENAME TO zz_dead_tenant_line_ledger;
-ALTER TABLE project_window RENAME TO zz_dead_project_window;
-
--- Recreated, not migrated: the LemonSqueezy table never held a production row, and the
--- provider now in its place (Creem) uses string ids. Written only by the hosted billing
--- sidecar; tenant.plan is derived from this row (measured, not asserted).
-DROP TABLE billing_subscription;
-CREATE TABLE billing_subscription (
-  tenant_id                bigint PRIMARY KEY REFERENCES tenant(id) ON DELETE CASCADE,
-  provider                 text NOT NULL,          -- creem
-  provider_customer_id     text NOT NULL,
-  provider_subscription_id text NOT NULL UNIQUE,
-  product_id               text NOT NULL,          -- the provider's product: it names plan and interval
-  status                   text NOT NULL,          -- provider status verbatim: active|trialing|past_due|unpaid|paused|scheduled_cancel|canceled|expired
-  period_end               timestamptz,            -- end of the paid period: the renewal date, or when a cancelled plan lapses
-  canceled_at              timestamptz,
-  updated_at               timestamptz NOT NULL DEFAULT now(),
-  created_at               timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX ON billing_subscription (provider_customer_id);
 

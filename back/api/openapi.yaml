@@ -112,19 +112,18 @@ components:
       # Self-hosted is the OSS install's plan (UC_SELF_HOSTED=1): one generous
       # entitlement row, never purchasable, never on the pricing page.
       enum: [Free, Indie, Growth, Agency, Self-hosted]
-    Billing:
-      type: string
-      enum: [monthly, annual]
+    # The plan word is the whole of what the core knows about money: how it is
+    # paid for (interval, renewal, the subscription itself) belongs to whatever
+    # sells it, outside this contract.
     Account:
       type: object
-      required: [id, name, email, initials, plan, billing]
+      required: [id, name, email, initials, plan]
       properties:
         id: { type: string, example: "usr_1" }
         name: { type: string, example: "Anna Kovacs" }
         email: { type: string, format: email }
         initials: { type: string, example: "AK" }
         plan: { $ref: "#/components/schemas/Plan" }
-        billing: { $ref: "#/components/schemas/Billing" }
         # The member's role in this workspace (from tenant_member). Absent for
         # accounts predating roles; `notify` gates every management write.
         role: { type: string, enum: [notify, login] }

@@ -29,7 +29,6 @@ const ME = {
 		email: EMAIL,
 		initials: "AP",
 		plan: "Self-hosted",
-		billing: "annual",
 	},
 	project: { id: "prj_1", domain: DOMAIN, createdAt: "2026-06-01T09:00:00Z" },
 };

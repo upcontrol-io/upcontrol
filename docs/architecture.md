@@ -203,8 +203,8 @@ delivery_queue, incident, incident_slice, incident_update
 (ucapi+ucworker); error_alert_state (ucworker); install_token,
 magic_link_code, magic_link_ip, telegram_invite, web_visitor,
 instance_setting (ucapi, sealed values); probe_node (ucapi, on probe
-lease); key_usage_log, plan_entitlement; billing_subscription (no writer in
-the core).
+lease); key_usage_log, plan_entitlement. Nothing about money: the hosted
+product's billing sidecar owns its own tables outside this schema.
 
 **Postgres, telemetry** (written through internal/storage/pgstore):
 

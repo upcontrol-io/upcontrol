@@ -97,7 +97,7 @@ func midnightUTC(t time.Time) time.Time {
 }
 
 // partitionDay reads the UTC day out of a logs_YYYYMMDD name. Anything else,
-// including 001's logs_today, reports false and is never dropped.
+// including an operator's own logs_today, reports false and is never dropped.
 func partitionDay(name string) (time.Time, bool) {
 	rest, ok := strings.CutPrefix(name, partitionPrefix)
 	if !ok {
