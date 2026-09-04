@@ -14,8 +14,8 @@ Windsurf, Amp, Aider, Cline, opencode). It does four deterministic things and
 runs no AI of its own:
 
 1. **Installs the upcontrol skill** into `.claude/skills/` and
-   `.agents/skills/` (add `--copilot` for `.github/skills/`) - the canonical
-   event dictionary, placement rules and stack recipes your agent follows.
+   `.agents/skills/` (add `--copilot` for `.github/skills/`) - event-name
+   guidance, placement rules and stack recipes your agent follows.
 2. **Pins `@upcontrol/sdk`** in package.json at an exact version - the library
    whose `track()` never throws and never blocks.
 3. **Provisions a key.** No account needed: an anonymous project is minted and
