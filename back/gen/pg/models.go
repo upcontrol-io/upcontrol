@@ -36,15 +36,16 @@ type ApiKey struct {
 }
 
 type BillingSubscription struct {
-	TenantID         int64
-	LsCustomerID     int64
-	LsSubscriptionID int64
-	VariantID        int64
-	Status           string
-	RenewsAt         pgtype.Timestamptz
-	EndsAt           pgtype.Timestamptz
-	UpdatedAt        pgtype.Timestamptz
-	CreatedAt        pgtype.Timestamptz
+	TenantID               int64
+	Provider               string
+	ProviderCustomerID     string
+	ProviderSubscriptionID string
+	ProductID              string
+	Status                 string
+	PeriodEnd              pgtype.Timestamptz
+	CanceledAt             pgtype.Timestamptz
+	UpdatedAt              pgtype.Timestamptz
+	CreatedAt              pgtype.Timestamptz
 }
 
 type Check struct {

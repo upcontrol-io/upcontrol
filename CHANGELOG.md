@@ -6,6 +6,14 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The billing table is provider-neutral.** Migration `006_billing_provider_neutral`
+  recreates `billing_subscription` with string provider ids (`provider`,
+  `provider_customer_id`, `provider_subscription_id`, `product_id`, `period_end`,
+  `canceled_at`) in place of the LemonSqueezy integer columns. The table never held
+  a production row, so nothing is migrated; the Down recreates the old shape empty.
+  The core still reads none of it — the hosted billing sidecar is its only writer.
+
 ### Removed
 - **AI Explain, in full.** The button that read a log selection or an
   incident's own evidence and answered what broke is gone from the product,
