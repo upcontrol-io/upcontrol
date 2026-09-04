@@ -245,7 +245,6 @@ func (e MonitorType) Valid() bool {
 
 // Defines values for MonitorCreateInterval.
 const (
-	MonitorCreateIntervalN15m MonitorCreateInterval = "15m"
 	MonitorCreateIntervalN1h  MonitorCreateInterval = "1h"
 	MonitorCreateIntervalN1m  MonitorCreateInterval = "1m"
 	MonitorCreateIntervalN30m MonitorCreateInterval = "30m"
@@ -255,8 +254,6 @@ const (
 // Valid indicates whether the value is a known member of the MonitorCreateInterval enum.
 func (e MonitorCreateInterval) Valid() bool {
 	switch e {
-	case MonitorCreateIntervalN15m:
-		return true
 	case MonitorCreateIntervalN1h:
 		return true
 	case MonitorCreateIntervalN1m:
@@ -290,7 +287,6 @@ func (e MonitorCreateType) Valid() bool {
 
 // Defines values for MonitorPatchInterval.
 const (
-	MonitorPatchIntervalN15m MonitorPatchInterval = "15m"
 	MonitorPatchIntervalN1h  MonitorPatchInterval = "1h"
 	MonitorPatchIntervalN1m  MonitorPatchInterval = "1m"
 	MonitorPatchIntervalN30m MonitorPatchInterval = "30m"
@@ -300,8 +296,6 @@ const (
 // Valid indicates whether the value is a known member of the MonitorPatchInterval enum.
 func (e MonitorPatchInterval) Valid() bool {
 	switch e {
-	case MonitorPatchIntervalN15m:
-		return true
 	case MonitorPatchIntervalN1h:
 		return true
 	case MonitorPatchIntervalN1m:

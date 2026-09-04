@@ -65,7 +65,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     Conflict:
-      description: Idempotent replay with a different body, or state conflict.
+      description: State conflict, for example a domain already connected to another account.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -203,7 +203,7 @@ components:
         keyword: { type: string }
         interval:
           type: string
-          enum: ["1m", "5m", "15m", "30m", "1h"]
+          enum: ["1m", "5m", "30m", "1h"]
     MonitorPatch:
       type: object
       properties:
@@ -212,7 +212,7 @@ components:
         keyword: { type: string }
         interval:
           type: string
-          enum: ["1m", "5m", "15m", "30m", "1h"]
+          enum: ["1m", "5m", "30m", "1h"]
         paused: { type: boolean }
 
     # --- sources ------------------------------------------------------------
@@ -2537,7 +2537,6 @@ paths:
                 { schema: { $ref: "#/components/schemas/IngestReceipt" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "429": { $ref: "#/components/responses/TooManyRequests" }
         "503":
           description: Spool full (always with Retry-After).
           headers:
@@ -2579,7 +2578,6 @@ paths:
                 { schema: { $ref: "#/components/schemas/IngestReceipt" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "429": { $ref: "#/components/responses/TooManyRequests" }
         "503":
           description: Spool full (always with Retry-After).
           headers:
