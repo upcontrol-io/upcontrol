@@ -12,9 +12,23 @@ All notable changes to the self-hosted package. The format follows
 - **The schema starts over at one migration.** `001_init` now carries the
   whole schema and replaces the earlier 001–006: every ALTER is folded into the
   CREATE it patched, `plan_entitlement` seeds its final numbers, and the log
-  partitions are dated from install day. Nobody has data, so there is no upgrade
-  path: an existing database is dropped and migrated afresh (`goose_db_version`
-  included). Self-host installs made after this release never see the difference.
+  partitions are dated from install day. A fresh install never sees the
+  difference. A database migrated through the old 001–006 already holds the same
+  schema plus leftovers, and goose still remembers the six versions, so bring it
+  in line once, by hand, after deploying this release (nothing here touches data):
+
+  ```sql
+  BEGIN;
+  ALTER TABLE tenant DROP COLUMN billing;
+  ALTER TABLE plan_entitlement DROP COLUMN regions, DROP COLUMN retain_mult;
+  DROP TABLE zz_dead_tenant_line_ledger;
+  DROP TABLE zz_dead_project_window;
+  DELETE FROM goose_db_version WHERE version_id BETWEEN 2 AND 6;
+  COMMIT;
+  ```
+
+  Without the last line the next migration this project ships (`002_…`) would
+  count as "missing" against a version table that still says 6.
 
 ### Removed
 - **Everything about money.** `billing_subscription` and `tenant.billing` are
