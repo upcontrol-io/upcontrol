@@ -187,12 +187,8 @@ test('the same name in one process is one funnel', async () => {
   const one = createFunnel('single', ['visit', 'signup'], deps(dir, { client }));
   const two = createFunnel('single', ['visit', 'signup'], deps(dir, { client }));
   assert.equal(one, two);
-
-  const err = stderr();
   const three = createFunnel('single', ['visit', 'paid'], deps(dir, { client }));
-  err.restore();
-  assert.equal(three, one, 'the first declaration wins');
-  assert.ok(err.lines.some((l) => l.includes('already declared')));
+  assert.equal(three, one, 'the first declaration wins, whatever the second says');
   await one.stop();
 });
 

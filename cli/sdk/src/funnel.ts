@@ -36,7 +36,6 @@ export interface Funnel {
 export interface FunnelDeps {
   client: { enqueue(fields: Record<string, unknown>, level: string): void };
   env: NodeJS.ProcessEnv;
-  now?: () => number;
   everyMs?: number;
   maxIds?: number;
 }
@@ -61,7 +60,7 @@ interface State {
 
 const warned = new Set<string>();
 const states = new Map<string, State>();
-const declarations = new Map<string, { steps: string[]; funnel: Declared }>();
+const declarations = new Map<string, Declared>();
 
 const NOOP: Declared = { step() {}, report() {}, stop: () => Promise.resolve() };
 
@@ -212,16 +211,10 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
 
   const file = stateFile(deps);
   const key = `${file}\n${label}`;
+  // Declared twice in one process (a module evaluated again): the first declaration is the
+  // funnel, and there is one timer.
   const already = declarations.get(key);
-  if (already) {
-    if (already.steps.join('\n') !== names.join('\n')) {
-      warnOnce(
-        'redeclared:' + key,
-        `upcontrol: funnel "${label}" is already declared with different steps; the first declaration wins`,
-      );
-    }
-    return already.funnel;
-  }
+  if (already) return already;
 
   const state = loadState(file);
   const stored = state.funnels.get(label);
@@ -230,7 +223,6 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
   // Steps the declaration no longer has are gone from here, so the next save drops them.
   state.funnels.set(label, stepStates);
 
-  const now = deps.now ?? Date.now;
   const everyMs = deps.everyMs ?? EVERY_MS;
   const maxIds = deps.maxIds ?? MAX_IDS;
 
@@ -300,7 +292,7 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
 
   function report(): void {
     try {
-      const ts = new Date(now()).toISOString();
+      const ts = new Date().toISOString();
       let index = 0;
       for (const [stepName, s] of stepStates) {
         index++;
@@ -313,7 +305,7 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
           'metric',
         );
       }
-      maybeSave(state, now());
+      maybeSave(state, Date.now());
     } catch {
       /* reporting never throws */
     }
@@ -325,11 +317,11 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
   function stop(): Promise<void> {
     clearInterval(timer);
     // A save already in flight finishes first, then whatever arrived during it.
-    return (state.pending ?? Promise.resolve()).then(() => (state.dirty ? save(state, now()) : undefined));
+    return (state.pending ?? Promise.resolve()).then(() => (state.dirty ? save(state, Date.now()) : undefined));
   }
 
   const funnel: Declared = { step, report, stop };
-  declarations.set(key, { steps: names, funnel });
+  declarations.set(key, funnel);
   report();
   return funnel;
 }
