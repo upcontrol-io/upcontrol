@@ -6,6 +6,12 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-09-06
+
+### Fixed
+- The two-instance HA test seeds its channel with a project: migration 004 made
+  `alert_channel.project_id` mandatory and the seed predated it. No runtime change.
+
 ## [0.17.0] — 2026-09-06
 
 ### Changed

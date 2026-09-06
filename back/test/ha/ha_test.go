@@ -103,16 +103,22 @@ func TestDeliveryQueueNoDuplication(t *testing.T) {
 	pool := openPool(t, dsn)
 	ctx := context.Background()
 
-	// Seed: one tenant + one channel + 100 queue items; the uuids are minted
-	// (the literals this used to carry were not valid uuid syntax).
+	// Seed: one tenant, its project, one channel + 100 queue items; the uuids
+	// are minted (the literals this used to carry were not valid uuid syntax).
+	// A channel belongs to a project since migration 004.
 	if _, err := pool.Raw().Exec(ctx,
 		`INSERT INTO tenant (id, public_id, name) VALUES (1, gen_random_uuid(), 'ha-delivery')
 		 ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
 	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (id, public_id, tenant_id, kind, target)
-		 VALUES (1, gen_random_uuid(), 1, 'email', 'test@example.com')
+		`INSERT INTO project (id, public_id, tenant_id, domain) VALUES (1, gen_random_uuid(), 1, '')
+		 ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO alert_channel (id, public_id, tenant_id, project_id, kind, target)
+		 VALUES (1, gen_random_uuid(), 1, 1, 'email', 'test@example.com')
 		 ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatalf("seed channel: %v", err)
 	}
