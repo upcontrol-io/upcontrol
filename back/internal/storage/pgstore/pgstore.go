@@ -113,6 +113,20 @@ type SeriesBump struct {
 	Bytes     int64
 }
 
+// HistoryBump is one hourly (service, level, fingerprint) count for a flushed
+// batch: the board's rollup, kept per plan long after the raw lines are gone.
+// The caller aggregates per hour before calling, so keys are unique within a
+// call, exactly as SeriesBump's are.
+type HistoryBump struct {
+	TenantID    uint64
+	ProjectID   uint64
+	Hour        time.Time
+	Service     string
+	Level       string
+	Fingerprint uint64 // same int64 wrap LogRow.Fingerprint stores
+	Lines       int64
+}
+
 // InsertLogs writes a batch of log rows via COPY: logs is the hot path and the
 // batcher delivers rows pre-grouped, one COPY per flush.
 func (s *Store) InsertLogs(ctx context.Context, rows []LogRow) error {
@@ -196,6 +210,32 @@ func (s *Store) BumpSeries(ctx context.Context, rows []SeriesBump) error {
 	q.WriteString(" ON CONFLICT (tenant_id, project_id, minute, source, level)" +
 		" DO UPDATE SET lines = series_1m.lines + EXCLUDED.lines," +
 		" bytes = series_1m.bytes + EXCLUDED.bytes")
+	_, err := s.pool.Exec(ctx, q.String(), args...)
+	return err
+}
+
+// BumpHistory adds the hourly rollup counts for a flushed batch, as one
+// statement beside BumpSeries. The two are the same shape on purpose: one
+// flush, one upsert per table, so a hot hour costs the flush interval rather
+// than the line count.
+func (s *Store) BumpHistory(ctx context.Context, rows []HistoryBump) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var q strings.Builder
+	args := make([]any, 0, len(rows)*7)
+	q.WriteString("INSERT INTO series_1h (tenant_id, project_id, hour, service, level, fingerprint, lines) VALUES ")
+	for i, r := range rows {
+		if i > 0 {
+			q.WriteByte(',')
+		}
+		b := i * 7
+		fmt.Fprintf(&q, "($%d,$%d,$%d,$%d,$%d,$%d,$%d)", b+1, b+2, b+3, b+4, b+5, b+6, b+7)
+		args = append(args, int64(r.TenantID), int64(r.ProjectID), r.Hour,
+			r.Service, r.Level, int64(r.Fingerprint), r.Lines)
+	}
+	q.WriteString(" ON CONFLICT (tenant_id, project_id, hour, service, level, fingerprint)" +
+		" DO UPDATE SET lines = series_1h.lines + EXCLUDED.lines")
 	_, err := s.pool.Exec(ctx, q.String(), args...)
 	return err
 }

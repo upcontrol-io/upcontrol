@@ -66,7 +66,7 @@ within seconds of the first request.
 ## What NOT to do
 
 - Do not add log lines to code as part of "send my logs" - that request is
-  about the logs that already exist. Placing new points is the `funnel` /
+  about the logs that already exist. Placing new points is the `behavior` /
   `jobs` topics, a separate (offered, not assumed) step.
 - Do not pipe stdout wholesale from outside the process (`node app | ...`):
   the SDK path preserves levels, timestamps and structure; a pipe loses all

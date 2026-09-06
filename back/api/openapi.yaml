@@ -640,6 +640,155 @@ components:
           description: "The service label. Empty for lines that carried none."
         lines: { type: integer }
 
+    # --- dashboard ----------------------------------------------------------
+    DashboardCatalog:
+      type: object
+      description: "What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure."
+      required:
+        [services, groups, attrs, checks, events, metrics, funnels]
+      properties:
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/LogService" }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogGroup" }
+        attrs:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogAttr" }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogCheck" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogEvent" }
+        metrics:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogMetric" }
+        funnels:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogFunnel" }
+    CatalogGroup:
+      type: object
+      description: "One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service."
+      required: [service, level, fingerprint, sample, lines, lastTs]
+      properties:
+        service: { type: string }
+        level: { $ref: "#/components/schemas/LogLevel" }
+        fingerprint:
+          type: string
+          description: "Decimal text, not a number: the fingerprint is a uint64 and JSON would round it past 2^53."
+        sample:
+          type: string
+          description: "The newest line of the group, capped at 200 characters — a label, not the line."
+        lines: { type: integer }
+        lastTs: { type: string, format: date-time }
+    CatalogAttr:
+      type: object
+      description: "One attribute pair seen on a service's recent lines, counted over the newest lines of the window rather than all of them: expanding every line into one row per attribute is not what a picker is worth."
+      required: [service, key, value, lines]
+      properties:
+        service: { type: string }
+        key: { type: string }
+        value: { type: string }
+        lines: { type: integer }
+    CatalogCheck:
+      type: object
+      description: "A monitor, in the same id and type shape GET /v1/monitors hands out."
+      required: [id, name, type]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string }
+    CatalogEvent:
+      type: object
+      required: [name, times, lastTs]
+      properties:
+        name: { type: string }
+        times: { type: integer }
+        lastTs: { type: string, format: date-time }
+    CatalogMetric:
+      type: object
+      required: [name, readings, labels]
+      properties:
+        name: { type: string }
+        readings: { type: integer }
+        labels:
+          type: array
+          description: "The label keys seen on this metric's readings — what a widget can narrow it by."
+          items: { type: string }
+    CatalogFunnel:
+      type: object
+      description: "A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`."
+      required: [name, steps]
+      properties:
+        name: { type: string }
+        steps:
+          type: array
+          items: { type: string }
+    SeriesQuery:
+      type: object
+      description: "One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws."
+      required: [id, source, range]
+      properties:
+        id:
+          type: string
+          description: "Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it."
+        source:
+          type: string
+          enum: [logs, check, event, metric]
+        range:
+          type: string
+          enum: ["1h", "4h", "12h", "24h", "7d", "31d", "365d"]
+        name:
+          type: string
+          description: "check: `response` or `uptime`; event: the event name; metric: the metric name."
+        where:
+          type: object
+          additionalProperties: { type: string }
+    SeriesRequest:
+      type: object
+      description: "Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer."
+      required: [queries]
+      properties:
+        queries:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items: { $ref: "#/components/schemas/SeriesQuery" }
+    Series:
+      type: object
+      required: [id, from, to, step, points]
+      properties:
+        id: { type: string }
+        from: { type: string, format: date-time }
+        to:
+          type: string
+          format: date-time
+          description: "Rounded UP to the next bucket boundary, so the last bucket is the current, partial one."
+        step:
+          type: integer
+          description: "Bucket width in seconds. `points.length` × `step` is the span."
+        points:
+          type: array
+          description: "One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing."
+          items: { type: number, nullable: true }
+        total:
+          type: number
+          nullable: true
+          description: "The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge."
+        previous:
+          type: number
+          nullable: true
+          description: "The same reading over the span before `from`, which is what a card's delta is measured against."
+    SeriesResponse:
+      type: object
+      required: [series]
+      properties:
+        series:
+          type: array
+          items: { $ref: "#/components/schemas/Series" }
+
     # --- plan ---------------------------------------------------------------
     UsedMax:
       type: object
@@ -683,6 +832,16 @@ components:
         logWindow: { $ref: "#/components/schemas/LogWindow" }
         telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
         incidentHistoryDays: { type: integer }
+        historyDays:
+          type: integer
+          description: >
+            How far back the dashboard's series reach, in days
+            (plan_entitlement.history_days). Absent when the plan is unlimited
+            (Self-hosted). A `POST /v1/series` range wider than this is a 402,
+            and the board reads this number first so it never asks for one.
+            A depth, not a consumption: the client renders it as a sentence,
+            and it counts from the day a plan is switched, since what an
+            earlier plan did not keep cannot be sold back.
         projects:
           description: >
             Absent when the plan is unlimited (Self-hosted): a usage bar needs
@@ -2131,6 +2290,85 @@ paths:
                 { schema: { $ref: "#/components/schemas/LogsResponse" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/dashboard/catalog:
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: >
+        What this project actually sent over the last 7 days, so a board widget
+        is picked from real names rather than typed from memory: the services,
+        the message groups inside them, the attribute pairs those lines carry,
+        the tenant's checks, and the event, metric and funnel names. Every list
+        is present and an empty one is a real answer — a project that has sent
+        nothing is not an error, it is a project with an empty picker.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardCatalog" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500":
+          description: >
+            A read behind one of the lists failed (`read_failed`). No partial
+            catalog is returned: an empty list is a claim about the project,
+            and a list left short by a broken read would make that claim
+            without measuring it.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
+
+  /v1/series:
+    post:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: >
+        Every chart on the board in one round trip. Each query names a source, a
+        range and the filter that narrows it, and comes back as one bucketed
+        series with the range's total and the same reading over the span before
+        it. A POST because the ask is a body, not because anything is written.
+        An empty project answers zeros and nulls, never a 404: a board drawn
+        before the first line arrives is the normal first view. A range wider
+        than the plan's `historyDays` is a 402 for the whole request, in the
+        upgrade shape every other wall uses: the board reads the plan first
+        and never asks past it, so the 402 is the gate, not the wall's copy.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/SeriesRequest" } },
+          }
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/SeriesResponse" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "500":
+          description: >
+            A read behind one of the queries failed (`read_failed`). No partial
+            body: zeros and nulls mean measured silence here, so a chart drawn
+            from a dead read would print a number nobody took.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
 
   /v1/plan:
     get:

@@ -12,7 +12,7 @@ export function Checkbox({ label, className, ...rest }: CheckboxProps) {
     <label className={[styles.wrap, className].filter(Boolean).join(' ')}>
       <input type="checkbox" className={styles.input} {...rest} />
       <span className={styles.box}>
-        <CheckIcon className={styles.check} width={9} height={9} />
+        <CheckIcon className={styles.check} width={12} height={12} />
       </span>
       {label}
     </label>

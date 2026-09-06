@@ -273,3 +273,112 @@ func TestEvidence_AlwaysScopedToTenantAndProject(t *testing.T) {
 	}
 	assertArgsHave(t, got.Args, int64(7), int64(11))
 }
+
+func TestGroups_ScopedAndCappedPerServiceAndLevel(t *testing.T) {
+	got := New(7, 11).Groups(7*24*time.Hour, 8)
+	for _, want := range []string{
+		"tenant_id = $1", "project_id = $2", "ts >= $3",
+		"GROUP BY service, 2, fingerprint",
+		"row_number() OVER (PARTITION BY service, CASE WHEN level IN ('error', 'warn') THEN level ELSE 'info' END ORDER BY count(*) DESC)",
+		"WHERE rn <= 8",
+		"left((array_agg(message ORDER BY ts DESC))[1], 200)",
+	} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("Groups must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11))
+}
+
+// The picker's levels have to partition the ring the same way the filter does,
+// or a group listed under "info" is unreachable from the level it was listed at.
+func TestGroups_FoldsEveryOtherLevelIntoInfo(t *testing.T) {
+	got := New(1, 2).Groups(time.Hour, 8)
+	if !contains(got.SQL, "CASE WHEN level IN ('error', 'warn') THEN level ELSE 'info' END AS level") {
+		t.Fatalf("Groups must emit the same three levels the API knows; got:\n%s", got.SQL)
+	}
+}
+
+func TestAttrPairs_BoundedScanAndValueCap(t *testing.T) {
+	got := New(7, 11).AttrPairs(7*24*time.Hour, 20000, 10)
+	for _, want := range []string{
+		"tenant_id = $1", "project_id = $2", "attrs IS NOT NULL",
+		"ORDER BY ts DESC LIMIT 20000",
+		"CROSS JOIN LATERAL jsonb_each_text(attrs)",
+		"length(value) <= 80",
+		"WHERE rn <= 10",
+	} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("AttrPairs must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11))
+}
+
+func TestSeriesBuckets_ScopedAndIndexedFromTheRangeStart(t *testing.T) {
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	got := New(7, 11).SeriesBuckets(Range{From: from, To: from.Add(time.Hour)}, 60, SeriesFilter{})
+	// The base rides in the SELECT list, so it must be $1 or the args slice
+	// has drifted from the placeholders.
+	if !contains(got.SQL, "floor((extract(epoch from ts)::float8 - $1) / 60)::bigint AS bucket") {
+		t.Fatalf("the bucket must be indexed from the bound base; got:\n%s", got.SQL)
+	}
+	if got.Args[0] != float64(from.Unix()) {
+		t.Fatalf("the base must be the range start; got %v", got.Args[0])
+	}
+	for _, want := range []string{"tenant_id = $2", "project_id = $3"} {
+		if !contains(got.SQL, want) {
+			t.Fatalf("SeriesBuckets must contain %q; got:\n%s", want, got.SQL)
+		}
+	}
+	assertArgsHave(t, got.Args, int64(7), int64(11))
+}
+
+func TestSeriesBuckets_BindsTheAttributeKeyAsWellAsItsValue(t *testing.T) {
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	got := New(1, 2).SeriesBuckets(Range{From: from, To: from.Add(time.Hour)}, 60,
+		SeriesFilter{Attrs: map[string]string{"route": "/checkout", "env": "prod"}})
+	if !contains(got.SQL, "attrs ->> $4::text = $5") || !contains(got.SQL, "attrs ->> $6::text = $7") {
+		t.Fatalf("both halves of an attribute pair must be parameters; got:\n%s", got.SQL)
+	}
+	// Sorted, so the same filter always builds the same statement text.
+	if got.Args[3] != "env" || got.Args[4] != "prod" || got.Args[5] != "route" || got.Args[6] != "/checkout" {
+		t.Fatalf("attribute pairs must bind in key order; got %v", got.Args)
+	}
+}
+
+func TestSeriesBuckets_DropsAnUnknownLevelRatherThanBindingIt(t *testing.T) {
+	// A crafted level must not reach the engine at all: appendLevelFilter
+	// inlines only the three it recognises, so anything else is no predicate.
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	got := New(1, 2).SeriesBuckets(Range{From: from, To: from.Add(time.Hour)}, 60,
+		SeriesFilter{Level: "'; DROP TABLE logs; --"})
+	if contains(got.SQL, "DROP TABLE") {
+		t.Fatalf("an unknown level must be dropped, not spliced; got:\n%s", got.SQL)
+	}
+	for _, a := range got.Args {
+		if s, ok := a.(string); ok && s != "" {
+			t.Fatalf("an unknown level must not be bound either; got %v", got.Args)
+		}
+	}
+}
+
+func TestSeriesBuckets_FingerprintAndSearchAreParameters(t *testing.T) {
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	fp := int64(-1)
+	got := New(1, 2).SeriesBuckets(Range{From: from, To: from.Add(time.Hour)}, 60,
+		SeriesFilter{Fingerprint: &fp, Search: "oom"})
+	if !contains(got.SQL, "fingerprint = $4") || !contains(got.SQL, "message ILIKE $5") {
+		t.Fatalf("fingerprint and search must bind; got:\n%s", got.SQL)
+	}
+	if got.Args[3] != int64(-1) || got.Args[4] != "%oom%" {
+		t.Fatalf("args must carry the wrapped fingerprint and the wrapped search; got %v", got.Args)
+	}
+}
+
+func TestSeriesBuckets_NeedsABoundedRange(t *testing.T) {
+	// An unbounded series has no bucket zero, so there is nothing to answer.
+	if got := New(1, 2).SeriesBuckets(Range{}, 60, SeriesFilter{}); got.SQL != "" {
+		t.Fatalf("an unbounded range must build nothing; got:\n%s", got.SQL)
+	}
+}

@@ -5,6 +5,28 @@ deploy is rolled back, a bad published version is on other people's machines).
 
 ## Unreleased
 
+### @upcontrol/sdk 0.3.0
+
+- `funnel(name, steps)` declares a journey and `step(name, who)` counts a person at a step
+  once: a request is fingerprinted on the server (a salted hash of its first `x-forwarded-for`
+  hop or socket address and its user-agent; known crawler user-agents are skipped), a string
+  id is hashed the same way, and nothing about the person leaves the process. Every minute the
+  funnel goes out as one metric reading per step (`metric: "funnel"`, labels `funnel`, `step`
+  and a zero-padded `i`), a counter that grows for as long as the process lives and picks up
+  from its last save after a restart (a reader treats a lower reading as a reset), so it never
+  lands in the log window and the board can show any range as a slice. The people seen are
+  kept in `node_modules/.cache/upcontrol/funnels.json` (or `UPCONTROL_STATE_DIR`), up to a
+  million per step, written off the event loop; a filesystem that does not survive a deploy
+  starts the counts again. A request with no resolvable address is not counted, and each
+  process counts its own people.
+- `SDK_VERSION` is `0.3.0`.
+
+### upcontrol 0.1.6
+
+- `SDK_PIN` moves to `0.3.0`. The skill's `funnel` topic is now the funnel feed (declare once,
+  one `step()` line per step); the recipe for placing behaviour events (payments, churn,
+  activation) moved to the `behavior` topic and the skill's table points there.
+
 ## 2026-08-30 — upcontrol 0.1.5
 
 - `SDK_PIN` moves to `0.2.0`, so a fresh `init` pins the `@upcontrol/sdk` that sends

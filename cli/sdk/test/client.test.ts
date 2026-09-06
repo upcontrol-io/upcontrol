@@ -1,57 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { once } from 'node:events';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { Client } from '../dist/esm/client.js';
+import { ok, startServer } from './server.ts';
 
 // Wire behavior against a real local HTTP server: NDJSON body, key header,
 // install_verified on the first batch only, byte-identical retry, 401 kill.
-
-interface RecordedRequest {
-  body: string;
-  headers: Record<string, string | string[] | undefined>;
-}
-
-interface TestServer {
-  server: Server;
-  bodies: RecordedRequest[];
-  url: string;
-  close: () => Promise<void>;
-}
-
-type Handler = (
-  req: IncomingMessage,
-  res: ServerResponse,
-  body: string,
-  count: number,
-) => void;
-
-function startServer(handler: Handler): Promise<TestServer> {
-  const bodies: RecordedRequest[] = [];
-  const server = createServer(async (req, res) => {
-    let body = '';
-    for await (const chunk of req) body += chunk;
-    bodies.push({ body, headers: req.headers });
-    handler(req, res, body, bodies.length);
-  });
-  return new Promise<TestServer>((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve({
-        server,
-        bodies,
-        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-        close: () => new Promise<void>((r) => server.close(() => r())),
-      });
-    });
-  });
-}
-
-const ok = (res: ServerResponse, accepted: number) => {
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ accepted }));
-};
 
 test('first batch carries install_verified, second does not', async () => {
   const srv = await startServer((req, res, body) => ok(res, body.split('\n').length));

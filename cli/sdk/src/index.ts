@@ -1,10 +1,12 @@
-// @upcontrol/sdk - the push library. Public surface: track(), flush(), and the logger bridges.
+// @upcontrol/sdk - the push library. Public surface: track(), flush(), funnel(), and the logger bridges.
 // Configuration is environment-only; track() never throws and without a key is a warned no-op.
 
 import { hostname } from 'node:os';
 import { Client, scrubFields, type Attrs } from './client.js';
+import { createFunnel, type Funnel } from './funnel.js';
 
 export type { Attrs };
+export type { Funnel, RequestLike } from './funnel.js';
 export { SDK_VERSION } from './client.js';
 
 const client = new Client();
@@ -35,6 +37,17 @@ export function track(event: string, attrs?: Attrs): void {
     client.enqueue(scrubFields(fields), 'info');
   } catch {
     /* track never throws */
+  }
+}
+
+/** funnel declares a journey by name and steps, in order. Its `step()` counts a person at a
+ *  step once: a request is fingerprinted here and never sent, a string id is hashed the same
+ *  way. The counts go out every minute as metric readings. Never throws, never blocks. */
+export function funnel(name: string, steps: string[]): Funnel {
+  try {
+    return createFunnel(name, steps, { client, env: process.env });
+  } catch {
+    return { step() {} };
   }
 }
 

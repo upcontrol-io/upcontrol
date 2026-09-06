@@ -42,3 +42,21 @@ func TestParseMetricKeepsItsTimestamp(t *testing.T) {
 		t.Fatalf("float value lost: %v", m.Value)
 	}
 }
+
+// A funnel reading from the SDK is a metric with its labels, so it leaves the
+// log path: the funnel must never show up in the log window.
+func TestParseMetricTakesAFunnelReading(t *testing.T) {
+	m, ok := ParseMetric([]byte(`{"ts":"2026-09-06T12:00:00.000Z","metric":"funnel","value":14135,"labels":{"funnel":"visit to paid","step":"visit","i":"01"}}`))
+	if !ok {
+		t.Fatal("a funnel reading is a metric")
+	}
+	if m.Name != "funnel" || m.Value != 14135 {
+		t.Fatalf("got %+v", m)
+	}
+	if m.Labels["funnel"] != "visit to paid" || m.Labels["step"] != "visit" || m.Labels["i"] != "01" {
+		t.Fatalf("labels lost: %+v", m.Labels)
+	}
+	if m.TS.IsZero() {
+		t.Fatal("ts was dropped")
+	}
+}

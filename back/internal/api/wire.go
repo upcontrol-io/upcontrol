@@ -39,15 +39,17 @@ func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error 
 	if len(eventRows) > 0 {
 		evErr = s.pgs.InsertEvents(ctx, eventRows)
 	}
-	// The per-minute upsert replaces ClickHouse's series_1m_mv: one aggregated
-	// statement per flush, and only for rows that actually landed.
-	var seriesErr error
+	// The per-minute upsert replaces ClickHouse's series_1m_mv, and the hourly
+	// one is the board's rollup: one aggregated statement each per flush, and
+	// only for rows that actually landed.
+	var seriesErr, historyErr error
 	if logErr == nil {
 		seriesErr = s.pgs.BumpSeries(ctx, aggregateSeries(logRows))
+		historyErr = s.pgs.BumpHistory(ctx, aggregateHistory(logRows))
 	}
 	// The batcher swaps the batch out before calling Flush and never retries a
 	// failed flush, so a partial insert cannot duplicate on a later attempt.
-	return errors.Join(logErr, evErr, seriesErr)
+	return errors.Join(logErr, evErr, seriesErr, historyErr)
 }
 
 // aggregateSeries folds a flushed log batch into per-(tenant, project, minute,
@@ -73,6 +75,37 @@ func aggregateSeries(rows []pgstore.LogRow) []pgstore.SeriesBump {
 		agg[k] = b
 	}
 	out := make([]pgstore.SeriesBump, 0, len(agg))
+	for _, b := range agg {
+		out = append(out, b)
+	}
+	return out
+}
+
+// aggregateHistory folds a flushed log batch into the rollup's key: per
+// (tenant, project, hour, service, level, fingerprint) line counts. Bytes are
+// absent on purpose: the rollup answers how many lines, and a byte total kept
+// for a year is a number nothing on the board reads.
+func aggregateHistory(rows []pgstore.LogRow) []pgstore.HistoryBump {
+	type key struct {
+		tenant, project uint64
+		hour            time.Time
+		service, level  string
+		fingerprint     uint64
+	}
+	agg := make(map[key]pgstore.HistoryBump, len(rows))
+	for _, r := range rows {
+		k := key{r.TenantID, r.ProjectID, r.TS.Truncate(time.Hour), r.Service, r.Level, r.Fingerprint}
+		b, ok := agg[k]
+		if !ok {
+			b = pgstore.HistoryBump{
+				TenantID: r.TenantID, ProjectID: r.ProjectID, Hour: k.hour,
+				Service: k.service, Level: k.level, Fingerprint: k.fingerprint,
+			}
+		}
+		b.Lines++
+		agg[k] = b
+	}
+	out := make([]pgstore.HistoryBump, 0, len(agg))
 	for _, b := range agg {
 		out = append(out, b)
 	}

@@ -260,6 +260,7 @@ type PlanEntitlement struct {
 	Projects           *int32
 	CustomDomain       bool
 	TelegramRooms      bool
+	HistoryDays        *int32
 }
 
 type ProbeNode struct {
@@ -280,6 +281,16 @@ type Project struct {
 type ProjectSeq struct {
 	ProjectID int64
 	Next      int64
+}
+
+type Series1h struct {
+	TenantID    int64
+	ProjectID   int64
+	Hour        pgtype.Timestamptz
+	Service     string
+	Level       string
+	Fingerprint int64
+	Lines       int64
 }
 
 type Series1m struct {

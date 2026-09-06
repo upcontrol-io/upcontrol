@@ -59,22 +59,28 @@ func startPostgres(t *testing.T) string {
 	return endpoint
 }
 
-// applyMigration execs db/postgres/001_init.sql statement by statement, the
-// whole schema in one file since the 28-migration collapse.
+// applyMigration execs every db/postgres migration's Up half in file order,
+// statement by statement: what goose would do, without goose's bookkeeping
+// table in the way of the tests.
 func applyMigration(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "..", "db", "postgres", "001_init.sql")
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
+	paths, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "db", "postgres", "[0-9][0-9][0-9]_*.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("find migrations: %v (%d found)", err, len(paths))
 	}
-	for _, stmt := range splitStatements(splitUp(string(body))) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migration: %v", err)
 		}
-		if _, err := pool.Exec(context.Background(), stmt); err != nil {
-			t.Fatalf("exec 001_init statement (%s…): %v", firstLine(stmt), err)
+		for _, stmt := range splitStatements(splitUp(string(body))) {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if _, err := pool.Exec(context.Background(), stmt); err != nil {
+				t.Fatalf("exec %s statement (%s…): %v", filepath.Base(path), firstLine(stmt), err)
+			}
 		}
 	}
 }
