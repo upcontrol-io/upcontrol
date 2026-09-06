@@ -271,10 +271,16 @@ Minimal and frozen:
 ```ts
 track(event: string, attrs?: Record<string, string | number | boolean>): void
 flush(): Promise<void>
+funnel(name: string, steps: string[]): { step(name: string, who: string | RequestLike): void }
 ```
 
 Plus, automatically: interception of unhandled exceptions → `unhandled_exception`, sending
 `app_started` on initialization, `flush()` on the termination signal.
+
+The funnel feed counts people once per step on the customer's server and reports counters as metric
+readings every minute; the SDK owns the wire shape, the agent only places `step()` lines.
+`RequestLike` is the duck type of every Node request, `{ headers, socket?, ip? }`: an
+`http.IncomingMessage`, an Express or Fastify request, a fetch `Request`, or a bag of headers.
 
 Everything else is internal and not configurable: a batch of 1–2 s or 64 KB, an 8 MB in-memory ring
 buffer, exponential backoff with jitter, an idempotent batch, scrubbing (§6).

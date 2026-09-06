@@ -5,6 +5,7 @@
     "declaration": false,
     "rootDir": ".",
     "outDir": null,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
   "include": ["src", "test"]
