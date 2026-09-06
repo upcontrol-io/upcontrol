@@ -54,3 +54,9 @@
   opacity: 0.38;
   cursor: not-allowed;
 }
+
+/* The icon draws a two-unit stroke on a 32-unit box: at nine pixels that was half a pixel
+   and the mark vanished in both themes. Twelve pixels and a five-unit stroke read at a glance. */
+.check path {
+  stroke-width: 5;
+}

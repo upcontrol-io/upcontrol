@@ -381,6 +381,63 @@ func (e RecipientRole) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryRange.
+const (
+	SeriesQueryRangeN12h  SeriesQueryRange = "12h"
+	SeriesQueryRangeN1h   SeriesQueryRange = "1h"
+	SeriesQueryRangeN24h  SeriesQueryRange = "24h"
+	SeriesQueryRangeN31d  SeriesQueryRange = "31d"
+	SeriesQueryRangeN365d SeriesQueryRange = "365d"
+	SeriesQueryRangeN4h   SeriesQueryRange = "4h"
+	SeriesQueryRangeN7d   SeriesQueryRange = "7d"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryRange enum.
+func (e SeriesQueryRange) Valid() bool {
+	switch e {
+	case SeriesQueryRangeN12h:
+		return true
+	case SeriesQueryRangeN1h:
+		return true
+	case SeriesQueryRangeN24h:
+		return true
+	case SeriesQueryRangeN31d:
+		return true
+	case SeriesQueryRangeN365d:
+		return true
+	case SeriesQueryRangeN4h:
+		return true
+	case SeriesQueryRangeN7d:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SeriesQuerySource.
+const (
+	SeriesQuerySourceCheck  SeriesQuerySource = "check"
+	SeriesQuerySourceEvent  SeriesQuerySource = "event"
+	SeriesQuerySourceLogs   SeriesQuerySource = "logs"
+	SeriesQuerySourceMetric SeriesQuerySource = "metric"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQuerySource enum.
+func (e SeriesQuerySource) Valid() bool {
+	switch e {
+	case SeriesQuerySourceCheck:
+		return true
+	case SeriesQuerySourceEvent:
+		return true
+	case SeriesQuerySourceLogs:
+		return true
+	case SeriesQuerySourceMetric:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TelegramInviteStatus.
 const (
 	TelegramInviteStatusPending TelegramInviteStatus = "pending"
@@ -551,6 +608,55 @@ type ApiKey struct {
 	Prefix string `json:"prefix"`
 }
 
+// CatalogAttr One attribute pair seen on a service's recent lines, counted over the newest lines of the window rather than all of them: expanding every line into one row per attribute is not what a picker is worth.
+type CatalogAttr struct {
+	Key     string `json:"key"`
+	Lines   int    `json:"lines"`
+	Service string `json:"service"`
+	Value   string `json:"value"`
+}
+
+// CatalogCheck A monitor, in the same id and type shape GET /v1/monitors hands out.
+type CatalogCheck struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// CatalogEvent defines model for CatalogEvent.
+type CatalogEvent struct {
+	LastTs time.Time `json:"lastTs"`
+	Name   string    `json:"name"`
+	Times  int       `json:"times"`
+}
+
+// CatalogFunnel A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`.
+type CatalogFunnel struct {
+	Name  string   `json:"name"`
+	Steps []string `json:"steps"`
+}
+
+// CatalogGroup One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service.
+type CatalogGroup struct {
+	// Fingerprint Decimal text, not a number: the fingerprint is a uint64 and JSON would round it past 2^53.
+	Fingerprint string    `json:"fingerprint"`
+	LastTs      time.Time `json:"lastTs"`
+	Level       LogLevel  `json:"level"`
+	Lines       int       `json:"lines"`
+
+	// Sample The newest line of the group, capped at 200 characters — a label, not the line.
+	Sample  string `json:"sample"`
+	Service string `json:"service"`
+}
+
+// CatalogMetric defines model for CatalogMetric.
+type CatalogMetric struct {
+	// Labels The label keys seen on this metric's readings — what a widget can narrow it by.
+	Labels   []string `json:"labels"`
+	Name     string   `json:"name"`
+	Readings int      `json:"readings"`
+}
+
 // ChannelKind defines model for ChannelKind.
 type ChannelKind string
 
@@ -612,6 +718,17 @@ type ConnectableSource struct {
 
 	// SetupTime Example: 1 command
 	SetupTime string `json:"setupTime"`
+}
+
+// DashboardCatalog What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure.
+type DashboardCatalog struct {
+	Attrs    []CatalogAttr   `json:"attrs"`
+	Checks   []CatalogCheck  `json:"checks"`
+	Events   []CatalogEvent  `json:"events"`
+	Funnels  []CatalogFunnel `json:"funnels"`
+	Groups   []CatalogGroup  `json:"groups"`
+	Metrics  []CatalogMetric `json:"metrics"`
+	Services []LogService    `json:"services"`
 }
 
 // DeliveryState The delivery queue's own vocabulary. `pending` covers leased/retrying too — to the reader the outcome is simply not known yet.
@@ -1089,6 +1206,55 @@ type RotatedKey struct {
 	Value string `json:"value"`
 }
 
+// Series defines model for Series.
+type Series struct {
+	From time.Time `json:"from"`
+	Id   string    `json:"id"`
+
+	// Points One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0.
+	Points []*float32 `json:"points"`
+
+	// Previous The same reading over the span before `from`, which is what a card's delta is measured against.
+	Previous *float32 `json:"previous,omitempty"`
+
+	// Step Bucket width in seconds. `points.length` × `step` is the span.
+	Step int `json:"step"`
+
+	// To Rounded UP to the next bucket boundary, so the last bucket is the current, partial one.
+	To time.Time `json:"to"`
+
+	// Total The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge.
+	Total *float32 `json:"total,omitempty"`
+}
+
+// SeriesQuery One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws.
+type SeriesQuery struct {
+	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
+	Id string `json:"id"`
+
+	// Name check: `response` or `uptime`; event: the event name; metric: the metric name.
+	Name   *string            `json:"name,omitempty"`
+	Range  SeriesQueryRange   `json:"range"`
+	Source SeriesQuerySource  `json:"source"`
+	Where  *map[string]string `json:"where,omitempty"`
+}
+
+// SeriesQueryRange defines model for SeriesQuery.Range.
+type SeriesQueryRange string
+
+// SeriesQuerySource defines model for SeriesQuery.Source.
+type SeriesQuerySource string
+
+// SeriesRequest Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer.
+type SeriesRequest struct {
+	Queries []SeriesQuery `json:"queries"`
+}
+
+// SeriesResponse defines model for SeriesResponse.
+type SeriesResponse struct {
+	Series []Series `json:"series"`
+}
+
 // Source defines model for Source.
 type Source struct {
 	// DuringIncident What this source reads like while the incident is open.
@@ -1549,6 +1715,9 @@ type PostV1RecipientsJSONRequestBody PostV1RecipientsJSONBody
 
 // PatchV1RecipientsIdJSONRequestBody defines body for PatchV1RecipientsId for application/json ContentType.
 type PatchV1RecipientsIdJSONRequestBody PatchV1RecipientsIdJSONBody
+
+// PostV1SeriesJSONRequestBody defines body for PostV1Series for application/json ContentType.
+type PostV1SeriesJSONRequestBody = SeriesRequest
 
 // PatchV1SourcesIdJSONRequestBody defines body for PatchV1SourcesId for application/json ContentType.
 type PatchV1SourcesIdJSONRequestBody PatchV1SourcesIdJSONBody

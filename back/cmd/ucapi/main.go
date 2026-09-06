@@ -245,6 +245,8 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("PUT /v1/status-page", wa)
 	mux.Handle("POST /v1/status-page/domain/verify", wa)
 	mux.Handle("GET /v1/logs", wa)
+	mux.Handle("GET /v1/dashboard/catalog", wa)
+	mux.Handle("POST /v1/series", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)

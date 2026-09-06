@@ -100,8 +100,9 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
-	// Notify members read (GETs below); every mutation needs login.
-	if r.Method != http.MethodGet && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+	// Notify members read (GETs below); every mutation needs login. POST /v1/series
+	// is a read that travels as a POST for its body, so it stays open to them.
+	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
@@ -167,6 +168,13 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case r.URL.Path == "/v1/logs" && r.Method == http.MethodGet:
 		h.getLogs(w, r, tenantID)
+
+	// The board: what this project sends, then every widget's points in one
+	// round trip.
+	case r.URL.Path == "/v1/dashboard/catalog" && r.Method == http.MethodGet:
+		h.getDashboardCatalog(w, r, tenantID)
+	case r.URL.Path == "/v1/series" && r.Method == http.MethodPost:
+		h.postSeries(w, r, tenantID)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)

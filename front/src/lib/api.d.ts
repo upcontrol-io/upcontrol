@@ -1811,6 +1811,103 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/dashboard/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What this project actually sent over the last 7 days, so a board widget is picked from real names rather than typed from memory: the services, the message groups inside them, the attribute pairs those lines carry, the tenant's checks, and the event, metric and funnel names. Every list is present and an empty one is a real answer — a project that has sent nothing is not an error, it is a project with an empty picker. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardCatalog"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description A read behind one of the lists failed (`read_failed`). No partial catalog is returned: an empty list is a claim about the project, and a list left short by a broken read would make that claim without measuring it. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Every chart on the board in one round trip. Each query names a source, a range and the filter that narrows it, and comes back as one bucketed series with the range's total and the same reading over the span before it. A POST because the ask is a body, not because anything is written. An empty project answers zeros and nulls, never a 404: a board drawn before the first line arrives is the normal first view. */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SeriesRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SeriesResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                /** @description A read behind one of the queries failed (`read_failed`). No partial body: zeros and nulls mean measured silence here, so a chart drawn from a dead read would print a number nobody took. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/plan": {
         parameters: {
             query?: never;
@@ -2980,6 +3077,97 @@ export interface components {
             /** @description The service label. Empty for lines that carried none. */
             name: string;
             lines: number;
+        };
+        /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */
+        DashboardCatalog: {
+            services: components["schemas"]["LogService"][];
+            groups: components["schemas"]["CatalogGroup"][];
+            attrs: components["schemas"]["CatalogAttr"][];
+            checks: components["schemas"]["CatalogCheck"][];
+            events: components["schemas"]["CatalogEvent"][];
+            metrics: components["schemas"]["CatalogMetric"][];
+            funnels: components["schemas"]["CatalogFunnel"][];
+        };
+        /** @description One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service. */
+        CatalogGroup: {
+            service: string;
+            level: components["schemas"]["LogLevel"];
+            /** @description Decimal text, not a number: the fingerprint is a uint64 and JSON would round it past 2^53. */
+            fingerprint: string;
+            /** @description The newest line of the group, capped at 200 characters — a label, not the line. */
+            sample: string;
+            lines: number;
+            /** Format: date-time */
+            lastTs: string;
+        };
+        /** @description One attribute pair seen on a service's recent lines, counted over the newest lines of the window rather than all of them: expanding every line into one row per attribute is not what a picker is worth. */
+        CatalogAttr: {
+            service: string;
+            key: string;
+            value: string;
+            lines: number;
+        };
+        /** @description A monitor, in the same id and type shape GET /v1/monitors hands out. */
+        CatalogCheck: {
+            id: string;
+            name: string;
+            type: string;
+        };
+        CatalogEvent: {
+            name: string;
+            times: number;
+            /** Format: date-time */
+            lastTs: string;
+        };
+        CatalogMetric: {
+            name: string;
+            readings: number;
+            /** @description The label keys seen on this metric's readings — what a widget can narrow it by. */
+            labels: string[];
+        };
+        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`. */
+        CatalogFunnel: {
+            name: string;
+            steps: string[];
+        };
+        /** @description One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws. */
+        SeriesQuery: {
+            /** @description Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it. */
+            id: string;
+            /** @enum {string} */
+            source: "logs" | "check" | "event" | "metric";
+            /** @enum {string} */
+            range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
+            /** @description check: `response` or `uptime`; event: the event name; metric: the metric name. */
+            name?: string;
+            where?: {
+                [key: string]: string;
+            };
+        };
+        /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
+        SeriesRequest: {
+            queries: components["schemas"]["SeriesQuery"][];
+        };
+        Series: {
+            id: string;
+            /** Format: date-time */
+            from: string;
+            /**
+             * Format: date-time
+             * @description Rounded UP to the next bucket boundary, so the last bucket is the current, partial one.
+             */
+            to: string;
+            /** @description Bucket width in seconds. `points.length` × `step` is the span. */
+            step: number;
+            /** @description One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. */
+            points: (number | null)[];
+            /** @description The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge. */
+            total?: number | null;
+            /** @description The same reading over the span before `from`, which is what a card's delta is measured against. */
+            previous?: number | null;
+        };
+        SeriesResponse: {
+            series: components["schemas"]["Series"][];
         };
         UsedMax: {
             used: number;

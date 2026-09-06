@@ -6,6 +6,13 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Two reads for the dashboard board.** `GET /v1/dashboard/catalog` lists what a project
+  can draw over the last 7 days (services, message groups by fingerprint with a sample line,
+  attribute pairs, checks, events, metrics, funnels with their steps) and `POST /v1/series`
+  answers up to 40 bucketed queries in one round trip (logs, checks, events, metrics; a
+  funnel step as counter deltas). Both are session reads of the current project.
+
 ## [0.14.0] — 2026-09-04
 
 ### Changed
