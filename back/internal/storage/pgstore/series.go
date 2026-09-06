@@ -1,5 +1,5 @@
 // The board's reads: the catalog of what a project sends (events, metrics,
-// funnels) and the bucketed series a widget draws from checks, events and
+// counters) and the bucketed series a widget draws from checks, events and
 // metrics. Logs stay behind ring.QueryBuilder; this file never touches them.
 
 package pgstore
@@ -25,11 +25,11 @@ type CatalogMetric struct {
 	Labels   []string
 }
 
-// CatalogFunnel is one funnel and its steps, in the order the latest readings
-// declared them.
-type CatalogFunnel struct {
-	Name  string
-	Steps []string
+// CatalogCounter is one reported counter and its members — a funnel's steps,
+// a test's variants — in the order the latest readings declared them.
+type CatalogCounter struct {
+	Name    string
+	Members []string
 }
 
 // Bucket is one counted bucket of a series, indexed from the range's start.
@@ -41,12 +41,22 @@ type Bucket struct {
 // CheckBucket carries both answers a check series can give: the summed
 // response time of the ok probes (with their count, so an average over any
 // span is a division rather than an average of averages) and the total number
-// of probes, which is what uptime is a share of.
+// of probes, which is what uptime is a share of. The four phase sums carry
+// their own run counts: a reused connection records no lookup and no connect,
+// and averaging those zeros in would report a lookup nobody measured.
 type CheckBucket struct {
-	Index int64
-	SumMs float64
-	OK    int64
-	Total int64
+	Index        int64
+	SumMs        float64
+	OK           int64
+	Total        int64
+	SumDNSMs     float64
+	SumConnectMs float64
+	SumTLSMs     float64
+	SumTTFBMs    float64
+	NDNS         int64
+	NConnect     int64
+	NTLS         int64
+	NTTFB        int64
 }
 
 // GaugeBucket is one bucket of a metric series: the mean of its readings and
@@ -63,6 +73,13 @@ type GaugeBucket struct {
 type SumBucket struct {
 	Index int64
 	Sum   float64
+}
+
+// LabelSum is one label combination's share of a counter's increase over the
+// range.
+type LabelSum struct {
+	Labels map[string]string
+	Sum    float64
 }
 
 // bucketExpr indexes a timestamp into fixed-width buckets counted from a base
@@ -94,21 +111,27 @@ func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, si
 	return out, rows.Err()
 }
 
-// CatalogMetrics lists the metric names except `funnel`, which is a shape of
-// its own (CatalogFunnels reads it). The label keys come from a second pass:
-// expanding them in the counting query would multiply the reading count by the
-// number of keys.
+// reservedCounters are the reported kinds the Metrics picker must not offer
+// as gauges: each is a counter with a shape of its own, and drawing its
+// running total would label it a reading. CatalogCounters reads them. One
+// list, so every predicate that excludes them cannot drift.
+var reservedCounters = []string{"funnel", "experiment", "retention", "breakdown"}
+
+// CatalogMetrics lists the metric names except the reserved counters, which
+// are shapes of their own (CatalogCounters reads those). The label keys come
+// from a second pass: expanding them in the counting query would multiply the
+// reading count by the number of keys.
 func (s *Store) CatalogMetrics(ctx context.Context, tenantID, projectID int64, since time.Time) ([]CatalogMetric, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT m.name, m.readings, COALESCE(k.keys, ARRAY[]::text[])
 		  FROM (SELECT name, count(*) AS readings FROM metrics
-		         WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name <> 'funnel'
+		         WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name <> ALL($4)
 		         GROUP BY name) m
 		  LEFT JOIN (SELECT name, array_agg(DISTINCT key) AS keys
 		               FROM metrics, LATERAL jsonb_object_keys(labels) AS key
-		              WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name <> 'funnel'
+		              WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name <> ALL($4)
 		              GROUP BY name) k ON k.name = m.name
-		 ORDER BY m.name`, tenantID, projectID, since)
+		 ORDER BY m.name`, tenantID, projectID, since, reservedCounters)
 	if err != nil {
 		return nil, err
 	}
@@ -124,39 +147,48 @@ func (s *Store) CatalogMetrics(ctx context.Context, tenantID, projectID int64, s
 	return out, rows.Err()
 }
 
-// CatalogFunnels groups the `funnel` metric's readings into funnels and their
-// steps. The order is the `i` label of the newest reading of each step; a step
-// whose `i` is not a number sorts last rather than failing the read.
-func (s *Store) CatalogFunnels(ctx context.Context, tenantID, projectID int64, since time.Time) ([]CatalogFunnel, error) {
+// maxCatalogMembers caps one counter's member list in the catalog. A
+// breakdown dimension can have thousands of values, and the catalog only
+// needs enough to count and to name.
+const maxCatalogMembers = 200
+
+// CatalogCounters groups one reported counter kind into its names and their
+// members. The order is the `i` label of the newest reading of each member; a
+// member whose `i` is not a number sorts last rather than failing the read.
+// The two label names ride as parameters like every other value.
+func (s *Store) CatalogCounters(ctx context.Context, tenantID, projectID int64,
+	name, keyLabel, memberLabel string, since time.Time) ([]CatalogCounter, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT funnel, step FROM (
-			SELECT labels->>'funnel' AS funnel, labels->>'step' AS step,
+		SELECT key, member FROM (
+			SELECT labels->>$4 AS key, labels->>$5 AS member,
 			       (array_agg(labels->>'i' ORDER BY ts DESC))[1] AS i
 			  FROM metrics
-			 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name = 'funnel'
-			   AND labels->>'funnel' IS NOT NULL AND labels->>'step' IS NOT NULL
+			 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name = $6
+			   AND labels->>$4 IS NOT NULL AND labels->>$5 IS NOT NULL
 			 GROUP BY 1, 2
 		) f
-		 ORDER BY funnel, (CASE WHEN i ~ '^-?[0-9]+$' THEN i::int END) NULLS LAST, step`,
-		tenantID, projectID, since)
+		 ORDER BY key, (CASE WHEN i ~ '^-?[0-9]+$' THEN i::int END) NULLS LAST, member`,
+		tenantID, projectID, since, keyLabel, memberLabel, name)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []CatalogFunnel{}
+	out := []CatalogCounter{}
 	at := map[string]int{}
 	for rows.Next() {
-		var name, step string
-		if err := rows.Scan(&name, &step); err != nil {
+		var key, member string
+		if err := rows.Scan(&key, &member); err != nil {
 			return nil, err
 		}
-		i, ok := at[name]
+		i, ok := at[key]
 		if !ok {
 			i = len(out)
-			at[name] = i
-			out = append(out, CatalogFunnel{Name: name, Steps: []string{}})
+			at[key] = i
+			out = append(out, CatalogCounter{Name: key, Members: []string{}})
 		}
-		out[i].Steps = append(out[i].Steps, step)
+		if len(out[i].Members) < maxCatalogMembers {
+			out[i].Members = append(out[i].Members, member)
+		}
 	}
 	return out, rows.Err()
 }
@@ -281,7 +313,15 @@ func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, fro
 		SELECT `+bucketExpr(3, stepSeconds)+` AS bucket,
 		       COALESCE(sum(total_ms) FILTER (WHERE ok), 0)::float8,
 		       count(*) FILTER (WHERE ok)::bigint,
-		       count(*)::bigint
+		       count(*)::bigint,
+		       COALESCE(sum(dns_ms) FILTER (WHERE ok), 0)::float8,
+		       COALESCE(sum(connect_ms) FILTER (WHERE ok), 0)::float8,
+		       COALESCE(sum(tls_ms) FILTER (WHERE ok), 0)::float8,
+		       COALESCE(sum(ttfb_ms) FILTER (WHERE ok), 0)::float8,
+		       count(*) FILTER (WHERE ok AND dns_ms > 0)::bigint,
+		       count(*) FILTER (WHERE ok AND connect_ms > 0)::bigint,
+		       count(*) FILTER (WHERE ok AND tls_ms > 0)::bigint,
+		       count(*) FILTER (WHERE ok AND ttfb_ms > 0)::bigint
 		  FROM checks
 		 WHERE tenant_id = $1 AND monitor_id = $2 AND ts >= $4 AND ts < $5
 		 GROUP BY bucket ORDER BY bucket`,
@@ -293,7 +333,9 @@ func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, fro
 	out := []CheckBucket{}
 	for rows.Next() {
 		var b CheckBucket
-		if err := rows.Scan(&b.Index, &b.SumMs, &b.OK, &b.Total); err != nil {
+		if err := rows.Scan(&b.Index, &b.SumMs, &b.OK, &b.Total,
+			&b.SumDNSMs, &b.SumConnectMs, &b.SumTLSMs, &b.SumTTFBMs,
+			&b.NDNS, &b.NConnect, &b.NTLS, &b.NTTFB); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -391,6 +433,79 @@ func (s *Store) FunnelBuckets(ctx context.Context, tenantID, projectID int64, na
 			return nil, err
 		}
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// maxGroupRows caps a grouped answer. A dimension with thousands of values
+// must not turn one card into a megabyte.
+const maxGroupRows = 200
+
+// CounterGroups folds a counter into one sum per label combination over
+// [from, to) — FunnelBuckets' fold with the label tuple where the time bucket
+// was: the delta against the previous reading, a drop counted as a reset
+// worth its own value, the first reading counted as nothing, and the last
+// reading strictly before `from` riding along as the seed and then dropped.
+// The group keys are customer text: they ride as parameters, and only the
+// tuple's width is ever spliced into the SQL.
+func (s *Store) CounterGroups(ctx context.Context, tenantID, projectID int64, name string,
+	labels map[string]string, group []string, from, to time.Time) ([]LabelSum, error) {
+	if len(group) == 0 || len(group) > 2 {
+		return nil, fmt.Errorf("group takes one or two label keys")
+	}
+	sel, keys, g2not := "labels->>$5 AS g1", "g1", ""
+	if len(group) == 2 {
+		sel, keys, g2not = "labels->>$5 AS g1, labels->>$6 AS g2", "g1, g2", " AND g2 IS NOT NULL"
+	}
+	fromP := fmt.Sprintf("$%d", 5+len(group))
+	toP := fmt.Sprintf("$%d", 6+len(group))
+	limitP := fmt.Sprintf("$%d", 7+len(group))
+	args := []any{tenantID, projectID, name, string(jsonb(labels)), group[0]}
+	if len(group) == 2 {
+		args = append(args, group[1])
+	}
+	args = append(args, from, to, maxGroupRows)
+	rows, err := s.pool.Query(ctx, `
+		WITH span AS (
+			(SELECT ts, value, `+sel+` FROM metrics
+			  WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND labels @> $4::jsonb
+			    AND ts >= `+fromP+` AND ts < `+toP+`)
+			UNION ALL
+			(SELECT DISTINCT ON (`+keys+`) ts, value, `+sel+` FROM metrics
+			  WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND labels @> $4::jsonb
+			    AND ts < `+fromP+`
+			  ORDER BY `+keys+`, ts DESC)
+		), stepped AS (
+			SELECT `+keys+`, ts, value,
+			       lag(value) OVER (PARTITION BY `+keys+` ORDER BY ts) AS prev FROM span
+		)
+		SELECT `+keys+`, sum(CASE WHEN prev IS NULL THEN 0
+		                WHEN value < prev THEN value
+		                ELSE value - prev END)::float8 AS total
+		  FROM stepped
+		 WHERE ts >= `+fromP+` AND ts < `+toP+` AND g1 IS NOT NULL`+g2not+`
+		 GROUP BY `+keys+` ORDER BY total DESC LIMIT `+limitP, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LabelSum{}
+	for rows.Next() {
+		var sum LabelSum
+		var g1, g2 string
+		dest := []any{&g1}
+		if len(group) == 2 {
+			dest = append(dest, &g2)
+		}
+		dest = append(dest, &sum.Sum)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		sum.Labels = map[string]string{group[0]: g1}
+		if len(group) == 2 {
+			sum.Labels[group[1]] = g2
+		}
+		out = append(out, sum)
 	}
 	return out, rows.Err()
 }

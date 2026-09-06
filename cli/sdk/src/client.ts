@@ -3,7 +3,7 @@
 
 import { scrub } from './scrub.js';
 
-export const SDK_VERSION = '0.3.0';
+export const SDK_VERSION = '0.4.0';
 
 const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const FLUSH_AFTER_MS = 1500;

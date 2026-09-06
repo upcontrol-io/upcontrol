@@ -141,6 +141,7 @@ type seriesQuery struct {
 	Range  string            `json:"range"`
 	Name   string            `json:"name"`
 	Where  map[string]string `json:"where"`
+	Group  []string          `json:"group"`
 }
 
 type seriesRequest struct {
@@ -174,6 +175,19 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		if _, ok := seriesRanges[q.Range]; !ok {
 			return "unknown range " + q.Range + " in " + q.ID
+		}
+		if len(q.Group) > 0 {
+			if q.Source != "metric" {
+				return "group is only for the metric source in " + q.ID
+			}
+			if len(q.Group) > 2 {
+				return "group takes one or two label keys in " + q.ID
+			}
+			for _, k := range q.Group {
+				if k == "" || len(k) > 40 {
+					return "bad group key in " + q.ID
+				}
+			}
 		}
 	}
 	return ""
@@ -217,6 +231,9 @@ func (h *writeAPI) getDashboardCatalog(w http.ResponseWriter, r *http.Request, t
 		{"events", func() ([]map[string]any, error) { return h.catalogEvents(ctx, tenantID, projectID, since) }},
 		{"metrics", func() ([]map[string]any, error) { return h.catalogMetrics(ctx, tenantID, projectID, since) }},
 		{"funnels", func() ([]map[string]any, error) { return h.catalogFunnels(ctx, tenantID, projectID, since) }},
+		{"experiments", func() ([]map[string]any, error) { return h.catalogExperiments(ctx, tenantID, projectID, since) }},
+		{"retentions", func() ([]map[string]any, error) { return h.catalogRetentions(ctx, tenantID, projectID, since) }},
+		{"dimensions", func() ([]map[string]any, error) { return h.catalogDimensions(ctx, tenantID, projectID, since) }},
 	} {
 		rows, err := part.read()
 		if err != nil {
@@ -360,19 +377,49 @@ func (h *writeAPI) catalogMetrics(ctx context.Context, tenantID, projectID int64
 	return out, nil
 }
 
-func (h *writeAPI) catalogFunnels(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
+// counterCatalog reads one reported kind through CatalogCounters into the
+// catalog's row shape. A nil member list is normalised to empty, so it
+// reaches JSON as [] and not null — an empty list is a real answer.
+func (h *writeAPI) counterCatalog(ctx context.Context, tenantID, projectID int64, name, keyLabel, memberLabel string, since time.Time, shape func(pgstore.CatalogCounter) map[string]any) ([]map[string]any, error) {
 	out := []map[string]any{}
 	if h.pgs == nil {
 		return out, nil
 	}
-	rows, err := h.pgs.CatalogFunnels(ctx, tenantID, projectID, since)
+	counters, err := h.pgs.CatalogCounters(ctx, tenantID, projectID, name, keyLabel, memberLabel, since)
 	if err != nil {
 		return nil, err
 	}
-	for _, f := range rows {
-		out = append(out, map[string]any{"name": f.Name, "steps": f.Steps})
+	for _, c := range counters {
+		if c.Members == nil {
+			c.Members = []string{}
+		}
+		out = append(out, shape(c))
 	}
 	return out, nil
+}
+
+func (h *writeAPI) catalogFunnels(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
+	return h.counterCatalog(ctx, tenantID, projectID, "funnel", "funnel", "step", since, func(c pgstore.CatalogCounter) map[string]any {
+		return map[string]any{"name": c.Name, "steps": c.Members}
+	})
+}
+
+func (h *writeAPI) catalogExperiments(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
+	return h.counterCatalog(ctx, tenantID, projectID, "experiment", "experiment", "variant", since, func(c pgstore.CatalogCounter) map[string]any {
+		return map[string]any{"name": c.Name, "variants": c.Members}
+	})
+}
+
+func (h *writeAPI) catalogRetentions(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
+	return h.counterCatalog(ctx, tenantID, projectID, "retention", "retention", "cohort", since, func(c pgstore.CatalogCounter) map[string]any {
+		return map[string]any{"name": c.Name, "cohorts": len(c.Members)}
+	})
+}
+
+func (h *writeAPI) catalogDimensions(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
+	return h.counterCatalog(ctx, tenantID, projectID, "breakdown", "dimension", "value", since, func(c pgstore.CatalogCounter) map[string]any {
+		return map[string]any{"name": c.Name, "values": len(c.Members)}
+	})
 }
 
 func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID int64) {
@@ -420,6 +467,9 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 // nothing measured.
 func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenantID, projectID int64, q seriesQuery, now time.Time, memo *oldestMemo) (map[string]any, error) {
 	from, to, r, _ := seriesWindow(q.Range, now)
+	if len(q.Group) > 0 {
+		return h.groupedSeries(ctx, tenantID, projectID, q, from, to, r)
+	}
 	var points []any
 	var total, previous any
 	var err error
@@ -447,6 +497,33 @@ func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenant
 		"points":   points,
 		"total":    total,
 		"previous": previous,
+	}, nil
+}
+
+// groupedSeries answers a grouped counter read: one sum per label
+// combination, ordered by value. There is no time axis to invent and no
+// single number for the whole range, so points is empty and the totals are
+// nil — a series of nulls would claim an axis the fold does not have.
+func (h *writeAPI) groupedSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
+	rows := []any{}
+	if h.pgs != nil {
+		sums, err := h.pgs.CounterGroups(ctx, tenantID, projectID, q.Name, q.Where, q.Group, from, to)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range sums {
+			rows = append(rows, map[string]any{"labels": s.Labels, "value": s.Sum})
+		}
+	}
+	return map[string]any{
+		"id":       q.ID,
+		"from":     from.Format(time.RFC3339),
+		"to":       to.Format(time.RFC3339),
+		"step":     r.step,
+		"points":   []any{},
+		"rows":     rows,
+		"total":    nil,
+		"previous": nil,
 	}, nil
 }
 
@@ -691,12 +768,19 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	return points, total, previous, nil
 }
 
-// checkSeries answers `response` (the average response time of the ok probes)
-// or `uptime` (their share). An unknown check or an unknown name answers a
-// null series rather than an error: the widget names something that used to
-// exist, and a chart saying "no data" is the honest reading.
+// checkNames is what the check source reads: the uptime share, the whole
+// response time, and the four phases a probe measures.
+var checkNames = map[string]bool{
+	"response": true, "uptime": true, "dns": true, "tcp": true, "tls": true, "wait": true,
+}
+
+// checkSeries answers `response` (the average response time of the ok probes),
+// `uptime` (their share) or one of the four phases. An unknown check or an
+// unknown name answers a null series rather than an error: the widget names
+// something that used to exist, and a chart saying "no data" is the honest
+// reading.
 func (h *writeAPI) checkSeries(ctx context.Context, tenantID int64, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
-	if h.pgs == nil || (q.Name != "response" && q.Name != "uptime") {
+	if h.pgs == nil || !checkNames[q.Name] {
 		return nil, nil, nil, nil
 	}
 	mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
@@ -722,9 +806,7 @@ func (h *writeAPI) checkSeries(ctx context.Context, tenantID int64, q seriesQuer
 			continue
 		}
 		points[b.Index] = checkValue(q.Name, b)
-		whole.SumMs += b.SumMs
-		whole.OK += b.OK
-		whole.Total += b.Total
+		accCheck(&whole, b)
 	}
 	prevRows, err := h.pgs.CheckBuckets(ctx, tenantID, mon.ID, from.Add(-span), from, int(span/time.Second))
 	if err != nil {
@@ -732,55 +814,73 @@ func (h *writeAPI) checkSeries(ctx context.Context, tenantID int64, q seriesQuer
 	}
 	var prev pgstore.CheckBucket
 	for _, b := range prevRows {
-		prev.SumMs += b.SumMs
-		prev.OK += b.OK
-		prev.Total += b.Total
+		accCheck(&prev, b)
 	}
 	return points, checkValue(q.Name, whole), checkValue(q.Name, prev), nil
 }
 
-// checkValue is the one place a check's two readings are computed, so a bucket
-// and a total can never be different arithmetic. nil means "no probe ran",
-// which is not the same fact as 0 ms or 0% uptime.
+// accCheck adds one bucket into a running whole, so a single bucket's reading
+// and the range's share one arithmetic.
+func accCheck(dst *pgstore.CheckBucket, b pgstore.CheckBucket) {
+	dst.SumMs += b.SumMs
+	dst.OK += b.OK
+	dst.Total += b.Total
+	dst.SumDNSMs += b.SumDNSMs
+	dst.SumConnectMs += b.SumConnectMs
+	dst.SumTLSMs += b.SumTLSMs
+	dst.SumTTFBMs += b.SumTTFBMs
+	dst.NDNS += b.NDNS
+	dst.NConnect += b.NConnect
+	dst.NTLS += b.NTLS
+	dst.NTTFB += b.NTTFB
+}
+
+// checkValue is the one place a check's readings are computed, so a bucket
+// and a total can never be different arithmetic. nil means "no probe ran"
+// (for a phase: no probe that measured it — a reused connection records no
+// lookup and no connect), which is not the same fact as 0 ms or 0% uptime.
 func checkValue(name string, b pgstore.CheckBucket) any {
-	if name == "uptime" {
+	switch name {
+	case "uptime":
 		if b.Total == 0 {
 			return nil
 		}
 		return 100 * float64(b.OK) / float64(b.Total)
-	}
-	if b.OK == 0 {
+	case "response":
+		if b.OK == 0 {
+			return nil
+		}
+		return b.SumMs / float64(b.OK)
+	case "dns":
+		if b.NDNS == 0 {
+			return nil
+		}
+		return b.SumDNSMs / float64(b.NDNS)
+	case "tcp":
+		if b.NConnect == 0 {
+			return nil
+		}
+		return b.SumConnectMs / float64(b.NConnect)
+	case "tls":
+		if b.NTLS == 0 {
+			return nil
+		}
+		return b.SumTLSMs / float64(b.NTLS)
+	case "wait":
+		if b.NTTFB == 0 {
+			return nil
+		}
+		return b.SumTTFBMs / float64(b.NTTFB)
+	default:
 		return nil
 	}
-	return b.SumMs / float64(b.OK)
 }
 
-// metricSeries draws a counter (the funnel's steps) as increments and every
-// other metric as a gauge.
+// metricSeries draws a metric as a gauge. The reported counters — funnels,
+// tests, retentions, dimensions — read through the grouped path instead.
 func (h *writeAPI) metricSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
 	if h.pgs == nil {
 		return nil, nil, nil, nil
-	}
-	span := to.Sub(from)
-	if q.Name == "funnel" {
-		// The fold runs in the database, so a year of a busy counter is a
-		// grouped scan rather than a slice held in memory here.
-		rows, err := h.pgs.FunnelBuckets(ctx, tenantID, projectID, q.Name, q.Where, from, to, r.step)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		points, total := sumPoints(rows, r)
-		// The previous span is the same fold at one bucket per span; it seeds
-		// itself from the reading before it, like the range does.
-		prevRows, err := h.pgs.FunnelBuckets(ctx, tenantID, projectID, q.Name, q.Where, from.Add(-span), from, int(span/time.Second))
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		var previous float64
-		for _, b := range prevRows {
-			previous += b.Sum
-		}
-		return points, total, previous, nil
 	}
 	rows, err := h.pgs.MetricBuckets(ctx, tenantID, projectID, q.Name, q.Where, from, to, r.step)
 	if err != nil {

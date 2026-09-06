@@ -272,7 +272,7 @@ func TestMetricCatalogAndFunnelFold(t *testing.T) {
 		t.Fatalf("the label keys are what a widget can narrow by; got %v", metrics[0].Labels)
 	}
 
-	funnels, err := s.CatalogFunnels(ctx, seriesTenant, catalogProject, from.Add(-time.Hour))
+	funnels, err := s.CatalogCounters(ctx, seriesTenant, catalogProject, "funnel", "funnel", "step", from.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("catalog funnels: %v", err)
 	}
@@ -280,8 +280,8 @@ func TestMetricCatalogAndFunnelFold(t *testing.T) {
 		t.Fatalf("one funnel was written; got %+v", funnels)
 	}
 	for i, step := range []string{"visit", "signup", "paid"} {
-		if funnels[0].Steps[i] != step {
-			t.Fatalf("steps must follow the `i` label; got %v", funnels[0].Steps)
+		if funnels[0].Members[i] != step {
+			t.Fatalf("steps must follow the `i` label; got %v", funnels[0].Members)
 		}
 	}
 
