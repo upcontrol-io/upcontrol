@@ -562,7 +562,8 @@ func TestMemberForChat_ScopesToTheChatsProject(t *testing.T) {
 		{"a member of a sibling project", siblingTG, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			personID, _, gotProjects, _ := b.memberForChat(ctx, chatID, tc.tgID)
+			m := b.memberForChat(ctx, chatID, tc.tgID)
+			personID, gotProjects := m.personID, m.projectIDs
 			if personID != tc.want {
 				t.Fatalf("person = %d, want %d", personID, tc.want)
 			}
@@ -581,13 +582,14 @@ func TestMemberForChat_ScopesToTheChatsProject(t *testing.T) {
 		t.Fatalf("seed the sibling channel: %v", err)
 	}
 	t.Run("the owner of a chat on two projects answers for both", func(t *testing.T) {
-		_, _, gotProjects, _ := b.memberForChat(ctx, chatID, ownerTG)
+		gotProjects := b.memberForChat(ctx, chatID, ownerTG).projectIDs
 		if len(gotProjects) != 2 || gotProjects[0] != projectID || gotProjects[1] != siblingID {
 			t.Fatalf("projects = %v, want [%d %d]", gotProjects, projectID, siblingID)
 		}
 	})
 	t.Run("a sibling member on a chat on two projects answers for theirs only", func(t *testing.T) {
-		personID, _, gotProjects, _ := b.memberForChat(ctx, chatID, siblingTG)
+		m := b.memberForChat(ctx, chatID, siblingTG)
+		personID, gotProjects := m.personID, m.projectIDs
 		if personID != siblingPersonID || len(gotProjects) != 1 || gotProjects[0] != siblingID {
 			t.Fatalf("person = %d projects = %v, want %d [%d]", personID, gotProjects, siblingPersonID, siblingID)
 		}

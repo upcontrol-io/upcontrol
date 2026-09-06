@@ -409,7 +409,7 @@ func TestStatusPageIsPerProject(t *testing.T) {
 
 	// A member of project 1: their own page says mine, the sibling's does not.
 	memberID := seedPerson(t, f.pool, fmt.Sprintf("pagemember-%d@example.com", uniq))
-	seedProjectMember(t, f.pool, one.projectID, memberID, f.tenantID, "notify", "active")
+	seedProjectMember(t, f.pool, one.projectID, memberID, f.tenantID, "notify")
 	memberToken, err := f.sess.Create(ctx, memberID, f.tenantID, &one.projectID)
 	if err != nil {
 		t.Fatalf("mint member session: %v", err)

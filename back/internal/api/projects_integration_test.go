@@ -104,11 +104,11 @@ func seedOwnedTenant(t *testing.T, pool *pg.Pool, ownerID int64, name string) in
 }
 
 // seedProjectMember puts one person on one project's team.
-func seedProjectMember(t *testing.T, pool *pg.Pool, projectID, personID, tenantID int64, role, status string) {
+func seedProjectMember(t *testing.T, pool *pg.Pool, projectID, personID, tenantID int64, role string) {
 	t.Helper()
 	if _, err := pool.Raw().Exec(context.Background(),
-		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, $4, $5)`,
-		projectID, personID, tenantID, role, status); err != nil {
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, $4, 'active')`,
+		projectID, personID, tenantID, role); err != nil {
 		t.Fatalf("seed project_member: %v", err)
 	}
 }
@@ -543,7 +543,7 @@ func TestGuestListsAndSwitchesIntoAnotherWorkspace(t *testing.T) {
 	uniq := time.Now().UnixNano()
 
 	guestID := seedPerson(t, f.pool, fmt.Sprintf("guest-%d@example.com", uniq))
-	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login", "active")
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
 
 	sm := session.New(f.pool, session.DefaultTTL, nil)
 	// The guest's own workspace is empty: no project, so the session opens on
@@ -610,7 +610,7 @@ func TestCreateProjectFromAGuestSeatLandsInTheCallersOwnWorkspace(t *testing.T) 
 	uniq := time.Now().UnixNano()
 
 	guestID := seedPerson(t, f.pool, fmt.Sprintf("maker-%d@example.com", uniq))
-	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login", "active")
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
 
 	sm := session.New(f.pool, session.DefaultTTL, nil)
 	// Standing INSIDE the host's project: tenant and project both theirs.
@@ -693,7 +693,7 @@ func TestGuestAdminIsRefusedTheOwnerOnlyDoors(t *testing.T) {
 	uniq := time.Now().UnixNano()
 
 	guestID := seedPerson(t, f.pool, fmt.Sprintf("admin-%d@example.com", uniq))
-	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login", "active")
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
 
 	sm := session.New(f.pool, session.DefaultTTL, nil)
 	token, err := sm.Create(ctx, guestID, f.tenantID, &f.projectID)

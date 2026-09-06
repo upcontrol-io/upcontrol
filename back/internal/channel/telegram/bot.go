@@ -608,12 +608,23 @@ func nullableLabel(label string) any {
 	return nil
 }
 
+// chatMember is who pressed and what the chat may act on: the presser, the
+// workspace of the chat's first channel, and every project of that workspace
+// this chat is a destination of that the presser reaches. A zero tenantID is
+// "not connected here", the same answer a stranger gets.
+type chatMember struct {
+	personID, tenantID int64
+	projectIDs         []int64
+	name               string
+}
+
 // memberForChat resolves the presser AND the chat's projects in one round
 // trip: every project this chat is a destination of, within the workspace of
 // its first channel, that the presser owns or holds an active membership in.
 // A chat connected to two projects answers for both. The owner has no
 // project_member row — ownership is a column on the workspace.
-func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, projectIDs []int64, name string) {
+func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) chatMember {
+	var m chatMember
 	rows, err := b.pool.Raw().Query(ctx,
 		`SELECT p.id, ac.tenant_id, ac.project_id, p.name
 		   FROM alert_channel ac
@@ -627,7 +638,7 @@ func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID
 		  ORDER BY ac.id`,
 		strconv.FormatInt(chatID, 10), fromID)
 	if err != nil {
-		return 0, 0, nil, ""
+		return m
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -638,13 +649,13 @@ func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID
 		}
 		// The first channel's workspace decides: a chat that also serves a
 		// second workspace's project is not that workspace's here.
-		if tenantID != 0 && tid != tenantID {
+		if m.tenantID != 0 && tid != m.tenantID {
 			continue
 		}
-		personID, tenantID, name = pid, tid, n
-		projectIDs = append(projectIDs, prid)
+		m.personID, m.tenantID, m.name = pid, tid, n
+		m.projectIDs = append(m.projectIDs, prid)
 	}
-	return personID, tenantID, projectIDs, name
+	return m
 }
 
 // handleHelp answers /help: the command list plus the Open Mini App button.
@@ -664,8 +675,8 @@ func (b *bot) handleHelp(msg *tgMessage) {
 // answer, anyone else learns nothing. A chat reports the projects it is
 // connected to, not the whole workspace.
 func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
-	_, tenantID, projectIDs, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
-	if tenantID == 0 {
+	m := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if m.tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
@@ -673,7 +684,7 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 		`SELECT mf.status, count(*), array_agg(m.name ORDER BY m.name) FILTER (WHERE mf.status <> 'ok')
 		   FROM monitor m LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
 		  WHERE m.tenant_id = $1 AND m.project_id = ANY($2) AND m.paused = false
-		  GROUP BY mf.status`, tenantID, projectIDs)
+		  GROUP BY mf.status`, m.tenantID, m.projectIDs)
 	if err != nil {
 		b.send(msg.Chat.ID, "Could not read the checks right now.")
 		return
@@ -700,7 +711,7 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	}
 	// Incidents are their own question: a detector incident has no monitor,
 	// so zero checks can still be on fire.
-	incidents, incidentsOK := b.openIncidentTitles(ctx, tenantID, projectIDs)
+	incidents, incidentsOK := b.openIncidentTitles(ctx, m.tenantID, m.projectIDs)
 	switch {
 	case up+failing+nodata == 0:
 		b.send(msg.Chat.ID, "No checks yet — nothing is being monitored."+incidentsLine(incidents, incidentsOK))
@@ -776,8 +787,8 @@ func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 		b.send(msg.Chat.ID, "How long? Try /mute 30m, /mute 2h or /mute 1d (up to 7d).")
 		return
 	}
-	personID, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
-	if tenantID == 0 {
+	m := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if m.tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
@@ -786,7 +797,7 @@ func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 		`UPDATE alert_channel SET muted_until = $1
 		  WHERE tenant_id = $2 AND kind = 'telegram'
 		    AND (recipient_person_id = $3 OR target = $4)`,
-		until, tenantID, personID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
+		until, m.tenantID, m.personID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
 		b.send(msg.Chat.ID, "Could not set the mute window. Try again.")
 		return
 	}
@@ -796,8 +807,8 @@ func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 // handleUnmute lifts the mute early AND un-parks what the window deferred:
 // the worker defers muted alerts to the mute's end, it does not drop them.
 func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
-	personID, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
-	if tenantID == 0 {
+	m := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if m.tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
@@ -821,7 +832,7 @@ func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 		      AND d.next_try_at >= m.muted_until
 		 )
 		 SELECT count(*) FROM muted`,
-		tenantID, personID, strconv.FormatInt(msg.Chat.ID, 10)).Scan(&lifted); err != nil {
+		m.tenantID, m.personID, strconv.FormatInt(msg.Chat.ID, 10)).Scan(&lifted); err != nil {
 		b.send(msg.Chat.ID, "Could not lift the mute. Try again.")
 		return
 	}
@@ -835,8 +846,8 @@ func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 // handleStop disconnects THIS chat: the destination goes, membership and
 // role stay. A fresh invite link brings the chat back.
 func (b *bot) handleStop(ctx context.Context, msg *tgMessage) {
-	_, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
-	if tenantID == 0 {
+	m := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	if m.tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
 	}
@@ -845,12 +856,12 @@ func (b *bot) handleStop(ctx context.Context, msg *tgMessage) {
 	if _, err := b.pool.Raw().Exec(ctx,
 		`DELETE FROM alert_channel
 		  WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2`,
-		tenantID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
+		m.tenantID, strconv.FormatInt(msg.Chat.ID, 10)); err != nil {
 		b.send(msg.Chat.ID, "Could not disconnect this chat. Try again.")
 		return
 	}
 	b.send(msg.Chat.ID, "Disconnected. No more alerts arrive here. You are still on the project — a fresh invite link from the Alerts screen brings this chat back.")
-	b.log.Info("telegram chat disconnected", "tenant_id", tenantID, "chat_id", msg.Chat.ID)
+	b.log.Info("telegram chat disconnected", "tenant_id", m.tenantID, "chat_id", msg.Chat.ID)
 }
 
 // parseMuteDuration accepts <n>m, <n>h, <n>d up to 7 days.
@@ -891,14 +902,14 @@ func (b *bot) handleCallback(ctx context.Context, cb *tgCallback) {
 	}
 	// Authorisation is the person, not the chat: a forwarded message or a
 	// stranger pressing a screenshot's button stops here.
-	personID, tenantID, projectIDs, name := b.memberForChat(ctx, cb.Message.Chat.ID, cb.From.ID)
-	if personID == 0 {
+	m := b.memberForChat(ctx, cb.Message.Chat.ID, cb.From.ID)
+	if m.personID == 0 {
 		b.answerCallback(cb.ID, "Your Telegram account is not connected to this project.")
 		return
 	}
 	// The id in the payload is attacker-controlled: the incident must belong
 	// to one of this chat's projects, whatever the button claims.
-	incID, ok := b.incidentByPublicID(ctx, pubID, tenantID, projectIDs)
+	incID, ok := b.incidentByPublicID(ctx, pubID, m.tenantID, m.projectIDs)
 	if !ok {
 		b.answerCallback(cb.ID, "That incident is not yours.")
 		return
@@ -906,9 +917,9 @@ func (b *bot) handleCallback(ctx context.Context, cb *tgCallback) {
 
 	switch action {
 	case "ack":
-		b.handleAck(ctx, cb, incID, personID, name)
+		b.handleAck(ctx, cb, incID, m.personID, m.name)
 	case "resolve":
-		b.handleResolve(ctx, cb, incID, personID, name)
+		b.handleResolve(ctx, cb, incID, m.personID, m.name)
 	default:
 		b.answerCallback(cb.ID, "Unknown action: "+action)
 	}
