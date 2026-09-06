@@ -3,9 +3,14 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
-## Unreleased
+## 2026-09-06 — upcontrol 0.1.6
 
-### @upcontrol/sdk 0.3.0
+- `SDK_PIN` moves to `0.3.0`. The skill's `funnel` topic is now the funnel feed (declare once,
+  one `step()` line per step); the recipe for placing behaviour events (payments, churn,
+  activation) moved to the `behavior` topic and the skill's table points there. Published
+  after the SDK, as the pin requires.
+
+## 2026-09-06 — @upcontrol/sdk 0.3.0
 
 - `funnel(name, steps)` declares a journey and `step(name, who)` counts a person at a step
   once: a request is fingerprinted on the server (a salted hash of its first `x-forwarded-for`
@@ -20,12 +25,6 @@ deploy is rolled back, a bad published version is on other people's machines).
   starts the counts again. A request with no resolvable address is not counted, and each
   process counts its own people.
 - `SDK_VERSION` is `0.3.0`.
-
-### upcontrol 0.1.6
-
-- `SDK_PIN` moves to `0.3.0`. The skill's `funnel` topic is now the funnel feed (declare once,
-  one `step()` line per step); the recipe for placing behaviour events (payments, churn,
-  activation) moved to the `behavior` topic and the skill's table points there.
 
 ## 2026-08-30 — upcontrol 0.1.5
 
