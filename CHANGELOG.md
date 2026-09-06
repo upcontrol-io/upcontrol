@@ -6,6 +6,8 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-09-06
+
 ### Added
 - **Two reads for the dashboard board.** `GET /v1/dashboard/catalog` lists what a project
   can draw over the last 7 days (services, message groups by fingerprint with a sample line,
