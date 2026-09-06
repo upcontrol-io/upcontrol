@@ -1866,7 +1866,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Every chart on the board in one round trip. Each query names a source, a range and the filter that narrows it, and comes back as one bucketed series with the range's total and the same reading over the span before it. A POST because the ask is a body, not because anything is written. An empty project answers zeros and nulls, never a 404: a board drawn before the first line arrives is the normal first view. */
+        /** Every chart on the board in one round trip. Each query names a source, a range and the filter that narrows it, and comes back as one bucketed series with the range's total and the same reading over the span before it. A POST because the ask is a body, not because anything is written. An empty project answers zeros and nulls, never a 404: a board drawn before the first line arrives is the normal first view. A range wider than the plan's `historyDays` is a 402 for the whole request, in the upgrade shape every other wall uses: the board reads the plan first and never asks past it, so the 402 is the gate, not the wall's copy. */
         post: {
             parameters: {
                 query?: never;
@@ -1891,6 +1891,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
                 /** @description A read behind one of the queries failed (`read_failed`). No partial body: zeros and nulls mean measured silence here, so a chart drawn from a dead read would print a number nobody took. */
                 500: {
                     headers: {
@@ -3159,7 +3160,7 @@ export interface components {
             to: string;
             /** @description Bucket width in seconds. `points.length` × `step` is the span. */
             step: number;
-            /** @description One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. */
+            /** @description One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing. */
             points: (number | null)[];
             /** @description The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge. */
             total?: number | null;
@@ -3189,6 +3190,8 @@ export interface components {
             logWindow: components["schemas"]["LogWindow"];
             telegramRecipients?: components["schemas"]["UsedMax"];
             incidentHistoryDays: number;
+            /** @description How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back. */
+            historyDays?: number;
             /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. */
             projects?: components["schemas"]["UsedMax"];
             /** @description Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time. */

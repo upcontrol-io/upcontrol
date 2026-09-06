@@ -161,6 +161,93 @@ func (s *Store) CatalogFunnels(ctx context.Context, tenantID, projectID int64, s
 	return out, rows.Err()
 }
 
+// HistoryBuckets counts the hourly rollup into buckets of stepSeconds over
+// [from, to). It answers the same question SeriesBuckets answers over the raw
+// lines, so the service and level predicates have to MEAN the same thing:
+// a nil service is every service and the empty string the unlabelled one,
+// and `info` is "neither error nor warn" rather than a level of its own.
+// A level that is none of the three narrows nothing, as the ring's does.
+func (s *Store) HistoryBuckets(ctx context.Context, tenantID, projectID int64, from, to time.Time, stepSeconds int, service *string, level string, fingerprint *int64) ([]Bucket, error) {
+	if stepSeconds <= 0 {
+		return nil, fmt.Errorf("history bucket width must be positive")
+	}
+	args := []any{tenantID, projectID, float64(from.Unix()), from, to}
+	conditions := "tenant_id = $1 AND project_id = $2 AND hour >= $4 AND hour < $5"
+	if service != nil {
+		args = append(args, *service)
+		conditions += fmt.Sprintf(" AND service = $%d", len(args))
+	}
+	switch level {
+	case "error", "warn":
+		args = append(args, level)
+		conditions += fmt.Sprintf(" AND level = $%d", len(args))
+	case "info":
+		conditions += " AND level NOT IN ('error', 'warn')"
+	}
+	if fingerprint != nil {
+		args = append(args, *fingerprint)
+		conditions += fmt.Sprintf(" AND fingerprint = $%d", len(args))
+	}
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(
+		"SELECT floor((extract(epoch from hour)::float8 - $3) / %d)::bigint AS bucket, sum(lines)::bigint"+
+			" FROM series_1h WHERE %s GROUP BY bucket ORDER BY bucket", stepSeconds, conditions), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Bucket{}
+	for rows.Next() {
+		var b Bucket
+		if err := rows.Scan(&b.Index, &b.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// OldestHistory is the first hour the rollup holds for the project; false when
+// it holds none. What the store never kept was never zero, so a chart drawn
+// before it has no value to draw rather than a measured 0.
+func (s *Store) OldestHistory(ctx context.Context, tenantID, projectID int64) (time.Time, bool, error) {
+	return s.oldest(ctx, `SELECT min(hour) FROM series_1h WHERE tenant_id = $1 AND project_id = $2`, tenantID, projectID)
+}
+
+// OldestLine is OldestHistory over the raw lines: the same fact for the ranges
+// the ring still answers.
+func (s *Store) OldestLine(ctx context.Context, tenantID, projectID int64) (time.Time, bool, error) {
+	return s.oldest(ctx, `SELECT min(ts) FROM logs WHERE tenant_id = $1 AND project_id = $2`, tenantID, projectID)
+}
+
+func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int64) (time.Time, bool, error) {
+	var at *time.Time
+	if err := s.pool.QueryRow(ctx, sql, tenantID, projectID).Scan(&at); err != nil {
+		return time.Time{}, false, err
+	}
+	if at == nil {
+		return time.Time{}, false, nil
+	}
+	return at.UTC(), true, nil
+}
+
+// TrimHistory drops rollup rows past the tenant's plan depth and answers how
+// many went. One statement, joined through the entitlement table so a limit
+// moves without a redeploy; a NULL history_days trims nothing, which is what
+// makes Self-hosted unlimited.
+func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM series_1h s
+		 USING project pr, tenant t, plan_entitlement p
+		 WHERE pr.id = s.project_id AND pr.tenant_id = s.tenant_id
+		   AND t.id = pr.tenant_id AND p.plan = t.plan
+		   AND p.history_days IS NOT NULL
+		   AND s.hour < date_trunc('hour', now()) - make_interval(days => p.history_days)`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // EventBuckets counts a named event into buckets of stepSeconds over
 // [from, to). One bucket as wide as the whole span is how a previous-span
 // total is read.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,6 +54,83 @@ var seriesRanges = map[string]seriesRange{
 // maxSeriesQueries bounds one board's read: a widget asks for one series per
 // metric it draws, and forty is more than a screen can hold.
 const maxSeriesQueries = 40
+
+// rangeDays is how deep a range reaches, rounded up to whole days, the unit
+// the plan sells. Every sub-day range is 1: the axis is depth, and a 1h chart
+// asks no more of the store than a 24h one.
+func rangeDays(r seriesRange) int {
+	return (r.step*r.buckets + 86399) / 86400
+}
+
+// readsRollup says which table a log query reads: the hourly rollup when the
+// range steps in whole hours and the filter is one the rollup's key can
+// answer. A substring or attribute filter has to see the lines themselves.
+func readsRollup(r seriesRange, f query.SeriesFilter) bool {
+	return r.step >= 3600 && f.Search == "" && len(f.Attrs) == 0
+}
+
+// historyLabel words a depth the way the front words it: a day is the window
+// a reader recognises as "24 hours", two months and beyond read in months.
+// 30.4 is the mean month, so 365 lands on 12 rather than 11.
+func historyLabel(days int) string {
+	switch {
+	case days <= 1:
+		return "24 hours"
+	case days < 60:
+		return strconv.Itoa(days) + " days"
+	default:
+		return strconv.Itoa(int(math.Round(float64(days)/30.4))) + " months"
+	}
+}
+
+// historyReason is the 402's copy, and the front spells it identically. The
+// top of the ladder drops " and up": there is nothing above it to buy.
+func historyReason(days int, plan string) string {
+	andUp := " and up"
+	if plan == planLadder[len(planLadder)-1] {
+		andUp = ""
+	}
+	return historyLabel(days) + " of history is on " + plan + andUp +
+		". It counts from the day you switch."
+}
+
+// historyRefusal is the history axis's wall: "" while every query in the batch
+// sits inside the plan's depth, else the 402's message and the plan that lifts
+// it. Unlike the projects wall this one does not fail open: the depth decides
+// what is read at all, so an entitlement read that broke is a 500, not a free
+// year of history.
+func (h *writeAPI) historyRefusal(ctx context.Context, tenantID int64, qs []seriesQuery) (msg, plan string, err error) {
+	tenantPlan, _ := h.pool.Queries().GetTenantPlan(ctx, tenantID)
+	if tenantPlan == "" {
+		tenantPlan = "Free"
+	}
+	ent, err := h.pool.Queries().GetPlanEntitlement(ctx, tenantPlan)
+	if err != nil {
+		return "", "", err
+	}
+	if ent.HistoryDays == nil {
+		return "", "", nil // NULL = unlimited
+	}
+	limit := int(*ent.HistoryDays)
+	// The widest query decides, so the one refusal names the plan that lifts
+	// the whole batch rather than the first rung on the way there.
+	days := 0
+	for _, q := range qs {
+		if d := rangeDays(seriesRanges[q.Range]); d > days {
+			days = d
+		}
+	}
+	if days <= limit {
+		return "", "", nil
+	}
+	lift := cheapestPlan(ctx, h.pool, func(e sqlc.PlanEntitlement) bool {
+		return e.HistoryDays == nil || int(*e.HistoryDays) >= days
+	})
+	if lift == "" {
+		return "History this deep is not on any plan.", "", nil
+	}
+	return historyReason(days, lift), strings.ToLower(lift), nil
+}
 
 type seriesQuery struct {
 	ID     string            `json:"id"`
@@ -304,12 +382,24 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 		return
 	}
 	ctx := r.Context()
+	// The depth gate runs before any read: a range the plan does not carry is
+	// refused whole, never answered clipped and labelled as if it were not.
+	msg, plan, err := h.historyRefusal(ctx, tenantID, req.Queries)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	if msg != "" {
+		writeUpgradeRequired(w, msg, plan)
+		return
+	}
 	projectID := h.currentProject(ctx, r, tenantID)
 	qb := query.New(tenantID, projectID)
 	now := time.Now().UTC()
+	memo := &oldestMemo{h: h, tenantID: tenantID, projectID: projectID}
 	out := make([]any, 0, len(req.Queries))
 	for _, q := range req.Queries {
-		s, err := h.oneSeries(ctx, qb, tenantID, projectID, q, now)
+		s, err := h.oneSeries(ctx, qb, tenantID, projectID, q, now, memo)
 		if err != nil {
 			// No partial body: a board that draws some of its charts and
 			// silently drops the rest reads as measured, and it is not.
@@ -325,14 +415,14 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 // error: a board drawn before the first line arrives is the normal first view.
 // A read that failed is an error, though — a chart may not print a number
 // nothing measured.
-func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenantID, projectID int64, q seriesQuery, now time.Time) (map[string]any, error) {
+func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenantID, projectID int64, q seriesQuery, now time.Time, memo *oldestMemo) (map[string]any, error) {
 	from, to, r, _ := seriesWindow(q.Range, now)
 	var points []any
 	var total, previous any
 	var err error
 	switch q.Source {
 	case "logs":
-		points, total, previous, err = h.logsSeries(ctx, qb, q, from, to, r)
+		points, total, previous, err = h.logsSeries(ctx, qb, q, from, to, r, memo)
 	case "check":
 		points, total, previous, err = h.checkSeries(ctx, tenantID, q, from, to, r)
 	case "event":
@@ -364,13 +454,79 @@ func nullPoints(r seriesRange) []any {
 	return out
 }
 
+// oldest is the first row a store holds for one project on one axis; found is
+// false when it holds none.
+type oldest struct {
+	at    time.Time
+	found bool
+}
+
+// oldestMemo reads those two facts at most once per request. A board of forty
+// queries would otherwise ask the same min() forty times. One request, one
+// goroutine, so nothing here needs a lock.
+type oldestMemo struct {
+	h                   *writeAPI
+	tenantID, projectID int64
+	rollup, ring        *oldest
+}
+
+// of is the floor of the table the read is going to: the rollup's first hour
+// or the ring's first line. They are separate facts: an upgrade starts the
+// rollup fresh while the ring still carries its own window. No store at all
+// reads as no rows.
+func (m *oldestMemo) of(ctx context.Context, rollup bool) (*oldest, error) {
+	slot := &m.ring
+	if rollup {
+		slot = &m.rollup
+	}
+	if *slot != nil {
+		return *slot, nil
+	}
+	if m.h.pgs == nil {
+		*slot = &oldest{}
+		return *slot, nil
+	}
+	read := m.h.pgs.OldestLine
+	if rollup {
+		read = m.h.pgs.OldestHistory
+	}
+	at, found, err := read(ctx, m.tenantID, m.projectID)
+	if err != nil {
+		return nil, err
+	}
+	*slot = &oldest{at: at, found: found}
+	return *slot, nil
+}
+
+// bucketMeasured says whether bucket i could have held anything. Bucket i covers
+// [from + i·step, from + (i+1)·step); one that ends at or before the store's
+// oldest row counted nothing because nothing was there yet, and that is not a
+// zero. A store with no row at all is that for every bucket. A nil oldest is
+// an axis with no such floor, where every bucket is a measured 0.
+func bucketMeasured(from time.Time, r seriesRange, i int, o *oldest) bool {
+	if o == nil {
+		return true
+	}
+	if !o.found {
+		return false
+	}
+	return from.Add(time.Duration((i+1)*r.step) * time.Second).After(o.at)
+}
+
 // countPoints turns bucket rows into a full array: a count bucket with nothing
-// in it is a measured 0, not a gap.
-func countPoints(rows []pgstore.Bucket, r seriesRange) ([]any, int64) {
+// in it is a measured 0, not a gap, unless the whole bucket predates the
+// store's oldest row, where the gap is the honest answer. total sums the
+// measured buckets and is nil when there are none.
+func countPoints(rows []pgstore.Bucket, r seriesRange, from time.Time, o *oldest) ([]any, any) {
 	points := make([]any, r.buckets)
 	var total int64
+	var anyMeasured bool
 	for i := range points {
+		if !bucketMeasured(from, r, i, o) {
+			continue // nil: the store held nothing to count yet
+		}
 		points[i] = int64(0)
+		anyMeasured = true
 	}
 	for _, b := range rows {
 		if b.Index < 0 || b.Index >= int64(r.buckets) {
@@ -379,7 +535,24 @@ func countPoints(rows []pgstore.Bucket, r seriesRange) ([]any, int64) {
 		points[b.Index] = b.Count
 		total += b.Count
 	}
+	if !anyMeasured {
+		return points, nil
+	}
 	return points, total
+}
+
+// previousTotal folds the previous span's buckets into one number, or nil when
+// the store does not reach the whole span: comparing this range against a span
+// that was only partly stored would print a rise nobody measured.
+func previousTotal(rows []pgstore.Bucket, from time.Time, span time.Duration, o *oldest) any {
+	if o != nil && (!o.found || from.Add(-span).Before(o.at)) {
+		return nil
+	}
+	var previous int64
+	for _, b := range rows {
+		previous += b.Count
+	}
+	return previous
 }
 
 // sumPoints is countPoints for a counter's folded increments: the database
@@ -430,25 +603,40 @@ func logsFilter(where map[string]string) query.SeriesFilter {
 	return f
 }
 
-func (h *writeAPI) logsSeries(ctx context.Context, qb *query.QueryBuilder, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
+// logsSeries reads the hourly rollup when the range steps in whole hours and
+// the filter is one the rollup's key can answer; a substring or attribute
+// filter has to see the lines themselves, so those keep the ring at every
+// range. Both paths answer the same question, and both draw nothing where the
+// store held nothing rather than a zero.
+func (h *writeAPI) logsSeries(ctx context.Context, qb *query.QueryBuilder, q seriesQuery, from, to time.Time, r seriesRange, memo *oldestMemo) ([]any, any, any, error) {
 	f := logsFilter(q.Where)
-	rows, err := h.runSeriesBuckets(ctx, qb.SeriesBuckets(query.Range{From: from, To: to}, r.step, f))
+	span := to.Sub(from)
+	fromRollup := readsRollup(r, f)
+	o, err := memo.of(ctx, fromRollup)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	points, total := countPoints(rows, r)
+	read := func(a, b time.Time, step int) ([]pgstore.Bucket, error) {
+		if fromRollup {
+			if h.pgs == nil {
+				return nil, nil
+			}
+			return h.pgs.HistoryBuckets(ctx, memo.tenantID, memo.projectID, a, b, step, f.Service, f.Level, f.Fingerprint)
+		}
+		return h.runSeriesBuckets(ctx, qb.SeriesBuckets(query.Range{From: a, To: b}, step, f))
+	}
+	rows, err := read(from, to, r.step)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	points, total := countPoints(rows, r, from, o)
 	// The previous span is the same query at one bucket per span: same
 	// predicate, so the comparison cannot be against a different question.
-	span := to.Sub(from)
-	prev, err := h.runSeriesBuckets(ctx, qb.SeriesBuckets(query.Range{From: from.Add(-span), To: from}, int(span/time.Second), f))
+	prev, err := read(from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var previous int64
-	for _, b := range prev {
-		previous += b.Count
-	}
-	return points, total, previous, nil
+	return points, total, previousTotal(prev, from, span, o), nil
 }
 
 // runSeriesBuckets executes a ring bucket query. Every way the read can fail —
@@ -485,7 +673,9 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	points, total := countPoints(rows, r)
+	// Events have no depth floor: the table is never displaced, so it holds
+	// every event since the project's first, and an empty bucket is a measured 0.
+	points, total := countPoints(rows, r, from, nil)
 	span := to.Sub(from)
 	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, from.Add(-span), from, int(span/time.Second))
 	if err != nil {

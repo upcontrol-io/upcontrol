@@ -103,14 +103,97 @@ func TestCountPoints_EmptyBucketIsAMeasuredZero(t *testing.T) {
 	// Zero is silence for a gauge, not for a count: nothing happened in that
 	// minute is a fact, and drawing a gap there would hide it.
 	points, total := countPoints([]pgstore.Bucket{{Index: 0, Count: 3}, {Index: 2, Count: 1}},
-		seriesRange{step: 60, buckets: 4})
-	if total != 4 {
-		t.Fatalf("total must sum the buckets; got %d", total)
+		seriesRange{step: 60, buckets: 4}, time.Time{}, nil)
+	if total != int64(4) {
+		t.Fatalf("total must sum the buckets; got %v", total)
 	}
 	for i, want := range []int64{3, 0, 1, 0} {
 		if points[i] != want {
 			t.Fatalf("bucket %d = %v, want %d", i, points[i], want)
 		}
+	}
+}
+
+func TestRangeDays_IsTheDepthThePlanSells(t *testing.T) {
+	// The gate compares this against plan_entitlement.history_days, so every
+	// sub-day range has to land on 1: a 1h chart asks the store for no more
+	// depth than a 24h one, and gating it would be a wall nobody crossed.
+	want := map[string]int{"1h": 1, "4h": 1, "12h": 1, "24h": 1, "7d": 7, "31d": 31, "365d": 365}
+	for name, days := range want {
+		if got := rangeDays(seriesRanges[name]); got != days {
+			t.Fatalf("rangeDays(%s) = %d, want %d", name, got, days)
+		}
+	}
+}
+
+func TestHistoryLabelAndReason_AreTheCopyTheFrontSpells(t *testing.T) {
+	for days, want := range map[int]string{1: "24 hours", 7: "7 days", 31: "31 days", 365: "12 months"} {
+		if got := historyLabel(days); got != want {
+			t.Fatalf("historyLabel(%d) = %q, want %q", days, got, want)
+		}
+	}
+	if got := historyReason(31, "Growth"); got != "31 days of history is on Growth and up. It counts from the day you switch." {
+		t.Fatalf("the wall's copy drifted; got %q", got)
+	}
+	// The top of the ladder drops " and up": there is nothing above it to buy.
+	if got := historyReason(365, "Agency"); got != "12 months of history is on Agency. It counts from the day you switch." {
+		t.Fatalf("the top rung must not offer a rung above it; got %q", got)
+	}
+}
+
+func TestCountPoints_BeforeTheOldestRowIsNullNotZero(t *testing.T) {
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	r := seriesRange{step: 3600, buckets: 4}
+	// The store's first row sits inside bucket 2, so buckets 0 and 1 end at or
+	// before it: nothing was kept there, which is not a count of zero.
+	o := &oldest{at: from.Add(2*time.Hour + 30*time.Minute), found: true}
+	points, total := countPoints([]pgstore.Bucket{{Index: 2, Count: 5}}, r, from, o)
+	if points[0] != nil || points[1] != nil {
+		t.Fatalf("a bucket ending at or before the oldest row must be null; got %v", points[:2])
+	}
+	if points[2] != int64(5) || points[3] != int64(0) {
+		t.Fatalf("from the oldest row on, an empty bucket is a measured 0; got %v", points[2:])
+	}
+	if total != int64(5) {
+		t.Fatalf("total sums the measured buckets only; got %v", total)
+	}
+
+	// A bucket ending EXACTLY on the oldest row held nothing either: the row
+	// is the next bucket's first.
+	edge, _ := countPoints(nil, r, from, &oldest{at: from.Add(2 * time.Hour), found: true})
+	if edge[1] != nil || edge[2] != int64(0) {
+		t.Fatalf("the boundary belongs to the bucket that starts on it; got %v", edge)
+	}
+
+	// An empty store measured nothing anywhere, so there is no total either.
+	empty, none := countPoints(nil, r, from, &oldest{})
+	for i, p := range empty {
+		if p != nil {
+			t.Fatalf("an empty store draws nothing; bucket %d = %v", i, p)
+		}
+	}
+	if none != nil {
+		t.Fatalf("a total over no measured bucket is null, not 0; got %v", none)
+	}
+}
+
+func TestPreviousTotal_OnlyWhenTheWholeSpanWasStored(t *testing.T) {
+	from := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	span := 24 * time.Hour
+	rows := []pgstore.Bucket{{Index: 0, Count: 9}}
+	// The previous span starts a day before `from`; an oldest row inside it
+	// would make the comparison a shorter span against a full one.
+	if got := previousTotal(rows, from, span, &oldest{at: from.Add(-2 * time.Hour), found: true}); got != nil {
+		t.Fatalf("a partly stored previous span has no total; got %v", got)
+	}
+	if got := previousTotal(rows, from, span, &oldest{}); got != nil {
+		t.Fatalf("an empty store has no previous total; got %v", got)
+	}
+	if got := previousTotal(rows, from, span, &oldest{at: from.Add(-span), found: true}); got != int64(9) {
+		t.Fatalf("a span starting exactly on the oldest row counts; got %v", got)
+	}
+	if got := previousTotal(rows, from, span, nil); got != int64(9) {
+		t.Fatalf("an axis with no floor always counts; got %v", got)
 	}
 }
 
@@ -159,5 +242,26 @@ func TestLogsFilter_AbsentServiceIsEveryServiceAndEmptyIsTheUnlabelledOne(t *tes
 	f := logsFilter(map[string]string{"service": ""})
 	if f.Service == nil || *f.Service != "" {
 		t.Fatalf("the empty string is the unlabelled service, a real name; got %v", f.Service)
+	}
+}
+
+func TestReadsRollup_WholeHoursWithoutTextFilters(t *testing.T) {
+	plain := logsFilter(nil)
+	if readsRollup(seriesRanges["24h"], plain) {
+		t.Fatal("a sub-day step reads the ring")
+	}
+	for _, rng := range []string{"7d", "31d", "365d"} {
+		if !readsRollup(seriesRanges[rng], plain) {
+			t.Fatalf("%s steps in whole hours and reads the rollup", rng)
+		}
+	}
+	if readsRollup(seriesRanges["7d"], logsFilter(map[string]string{"q": "timeout"})) {
+		t.Fatal("a substring filter has to see the lines")
+	}
+	if readsRollup(seriesRanges["31d"], logsFilter(map[string]string{"attr.route": "/x"})) {
+		t.Fatal("an attribute filter has to see the lines")
+	}
+	if !readsRollup(seriesRanges["7d"], logsFilter(map[string]string{"service": "api", "level": "warn", "fingerprint": "7"})) {
+		t.Fatal("service, level and fingerprint are the rollup's own key")
 	}
 }

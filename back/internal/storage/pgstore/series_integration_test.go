@@ -10,6 +10,7 @@ package pgstore
 
 import (
 	"context"
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -342,5 +343,157 @@ func TestMetricCatalogAndFunnelFold(t *testing.T) {
 	}
 	if len(buckets) != 3 || buckets[0].Index != 1 || buckets[0].Avg != 12 || buckets[0].Last != 12 {
 		t.Fatalf("one bucket per minute a reading arrived in; got %+v", buckets)
+	}
+}
+
+func TestHistoryRollup(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+
+	bump := func(h time.Time, service, level string, fp uint64, lines int64) HistoryBump {
+		return HistoryBump{TenantID: seriesTenant, ProjectID: bucketProject, Hour: h,
+			Service: service, Level: level, Fingerprint: fp, Lines: lines}
+	}
+	first := bump(hour, "api", "error", 7, 2)
+	if err := s.BumpHistory(ctx, []HistoryBump{first}); err != nil {
+		t.Fatalf("bump history: %v", err)
+	}
+	// The same key again: a flush is an increment, never a replacement, or an
+	// hour would only ever hold its last batch.
+	second := first
+	second.Lines = 3
+	if err := s.BumpHistory(ctx, []HistoryBump{
+		second,
+		bump(hour, "api", "warn", wrappedFingerprint, 1),
+		// The unlabelled service is a real name, not "every service".
+		bump(hour, "", "debug", 3, 7),
+		bump(hour.Add(time.Hour), "worker", "error", 11, 4),
+		bump(hour.Add(2*time.Hour), "api", "debug", 9, 2),
+	}); err != nil {
+		t.Fatalf("bump history again: %v", err)
+	}
+
+	to := hour.Add(3 * time.Hour)
+	read := func(service *string, level string, fingerprint *int64) map[int64]int64 {
+		t.Helper()
+		rows, err := s.HistoryBuckets(ctx, seriesTenant, bucketProject, hour, to, 3600, service, level, fingerprint)
+		if err != nil {
+			t.Fatalf("history buckets: %v", err)
+		}
+		got := map[int64]int64{}
+		for _, b := range rows {
+			got[b.Index] = b.Count
+		}
+		return got
+	}
+	same := func(name string, got, want map[int64]int64) {
+		t.Helper()
+		if !maps.Equal(got, want) {
+			t.Fatalf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	api, unlabelled := "api", ""
+	// The conversion has to run at runtime: the constant does not fit an
+	// int64, which is exactly the wrap the column stores.
+	wrapped := wrappedFingerprint
+	fp := int64(wrapped)
+	same("every row", read(nil, "", nil), map[int64]int64{0: 5 + 1 + 7, 1: 4, 2: 2})
+	same("service api", read(&api, "", nil), map[int64]int64{0: 6, 2: 2})
+	same("the unlabelled service", read(&unlabelled, "", nil), map[int64]int64{0: 7})
+	same("level error", read(nil, "error", nil), map[int64]int64{0: 5, 1: 4})
+	// `info` is "neither error nor warn", exactly as the ring reads it, so
+	// debug lands in it and a card reads the same thing at 24h and at 7d.
+	same("level info", read(nil, "info", nil), map[int64]int64{0: 7, 2: 2})
+	// An unknown level narrows nothing, the way appendLevelFilter drops it.
+	same("an unknown level", read(nil, "trace", nil), map[int64]int64{0: 13, 1: 4, 2: 2})
+	same("the wrapped fingerprint", read(nil, "", &fp), map[int64]int64{0: 1})
+
+	oldest, found, err := s.OldestHistory(ctx, seriesTenant, bucketProject)
+	if err != nil || !found || !oldest.Equal(hour) {
+		t.Fatalf("the rollup's first hour = (%s, %v, %v), want %s", oldest, found, err, hour)
+	}
+	if _, found, err := s.OldestHistory(ctx, seriesTenant, catalogProject); err != nil || found {
+		t.Fatalf("a project the rollup holds nothing for has no oldest row; got %v %v", found, err)
+	}
+
+	// OldestLine is the same fact over the raw lines, which the sub-day ranges
+	// still read.
+	if _, _, err := s.RollLogPartitions(ctx, time.Now(), 1, 24*time.Hour); err != nil {
+		t.Fatalf("roll partitions: %v", err)
+	}
+	at := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Microsecond)
+	if err := s.InsertLogs(ctx, []LogRow{{TenantID: seriesTenant, ProjectID: bucketProject,
+		TS: at, Seq: 1, Source: "sdk", Service: "api", Level: "error", Message: "boom"}}); err != nil {
+		t.Fatalf("insert logs: %v", err)
+	}
+	line, found, err := s.OldestLine(ctx, seriesTenant, bucketProject)
+	if err != nil || !found || !line.Equal(at) {
+		t.Fatalf("the ring's first line = (%s, %v, %v), want %s", line, found, err, at)
+	}
+	if _, found, err := s.OldestLine(ctx, seriesTenant, catalogProject); err != nil || found {
+		t.Fatalf("a project with no line has no oldest one; got %v %v", found, err)
+	}
+}
+
+func TestTrimHistoryFollowsThePlan(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Hour)
+
+	// The trim joins project → tenant → plan_entitlement, so these rows are
+	// what decides; the depth comes from the table, never from this file.
+	seed := func(plan string) (tenantID, projectID int64) {
+		t.Helper()
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO tenant (public_id, name, plan) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+			"history-trim-"+plan, plan).Scan(&tenantID); err != nil {
+			t.Fatalf("seed tenant on %s: %v", plan, err)
+		}
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+			tenantID, plan+".example.com").Scan(&projectID); err != nil {
+			t.Fatalf("seed project on %s: %v", plan, err)
+		}
+		if err := s.BumpHistory(ctx, []HistoryBump{
+			{TenantID: uint64(tenantID), ProjectID: uint64(projectID), Hour: now.AddDate(0, 0, -40),
+				Service: "api", Level: "error", Fingerprint: 1, Lines: 3},
+			{TenantID: uint64(tenantID), ProjectID: uint64(projectID), Hour: now.Add(-time.Hour),
+				Service: "api", Level: "error", Fingerprint: 1, Lines: 4},
+		}); err != nil {
+			t.Fatalf("seed rollup on %s: %v", plan, err)
+		}
+		return tenantID, projectID
+	}
+	free, freeProject := seed("Free")        // 1 day
+	agency, agencyProject := seed("Agency")  // 365 days
+	self, selfProject := seed("Self-hosted") // NULL = unlimited
+
+	deleted, err := s.TrimHistory(ctx)
+	if err != nil {
+		t.Fatalf("trim history: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("only the Free tenant's month-old row is past its depth; got %d deleted", deleted)
+	}
+	left := func(tenantID, projectID int64) int64 {
+		t.Helper()
+		var n int64
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM series_1h WHERE tenant_id = $1 AND project_id = $2`,
+			tenantID, projectID).Scan(&n); err != nil {
+			t.Fatalf("count rollup rows: %v", err)
+		}
+		return n
+	}
+	if n := left(free, freeProject); n != 1 {
+		t.Fatalf("Free keeps the last day and nothing older; got %d rows", n)
+	}
+	if n := left(agency, agencyProject); n != 2 {
+		t.Fatalf("a month is well inside Agency's year; got %d rows", n)
+	}
+	// NULL trims nothing: that is what makes Self-hosted unlimited.
+	if n := left(self, selfProject); n != 2 {
+		t.Fatalf("a NULL depth keeps everything; got %d rows", n)
 	}
 }

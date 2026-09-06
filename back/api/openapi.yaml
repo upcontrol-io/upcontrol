@@ -771,7 +771,7 @@ components:
           description: "Bucket width in seconds. `points.length` × `step` is the span."
         points:
           type: array
-          description: "One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0."
+          description: "One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing."
           items: { type: number, nullable: true }
         total:
           type: number
@@ -832,6 +832,16 @@ components:
         logWindow: { $ref: "#/components/schemas/LogWindow" }
         telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
         incidentHistoryDays: { type: integer }
+        historyDays:
+          type: integer
+          description: >
+            How far back the dashboard's series reach, in days
+            (plan_entitlement.history_days). Absent when the plan is unlimited
+            (Self-hosted). A `POST /v1/series` range wider than this is a 402,
+            and the board reads this number first so it never asks for one.
+            A depth, not a consumption: the client renders it as a sentence,
+            and it counts from the day a plan is switched, since what an
+            earlier plan did not keep cannot be sold back.
         projects:
           description: >
             Absent when the plan is unlimited (Self-hosted): a usage bar needs
@@ -2327,7 +2337,10 @@ paths:
         series with the range's total and the same reading over the span before
         it. A POST because the ask is a body, not because anything is written.
         An empty project answers zeros and nulls, never a 404: a board drawn
-        before the first line arrives is the normal first view.
+        before the first line arrives is the normal first view. A range wider
+        than the plan's `historyDays` is a 402 for the whole request, in the
+        upgrade shape every other wall uses: the board reads the plan first
+        and never asks past it, so the 402 is the gate, not the wall's copy.
       requestBody:
         required: true
         content:
@@ -2345,6 +2358,7 @@ paths:
             }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "500":
           description: >
             A read behind one of the queries failed (`read_failed`). No partial

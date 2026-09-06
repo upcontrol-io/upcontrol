@@ -12,6 +12,16 @@ All notable changes to the self-hosted package. The format follows
   attribute pairs, checks, events, metrics, funnels with their steps) and `POST /v1/series`
   answers up to 40 bucketed queries in one round trip (logs, checks, events, metrics; a
   funnel step as counter deltas). Both are session reads of the current project.
+- **History is a plan axis: how far back the board reads.**
+  `plan_entitlement.history_days` (Free 1, Indie 7, Growth 31, Agency 365; NULL on
+  Self-hosted is unlimited) travels as `historyDays` on `GET /v1/plan`, and a
+  `POST /v1/series` range deeper than it is refused whole with the same 402 every
+  other paid axis uses. Behind it, ingest keeps an hourly rollup of the line counts
+  per service, level and message fingerprint (`series_1h`), which is what the 7d,
+  31d and 365d ranges read instead of scanning the raw lines; ucworker's new
+  `history-trim` job drops rollup rows past the tenant's depth. A bucket older than
+  the first row the store actually holds draws `null`, never 0: an upgrade starts
+  counting from the day it happens, and what was never kept was never zero.
 
 ## [0.14.0] — 2026-09-04
 

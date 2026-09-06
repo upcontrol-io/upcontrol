@@ -116,10 +116,22 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		}
 	})
 
-	// Error-log notification scanner, every 60 seconds; it backs the per-channel
-	// "Error logs" / "Repeating error logs" settings.
 	jobs := "delivery+purge+reaper+incident-purge"
 	pgs := pgstore.New(pool.Raw())
+
+	// The board's rollup, trimmed to the tenant's plan depth: hourly, because
+	// the depth is sold in days and an hour of slack is invisible. NULL trims
+	// nothing, which is what makes Self-hosted unlimited. The statement lives
+	// in pgstore so the integration test runs the very code this job runs.
+	go runWithLock(ctx, pool, d, "history-trim", time.Hour, func(ctx context.Context) {
+		if _, err := pgs.TrimHistory(ctx); err != nil {
+			d.Logger.Warn("history trim tick error", "err", err)
+		}
+	})
+	jobs += "+history-trim"
+
+	// Error-log notification scanner, every 60 seconds; it backs the per-channel
+	// "Error logs" / "Repeating error logs" settings.
 	scanner := errorlog.New(pool, pgs, d.Logger)
 	go runWithLock(ctx, pool, d, "errorlog-scan", time.Minute, func(ctx context.Context) {
 		if err := scanner.Tick(ctx); err != nil {

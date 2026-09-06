@@ -88,6 +88,11 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 		// invite screen words its copy from this, never from the plan name.
 		"telegramRooms": ent.TelegramRooms,
 	}
+	// How deep the board's series reach. Absent when the plan is unlimited
+	// (Self-hosted), like projects: what nothing caps is not a number to print.
+	if ent.HistoryDays != nil {
+		resp["historyDays"] = int(*ent.HistoryDays)
+	}
 	// Absent when the plan is unlimited (Self-hosted): a bar needs a remainder.
 	if ent.Projects != nil {
 		projUsed, _ := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)

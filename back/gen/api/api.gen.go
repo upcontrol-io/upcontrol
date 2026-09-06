@@ -1049,6 +1049,8 @@ type Plan string
 
 // PlanResponse defines model for PlanResponse.
 type PlanResponse struct {
+	// HistoryDays How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back.
+	HistoryDays         *int      `json:"historyDays,omitempty"`
 	HttpChecks          UsedMax   `json:"httpChecks"`
 	IncidentHistoryDays int       `json:"incidentHistoryDays"`
 	LogWindow           LogWindow `json:"logWindow"`
@@ -1211,7 +1213,7 @@ type Series struct {
 	From time.Time `json:"from"`
 	Id   string    `json:"id"`
 
-	// Points One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0.
+	// Points One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing.
 	Points []*float32 `json:"points"`
 
 	// Previous The same reading over the span before `from`, which is what a card's delta is measured against.

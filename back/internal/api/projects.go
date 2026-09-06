@@ -26,22 +26,31 @@ import (
 // upgrade target, so a tenant at the top hits the wall with no plan hint.
 var planLadder = []string{"Free", "Indie", "Growth", "Agency"}
 
-// upgradePlanForProjects names the cheapest ladder plan with room for one
-// more project, lowercased for error.upgrade.plan on the wire. The table
-// decides, not this file: limits move without a redeploy. "" means every
-// ladder plan is full — the 402 carries no plan field and the front shows the
-// message instead of the modal.
-func upgradePlanForProjects(ctx context.Context, pool *pg.Pool, count int64) string {
+// cheapestPlan walks the ladder and names the first plan whose entitlement row
+// satisfies `fits`, as the ladder spells it. The table decides, not this file:
+// limits move without a redeploy. "" means no ladder plan fits: the 402
+// carries no plan field and the front shows the message instead of the modal.
+// One walk for every axis: two copies is how two walls start pointing at
+// different plans for the same table.
+func cheapestPlan(ctx context.Context, pool *pg.Pool, fits func(sqlc.PlanEntitlement) bool) string {
 	for _, plan := range planLadder {
 		ent, err := pool.Queries().GetPlanEntitlement(ctx, plan)
 		if err != nil {
 			continue
 		}
-		if ent.Projects == nil || int64(*ent.Projects) > count {
-			return strings.ToLower(plan)
+		if fits(ent) {
+			return plan
 		}
 	}
 	return ""
+}
+
+// upgradePlanForProjects names the cheapest ladder plan with room for one
+// more project, lowercased for error.upgrade.plan on the wire.
+func upgradePlanForProjects(ctx context.Context, pool *pg.Pool, count int64) string {
+	return strings.ToLower(cheapestPlan(ctx, pool, func(ent sqlc.PlanEntitlement) bool {
+		return ent.Projects == nil || int64(*ent.Projects) > count
+	}))
 }
 
 // currentProjectID resolves the session's current project within tenantID:

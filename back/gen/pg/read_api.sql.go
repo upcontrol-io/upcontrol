@@ -51,7 +51,7 @@ func (q *Queries) GetAPIKeyForTenant(ctx context.Context, tenantID int64) (GetAP
 }
 
 const getPlanEntitlement = `-- name: GetPlanEntitlement :one
-SELECT plan, http_checks, window_lines, window_hours, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms FROM plan_entitlement WHERE plan = $1
+SELECT plan, http_checks, window_lines, window_hours, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms, history_days FROM plan_entitlement WHERE plan = $1
 `
 
 func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEntitlement, error) {
@@ -68,6 +68,7 @@ func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEnti
 		&i.Projects,
 		&i.CustomDomain,
 		&i.TelegramRooms,
+		&i.HistoryDays,
 	)
 	return i, err
 }
