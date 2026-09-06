@@ -752,6 +752,12 @@ type CatalogCheck struct {
 	Type string `json:"type"`
 }
 
+// CatalogDimension One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series.
+type CatalogDimension struct {
+	Name   string `json:"name"`
+	Values int    `json:"values"`
+}
+
 // CatalogEvent defines model for CatalogEvent.
 type CatalogEvent struct {
 	LastTs time.Time `json:"lastTs"`
@@ -759,7 +765,13 @@ type CatalogEvent struct {
 	Times  int       `json:"times"`
 }
 
-// CatalogFunnel A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`.
+// CatalogExperiment One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list.
+type CatalogExperiment struct {
+	Name     string   `json:"name"`
+	Variants []string `json:"variants"`
+}
+
+// CatalogFunnel A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`).
 type CatalogFunnel struct {
 	Name  string   `json:"name"`
 	Steps []string `json:"steps"`
@@ -784,6 +796,12 @@ type CatalogMetric struct {
 	Labels   []string `json:"labels"`
 	Name     string   `json:"name"`
 	Readings int      `json:"readings"`
+}
+
+// CatalogRetention One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series.
+type CatalogRetention struct {
+	Cohorts int    `json:"cohorts"`
+	Name    string `json:"name"`
 }
 
 // ChannelKind defines model for ChannelKind.
@@ -851,13 +869,16 @@ type ConnectableSource struct {
 
 // DashboardCatalog What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure.
 type DashboardCatalog struct {
-	Attrs    []CatalogAttr   `json:"attrs"`
-	Checks   []CatalogCheck  `json:"checks"`
-	Events   []CatalogEvent  `json:"events"`
-	Funnels  []CatalogFunnel `json:"funnels"`
-	Groups   []CatalogGroup  `json:"groups"`
-	Metrics  []CatalogMetric `json:"metrics"`
-	Services []LogService    `json:"services"`
+	Attrs       []CatalogAttr       `json:"attrs"`
+	Checks      []CatalogCheck      `json:"checks"`
+	Dimensions  []CatalogDimension  `json:"dimensions"`
+	Events      []CatalogEvent      `json:"events"`
+	Experiments []CatalogExperiment `json:"experiments"`
+	Funnels     []CatalogFunnel     `json:"funnels"`
+	Groups      []CatalogGroup      `json:"groups"`
+	Metrics     []CatalogMetric     `json:"metrics"`
+	Retentions  []CatalogRetention  `json:"retentions"`
+	Services    []LogService        `json:"services"`
 }
 
 // DashboardLayout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
@@ -1410,6 +1431,9 @@ type Series struct {
 	// Previous The same reading over the span before `from`, which is what a card's delta is measured against.
 	Previous *float32 `json:"previous,omitempty"`
 
+	// Rows Present only when the query carried `group`: the counter's increase over the range, one entry per label combination, ordered by value descending and capped at 200. `points` is empty on a grouped answer — the fold has no time axis, and a series of nulls would claim one.
+	Rows *[]SeriesRow `json:"rows,omitempty"`
+
 	// Step Bucket width in seconds. `points.length` × `step` is the span.
 	Step int `json:"step"`
 
@@ -1422,10 +1446,13 @@ type Series struct {
 
 // SeriesQuery One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws.
 type SeriesQuery struct {
+	// Group Label keys to fold the counter by, for the metric source only. With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold.
+	Group *[]string `json:"group,omitempty"`
+
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
 	Id string `json:"id"`
 
-	// Name check: `response` or `uptime`; event: the event name; metric: the metric name.
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name.
 	Name   *string            `json:"name,omitempty"`
 	Range  SeriesQueryRange   `json:"range"`
 	Source SeriesQuerySource  `json:"source"`
@@ -1446,6 +1473,12 @@ type SeriesRequest struct {
 // SeriesResponse defines model for SeriesResponse.
 type SeriesResponse struct {
 	Series []Series `json:"series"`
+}
+
+// SeriesRow defines model for SeriesRow.
+type SeriesRow struct {
+	Labels map[string]string `json:"labels"`
+	Value  float32           `json:"value"`
 }
 
 // Source defines model for Source.
