@@ -175,6 +175,12 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.getDashboardCatalog(w, r, tenantID)
 	case r.URL.Path == "/v1/series" && r.Method == http.MethodPost:
 		h.postSeries(w, r, tenantID)
+	// The board itself: one stored layout per project, read by any member
+	// and replaced whole by a login member (the gate above).
+	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
+		h.getDashboard(w, r, tenantID)
+	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
+		h.putDashboard(w, r, tenantID)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)
@@ -789,7 +795,7 @@ func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 	if _, err := tx.Exec(ctx, `UPDATE project SET tenant_id = $1 WHERE id = $2`, orphanTenant, projectID); err != nil {
 		return err
 	}
-	for _, table := range [...]string{"monitor", "status_page", "incident", "source_connection"} {
+	for _, table := range [...]string{"monitor", "status_page", "incident", "source_connection", "dashboard"} {
 		if _, err := tx.Exec(ctx,
 			`UPDATE `+table+` SET tenant_id = $1 WHERE project_id = $2`, orphanTenant, projectID); err != nil {
 			return err

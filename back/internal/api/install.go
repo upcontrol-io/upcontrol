@@ -385,7 +385,7 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	// this file, never input.
 	for _, table := range [...]string{
 		"project", "monitor", "incident", "status_page",
-		"source_connection", "api_key", "install_token",
+		"source_connection", "api_key", "install_token", "dashboard",
 	} {
 		if _, err := tx.Exec(ctx,
 			`UPDATE `+table+` SET tenant_id = $1 WHERE tenant_id = $2`, s.TenantID, anonTenantID); err != nil {

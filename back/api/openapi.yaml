@@ -641,6 +641,48 @@ components:
         lines: { type: integer }
 
     # --- dashboard ----------------------------------------------------------
+    DashboardMetricRef:
+      type: object
+      description: "What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it."
+      required: [source]
+      properties:
+        source:
+          type: string
+          enum: [logs, check, event, metric, service, funnel, experiment, dimension]
+        name: { type: string }
+        where:
+          type: object
+          additionalProperties: { type: string }
+        label: { type: string }
+    DashboardWidget:
+      type: object
+      required: [id, kind, title, metrics, x, y, w, h]
+      properties:
+        id: { type: string, example: "w_1" }
+        kind:
+          type: string
+          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown]
+        title: { type: string }
+        metrics:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardMetricRef" }
+        range:
+          type: string
+          enum: [1h, 4h, 12h, 24h, 7d, 31d]
+          description: "Present only for kinds with a time axis."
+        x: { type: integer, minimum: 0 }
+        y: { type: integer, minimum: 0 }
+        w: { type: integer, minimum: 1, maximum: 12 }
+        h: { type: integer, minimum: 1 }
+    DashboardLayout:
+      type: object
+      description: "The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB."
+      required: [version, widgets]
+      properties:
+        version: { type: integer, enum: [1] }
+        widgets:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardWidget" }
     DashboardCatalog:
       type: object
       description: "What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure."
@@ -2290,6 +2332,58 @@ paths:
                 { schema: { $ref: "#/components/schemas/LogsResponse" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/dashboard:
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: The stored board of the session's current project.
+      description: >
+        One layout per project, whatever the board last saved. A project that
+        never saved one answers an empty layout, never a 404: the front reads a
+        404 as a core without this endpoint and keeps the layout in the browser.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: Replace the board of the session's current project.
+      description: >
+        The whole layout, overwritten whole; last write wins. Only the envelope
+        is validated (the version, the ids, the kinds, the grid), because a
+        widget's refs are the front's own to interpret. A notify member may
+        read the board and may not write it.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+          }
+      responses:
+        "200":
+          description: The layout as stored.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404":
+          description: The tenant holds no project, so there is nothing to keep a board for.
 
   /v1/dashboard/catalog:
     get:

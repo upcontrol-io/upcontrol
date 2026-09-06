@@ -6,6 +6,17 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-09-06
+
+### Added
+- **The board is stored on the server.** `GET /v1/dashboard` answers the current project's
+  saved layout, or an empty board when it never saved one, and `PUT /v1/dashboard` replaces
+  it whole. Any member reads it; only a `login` member writes it. Only the envelope is
+  checked (version 1, unique non-empty widget ids, a known kind, a known range when one is
+  present, and a widget that fits the 12 columns, under 64 KB), because a widget's refs are
+  the front's to interpret. Last write wins: the board moves between browsers and machines
+  instead of living in one of them.
+
 ## [0.15.0] — 2026-09-06
 
 ### Added

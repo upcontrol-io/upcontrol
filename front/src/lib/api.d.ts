@@ -1811,6 +1811,82 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The stored board of the session's current project.
+         * @description One layout per project, whatever the board last saved. A project that never saved one answers an empty layout, never a 404: the front reads a 404 as a core without this endpoint and keeps the layout in the browser.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Replace the board of the session's current project.
+         * @description The whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardLayout"];
+                };
+            };
+            responses: {
+                /** @description The layout as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/dashboard/catalog": {
         parameters: {
             query?: never;
@@ -3078,6 +3154,39 @@ export interface components {
             /** @description The service label. Empty for lines that carried none. */
             name: string;
             lines: number;
+        };
+        /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. */
+        DashboardMetricRef: {
+            /** @enum {string} */
+            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "dimension";
+            name?: string;
+            where?: {
+                [key: string]: string;
+            };
+            label?: string;
+        };
+        DashboardWidget: {
+            /** @example w_1 */
+            id: string;
+            /** @enum {string} */
+            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown";
+            title: string;
+            metrics: components["schemas"]["DashboardMetricRef"][];
+            /**
+             * @description Present only for kinds with a time axis.
+             * @enum {string}
+             */
+            range?: "1h" | "4h" | "12h" | "24h" | "7d" | "31d";
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+        };
+        /** @description The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB. */
+        DashboardLayout: {
+            /** @enum {integer} */
+            version: 1;
+            widgets: components["schemas"]["DashboardWidget"][];
         };
         /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */
         DashboardCatalog: {

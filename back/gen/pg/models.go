@@ -51,6 +51,13 @@ type Check struct {
 	BodyHash   *int64
 }
 
+type Dashboard struct {
+	TenantID  int64
+	ProjectID int64
+	Layout    []byte
+	UpdatedAt pgtype.Timestamptz
+}
+
 type DeliveryAttempt struct {
 	ID      int64
 	QueueID int64
