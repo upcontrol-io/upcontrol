@@ -1,10 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
+	apigen "go.upcontrol.io/back/gen/api"
 	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
@@ -263,5 +265,136 @@ func TestReadsRollup_WholeHoursWithoutTextFilters(t *testing.T) {
 	}
 	if !readsRollup(seriesRanges["7d"], logsFilter(map[string]string{"service": "api", "level": "warn", "fingerprint": "7"})) {
 		t.Fatal("service, level and fingerprint are the rollup's own key")
+	}
+}
+
+// The board's envelope. validateLayout is the only thing standing between a
+// front's document and the store, and it deliberately checks the envelope
+// alone: the refs inside a widget are the front's to interpret.
+
+// widget is the shortest way to spell a valid widget in a table row; each case
+// below mutates the one field it is about.
+func widget(id string) apigen.DashboardWidget {
+	rng := apigen.DashboardWidgetRangeN24h
+	return apigen.DashboardWidget{
+		Id: id, Kind: apigen.DashboardWidgetKindLine, Title: "Errors by level",
+		Metrics: []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourceLogs}},
+		Range:   &rng, X: 0, Y: 0, W: 6, H: 4,
+	}
+}
+
+func TestValidateLayout(t *testing.T) {
+	badRange := apigen.DashboardWidgetRange("2h")
+	cases := []struct {
+		name string
+		doc  apigen.DashboardLayout
+		ok   bool
+	}{
+		{"a board the front would send", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{widget("w_1"), func() apigen.DashboardWidget {
+				b := widget("w_2")
+				b.X, b.W = 6, 6
+				return b
+			}()},
+		}, true},
+		{"an empty board", apigen.DashboardLayout{Version: 1, Widgets: []apigen.DashboardWidget{}}, true},
+		{"a widget with no range", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Kind, b.Range = apigen.DashboardWidgetKindStatus, nil
+				return b
+			}()},
+		}, true},
+		{"a version this server does not store", apigen.DashboardLayout{
+			Version: 2, Widgets: []apigen.DashboardWidget{widget("w_1")},
+		}, false},
+		{"an empty id", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{widget("")},
+		}, false},
+		{"the same id twice", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{widget("w_1"), widget("w_1")},
+		}, false},
+		{"an unknown kind", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Kind = apigen.DashboardWidgetKind("sparkline")
+				return b
+			}()},
+		}, false},
+		{"a range outside the six", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Range = &badRange
+				return b
+			}()},
+		}, false},
+		{"a widget with no width", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.W = 0
+				return b
+			}()},
+		}, false},
+		{"a widget running past the grid", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.X, b.W = 7, 6
+				return b
+			}()},
+		}, false},
+		{"a widget above the grid", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Y = -1
+				return b
+			}()},
+		}, false},
+		{"a widget left of the grid", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.X = -1
+				return b
+			}()},
+		}, false},
+		{"a widget with no height", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.H = 0
+				return b
+			}()},
+		}, false},
+		{"a ref with an unknown source", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSource("guesswork")}}
+				return b
+			}()},
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reason := validateLayout(c.doc)
+			if c.ok && reason != "" {
+				t.Fatalf("this layout must be stored; refused with %q", reason)
+			}
+			if !c.ok && reason == "" {
+				t.Fatal("this layout must be refused, and the refusal must say why")
+			}
+		})
+	}
+}
+
+// The empty answer is the contract's own literal: the front compares against
+// it, and a re-spelling here (a space, "widgets" first) would break that.
+func TestEmptyLayoutIsTheDocumentedEmptyBoard(t *testing.T) {
+	if string(emptyLayout) != `{"version":1,"widgets":[]}` {
+		t.Fatalf("the empty board is %s", emptyLayout)
+	}
+	var doc apigen.DashboardLayout
+	if err := json.Unmarshal(emptyLayout, &doc); err != nil {
+		t.Fatalf("the empty board must parse as a layout: %v", err)
+	}
+	if reason := validateLayout(doc); reason != "" {
+		t.Fatalf("the empty board must be a layout this server would store; got %q", reason)
 	}
 }

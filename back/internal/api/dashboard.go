@@ -1,12 +1,14 @@
 // The board's two reads: GET /v1/dashboard/catalog (what this project actually
 // sends, so a widget is picked from real names) and POST /v1/series (every
-// widget's points in one round trip). Both are session-gated and scoped to the
-// session's current project, like /v1/logs.
+// widget's points in one round trip), and the board itself: GET and PUT
+// /v1/dashboard, one stored layout per project. All of them are session-gated
+// and scoped to the session's current project, like /v1/logs.
 
 package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	apigen "go.upcontrol.io/back/gen/api"
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pgstore"
@@ -803,4 +806,120 @@ func (h *writeAPI) metricSeries(ctx context.Context, tenantID, projectID int64, 
 		previous = v
 	}
 	return points, total, previous, nil
+}
+
+// ---------------------------------------------------------------------------
+// The board itself: one stored layout per project, read by any member and
+// replaced whole by a login member (the writeAPI's own non-GET gate).
+
+// dashboardColumns is the grid the front lays widgets on; a widget that runs
+// past it would be drawn clipped or wrapped, so it never gets stored.
+const dashboardColumns = 12
+
+// dashboardMaxBody caps the document. The board is a layout, not a data store,
+// and 64 KB is far more than a screenful of widgets needs.
+const dashboardMaxBody = 64 << 10
+
+// emptyLayout answers a project that never saved a board. An empty board is a
+// real answer and never a 404: the front reads a 404 as "this core does not
+// have the endpoint yet" and falls back to the browser's own copy.
+var emptyLayout = []byte(`{"version":1,"widgets":[]}`)
+
+// writeLayout hands the stored bytes back unchanged. The column is jsonb, so
+// what comes out is postgres's own spelling of the document that went in:
+// re-decoding it here would cost a round trip and change nothing a reader can
+// see, since key order in a JSON object means nothing.
+func writeLayout(w http.ResponseWriter, layout []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(layout)
+}
+
+func (h *writeAPI) getDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	ctx := r.Context()
+	projectID := h.currentProject(ctx, r, tenantID)
+	if projectID == 0 {
+		writeLayout(w, emptyLayout)
+		return
+	}
+	layout, err := h.pool.Queries().GetDashboard(ctx, sqlc.GetDashboardParams{
+		TenantID: tenantID, ProjectID: projectID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeLayout(w, emptyLayout)
+	case err != nil:
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+	default:
+		writeLayout(w, layout)
+	}
+}
+
+func (h *writeAPI) putDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	// The tighter reader wraps the body first, so it is the one that fires;
+	// decodeStrict's own 1 MB limit sits outside it and never applies here.
+	r.Body = http.MaxBytesReader(w, r.Body, dashboardMaxBody)
+	var doc apigen.DashboardLayout
+	if !decodeStrict(w, r, &doc) {
+		return
+	}
+	if reason := validateLayout(doc); reason != "" {
+		writeAPIErrMsg(w, http.StatusBadRequest, "bad_layout", reason)
+		return
+	}
+	ctx := r.Context()
+	projectID := h.currentProject(ctx, r, tenantID)
+	if projectID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	stored, err := json.Marshal(doc)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if err := h.pool.Queries().PutDashboard(ctx, sqlc.PutDashboardParams{
+		TenantID: tenantID, ProjectID: projectID, Layout: stored,
+	}); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	writeLayout(w, stored)
+}
+
+// validateLayout checks the envelope and nothing inside it: a widget's refs
+// are the front's to interpret, and a server that second-guessed them would
+// refuse boards a newer front draws fine. "" means the layout may be stored.
+// Every enum is asked through the generated Valid(), so the contract stays the
+// one list and this file cannot drift from it.
+func validateLayout(doc apigen.DashboardLayout) string {
+	if !doc.Version.Valid() {
+		return fmt.Sprintf("version %d is not a layout this server stores", int(doc.Version))
+	}
+	seen := make(map[string]bool, len(doc.Widgets))
+	for _, wd := range doc.Widgets {
+		switch {
+		case wd.Id == "":
+			return "every widget needs an id"
+		case seen[wd.Id]:
+			return fmt.Sprintf("widget id %q appears twice", wd.Id)
+		case !wd.Kind.Valid():
+			return fmt.Sprintf("widget %q has an unknown kind %q", wd.Id, string(wd.Kind))
+		case wd.Range != nil && !wd.Range.Valid():
+			return fmt.Sprintf("widget %q has an unknown range %q", wd.Id, string(*wd.Range))
+		case wd.X < 0 || wd.Y < 0:
+			return fmt.Sprintf("widget %q sits off the grid at %d,%d", wd.Id, wd.X, wd.Y)
+		case wd.W < 1 || wd.H < 1:
+			return fmt.Sprintf("widget %q has no size", wd.Id)
+		case wd.X+wd.W > dashboardColumns:
+			return fmt.Sprintf("widget %q runs past the %d columns", wd.Id, dashboardColumns)
+		}
+		seen[wd.Id] = true
+		for _, m := range wd.Metrics {
+			if !m.Source.Valid() {
+				return fmt.Sprintf("widget %q reads an unknown source %q", wd.Id, string(m.Source))
+			}
+		}
+	}
+	return ""
 }

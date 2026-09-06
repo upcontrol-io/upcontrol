@@ -54,6 +54,135 @@ func (e ChannelKind) Valid() bool {
 	}
 }
 
+// Defines values for DashboardLayoutVersion.
+const (
+	N1 DashboardLayoutVersion = 1
+)
+
+// Valid indicates whether the value is a known member of the DashboardLayoutVersion enum.
+func (e DashboardLayoutVersion) Valid() bool {
+	switch e {
+	case N1:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DashboardMetricRefSource.
+const (
+	DashboardMetricRefSourceCheck      DashboardMetricRefSource = "check"
+	DashboardMetricRefSourceDimension  DashboardMetricRefSource = "dimension"
+	DashboardMetricRefSourceEvent      DashboardMetricRefSource = "event"
+	DashboardMetricRefSourceExperiment DashboardMetricRefSource = "experiment"
+	DashboardMetricRefSourceFunnel     DashboardMetricRefSource = "funnel"
+	DashboardMetricRefSourceLogs       DashboardMetricRefSource = "logs"
+	DashboardMetricRefSourceMetric     DashboardMetricRefSource = "metric"
+	DashboardMetricRefSourceService    DashboardMetricRefSource = "service"
+)
+
+// Valid indicates whether the value is a known member of the DashboardMetricRefSource enum.
+func (e DashboardMetricRefSource) Valid() bool {
+	switch e {
+	case DashboardMetricRefSourceCheck:
+		return true
+	case DashboardMetricRefSourceDimension:
+		return true
+	case DashboardMetricRefSourceEvent:
+		return true
+	case DashboardMetricRefSourceExperiment:
+		return true
+	case DashboardMetricRefSourceFunnel:
+		return true
+	case DashboardMetricRefSourceLogs:
+		return true
+	case DashboardMetricRefSourceMetric:
+		return true
+	case DashboardMetricRefSourceService:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DashboardWidgetKind.
+const (
+	DashboardWidgetKindBar        DashboardWidgetKind = "bar"
+	DashboardWidgetKindBreakdown  DashboardWidgetKind = "breakdown"
+	DashboardWidgetKindCalendar   DashboardWidgetKind = "calendar"
+	DashboardWidgetKindDonut      DashboardWidgetKind = "donut"
+	DashboardWidgetKindExperiment DashboardWidgetKind = "experiment"
+	DashboardWidgetKindFunnel     DashboardWidgetKind = "funnel"
+	DashboardWidgetKindLine       DashboardWidgetKind = "line"
+	DashboardWidgetKindLogs       DashboardWidgetKind = "logs"
+	DashboardWidgetKindNetwork    DashboardWidgetKind = "network"
+	DashboardWidgetKindRetention  DashboardWidgetKind = "retention"
+	DashboardWidgetKindStat       DashboardWidgetKind = "stat"
+	DashboardWidgetKindStatus     DashboardWidgetKind = "status"
+)
+
+// Valid indicates whether the value is a known member of the DashboardWidgetKind enum.
+func (e DashboardWidgetKind) Valid() bool {
+	switch e {
+	case DashboardWidgetKindBar:
+		return true
+	case DashboardWidgetKindBreakdown:
+		return true
+	case DashboardWidgetKindCalendar:
+		return true
+	case DashboardWidgetKindDonut:
+		return true
+	case DashboardWidgetKindExperiment:
+		return true
+	case DashboardWidgetKindFunnel:
+		return true
+	case DashboardWidgetKindLine:
+		return true
+	case DashboardWidgetKindLogs:
+		return true
+	case DashboardWidgetKindNetwork:
+		return true
+	case DashboardWidgetKindRetention:
+		return true
+	case DashboardWidgetKindStat:
+		return true
+	case DashboardWidgetKindStatus:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DashboardWidgetRange.
+const (
+	DashboardWidgetRangeN12h DashboardWidgetRange = "12h"
+	DashboardWidgetRangeN1h  DashboardWidgetRange = "1h"
+	DashboardWidgetRangeN24h DashboardWidgetRange = "24h"
+	DashboardWidgetRangeN31d DashboardWidgetRange = "31d"
+	DashboardWidgetRangeN4h  DashboardWidgetRange = "4h"
+	DashboardWidgetRangeN7d  DashboardWidgetRange = "7d"
+)
+
+// Valid indicates whether the value is a known member of the DashboardWidgetRange enum.
+func (e DashboardWidgetRange) Valid() bool {
+	switch e {
+	case DashboardWidgetRangeN12h:
+		return true
+	case DashboardWidgetRangeN1h:
+		return true
+	case DashboardWidgetRangeN24h:
+		return true
+	case DashboardWidgetRangeN31d:
+		return true
+	case DashboardWidgetRangeN4h:
+		return true
+	case DashboardWidgetRangeN7d:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DeliveryState.
 const (
 	DeliveryStateDead    DeliveryState = "dead"
@@ -730,6 +859,49 @@ type DashboardCatalog struct {
 	Metrics  []CatalogMetric `json:"metrics"`
 	Services []LogService    `json:"services"`
 }
+
+// DashboardLayout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
+type DashboardLayout struct {
+	Version DashboardLayoutVersion `json:"version"`
+	Widgets []DashboardWidget      `json:"widgets"`
+}
+
+// DashboardLayoutVersion defines model for DashboardLayout.Version.
+type DashboardLayoutVersion int
+
+// DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it.
+type DashboardMetricRef struct {
+	Label  *string                  `json:"label,omitempty"`
+	Name   *string                  `json:"name,omitempty"`
+	Source DashboardMetricRefSource `json:"source"`
+	Where  *map[string]string       `json:"where,omitempty"`
+}
+
+// DashboardMetricRefSource defines model for DashboardMetricRef.Source.
+type DashboardMetricRefSource string
+
+// DashboardWidget defines model for DashboardWidget.
+type DashboardWidget struct {
+	H int `json:"h"`
+
+	// Id Example: w_1
+	Id      string               `json:"id"`
+	Kind    DashboardWidgetKind  `json:"kind"`
+	Metrics []DashboardMetricRef `json:"metrics"`
+
+	// Range Present only for kinds with a time axis.
+	Range *DashboardWidgetRange `json:"range,omitempty"`
+	Title string                `json:"title"`
+	W     int                   `json:"w"`
+	X     int                   `json:"x"`
+	Y     int                   `json:"y"`
+}
+
+// DashboardWidgetKind defines model for DashboardWidget.Kind.
+type DashboardWidgetKind string
+
+// DashboardWidgetRange Present only for kinds with a time axis.
+type DashboardWidgetRange string
 
 // DeliveryState The delivery queue's own vocabulary. `pending` covers leased/retrying too — to the reader the outcome is simply not known yet.
 type DeliveryState string
@@ -1681,6 +1853,9 @@ type PatchV1ChecksIdJSONRequestBody = MonitorPatch
 
 // PostV1ClaimJSONRequestBody defines body for PostV1Claim for application/json ContentType.
 type PostV1ClaimJSONRequestBody PostV1ClaimJSONBody
+
+// PutV1DashboardJSONRequestBody defines body for PutV1Dashboard for application/json ContentType.
+type PutV1DashboardJSONRequestBody = DashboardLayout
 
 // PostV1EventJSONRequestBody defines body for PostV1Event for application/json ContentType.
 type PostV1EventJSONRequestBody PostV1EventJSONBody
