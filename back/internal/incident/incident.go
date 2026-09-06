@@ -118,7 +118,7 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 		"monitor_name": mon.Name,
 	})
 
-	l.notifyChannels(ctx, mon.TenantID, notifySpec{
+	l.notifyChannels(ctx, mon.TenantID, mon.ProjectID, notifySpec{
 		incidentID: row.ID,
 		payload:    payload,
 		wants:      func(s notifysettings.Settings) bool { return s.WebsiteDown },
@@ -141,9 +141,11 @@ type notifySpec struct {
 
 // notifyChannels enqueues one delivery per interested channel; EnqueueDelivery
 // dedupes on idem_key, so replaying an open is a no-op.
-func (l *Lifecycle) notifyChannels(ctx context.Context, tenantID int64, n notifySpec) {
+func (l *Lifecycle) notifyChannels(ctx context.Context, tenantID, projectID int64, n notifySpec) {
 	q := l.pool.Queries()
-	chans, err := q.ListChannelsByTenant(ctx, tenantID)
+	// A project's incident reaches that project's destinations and nobody
+	// else's — a sibling project of the same workspace is not an audience.
+	chans, err := q.ListChannelsByProject(ctx, projectID)
 	if err != nil {
 		return
 	}
@@ -293,7 +295,7 @@ func (l *Lifecycle) OpenDetect(ctx context.Context, p DetectOpen) (incidentID in
 	if serr != nil {
 		slice = nil
 	}
-	l.notifyChannels(ctx, p.TenantID, notifySpec{
+	l.notifyChannels(ctx, p.TenantID, p.ProjectID, notifySpec{
 		incidentID: row.ID,
 		payload:    detectAlertPayload(p, uuidStr(row.PublicID), slice),
 		wants: func(s notifysettings.Settings) bool {

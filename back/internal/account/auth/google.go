@@ -148,8 +148,9 @@ func (h *google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Google verified the address, the same proof a magic-link redeem carries:
 	// invites activate here, never on the request path.
-	door.activateInvites(ctx, person.ID, email)
-	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
+	activated := door.activateInvites(ctx, person.ID, email)
+	landTenant, landProject := door.landing(ctx, person, activated)
+	sessToken, err := h.sess.Create(ctx, person.ID, landTenant, landProject)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return

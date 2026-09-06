@@ -6,6 +6,31 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-09-06
+
+### Changed
+- **A project owns its team, its channels and its status page.** Migration 004:
+  `tenant.owner_person_id` names the workspace's one owner, who needs no member row and is
+  `login` in every project of the workspace; `project_member(project_id, person_id,
+  tenant_id, role, status)` replaces `tenant_member`, and existing members land on the
+  workspace's oldest project only; `alert_channel`, `telegram_invite` and `error_alert_state`
+  carry `project_id`. The session's workspace follows the current project on every switch and
+  sign-in, so every read a screen makes is one project's: monitors, incidents, sources, keys
+  (a rotate touches one project's key), channels, recipients, the status page and its public
+  page, overview, incident evidence and metric tiles. An incident pages its own project's
+  channels, the error scanner remembers per project, the delivery failover stays inside the
+  project, and a Telegram chat answers for the projects it is connected to.
+- **A person may be a member of projects in other people's workspaces.** `GET /v1/projects`
+  lists every reachable project, own ones first, each with `owned`, `role` and `ownerEmail`;
+  `POST /v1/project/switch` may cross workspaces; `POST /v1/projects` always creates in the
+  caller's own workspace (created on first use) against their own plan. `GET /v1/me` carries
+  `project.owned` and `project.ownerEmail`, `GET /v1/plan` carries `owned`, and the owner's
+  row in `GET /v1/recipients` carries `owner: true`. Sign-in lands on the project an
+  invitation just activated, else where the person last worked, else their own project.
+- **Owner-only doors.** `DELETE /v1/project` and `GET /v1/export` answer 403 `owner_only` to
+  anyone but the workspace's owner; releasing a project also drops its channels, invites,
+  members and scanner state.
+
 ## [0.16.0] — 2026-09-06
 
 ### Added

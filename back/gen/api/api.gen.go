@@ -1232,7 +1232,10 @@ type PlanResponse struct {
 	//
 	// Example: 300
 	MinIntervalSec *int `json:"minIntervalSec,omitempty"`
-	Plan           Plan `json:"plan"`
+
+	// Owned Whether the caller owns the workspace whose plan this is; false inside a project somebody else owns, where the plan is a fact, not a purchase.
+	Owned *bool `json:"owned,omitempty"`
+	Plan  Plan  `json:"plan"`
 
 	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw.
 	Projects           *UsedMax `json:"projects,omitempty"`
@@ -1271,6 +1274,12 @@ type Project struct {
 
 	// Id Example: prj_1
 	Id string `json:"id"`
+
+	// Owned Whether the session's person owns the workspace this project lives in. False inside a project somebody else owns, where the plan is a fact rather than a purchase and the owner-only doors are closed.
+	Owned bool `json:"owned"`
+
+	// OwnerEmail The workspace owner's address, sent for every project so a guest card can name whose it is.
+	OwnerEmail *openapi_types.Email `json:"ownerEmail,omitempty"`
 }
 
 // ProjectListItem defines model for ProjectListItem.
@@ -1282,6 +1291,13 @@ type ProjectListItem struct {
 
 	// Id Example: 6f9619ff8b86d97111d1c1e4bba1f0b2
 	Id string `json:"id"`
+
+	// Owned Whether the caller owns the workspace this project lives in.
+	Owned bool `json:"owned"`
+
+	// OwnerEmail The workspace owner's address, so a guest row can name whose project it is.
+	OwnerEmail *openapi_types.Email `json:"ownerEmail,omitempty"`
+	Role       RecipientRole        `json:"role"`
 }
 
 // PublicComponent defines model for PublicComponent.
@@ -1340,8 +1356,11 @@ type Recipient struct {
 	Id       string               `json:"id"`
 	Initials string               `json:"initials"`
 	Name     string               `json:"name"`
-	Role     RecipientRole        `json:"role"`
-	Status   RecipientStatus      `json:"status"`
+
+	// Owner Present and true on the workspace owner's row, which has no role control and cannot be removed.
+	Owner  *bool           `json:"owner,omitempty"`
+	Role   RecipientRole   `json:"role"`
+	Status RecipientStatus `json:"status"`
 
 	// Telegram Present when this person is a verified Telegram recipient.
 	Telegram *bool `json:"telegram,omitempty"`

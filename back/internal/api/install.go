@@ -312,10 +312,9 @@ func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc
 
 // adoptTenant moves the anonymous tenant's whole project footprint into the
 // claimer's tenant, then deletes the anonymous tenant. Claim adopts, it never
-// adds a membership: a second tenant_member row is what the session lookup
-// (ORDER BY tenant_id LIMIT 1) can never see — the bug this rewrites
-// (docs/plans/projects-axis.md Decision 6). One transaction; the conditional
-// burn is the race lock, exactly as the slug path always had it.
+// adds a membership (docs/plans/projects-axis.md Decision 6). One
+// transaction; the conditional burn is the race lock, exactly as the slug
+// path always had it.
 func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc.Session, anonTenantID int64) {
 	// Self-adoption is impossible before anything is touched: an anon id that
 	// IS the claimer's own tenant answers the burn's 404 locally, so no future
@@ -379,6 +378,18 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		writeUpgradeRequired(w, msg, plan)
 		return
 	}
+	// The projects coming in, read before they are reparented: a channel is
+	// per project now, so each needs the claimer's address seeded onto it.
+	var adopted []int64
+	if rows, err := tx.Query(ctx, `SELECT id FROM project WHERE tenant_id = $1`, anonTenantID); err == nil {
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				adopted = append(adopted, id)
+			}
+		}
+		rows.Close()
+	}
 	// Reparent the footprint. Everything not on this list — alert channels,
 	// delivery_queue, error_alert_state — dies with the anonymous tenant
 	// below, deliberately (Decision 6). The table names are a fixed list in
@@ -396,6 +407,21 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	if _, err := tx.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, anonTenantID); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	// A channel belongs to one project now, so the adopted page arrives with
+	// none — and the absorb above may have deleted the claimer's empty project
+	// and its seeded email channel with it.
+	for _, projectID := range adopted {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+			 SELECT gen_random_uuid(), $1, $2, 'email', p.email FROM person p
+			  WHERE p.id = $3 AND p.email IS NOT NULL
+			    AND NOT EXISTS (SELECT 1 FROM alert_channel c
+			                     WHERE c.project_id = $2 AND c.kind = 'email' AND c.target = p.email)`,
+			s.TenantID, projectID, s.PersonID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -429,7 +455,7 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig, err := h.pool.Queries().TenantSignals(ctx, tenant.TenantID)
+	sig, err := h.pool.Queries().ProjectSignals(ctx, tenant.ProjectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return

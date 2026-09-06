@@ -42,27 +42,32 @@ func (h *readAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
+	// Everything a screen shows is the CURRENT project's; the workspace still
+	// decides the plan. 0 means the reader reaches no project here, which
+	// every handler below renders as empty.
+	projectID := currentProjectID(r.Context(), h.pool, s, s.TenantID)
 	switch r.URL.Path {
 	case "/v1/plan":
-		h.plan(w, r, s.TenantID)
+		h.plan(w, r, s)
 	case "/v1/channels":
-		h.channels(w, r, s.TenantID)
+		h.channels(w, r, s.TenantID, projectID)
 	case "/v1/recipients":
-		h.recipients(w, r, s.TenantID)
+		h.recipients(w, r, s.TenantID, projectID)
 	case "/v1/incidents":
-		h.incidents(w, r, s.TenantID)
+		h.incidents(w, r, s.TenantID, projectID)
 	case "/v1/sources":
-		h.sources(w, r, s.TenantID)
+		h.sources(w, r, s.TenantID, projectID)
 	case "/v1/overview":
-		h.overview(w, r, s.TenantID)
+		h.overview(w, r, s.TenantID, projectID)
 	default:
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 	}
 }
 
 // GET /v1/plan — the plan numbers (single-sourced with Pricing.tsx).
-func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 	ctx := r.Context()
+	tenantID := s.TenantID
 	var plan string
 	_ = h.pool.Raw().QueryRow(ctx, `SELECT plan FROM tenant WHERE id = $1`, tenantID).Scan(&plan)
 	if plan == "" {
@@ -71,8 +76,14 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ent, _ := h.pool.Queries().GetPlanEntitlement(ctx, plan)
 	used, _ := h.pool.Queries().CountMonitors(ctx, tenantID)
 	tgUsed, tgMax, _ := countTelegramRecipients(ctx, h.pool, tenantID)
+	personID := s.PersonID
+	owned, _ := h.pool.Queries().IsTenantOwner(ctx, sqlc.IsTenantOwnerParams{
+		TenantID: tenantID, PersonID: &personID,
+	})
 	resp := map[string]any{
 		"plan": plan,
+		// Inside somebody else's project the plan is a fact, not a purchase.
+		"owned": owned,
 		// How often this plan may check: the picker needs the wall, and a
 		// hardcoded 5m would be a second home for this row's number.
 		"minIntervalSec": int(ent.MinIntervalSec),
@@ -102,8 +113,8 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, tenantID int64) {
 }
 
 // GET /v1/channels — connected channels + what is still connectable.
-func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	rows, _ := h.pool.Queries().ListChannelsByTenant(r.Context(), tenantID)
+func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
+	rows, _ := h.pool.Queries().ListChannelsByProject(r.Context(), projectID)
 	channels := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		ch := map[string]any{
@@ -138,16 +149,37 @@ func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID int6
 	// working one. Tests are excluded; next_try_at is the recency stamp.
 	undelivered := 0
 	_ = h.pool.Raw().QueryRow(r.Context(),
-		`SELECT count(*) FROM delivery_queue
-		  WHERE tenant_id = $1 AND state = 'dead' AND class <> 'test'
-		    AND next_try_at > now() - interval '24 hours'`, tenantID).Scan(&undelivered)
+		`SELECT count(*) FROM delivery_queue d JOIN alert_channel c ON c.id = d.channel_id
+		  WHERE d.tenant_id = $1 AND c.project_id = $2 AND d.state = 'dead' AND d.class <> 'test'
+		    AND d.next_try_at > now() - interval '24 hours'`, tenantID, projectID).Scan(&undelivered)
 	writeAPIJSON(w, http.StatusOK, map[string]any{"channels": channels, "connectableChannels": connectable, "undelivered": undelivered})
 }
 
 // GET /v1/recipients — people (e-mail + Telegram members) + pending invite links.
-func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	rows, _ := h.pool.Queries().ListRecipientsByTenant(r.Context(), tenantID)
-	recs := make([]map[string]any, 0, len(rows))
+func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
+	recs := make([]map[string]any, 0, 8)
+	// The owner leads and is not a membership row: ownership is a column on
+	// the workspace, so the Team list prepends it.
+	if o, err := h.pool.Queries().TenantOwner(r.Context(), tenantID); err == nil {
+		name := o.Name
+		if name == "" {
+			name = emailLocal(ptrStrSafe(o.Email))
+		}
+		rec := map[string]any{
+			"id":       uuidStr(o.PublicID),
+			"initials": initials2(name, ptrStrSafe(o.Email)),
+			"name":     name,
+			"email":    ptrStrSafe(o.Email),
+			"role":     "login",
+			"status":   "active",
+			"owner":    true,
+		}
+		if o.TelegramID != nil {
+			rec["telegram"] = true
+		}
+		recs = append(recs, rec)
+	}
+	rows, _ := h.pool.Queries().ListRecipientsByProject(r.Context(), projectID)
 	for _, row := range rows {
 		name := row.Name
 		if name == "" {
@@ -180,8 +212,8 @@ func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 			`SELECT ti.id, ti.created_at, ti.expires_at, p.public_id
 			  FROM telegram_invite ti
 			  LEFT JOIN person p ON p.id = ti.person_id
-			 WHERE ti.tenant_id = $1 AND ti.redeemed_at IS NULL AND ti.expires_at > now()
-			 ORDER BY ti.created_at DESC`, tenantID); ierr == nil {
+			 WHERE ti.project_id = $1 AND ti.redeemed_at IS NULL AND ti.expires_at > now()
+			 ORDER BY ti.created_at DESC`, projectID); ierr == nil {
 			for rows.Next() {
 				var id int64
 				var createdAt, expiresAt time.Time
@@ -209,7 +241,7 @@ func (h *readAPI) recipients(w http.ResponseWriter, r *http.Request, tenantID in
 // GET /v1/incidents — incident history (newest first), clamped to the plan's
 // window. Closed incidents past incident_days are hidden, never deleted below
 // the widest plan's window — an upgrade restores them at once.
-func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	ctx := r.Context()
 	plan, _ := h.pool.Queries().GetTenantPlan(ctx, tenantID)
 	if plan == "" {
@@ -221,11 +253,13 @@ func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int
 	if ent, err := h.pool.Queries().GetPlanEntitlement(ctx, plan); err == nil {
 		windowDays = int(ent.IncidentDays)
 	}
-	rows, _ := h.pool.Queries().ListIncidentsByTenant(ctx,
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, RowLimit: 20, SinceDays: int32(windowDays)})
+	rows, _ := h.pool.Queries().ListIncidentsByProject(ctx,
+		sqlc.ListIncidentsByProjectParams{
+			TenantID: tenantID, ProjectID: projectID, RowLimit: 20, SinceDays: int32(windowDays),
+		})
 	items := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		inc := h.incidentWithEvidence(ctx, row)
+		inc := h.incidentWithEvidence(ctx, sqlc.ListIncidentsByTenantRow(row))
 		// The record's real deletion-from-view date, for the Dashboard's "keep
 		// it longer" teaser. Only closed incidents age out, and only when the
 		// window is known.
@@ -242,7 +276,7 @@ func (h *readAPI) incidents(w http.ResponseWriter, r *http.Request, tenantID int
 }
 
 // GET /v1/sources — connected sources + what is still connectable.
-func (h *readAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) sources(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	// The connectable list is a constant on purpose: it describes what CAN be
 	// connected, not what this tenant has. What the tenant has is read below.
 	connectable := []map[string]any{
@@ -251,9 +285,9 @@ func (h *readAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64
 		// No grafana tile: internal/source/webhook verifies stripe, github and
 		// vercel only, so the tile would create a row that can receive nothing.
 	}
-	signals, _ := h.pool.Queries().TenantSignals(r.Context(), tenantID)
+	signals, _ := h.pool.Queries().ProjectSignals(r.Context(), projectID)
 	lines, lastLog := h.logSummary(r.Context(), tenantID, signals)
-	conns, _ := h.pool.Queries().ListSourceConnections(r.Context(), tenantID)
+	conns, _ := h.pool.Queries().ListSourceConnections(r.Context(), projectID)
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"sources":            append(sourcesFromSignals(signals, lines, lastLog), connectedSources(conns)...),
 		"connectableSources": connectable,
@@ -261,9 +295,9 @@ func (h *readAPI) sources(w http.ResponseWriter, r *http.Request, tenantID int64
 }
 
 // GET /v1/overview — the Dashboard aggregate.
-func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	ctx := r.Context()
-	monRows, _ := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID)
+	monRows, _ := h.pool.Queries().ListMonitorsByProject(ctx, projectID)
 	monitors := make([]map[string]any, 0, len(monRows))
 	for _, row := range monRows {
 		// The overview tile carries no ping URL: the checks list is where the
@@ -274,9 +308,9 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	}
 	// Sources and ladder both derive from what the tenant has actually connected
 	// (same signals as /v1/sources), never from a fixed list.
-	signals, _ := h.pool.Queries().TenantSignals(ctx, tenantID)
+	signals, _ := h.pool.Queries().ProjectSignals(ctx, projectID)
 	logLines, lastLog := h.logSummary(ctx, tenantID, signals)
-	conns, _ := h.pool.Queries().ListSourceConnections(ctx, tenantID)
+	conns, _ := h.pool.Queries().ListSourceConnections(ctx, projectID)
 	sources := append(sourcesFromSignals(signals, logLines, lastLog), connectedSources(conns)...)
 	ladder := []map[string]any{
 		{"key": "account", "title": "Create your account", "done": true},
@@ -285,7 +319,7 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 		{"key": "install", "title": "Add the ingest key", "done": logLines > 0},
 		{"key": "alert", "title": "Set up an alert channel", "done": signals.ChannelCount > 0},
 	}
-	metrics, uptime, health := h.availability(ctx, tenantID)
+	metrics, uptime, health := h.availability(ctx, tenantID, projectID)
 	resp := map[string]any{
 		"sources":  sources,
 		"monitors": monitors,
@@ -302,19 +336,19 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID int6
 	}
 	// Open incident (if any). SinceDays 1: only the ongoing incident is
 	// consumed below, and an open one passes any clamp (resolved_at IS NULL).
-	incRows, _ := h.pool.Queries().ListIncidentsByTenant(ctx,
-		sqlc.ListIncidentsByTenantParams{TenantID: tenantID, RowLimit: 1, SinceDays: 1})
+	incRows, _ := h.pool.Queries().ListIncidentsByProject(ctx,
+		sqlc.ListIncidentsByProjectParams{TenantID: tenantID, ProjectID: projectID, RowLimit: 1, SinceDays: 1})
 	if len(incRows) > 0 && (incRows[0].Status == "down" || incRows[0].Status == "check") {
 		// Same shape as /v1/incidents: the Dashboard branches on `ongoing`, and a
 		// three-field incident silently read as "nothing is wrong".
-		resp["incident"] = h.incidentWithEvidence(ctx, incRows[0])
+		resp["incident"] = h.incidentWithEvidence(ctx, sqlc.ListIncidentsByTenantRow(incRows[0]))
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 
 // logSummary reads "is this project sending lines, and when was the last one"
 // through ring.QueryBuilder, the only permitted path to the logs table.
-func (h *readAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.TenantSignalsRow) (uint64, time.Time) {
+func (h *readAPI) logSummary(ctx context.Context, tenantID int64, s sqlc.ProjectSignalsRow) (uint64, time.Time) {
 	if h.pgs == nil || s.ProjectID == 0 {
 		return 0, time.Time{}
 	}
@@ -336,14 +370,14 @@ const (
 
 // availability computes the uptime tile and the 7-day health line from the
 // checks table; nil/empty when nothing has been checked.
-func (h *readAPI) availability(ctx context.Context, tenantID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
+func (h *readAPI) availability(ctx context.Context, tenantID, projectID int64) (metrics []map[string]any, uptime map[string]any, health map[string]any) {
 	// The product tiles are the events pipeline's output, read from the
 	// telemetry store; under 7 days of history produces no tile.
 	metrics = []map[string]any{}
 	if h.pgs == nil {
 		return metrics, nil, nil
 	}
-	if stats, err := h.pgs.MetricSummary(ctx, tenantID); err == nil {
+	if stats, err := h.pgs.MetricSummary(ctx, tenantID, projectID); err == nil {
 		metrics = metricTiles(stats)
 	}
 	rows, err := h.pgs.Raw().Query(ctx, `
@@ -352,7 +386,8 @@ func (h *readAPI) availability(ctx context.Context, tenantID int64) (metrics []m
 		       count(*) AS total_count
 		  FROM checks
 		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
-		 GROUP BY bucket ORDER BY bucket`, tenantID)
+		   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)
+		 GROUP BY bucket ORDER BY bucket`, tenantID, projectID)
 	if err != nil {
 		return metrics, nil, nil
 	}
@@ -484,7 +519,7 @@ func pctLabel(ok, total uint64) string {
 
 // sourcesFromSignals builds the Sources list from what the tenant actually
 // connected: no checks and no lines means an EMPTY list, not a claim.
-func sourcesFromSignals(s sqlc.TenantSignalsRow, logLines uint64, lastLog time.Time) []map[string]any {
+func sourcesFromSignals(s sqlc.ProjectSignalsRow, logLines uint64, lastLog time.Time) []map[string]any {
 	sources := make([]map[string]any, 0, 2)
 	if s.MonitorCount > 0 {
 		status, signal := "nodata", "no checks yet"
@@ -621,7 +656,7 @@ func (h *readAPI) incidentWithEvidence(ctx context.Context, row sqlc.ListInciden
 		if row.ResolvedAt.Valid {
 			end = row.ResolvedAt.Time
 		}
-		events, _ = h.pgs.EventsAround(ctx, row.TenantID,
+		events, _ = h.pgs.EventsAround(ctx, row.TenantID, row.ProjectID,
 			row.DetectedAt.Time.Add(-30*time.Minute), end, row.DetectedAt.Time, 50)
 	}
 	if merged := mergeTimeline(lifecycle, events); len(merged) > 0 {

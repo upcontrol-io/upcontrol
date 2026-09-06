@@ -21,6 +21,7 @@ type AlertChannel struct {
 	SecretEnc         []byte
 	BreakerOpenUntil  pgtype.Timestamptz
 	CreatedAt         pgtype.Timestamptz
+	ProjectID         int64
 }
 
 type ApiKey struct {
@@ -87,6 +88,7 @@ type ErrorAlertState struct {
 	Fingerprint int64
 	Kind        string
 	LastAlerted pgtype.Timestamptz
+	ProjectID   int64
 }
 
 type Event struct {
@@ -285,6 +287,15 @@ type Project struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type ProjectMember struct {
+	ProjectID int64
+	PersonID  int64
+	TenantID  int64
+	Role      string
+	Status    string
+	CreatedAt pgtype.Timestamptz
+}
+
 type ProjectSeq struct {
 	ProjectID int64
 	Next      int64
@@ -357,6 +368,7 @@ type TelegramInvite struct {
 	CreatedAt  pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
 	RedeemedAt pgtype.Timestamptz
+	ProjectID  int64
 }
 
 type Tenant struct {
@@ -367,13 +379,7 @@ type Tenant struct {
 	ClaimTokenHash []byte
 	ClaimedAt      pgtype.Timestamptz
 	CreatedAt      pgtype.Timestamptz
-}
-
-type TenantMember struct {
-	TenantID int64
-	PersonID int64
-	Role     string
-	Status   string
+	OwnerPersonID  *int64
 }
 
 type WebEvent struct {

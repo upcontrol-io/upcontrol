@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
@@ -59,15 +61,20 @@ func (h *telegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	var personID, tenantID int64
+	var personID int64
 	var name, email string
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT p.id, tm.tenant_id, coalesce(p.name, ''), coalesce(p.email, '')
-		   FROM person p
-		   JOIN tenant_member tm ON tm.person_id = p.id
-		  WHERE p.telegram_id = $1
-		  ORDER BY tm.tenant_id LIMIT 1`, tgUser.ID).Scan(&personID, &tenantID, &name, &email); err != nil {
-		// A Telegram account that never redeemed an invite is nobody here.
+		`SELECT p.id, coalesce(p.name, ''), coalesce(p.email, '')
+		   FROM person p WHERE p.telegram_id = $1 LIMIT 1`,
+		tgUser.ID).Scan(&personID, &name, &email); err != nil {
+		writeErr(w, http.StatusUnauthorized, "not_a_member")
+		return
+	}
+	// The same landing rule the magic link follows, minus the invite arm: a
+	// Mini App open proves nothing about an address, so it activates nothing.
+	tenantID, projectID := h.scopeFor(ctx, personID)
+	if projectID == nil {
+		// A Telegram account that reaches no project is nobody here.
 		writeErr(w, http.StatusUnauthorized, "not_a_member")
 		return
 	}
@@ -75,7 +82,7 @@ func (h *telegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name = tgUser.FirstName
 	}
 
-	sessToken, err := h.sess.Create(ctx, personID, tenantID)
+	sessToken, err := h.sess.Create(ctx, personID, tenantID, projectID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -88,6 +95,24 @@ func (h *telegramMiniApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"initials": initials(name, email),
 		"plan":     "Free",
 	})
+}
+
+// scopeFor answers where this person's Mini App session opens: their last
+// project while they still reach it, else the lowest one they reach. A nil
+// project means they reach none.
+func (h *telegramMiniApp) scopeFor(ctx context.Context, personID int64) (int64, *int64) {
+	q := h.pool.Queries()
+	if last, err := q.LastSessionScope(ctx, personID); err == nil && last.ProjectID != nil {
+		if row, serr := q.ProjectScope(ctx, sqlc.ProjectScopeParams{
+			PersonID: &personID, ProjectID: *last.ProjectID,
+		}); serr == nil {
+			return row.TenantID, &row.ID
+		}
+	}
+	if first, err := q.FirstReachableProject(ctx, personID); err == nil {
+		return first.TenantID, &first.ID
+	}
+	return 0, nil
 }
 
 // tgUserLite is the `user` field of initData.

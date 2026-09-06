@@ -99,40 +99,49 @@ func New(pool *pg.Pool, pgs *pgstore.Store, log *slog.Logger) *Scanner {
 	return &Scanner{pool: pool, pgs: pgs, log: log}
 }
 
-// subscription is one channel's resolved interest, grouped per tenant.
+// subscription is one channel's resolved interest, grouped per project.
 type subscription struct {
 	channelID int64
 	settings  notifysettings.Settings
 }
 
-// Tick runs one scan pass over every tenant with at least one subscribed
-// channel; tenants without subscriptions cost nothing, not even a query.
+// scope is the pair a scan pass runs over: a channel subscribes for its own
+// project, and the scanner's memory is keyed the same way.
+type scope struct {
+	tenantID  int64
+	projectID int64
+}
+
+// Tick runs one scan pass over every project with at least one subscribed
+// channel; projects without subscriptions cost nothing, not even a query.
 func (s *Scanner) Tick(ctx context.Context) error {
 	q := s.pool.Queries()
 	rows, err := q.ListErrorSubscribedChannels(ctx)
 	if err != nil {
 		return fmt.Errorf("errorlog: list subscribed: %w", err)
 	}
-	byTenant := map[int64][]subscription{}
+	byProject := map[scope][]subscription{}
 	for _, row := range rows {
-		byTenant[row.TenantID] = append(byTenant[row.TenantID], subscription{
+		key := scope{tenantID: row.TenantID, projectID: row.ProjectID}
+		byProject[key] = append(byProject[key], subscription{
 			channelID: row.ID,
 			settings:  notifysettings.Resolve(row.Notify),
 		})
 	}
-	for tenantID, subs := range byTenant {
-		if err := s.scanTenant(ctx, tenantID, subs); err != nil {
-			s.log.Warn("errorlog: tenant scan failed", "tenant_id", tenantID, "err", err)
+	for key, subs := range byProject {
+		if err := s.scanProject(ctx, key, subs); err != nil {
+			s.log.Warn("errorlog: project scan failed",
+				"tenant_id", key.tenantID, "project_id", key.projectID, "err", err)
 		}
 	}
 	return nil
 }
 
-func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscription) error {
+func (s *Scanner) scanProject(ctx context.Context, sc scope, subs []subscription) error {
 	now := time.Now()
 	q := s.pool.Queries()
 
-	// What this tenant's channels asked for: the distinct repeat windows (each
+	// What this project's channels asked for: the distinct repeat windows (each
 	// gets its own aggregate query) and whether anyone wants the "appeared" pass.
 	windows := map[int]bool{}
 	needNew := false
@@ -145,8 +154,11 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 		}
 	}
 
-	// The scanner's memory: fingerprint+kind → when it last alerted.
-	stateRows, err := q.ListErrorAlertState(ctx, tenantID)
+	// The scanner's memory: fingerprint+kind → when it last alerted. Per
+	// project: the same error in a sibling project is a separate alert.
+	stateRows, err := q.ListErrorAlertState(ctx, sqlc.ListErrorAlertStateParams{
+		TenantID: sc.tenantID, ProjectID: sc.projectID,
+	})
 	if err != nil {
 		return err
 	}
@@ -167,7 +179,7 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 
 	// The "appeared" pass: one lookback-sized query.
 	if needNew {
-		groups, gerr := s.errorGroups(ctx, tenantID, now.Add(-Lookback))
+		groups, gerr := s.errorGroups(ctx, sc, now.Add(-Lookback))
 		if gerr != nil {
 			return gerr
 		}
@@ -179,19 +191,20 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 				if !sub.settings.ErrorLogs {
 					continue
 				}
-				s.enqueue(ctx, tenantID, sub.channelID, g, "error", NewErrorTitle(g), 0, now)
+				s.enqueue(ctx, sc.tenantID, sub.channelID, g, "error", NewErrorTitle(g), 0, now)
 			}
 			_ = q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
-				TenantID: tenantID, Fingerprint: int64(g.Fingerprint), Kind: "error",
+				TenantID: sc.tenantID, ProjectID: sc.projectID,
+				Fingerprint: int64(g.Fingerprint), Kind: "error",
 			})
 		}
 	}
 
-	// The "repeating" pass: one query per distinct window among this tenant's
+	// The "repeating" pass: one query per distinct window among this project's
 	// channels, so each channel's count is measured inside its own window.
 	for windowMin := range windows {
 		window := time.Duration(windowMin) * time.Minute
-		groups, gerr := s.errorGroups(ctx, tenantID, now.Add(-window))
+		groups, gerr := s.errorGroups(ctx, sc, now.Add(-window))
 		if gerr != nil {
 			return gerr
 		}
@@ -203,63 +216,40 @@ func (s *Scanner) scanTenant(ctx context.Context, tenantID int64, subs []subscri
 				if !sub.settings.RepeatingErrorLogs || sub.settings.RepeatWindowMin != windowMin {
 					continue
 				}
-				s.enqueue(ctx, tenantID, sub.channelID, g, "repeat", RepeatTitle(g, windowMin), windowMin, now)
+				s.enqueue(ctx, sc.tenantID, sub.channelID, g, "repeat", RepeatTitle(g, windowMin), windowMin, now)
 			}
 			_ = q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
-				TenantID: tenantID, Fingerprint: int64(g.Fingerprint), Kind: "repeat",
+				TenantID: sc.tenantID, ProjectID: sc.projectID,
+				Fingerprint: int64(g.Fingerprint), Kind: "repeat",
 			})
 		}
 	}
 	return nil
 }
 
-// errorGroups aggregates error lines by fingerprint across every project of
-// the tenant, each behind its own ring cutoff (a displaced line must not page).
-func (s *Scanner) errorGroups(ctx context.Context, tenantID int64, since time.Time) ([]Group, error) {
-	projRows, err := s.pool.Raw().Query(ctx, `SELECT id FROM project WHERE tenant_id = $1`, tenantID)
+// errorGroups aggregates one project's error lines by fingerprint, behind its
+// own ring cutoff (a displaced line must not page).
+func (s *Scanner) errorGroups(ctx context.Context, sc scope, since time.Time) ([]Group, error) {
+	lq := query.New(sc.tenantID, sc.projectID).ErrorGroups(since)
+	rows, err := s.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
 	if err != nil {
 		return nil, err
 	}
-	var projectIDs []int64
-	for projRows.Next() {
-		var id int64
-		if err := projRows.Scan(&id); err == nil {
-			projectIDs = append(projectIDs, id)
-		}
-	}
-	projRows.Close()
+	defer rows.Close()
 
-	merged := map[uint64]Group{}
-	for _, projectID := range projectIDs {
-		lq := query.New(tenantID, projectID).ErrorGroups(since)
-		rows, qerr := s.pgs.Raw().Query(ctx, lq.SQL, lq.Args...)
-		if qerr != nil {
-			return nil, qerr
+	var groups []Group
+	for rows.Next() {
+		// fingerprint is a wrapped bigint: scan signed, wrap in Go — pgx
+		// refuses a negative int8 into uint64, and half the hash space is.
+		var g Group
+		var fp int64
+		if err := rows.Scan(&fp, &g.Count, &g.Service, &g.Message, &g.LastTS); err != nil {
+			continue
 		}
-		for rows.Next() {
-			// fingerprint is a wrapped bigint: scan signed, wrap in Go — pgx
-			// refuses a negative int8 into uint64, and half the hash space is.
-			var g Group
-			var fp int64
-			if err := rows.Scan(&fp, &g.Count, &g.Service, &g.Message, &g.LastTS); err != nil {
-				continue
-			}
-			g.Fingerprint = uint64(fp)
-			if have, ok := merged[g.Fingerprint]; ok {
-				g.Count += have.Count
-				if have.LastTS.After(g.LastTS) {
-					g.LastTS, g.Service, g.Message = have.LastTS, have.Service, have.Message
-				}
-			}
-			merged[g.Fingerprint] = g
-		}
-		rows.Close()
-	}
-	groups := make([]Group, 0, len(merged))
-	for _, g := range merged {
+		g.Fingerprint = uint64(fp)
 		groups = append(groups, g)
 	}
-	return groups, nil
+	return groups, rows.Err()
 }
 
 // enqueue puts one class-`ticket` delivery on the queue (a log alert is not

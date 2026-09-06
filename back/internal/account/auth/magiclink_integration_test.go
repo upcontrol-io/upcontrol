@@ -113,27 +113,29 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Tenant A and its owner, the recipients harness's shape.
-	var tenantID int64
-	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("redeem-activate-%d", time.Now().UnixNano())).Scan(&tenantID); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	// Workspace A, its owner (a column, not a membership row) and its project:
+	// the team, the channel and the landing all hang off that project now.
 	var ownerID int64
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'owner') RETURNING id`,
 		fmt.Sprintf("owner-%d@example.com", time.Now().UnixNano())).Scan(&ownerID); err != nil {
 		t.Fatalf("seed owner: %v", err)
 	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		tenantID, ownerID); err != nil {
-		t.Fatalf("seed owner membership: %v", err)
+	var tenantID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("redeem-activate-%d", time.Now().UnixNano()), ownerID).Scan(&tenantID); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	var projectID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		tenantID, fmt.Sprintf("invited-%d.example.com", time.Now().UnixNano()%100000)).Scan(&projectID); err != nil {
+		t.Fatalf("seed project: %v", err)
 	}
 
-	// The invited teammate: a person whose membership in tenant A is pending.
-	// A unique address per run — the database holds earlier runs' accounts.
+	// The invited teammate: a person whose membership in that PROJECT is
+	// pending. A unique address per run — the database holds earlier runs'.
 	email := fmt.Sprintf("invitee-%d@example.com", time.Now().UnixNano())
 	var personID int64
 	if err := pool.Raw().QueryRow(ctx,
@@ -142,8 +144,8 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 		t.Fatalf("seed invitee: %v", err)
 	}
 	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'notify', 'pending')`,
-		tenantID, personID); err != nil {
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, 'notify', 'pending')`,
+		projectID, personID, tenantID); err != nil {
 		t.Fatalf("seed pending membership: %v", err)
 	}
 
@@ -167,16 +169,18 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 	memberStatus := func() string {
 		var status string
 		if err := pool.Raw().QueryRow(ctx,
-			`SELECT status FROM tenant_member WHERE tenant_id = $1 AND person_id = $2`, tenantID, personID).Scan(&status); err != nil {
+			`SELECT status FROM project_member WHERE project_id = $1 AND person_id = $2`, projectID, personID).Scan(&status); err != nil {
 			t.Fatalf("read membership: %v", err)
 		}
 		return status
 	}
+	// The channel is the PROJECT's: a workspace-wide count would pass even if
+	// the seed landed on the wrong project.
 	channels := func() int {
 		var n int
 		if err := pool.Raw().QueryRow(ctx,
-			`SELECT count(*) FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2`,
-			tenantID, email).Scan(&n); err != nil {
+			`SELECT count(*) FROM alert_channel WHERE project_id = $1 AND kind = 'email' AND target = $2`,
+			projectID, email).Scan(&n); err != nil {
 			t.Fatalf("count channels: %v", err)
 		}
 		return n
@@ -210,6 +214,18 @@ func TestRedeemActivatesInviteAndSeedsEmailChannel(t *testing.T) {
 	}
 	if n := channels(); n != 1 {
 		t.Fatalf("email channels for the invitee = %d, want exactly 1", n)
+	}
+	// The session lands on the project the invitation opened, in ITS
+	// workspace — not on the invitee's own empty one.
+	var landedTenant, landedProject int64
+	if err := pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id, project_id FROM session WHERE person_id = $1`, personID).
+		Scan(&landedTenant, &landedProject); err != nil {
+		t.Fatalf("read the redeemed session: %v", err)
+	}
+	if landedTenant != tenantID || landedProject != projectID {
+		t.Fatalf("session scope = (%d, %d), want the invited project's (%d, %d)",
+			landedTenant, landedProject, tenantID, projectID)
 	}
 
 	// A second sign-in mints a fresh code; the cooldown is backdated first.

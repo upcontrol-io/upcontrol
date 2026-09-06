@@ -47,14 +47,16 @@ func New(p *pg.Pool, ttl time.Duration, log *slog.Logger) *Manager {
 }
 
 // Create generates a random session token, persists its hash, and returns the
-// raw token (to set as a cookie).
-func (m *Manager) Create(ctx context.Context, personID, tenantID int64) (string, error) {
+// raw token (to set as a cookie). projectID is the project the session opens
+// on; nil when the person reaches none in that workspace.
+func (m *Manager) Create(ctx context.Context, personID, tenantID int64, projectID *int64) (string, error) {
 	raw := randomToken()
 	hash := sha256.Sum256([]byte(raw))
 	err := m.pool.Queries().CreateSession(ctx, sqlc.CreateSessionParams{
 		TokenHash: hash[:],
 		PersonID:  personID,
 		TenantID:  tenantID,
+		ProjectID: projectID,
 		TtlSecs:   m.ttl.Seconds(),
 	})
 	return raw, err

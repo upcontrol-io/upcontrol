@@ -16,13 +16,13 @@ import (
 
 // seedUnboundInvite mints the teammate/group link (person_id NULL), the only
 // kind a group redeem accepts.
-func seedUnboundInvite(t *testing.T, b *bot, tenantID, inviterID int64) string {
+func seedUnboundInvite(t *testing.T, b *bot, tenantID, projectID, inviterID int64) string {
 	t.Helper()
 	payload := fmt.Sprintf("inv_room%d", time.Now().UnixNano())
 	if _, err := b.pool.Raw().Exec(context.Background(),
-		`INSERT INTO telegram_invite (tenant_id, role, invited_by, token_hash, expires_at)
-		 VALUES ($1, 'notify', $2, $3, now() + interval '1 hour')`,
-		tenantID, inviterID, InviteTokenHash(payload)); err != nil {
+		`INSERT INTO telegram_invite (tenant_id, project_id, role, invited_by, token_hash, expires_at)
+		 VALUES ($1, $2, 'notify', $3, $4, now() + interval '1 hour')`,
+		tenantID, projectID, inviterID, InviteTokenHash(payload)); err != nil {
 		t.Fatalf("seed unbound invite: %v", err)
 	}
 	return payload
@@ -39,17 +39,17 @@ func startFromGroup(ctx context.Context, b *bot, payload string) {
 }
 
 func TestGroupRedeemPaidWall(t *testing.T) {
-	b, tenantID, _ := openTelegramDB(t)
+	b, tenantID, projectID := openTelegramDB(t)
 	ctx := context.Background()
-	inviterID := seedOwner(t, b, tenantID, "active")
-	payload := seedUnboundInvite(t, b, tenantID, inviterID)
+	inviterID := seedOwner(t, b, tenantID, projectID, "active")
+	payload := seedUnboundInvite(t, b, tenantID, projectID, inviterID)
 
 	broadcasts := func() int {
 		var n int
 		if err := b.pool.Raw().QueryRow(ctx,
 			`SELECT count(*) FROM alert_channel
-			  WHERE tenant_id = $1 AND kind = 'telegram' AND recipient_person_id IS NULL`,
-			tenantID).Scan(&n); err != nil {
+			  WHERE project_id = $1 AND kind = 'telegram' AND recipient_person_id IS NULL`,
+			projectID).Scan(&n); err != nil {
 			t.Fatalf("count broadcasts: %v", err)
 		}
 		return n

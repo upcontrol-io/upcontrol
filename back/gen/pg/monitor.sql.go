@@ -215,6 +215,70 @@ func (q *Queries) GetPlanHTTPChecks(ctx context.Context, plan string) (int32, er
 	return http_checks, err
 }
 
+const listMonitorsByProject = `-- name: ListMonitorsByProject :many
+SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
+       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
+       mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
+  FROM monitor m
+  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+ WHERE m.project_id = $1
+ ORDER BY m.created_at
+`
+
+type ListMonitorsByProjectRow struct {
+	ID                 int64
+	PublicID           pgtype.UUID
+	Kind               string
+	Name               string
+	Target             string
+	Keyword            *string
+	IntervalSec        int32
+	AvailabilityTarget pgtype.Numeric
+	Paused             bool
+	PingToken          *string
+	CreatedAt          pgtype.Timestamptz
+	Status             *string
+	SslExpiresAt       pgtype.Timestamptz
+	DomainExpiresAt    pgtype.Timestamptz
+	LastCheckAt        pgtype.Timestamptz
+}
+
+func (q *Queries) ListMonitorsByProject(ctx context.Context, projectID int64) ([]ListMonitorsByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listMonitorsByProject, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMonitorsByProjectRow
+	for rows.Next() {
+		var i ListMonitorsByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.Kind,
+			&i.Name,
+			&i.Target,
+			&i.Keyword,
+			&i.IntervalSec,
+			&i.AvailabilityTarget,
+			&i.Paused,
+			&i.PingToken,
+			&i.CreatedAt,
+			&i.Status,
+			&i.SslExpiresAt,
+			&i.DomainExpiresAt,
+			&i.LastCheckAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMonitorsByTenant = `-- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
        m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,

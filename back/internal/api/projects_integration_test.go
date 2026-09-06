@@ -58,37 +58,71 @@ func newProjectsFixture(t *testing.T) *projectsFixture {
 	uniq := time.Now().UnixNano()
 	f := &projectsFixture{pool: pool}
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("projects-%d", uniq)).Scan(&f.tenantID); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
-	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Owner') RETURNING id`,
 		fmt.Sprintf("projects-%d@example.com", uniq)).Scan(&f.personID); err != nil {
 		t.Fatalf("seed person: %v", err)
 	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		f.tenantID, f.personID); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	f.tenantID = seedOwnedTenant(t, pool, f.personID, fmt.Sprintf("projects-%d", uniq))
 	f.projectID = seedProject(t, pool, f.tenantID, fmt.Sprintf("first-%d.example.com", uniq%100000))
 
 	f.sess = session.New(pool, session.DefaultTTL, nil)
-	token, err := f.sess.Create(ctx, f.personID, f.tenantID)
+	token, err := f.sess.Create(ctx, f.personID, f.tenantID, &f.projectID)
 	if err != nil {
 		t.Fatalf("mint session: %v", err)
 	}
 	f.cookie = &http.Cookie{Name: session.CookieName, Value: token}
 
-	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false)
+	f.route = projectsRoutes(pool, f.sess)
+	return f
+}
+
+// projectsRoutes mounts the project surface exactly as cmd/ucapi does, plus
+// the two owner-only doors and the status page the guest tests exercise.
+func projectsRoutes(pool *pg.Pool, sm *session.Manager) http.Handler {
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/projects", wa)
 	mux.Handle("POST /v1/projects", wa)
 	mux.Handle("POST /v1/project/switch", wa)
 	mux.Handle("DELETE /v1/project", wa)
-	f.route = mux
-	return f
+	mux.Handle("GET /v1/export", wa)
+	mux.Handle("PUT /v1/status-page", wa)
+	return mux
+}
+
+// seedOwnedTenant is the shape migration 004 leaves behind: one workspace,
+// one owner column, no membership row for the owner.
+func seedOwnedTenant(t *testing.T, pool *pg.Pool, ownerID int64, name string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.Raw().QueryRow(context.Background(),
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		name, ownerID).Scan(&id); err != nil {
+		t.Fatalf("seed tenant %q: %v", name, err)
+	}
+	return id
+}
+
+// seedProjectMember puts one person on one project's team.
+func seedProjectMember(t *testing.T, pool *pg.Pool, projectID, personID, tenantID int64, role string) {
+	t.Helper()
+	if _, err := pool.Raw().Exec(context.Background(),
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, $4, 'active')`,
+		projectID, personID, tenantID, role); err != nil {
+		t.Fatalf("seed project_member: %v", err)
+	}
+}
+
+// seedPerson mints a person row and answers its id.
+func seedPerson(t *testing.T, pool *pg.Pool, email string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.Raw().QueryRow(context.Background(),
+		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		email, email).Scan(&id); err != nil {
+		t.Fatalf("seed person %q: %v", email, err)
+	}
+	return id
 }
 
 func seedProject(t *testing.T, pool *pg.Pool, tenantID int64, domain string) int64 {
@@ -163,12 +197,15 @@ func TestCurrentProjectIDMatrix(t *testing.T) {
 		want     int64
 		tenantID int64
 	}{
-		{"pick honoured", sqlc.Session{TenantID: f.tenantID, ProjectID: &second}, second, f.tenantID},
-		{"stale pick falls to min(id)", sqlc.Session{TenantID: f.tenantID, ProjectID: &gone}, first, f.tenantID},
-		{"unset pick falls to min(id)", sqlc.Session{TenantID: f.tenantID}, first, f.tenantID},
-		{"empty tenant answers 0", sqlc.Session{}, 0, emptyTenant},
-		{"foreign session pick is never honoured", sqlc.Session{TenantID: otherTenant, ProjectID: &foreignPick}, first, f.tenantID},
-		{"failed session re-read keeps the caller's tenant", sqlc.Session{ProjectID: &second}, first, f.tenantID},
+		{"pick honoured", sqlc.Session{PersonID: f.personID, TenantID: f.tenantID, ProjectID: &second}, second, f.tenantID},
+		{"stale pick falls to min(id)", sqlc.Session{PersonID: f.personID, TenantID: f.tenantID, ProjectID: &gone}, first, f.tenantID},
+		{"unset pick falls to min(id)", sqlc.Session{PersonID: f.personID, TenantID: f.tenantID}, first, f.tenantID},
+		{"empty tenant answers 0", sqlc.Session{PersonID: f.personID}, 0, emptyTenant},
+		{"foreign session pick is never honoured", sqlc.Session{PersonID: f.personID, TenantID: otherTenant, ProjectID: &foreignPick}, first, f.tenantID},
+		{"failed session re-read keeps the caller's tenant", sqlc.Session{PersonID: f.personID, ProjectID: &second}, first, f.tenantID},
+		// Reaching nothing is the same 0 an empty workspace answers: a person
+		// removed from every team must not fall back onto a project.
+		{"a stranger reaches nothing", sqlc.Session{PersonID: 0, TenantID: f.tenantID}, 0, f.tenantID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := currentProjectID(ctx, f.pool, tc.s, tc.tenantID); got != tc.want {
@@ -191,9 +228,12 @@ func TestListAndSwitchProjects(t *testing.T) {
 	}
 	var listed struct {
 		Projects []struct {
-			ID        string `json:"id"`
-			Domain    string `json:"domain"`
-			CreatedAt string `json:"createdAt"`
+			ID         string `json:"id"`
+			Domain     string `json:"domain"`
+			CreatedAt  string `json:"createdAt"`
+			Owned      bool   `json:"owned"`
+			Role       string `json:"role"`
+			OwnerEmail string `json:"ownerEmail"`
 		} `json:"projects"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
@@ -206,6 +246,9 @@ func TestListAndSwitchProjects(t *testing.T) {
 	for _, p := range listed.Projects {
 		if p.CreatedAt == "" {
 			t.Fatalf("project %q listed without createdAt", p.Domain)
+		}
+		if !p.Owned || p.Role != "login" {
+			t.Fatalf("own project %q listed as owned=%v role=%q, want true/login", p.Domain, p.Owned, p.Role)
 		}
 		byDomain[p.Domain] = p.ID
 	}
@@ -451,7 +494,7 @@ func TestDeleteProjectReleasesOnlyTheCurrentOne(t *testing.T) {
 	}
 
 	// The session's pick died with the release; the resolver falls back.
-	if id := currentProjectID(ctx, f.pool, sqlc.Session{TenantID: f.tenantID}, f.tenantID); id != keep {
+	if id := currentProjectID(ctx, f.pool, sqlc.Session{PersonID: f.personID, TenantID: f.tenantID}, f.tenantID); id != keep {
 		t.Fatalf("resolver after the delete = %d, want the surviving %d", id, keep)
 	}
 }
@@ -487,5 +530,210 @@ func TestDeleteLastProjectClosesTheAccountAndReleasesThePage(t *testing.T) {
 	}
 	if n := f.count(t, `SELECT count(*) FROM status_page WHERE slug = $1`, slug); n != 1 {
 		t.Fatal("closing the account erased the status page instead of releasing it")
+	}
+}
+
+// A guest — invited into somebody else's project — sees that project in the
+// list with owned:false and their own role, and switching to it moves BOTH
+// halves of the session's scope: a project reached by invite lives in another
+// workspace, so the tenant follows the project.
+func TestGuestListsAndSwitchesIntoAnotherWorkspace(t *testing.T) {
+	f := newProjectsFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+
+	guestID := seedPerson(t, f.pool, fmt.Sprintf("guest-%d@example.com", uniq))
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
+
+	sm := session.New(f.pool, session.DefaultTTL, nil)
+	// The guest's own workspace is empty: no project, so the session opens on
+	// the shared one.
+	guestTenant := seedOwnedTenant(t, f.pool, guestID, fmt.Sprintf("guest-ws-%d", uniq))
+	token, err := sm.Create(ctx, guestID, guestTenant, nil)
+	if err != nil {
+		t.Fatalf("mint guest session: %v", err)
+	}
+	call := guestCaller(t, projectsRoutes(f.pool, sm), token)
+
+	w := call(http.MethodGet, "/v1/projects", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("guest list = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	var listed struct {
+		Projects []struct {
+			ID         string `json:"id"`
+			Domain     string `json:"domain"`
+			Owned      bool   `json:"owned"`
+			Role       string `json:"role"`
+			OwnerEmail string `json:"ownerEmail"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode guest list: %v", err)
+	}
+	if len(listed.Projects) != 1 {
+		t.Fatalf("guest listed %d projects, want the one they were invited to", len(listed.Projects))
+	}
+	shared := listed.Projects[0]
+	if shared.Owned {
+		t.Fatal("the shared project is listed as owned by the guest")
+	}
+	if shared.Role != "login" {
+		t.Fatalf("guest role = %q, want login", shared.Role)
+	}
+	if !strings.HasPrefix(shared.OwnerEmail, "projects-") {
+		t.Fatalf("ownerEmail = %q, want the workspace owner's address", shared.OwnerEmail)
+	}
+
+	if w := call(http.MethodPost, "/v1/project/switch", `{"id":"`+shared.ID+`"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("guest switch = %d (%s), want 204", w.Code, w.Body.String())
+	}
+	var gotTenant, gotProject int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id, project_id FROM session WHERE person_id = $1`, guestID).
+		Scan(&gotTenant, &gotProject); err != nil {
+		t.Fatalf("read guest session: %v", err)
+	}
+	if gotTenant != f.tenantID || gotProject != f.projectID {
+		t.Fatalf("guest session scope = (%d, %d), want the shared project's (%d, %d)",
+			gotTenant, gotProject, f.tenantID, f.projectID)
+	}
+}
+
+// POST /v1/projects always lands in the CALLER's own workspace, whatever
+// project they happen to stand in — and the plan it counts against is their
+// own, so their second project hits the Free wall while the host's plan is
+// untouched.
+func TestCreateProjectFromAGuestSeatLandsInTheCallersOwnWorkspace(t *testing.T) {
+	f := newProjectsFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+
+	guestID := seedPerson(t, f.pool, fmt.Sprintf("maker-%d@example.com", uniq))
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
+
+	sm := session.New(f.pool, session.DefaultTTL, nil)
+	// Standing INSIDE the host's project: tenant and project both theirs.
+	token, err := sm.Create(ctx, guestID, f.tenantID, &f.projectID)
+	if err != nil {
+		t.Fatalf("mint guest session: %v", err)
+	}
+	call := guestCaller(t, projectsRoutes(f.pool, sm), token)
+
+	// A unique domain per run: the lookup below is by domain across the whole
+	// database, which survives between runs.
+	domain := fmt.Sprintf("mine-%d.example.com", uniq)
+	w := call(http.MethodPost, "/v1/projects", fmt.Sprintf(`{"domain":%q}`, domain))
+	if w.Code != http.StatusOK {
+		t.Fatalf("create from a guest seat = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	var created struct {
+		Owned bool   `json:"owned"`
+		Role  string `json:"role"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if !created.Owned || created.Role != "login" {
+		t.Fatalf("created = owned:%v role:%q, want true/login — it is their own", created.Owned, created.Role)
+	}
+	var ownTenant, ownProject int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT p.tenant_id, p.id FROM project p WHERE p.domain = $1`, domain).
+		Scan(&ownTenant, &ownProject); err != nil {
+		t.Fatalf("read the created project: %v", err)
+	}
+	if ownTenant == f.tenantID {
+		t.Fatal("the project landed in the HOST's workspace, not the caller's own")
+	}
+	if n := f.count(t, `SELECT count(*) FROM tenant WHERE id = $1 AND owner_person_id = $2`, ownTenant, guestID); n != 1 {
+		t.Fatal("the caller does not own the workspace their project landed in")
+	}
+	// The session follows: both halves, or the app opens the new project
+	// against the workspace it came from.
+	var gotTenant, gotProject int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id, project_id FROM session WHERE person_id = $1`, guestID).
+		Scan(&gotTenant, &gotProject); err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if gotTenant != ownTenant || gotProject != ownProject {
+		t.Fatalf("session scope = (%d, %d), want the new project's (%d, %d)",
+			gotTenant, gotProject, ownTenant, ownProject)
+	}
+
+	// Their OWN Free plan is the one counted: the second project walls.
+	w = call(http.MethodPost, "/v1/projects", fmt.Sprintf(`{"domain":"second-%s"}`, domain))
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("second own project = %d (%s), want 402", w.Code, w.Body.String())
+	}
+	var wall struct {
+		Error struct {
+			Code    string `json:"code"`
+			Upgrade struct {
+				Plan string `json:"plan"`
+			} `json:"upgrade"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &wall); err != nil {
+		t.Fatalf("decode wall: %v", err)
+	}
+	if wall.Error.Code != "plan_limit_exceeded" || wall.Error.Upgrade.Plan != "indie" {
+		t.Fatalf("wall = %q / plan %q, want plan_limit_exceeded / indie",
+			wall.Error.Code, wall.Error.Upgrade.Plan)
+	}
+}
+
+// An Admin invited into somebody's project may run it — the status page is
+// theirs to save — but the two acts that end or take out the ACCOUNT are the
+// workspace owner's alone.
+func TestGuestAdminIsRefusedTheOwnerOnlyDoors(t *testing.T) {
+	f := newProjectsFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+
+	guestID := seedPerson(t, f.pool, fmt.Sprintf("admin-%d@example.com", uniq))
+	seedProjectMember(t, f.pool, f.projectID, guestID, f.tenantID, "login")
+
+	sm := session.New(f.pool, session.DefaultTTL, nil)
+	token, err := sm.Create(ctx, guestID, f.tenantID, &f.projectID)
+	if err != nil {
+		t.Fatalf("mint guest session: %v", err)
+	}
+	call := guestCaller(t, projectsRoutes(f.pool, sm), token)
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodDelete, "/v1/project"},
+		{http.MethodGet, "/v1/export"},
+	} {
+		w := call(tc.method, tc.path, "")
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "owner_only") {
+			t.Fatalf("%s %s = %d (%s), want 403 owner_only", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+	if n := f.count(t, `SELECT count(*) FROM project WHERE id = $1`, f.projectID); n != 1 {
+		t.Fatal("the refused delete took the project anyway")
+	}
+
+	w := call(http.MethodPut, "/v1/status-page", `{"title":"Guest saved this"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("guest Admin PUT /v1/status-page = %d (%s), want 200", w.Code, w.Body.String())
+	}
+}
+
+// guestCaller drives a mounted route with one person's cookie.
+func guestCaller(t *testing.T, route http.Handler, token string) func(method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return func(method, path, body string) *httptest.ResponseRecorder {
+		var r *http.Request
+		if body == "" {
+			r = httptest.NewRequest(method, path, nil)
+		} else {
+			r = httptest.NewRequest(method, path, strings.NewReader(body))
+		}
+		r.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
+		w := httptest.NewRecorder()
+		route.ServeHTTP(w, r)
+		return w
 	}
 }

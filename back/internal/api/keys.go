@@ -33,33 +33,36 @@ func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
+	// The key is the project's, not the workspace's: a sibling project keeps
+	// its own.
+	projectID := currentProjectID(r.Context(), h.pool, s, s.TenantID)
 	switch r.URL.Path {
 	case "/v1/keys":
-		h.get(w, r, s.TenantID)
+		h.get(w, r, projectID)
 	case "/v1/keys/rotate":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		// Rotating the key breaks every deployed SDK: a settings act.
-		if !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+		if !canManage(r.Context(), h.pool, s) {
 			writeAPIErr(w, http.StatusForbidden, "notify_role")
 			return
 		}
-		h.rotate(w, r, s.TenantID)
+		h.rotate(w, r, s.TenantID, projectID)
 	default:
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 	}
 }
 
-func (h *keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) get(w http.ResponseWriter, r *http.Request, projectID int64) {
 	ctx := r.Context()
-	key, err := h.pool.Queries().GetAPIKeyForTenant(ctx, tenantID)
+	key, err := h.pool.Queries().GetAPIKeyForProject(ctx, projectID)
 	if err != nil {
 		writeAPIJSON(w, http.StatusOK, map[string]any{"key": nil, "usage": []any{}})
 		return
 	}
-	usageRows, _ := h.pool.Queries().ListKeyUsage(ctx, tenantID)
+	usageRows, _ := h.pool.Queries().ListKeyUsage(ctx, projectID)
 	usage := make([]map[string]any, 0, len(usageRows))
 	for _, u := range usageRows {
 		ts := ""
@@ -85,7 +88,7 @@ func (h *keys) get(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	})
 }
 
-func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	ctx := r.Context()
 
 	secret := randomHex() // 32 hex chars; first 12 = prefix, rest = secret
@@ -95,6 +98,7 @@ func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID int64) {
 
 	row, err := h.pool.Queries().RotateAPIKey(ctx, sqlc.RotateAPIKeyParams{
 		TenantID:   tenantID,
+		ProjectID:  projectID,
 		Prefix:     prefix,
 		SecretHash: hash[:],
 	})

@@ -7,6 +7,15 @@ SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
  WHERE m.tenant_id = $1
  ORDER BY m.created_at;
 
+-- name: ListMonitorsByProject :many
+SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
+       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
+       mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
+  FROM monitor m
+  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+ WHERE m.project_id = $1
+ ORDER BY m.created_at;
+
 -- name: CreateMonitor :one
 INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec, ping_token)
 VALUES (sqlc.arg(public_id), sqlc.arg(tenant_id), sqlc.arg(project_id),

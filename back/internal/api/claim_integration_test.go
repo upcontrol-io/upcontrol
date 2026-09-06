@@ -63,19 +63,15 @@ func newClaimFixture(t *testing.T) *claimFixture {
 
 	// The claimer: plan Free by default, no projects — the fresh signup.
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("claimer-%d", uniq)).Scan(&f.claimerID); err != nil {
-		t.Fatalf("claimer tenant: %v", err)
-	}
-	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Owner') RETURNING id`,
 		fmt.Sprintf("claimer-%d@example.com", uniq)).Scan(&f.personID); err != nil {
 		t.Fatalf("person: %v", err)
 	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		f.claimerID, f.personID); err != nil {
-		t.Fatalf("tenant_member: %v", err)
+	// Ownership is a column on the workspace: no membership row for the owner.
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("claimer-%d", uniq), f.personID).Scan(&f.claimerID); err != nil {
+		t.Fatalf("claimer tenant: %v", err)
 	}
 
 	// The anonymous tenant: unclaimed (the hash IS the marker), one project
@@ -121,7 +117,7 @@ func newClaimFixture(t *testing.T) *claimFixture {
 	}
 
 	sm := session.New(pool, session.DefaultTTL, nil)
-	token, err := sm.Create(ctx, f.personID, f.claimerID)
+	token, err := sm.Create(ctx, f.personID, f.claimerID, nil)
 	if err != nil {
 		t.Fatalf("mint session: %v", err)
 	}
@@ -197,10 +193,13 @@ func TestClaimAdoptsTheAnonymousTenant(t *testing.T) {
 	if n := f.count(t, `SELECT count(*) FROM tenant WHERE id = $1`, f.anonID); n != 0 {
 		t.Fatal("the anonymous tenant outlived its own claim")
 	}
-	// Exactly one membership, to the claimer's own tenant: adoption must not
-	// add a second one (the invisible-tenant bug this rewrites).
-	if n := f.count(t, `SELECT count(*) FROM tenant_member WHERE person_id = $1`, f.personID); n != 1 {
-		t.Fatalf("person holds %d memberships, want exactly 1", n)
+	// Adoption grants no membership: the claimer already owns the workspace
+	// the project moved into, and a row here would be a second standing.
+	if n := f.count(t, `SELECT count(*) FROM project_member WHERE person_id = $1`, f.personID); n != 0 {
+		t.Fatalf("person holds %d memberships, want 0 — ownership is the workspace column", n)
+	}
+	if n := f.count(t, `SELECT count(*) FROM tenant WHERE id = $1 AND owner_person_id = $2`, f.claimerID, f.personID); n != 1 {
+		t.Fatal("the claimer no longer owns their own workspace")
 	}
 	if after := f.unclaimedCount(t); after != before-1 {
 		t.Fatalf("this fixture's anonymous tenant %d -> %d, want it consumed by the adoption", before, after)

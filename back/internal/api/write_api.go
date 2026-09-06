@@ -102,7 +102,11 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notify members read (GETs below); every mutation needs login. POST /v1/series
 	// is a read that travels as a POST for its body, so it stays open to them.
-	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+	// POST /v1/projects is the one write a guest may make: it creates in their
+	// OWN workspace, where they are the owner.
+	newProject := r.URL.Path == "/v1/projects" && r.Method == http.MethodPost
+	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !newProject &&
+		!canManage(r.Context(), h.pool, s) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
@@ -151,17 +155,17 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.verifyStatusPageDomain(w, r, tenantID)
 
 	case r.URL.Path == "/v1/export" && r.Method == http.MethodGet:
-		h.exportAll(w, r, tenantID)
+		h.exportAll(w, r, tenantID, s)
 
 	case r.URL.Path == "/v1/project" && r.Method == http.MethodDelete:
 		h.deleteProject(w, r, tenantID)
 
 	case r.URL.Path == "/v1/projects" && r.Method == http.MethodGet:
-		h.listProjects(w, r, tenantID)
+		h.listProjects(w, r, s)
 	case r.URL.Path == "/v1/projects" && r.Method == http.MethodPost:
-		h.createProject(w, r, tenantID, s)
+		h.createProject(w, r, s)
 	case r.URL.Path == "/v1/project/switch" && r.Method == http.MethodPost:
-		h.switchProject(w, r, tenantID, s)
+		h.switchProject(w, r, s)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/sources/") && r.Method == http.MethodPatch:
 		h.patchSource(w, r, tenantID)
@@ -196,16 +200,26 @@ func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 		Target string `json:"target"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	// An e-mail channel may only address an active member of this workspace:
-	// anything else makes us a free mailer to strangers.
+	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	if projectID == 0 {
+		writeAPIErr(w, http.StatusBadRequest, "no_project")
+		return
+	}
+	// An e-mail channel may only address the workspace's owner or an active
+	// member of THIS project: anything else makes us a free mailer to
+	// strangers.
 	if req.Kind == "email" {
 		var known bool
-		_ = h.pool.Raw().QueryRow(r.Context(),
+		_ = h.pool.Raw().QueryRow(ctx,
 			`SELECT EXISTS (
-			   SELECT 1 FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-			    WHERE tm.tenant_id = $1 AND lower(p.email) = lower($2)
-			      AND tm.status = 'active')`,
-			tenantID, req.Target).Scan(&known)
+			   SELECT 1 FROM person p
+			    WHERE lower(p.email) = lower($2)
+			      AND (EXISTS (SELECT 1 FROM tenant t WHERE t.id = $1 AND t.owner_person_id = p.id)
+			           OR EXISTS (SELECT 1 FROM project_member m
+			                       WHERE m.project_id = $3 AND m.person_id = p.id AND m.status = 'active')))`,
+			tenantID, req.Target, projectID).Scan(&known)
 		if !known {
 			writeAPIErr(w, http.StatusBadRequest, "unknown_recipient")
 			return
@@ -214,9 +228,9 @@ func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 	// Returns the SAME id shape GET /v1/channels hands out (public_id hex):
 	// two id shapes for one entity is how callers parsed a uuid as an integer.
 	var pubID pgtype.UUID
-	_ = h.pool.Raw().QueryRow(r.Context(),
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target) VALUES (gen_random_uuid()::text::uuid, $1, $2, $3) RETURNING public_id`,
-		tenantID, req.Kind, req.Target).Scan(&pubID)
+	_ = h.pool.Raw().QueryRow(ctx,
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target) VALUES (gen_random_uuid()::text::uuid, $1, $2, $3, $4) RETURNING public_id`,
+		tenantID, projectID, req.Kind, req.Target).Scan(&pubID)
 	writeAPIJSON(w, http.StatusCreated, map[string]any{
 		"id":     uuidStr(pubID),
 		"kind":   req.Kind,
@@ -225,25 +239,33 @@ func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 }
 
 // channelRowID resolves a public_id or numeric id to the row's own id.
-// Returns 0 when nothing matches: "not yours", never "deleted".
-func (h *writeAPI) channelRowID(ctx context.Context, tenantID int64, raw string) int64 {
+// Returns 0 when nothing matches: "not yours", never "deleted". Both keys
+// guard — a sibling project's channel is as foreign as a stranger's.
+func (h *writeAPI) channelRowID(ctx context.Context, tenantID, projectID int64, raw string) int64 {
 	if n := parseID(raw); n > 0 {
 		var id int64
 		_ = h.pool.Raw().QueryRow(ctx,
-			`SELECT id FROM alert_channel WHERE id = $1 AND tenant_id = $2`, n, tenantID).Scan(&id)
+			`SELECT id FROM alert_channel WHERE id = $1 AND tenant_id = $2 AND project_id = $3`,
+			n, tenantID, projectID).Scan(&id)
 		return id
 	}
 	var id int64
 	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM alert_channel WHERE public_id = $1 AND tenant_id = $2`,
-		parseUUID(raw), tenantID).Scan(&id)
+		`SELECT id FROM alert_channel WHERE public_id = $1 AND tenant_id = $2 AND project_id = $3`,
+		parseUUID(raw), tenantID, projectID).Scan(&id)
 	return id
+}
+
+// channelRowIDFor is channelRowID with the request's project resolved.
+func (h *writeAPI) channelRowIDFor(ctx context.Context, r *http.Request, tenantID int64, raw string) int64 {
+	s, _ := h.sess.FromRequest(ctx, r)
+	return h.channelRowID(ctx, tenantID, currentProjectID(ctx, h.pool, s, tenantID), raw)
 }
 
 func (h *writeAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	// Deleting the last e-mail channel is allowed: nobody has to be reachable
 	// by mail.
-	id := h.channelRowID(r.Context(), tenantID, pathLast(r.URL.Path))
+	id := h.channelRowIDFor(r.Context(), r, tenantID, pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
 		return
@@ -256,7 +278,7 @@ func (h *writeAPI) deleteChannel(w http.ResponseWriter, r *http.Request, tenantI
 // patchChannel changes what the channel is notified about: only `notify`
 // is patchable; a chat-set mute window is lifted here, never set.
 func (h *writeAPI) patchChannel(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	id := h.channelRowID(r.Context(), tenantID, pathLast(r.URL.Path))
+	id := h.channelRowIDFor(r.Context(), r, tenantID, pathLast(r.URL.Path))
 	if id == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
 		return
@@ -337,7 +359,7 @@ func (h *writeAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID 
 		writeAPIErr(w, http.StatusBadRequest, "bad_path")
 		return
 	}
-	chID := h.channelRowID(r.Context(), tenantID, parts[3])
+	chID := h.channelRowIDFor(r.Context(), r, tenantID, parts[3])
 	if chID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
 		return
@@ -401,6 +423,12 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		req.Role = "notify"
 	}
 	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	if projectID == 0 {
+		writeAPIErr(w, http.StatusBadRequest, "no_project")
+		return
+	}
 	tx, err := h.pool.Raw().Begin(ctx)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -415,15 +443,30 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 			`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
 			req.Email, auth.NameFromEmail(req.Email)).Scan(&personID)
 	}
+	// The owner has no membership row and never needs one: inviting the
+	// address that already owns the workspace answers with the row it has.
+	var ownsIt bool
+	_ = tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM tenant WHERE id = $1 AND owner_person_id = $2)`,
+		tenantID, personID).Scan(&ownsIt)
+	if ownsIt {
+		var pubID pgtype.UUID
+		_ = tx.QueryRow(ctx, `SELECT public_id FROM person WHERE id = $1`, personID).Scan(&pubID)
+		writeAPIJSON(w, http.StatusOK, map[string]any{
+			"id": uuidStr(pubID), "email": req.Email,
+			"role": "login", "status": "active", "owner": true,
+		})
+		return
+	}
 	_, _ = tx.Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'pending')
-		 ON CONFLICT DO NOTHING`, tenantID, personID, req.Role)
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, $4, 'pending')
+		 ON CONFLICT DO NOTHING`, projectID, personID, tenantID, req.Role)
 	// Read the status inside the same transaction: an already-active invitee
 	// needs no mail and no code.
 	var status string
 	if err := tx.QueryRow(ctx,
-		`SELECT status FROM tenant_member WHERE tenant_id = $1 AND person_id = $2`,
-		tenantID, personID).Scan(&status); err != nil {
+		`SELECT status FROM project_member WHERE project_id = $1 AND person_id = $2`,
+		projectID, personID).Scan(&status); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -464,15 +507,12 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 	var project, invitedBy string
-	// The mail names the session's current project (the tenant's first as
-	// fallback); a tenant with no project keeps the tenant name, the old
-	// LEFT JOIN answer.
-	s, _ := h.sess.FromRequest(ctx, r)
+	// The mail names the project the invitation is for; an unnamed project
+	// keeps the workspace name, the old LEFT JOIN answer.
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
-		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
-		  WHERE t.id = $1 AND (p.id = $2 OR p.id IS NULL)`,
-		tenantID, currentProjectID(ctx, h.pool, s, tenantID)).Scan(&project)
+		   FROM project p JOIN tenant t ON t.id = p.tenant_id WHERE p.id = $1`,
+		projectID).Scan(&project)
 	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
 		inviterID).Scan(&invitedBy)
@@ -507,9 +547,11 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 // writes, so a failed send leaves exactly the state it found.
 func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID, inviterID int64) {
 	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	// The id is one segment up from /resend; pathLast alone would read
 	// "resend". Resolution is the patch/delete arms' own: public or row id.
-	personID := h.personRowID(ctx, tenantID, pathLast(strings.TrimSuffix(r.URL.Path, "/resend")))
+	personID := h.personRowID(ctx, projectID, pathLast(strings.TrimSuffix(r.URL.Path, "/resend")))
 	if personID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
@@ -518,8 +560,8 @@ func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 	// 404 the patch and delete arms use.
 	var email, status string
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT p.email, tm.status FROM person p JOIN tenant_member tm ON tm.person_id = p.id
-		  WHERE p.id = $1 AND tm.tenant_id = $2`, personID, tenantID).Scan(&email, &status); err != nil || status != "pending" {
+		`SELECT p.email, m.status FROM person p JOIN project_member m ON m.person_id = p.id
+		  WHERE p.id = $1 AND m.project_id = $2`, personID, projectID).Scan(&email, &status); err != nil || status != "pending" {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
@@ -542,14 +584,12 @@ func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 		return
 	}
 	var project, invitedBy string
-	// Same project naming as the invite: the session's current project, the
-	// tenant's first as fallback, tenant name when no project exists.
-	s, _ := h.sess.FromRequest(ctx, r)
+	// Same project naming as the invite: the project the membership is in,
+	// its workspace's name when the project has no domain.
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(p.domain, ''), t.name)
-		   FROM tenant t LEFT JOIN project p ON p.tenant_id = t.id
-		  WHERE t.id = $1 AND (p.id = $2 OR p.id IS NULL)`,
-		tenantID, currentProjectID(ctx, h.pool, s, tenantID)).Scan(&project)
+		   FROM project p JOIN tenant t ON t.id = p.tenant_id WHERE p.id = $1`,
+		projectID).Scan(&project)
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT COALESCE(NULLIF(name, ''), email, '') FROM person WHERE id = $1`,
 		inviterID).Scan(&invitedBy)
@@ -577,19 +617,21 @@ func (h *writeAPI) resendInvite(w http.ResponseWriter, r *http.Request, tenantID
 }
 
 // personRowID is channelRowID for People: it accepts the public_id that
-// GET /v1/recipients hands out as well as the numeric row id.
-func (h *writeAPI) personRowID(ctx context.Context, tenantID int64, raw string) int64 {
+// GET /v1/recipients hands out as well as the numeric row id. Keyed by the
+// PROJECT's team — the owner has no row here, so patch and delete of the
+// owner answer the same 404 a stranger's id does.
+func (h *writeAPI) personRowID(ctx context.Context, projectID int64, raw string) int64 {
 	var id int64
 	if n := parseID(raw); n > 0 {
 		_ = h.pool.Raw().QueryRow(ctx,
-			`SELECT tm.person_id FROM tenant_member tm WHERE tm.person_id = $1 AND tm.tenant_id = $2`,
-			n, tenantID).Scan(&id)
+			`SELECT m.person_id FROM project_member m WHERE m.person_id = $1 AND m.project_id = $2`,
+			n, projectID).Scan(&id)
 		return id
 	}
 	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT p.id FROM person p JOIN tenant_member tm ON tm.person_id = p.id
-		  WHERE p.public_id = $1 AND tm.tenant_id = $2`,
-		parseUUID(raw), tenantID).Scan(&id)
+		`SELECT p.id FROM person p JOIN project_member m ON m.person_id = p.id
+		  WHERE p.public_id = $1 AND m.project_id = $2`,
+		parseUUID(raw), projectID).Scan(&id)
 	return id
 }
 
@@ -601,47 +643,54 @@ func (h *writeAPI) patchRecipient(w http.ResponseWriter, r *http.Request, tenant
 	if !decodeStrict(w, r, &req) {
 		return
 	}
-	personID := h.personRowID(r.Context(), tenantID, idStr)
+	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	personID := h.personRowID(ctx, projectID, idStr)
 	if personID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
-	_, _ = h.pool.Raw().Exec(r.Context(),
-		`UPDATE tenant_member SET role = $1 WHERE person_id = $2 AND tenant_id = $3`,
-		req.Role, personID, tenantID)
+	_, _ = h.pool.Raw().Exec(ctx,
+		`UPDATE project_member SET role = $1 WHERE person_id = $2 AND project_id = $3`,
+		req.Role, personID, projectID)
 	writeAPIJSON(w, http.StatusOK, map[string]any{"id": idStr, "role": req.Role})
 }
 
 func (h *writeAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	personID := h.personRowID(r.Context(), tenantID, pathLast(r.URL.Path))
+	ctx := r.Context()
+	s, _ := h.sess.FromRequest(ctx, r)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	personID := h.personRowID(ctx, projectID, pathLast(r.URL.Path))
 	if personID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_person")
 		return
 	}
-	// Full revocation, one transaction: membership, destinations, unused
-	// invites and sessions die together. The person row stays.
-	tx, err := h.pool.Raw().Begin(r.Context())
+	// Full revocation from THIS project, one transaction: membership,
+	// destinations, unused invites and sessions die together. The person row
+	// stays, and so does their standing in the workspace's other projects.
+	tx, err := h.pool.Raw().Begin(ctx)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer func() { _ = tx.Rollback(ctx) }()
 	for _, q := range []string{
-		`DELETE FROM tenant_member WHERE person_id = $1 AND tenant_id = $2`,
-		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'telegram' AND recipient_person_id = $1`,
-		`DELETE FROM alert_channel WHERE tenant_id = $2 AND kind = 'email' AND lower(target) = (SELECT lower(email) FROM person WHERE id = $1)`,
+		`DELETE FROM project_member WHERE person_id = $1 AND project_id = $2`,
+		`DELETE FROM alert_channel WHERE project_id = $2 AND kind = 'telegram' AND recipient_person_id = $1`,
+		`DELETE FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND lower(target) = (SELECT lower(email) FROM person WHERE id = $1)`,
 		// Both invite directions: either redeemed after removal would attach a
 		// chat to a person no longer here.
 		`UPDATE telegram_invite SET expires_at = now()
-		  WHERE tenant_id = $2 AND (invited_by = $1 OR person_id = $1) AND redeemed_at IS NULL`,
-		`DELETE FROM session WHERE person_id = $1 AND tenant_id = $2`,
+		  WHERE project_id = $2 AND (invited_by = $1 OR person_id = $1) AND redeemed_at IS NULL`,
+		`DELETE FROM session WHERE person_id = $1 AND project_id = $2`,
 	} {
-		if _, err := tx.Exec(r.Context(), q, personID, tenantID); err != nil {
+		if _, err := tx.Exec(ctx, q, personID, projectID); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -649,9 +698,15 @@ func (h *writeAPI) deleteRecipient(w http.ResponseWriter, r *http.Request, tenan
 }
 
 // GET /v1/export: everything this account owns, one JSON document. Secrets
-// are not included: an export copies the record, not the credentials.
-func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// are not included: an export copies the record, not the credentials. The
+// takeout is the workspace's, so only its owner may take it — an Admin
+// invited into one project is not the account.
+func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID int64, s sqlc.Session) {
 	ctx := r.Context()
+	if !isOwner(ctx, h.pool, s) {
+		writeAPIErr(w, http.StatusForbidden, "owner_only")
+		return
+	}
 	out := map[string]any{
 		"exportedAt": time.Now().UTC().Format(time.RFC3339),
 		"monitors":   []any{},
@@ -725,6 +780,11 @@ func (h *writeAPI) exportAll(w http.ResponseWriter, r *http.Request, tenantID in
 func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
+	// Owner only: an Admin invited into the project may run it, not end it.
+	if !isOwner(ctx, h.pool, s) {
+		writeAPIErr(w, http.StatusForbidden, "owner_only")
+		return
+	}
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	count, err := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)
 	if err != nil {
@@ -804,7 +864,13 @@ func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 	if _, err := tx.Exec(ctx, `UPDATE monitor SET paused = true WHERE project_id = $1`, projectID); err != nil {
 		return err
 	}
-	for _, table := range [...]string{"api_key", "install_token"} {
+	// The owner's own rows, now that a channel, an invite, a team and the
+	// scanner's memory all belong to ONE project: they stay with the account
+	// that is leaving, not with the ownerless page.
+	for _, table := range [...]string{
+		"api_key", "install_token",
+		"alert_channel", "telegram_invite", "project_member", "error_alert_state",
+	} {
 		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE project_id = $1`, projectID); err != nil {
 			return err
 		}
@@ -921,8 +987,9 @@ func sourceID(s string) int64 {
 func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
-	cfg, domain, verified := h.statusConfig(ctx, s, tenantID)
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, cfg, domain, verified))
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	cfg, domain, verified := h.statusConfig(ctx, projectID)
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified))
 }
 
 // PUT /v1/status-page: persist the settings. Components are not stored: they
@@ -946,7 +1013,8 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		return
 	}
 	s, _ := h.sess.FromRequest(ctx, r)
-	cfg, current, verified := h.statusConfig(ctx, s, tenantID)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	cfg, current, verified := h.statusConfig(ctx, projectID)
 	if req.Shown != nil {
 		cfg.Shown = req.Shown
 	}
@@ -979,7 +1047,6 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	// when the host moves.
 	verified = verified && domain == current
 	raw, _ := json.Marshal(cfg)
-	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var projectDomain string
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT id, domain FROM project WHERE id = $1`, projectID).Scan(&projectID, &projectDomain)
@@ -1020,9 +1087,9 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	// customer who pre-configured their records saves and is done. Skipped
 	// when already verified — a resolver hiccup must not wipe a standing proof.
 	if domain != "" && !verified {
-		verified = h.verifyStatusDomain(ctx, tenantID, domain)
+		verified = h.verifyStatusDomain(ctx, projectID, domain)
 	}
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, cfg, domain, verified))
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified))
 }
 
 // statusPageConfig is the owner's decisions about the page. Everything else on
@@ -1048,21 +1115,19 @@ func (h *writeAPI) poweredBy(cfg statusPageConfig) bool {
 	return !h.selfHosted || cfg.ShowPoweredBy
 }
 
-// statusConfig loads the saved settings, defaulting a page that has never been
-// configured to "publish everything" — the page exists to be public. The
-// project it reads is the session's current one (the tenant's first as the
-// fallback); the gate-authenticated tenantID decides the tenant, so a failed
-// session re-read cannot send the lookup to tenant 0. The domain and its proof
+// statusConfig loads the saved settings for ONE project, defaulting a page
+// that has never been configured to "publish everything" — the page exists to
+// be public. The caller resolves the project first (currentProjectID for a
+// session, the page's own row for the public door). The domain and its proof
 // come from the columns, never the config blob.
-func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID int64) (statusPageConfig, string, bool) {
+func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPageConfig, string, bool) {
 	cfg := statusPageConfig{ShowNetwork: true, ShowPoweredBy: true, Shown: map[string]bool{}}
-	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	var domain, title, slug *string
 	var verifiedAt *time.Time
 	var raw []byte
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config
-		   FROM project p LEFT JOIN status_page s ON s.tenant_id = p.tenant_id
+		   FROM project p LEFT JOIN status_page s ON s.project_id = p.id
 		  WHERE p.id = $1`, projectID).Scan(&projectID, &slug, &title, &domain, &verifiedAt, &raw)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
@@ -1088,14 +1153,14 @@ func (h *writeAPI) statusConfig(ctx context.Context, s sqlc.Session, tenantID in
 
 // statusPageResponse is the one shape both /v1/status-page handlers answer
 // with: the stored decisions plus the measured components and network.
-func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID int64, cfg statusPageConfig, domain string, verified bool) map[string]any {
+func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, domain string, verified bool) map[string]any {
 	return map[string]any{
 		"slug":           cfg.Slug,
 		"title":          cfg.Title,
 		"domain":         domain,
 		"domainVerified": verified,
-		"components":     h.statusComponents(ctx, tenantID, cfg, false),
-		"network":        h.statusNetwork(ctx, tenantID),
+		"components":     h.statusComponents(ctx, tenantID, projectID, cfg, false),
+		"network":        h.statusNetwork(ctx, tenantID, projectID),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
 	}
@@ -1153,14 +1218,15 @@ func normalizeStatusDomain(raw string) (string, error) {
 func (h *writeAPI) verifyStatusPageDomain(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
-	_, domain, _ := h.statusConfig(ctx, s, tenantID)
+	projectID := currentProjectID(ctx, h.pool, s, tenantID)
+	_, domain, _ := h.statusConfig(ctx, projectID)
 	if domain == "" {
 		writeAPIErr(w, http.StatusBadRequest, "no_domain")
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"domain":   domain,
-		"verified": h.verifyStatusDomain(ctx, tenantID, domain),
+		"verified": h.verifyStatusDomain(ctx, projectID, domain),
 	})
 }
 
@@ -1168,7 +1234,7 @@ func (h *writeAPI) verifyStatusPageDomain(w http.ResponseWriter, r *http.Request
 // domain_verified_at when the two answers intersect. LookupHost, deliberately
 // not LookupCNAME: several DNS providers flatten the CNAME away and would
 // fail this check while serving the traffic correctly.
-func (h *writeAPI) verifyStatusDomain(ctx context.Context, tenantID int64, domain string) bool {
+func (h *writeAPI) verifyStatusDomain(ctx context.Context, projectID int64, domain string) bool {
 	verified := false
 	if u, err := url.Parse(os.Getenv("UC_PUBLIC_ORIGIN")); err == nil && u.Hostname() != "" {
 		if ours, err := net.DefaultResolver.LookupHost(ctx, u.Hostname()); err == nil {
@@ -1181,8 +1247,8 @@ func (h *writeAPI) verifyStatusDomain(ctx context.Context, tenantID int64, domai
 	// in the same statement that would have stamped it.
 	_, _ = h.pool.Raw().Exec(ctx,
 		`UPDATE status_page SET domain_verified_at = CASE WHEN $1 THEN now() END
-		  WHERE tenant_id = $2 AND domain = $3`,
-		verified, tenantID, domain)
+		  WHERE project_id = $2 AND domain = $3`,
+		verified, projectID, domain)
 	return verified
 }
 
@@ -1254,7 +1320,7 @@ func barPlanFor(oldest time.Time, intervalSec int32, now time.Time) (window, buc
 
 // statusComponents renders one component per monitor with measured uptime and
 // bars. `publicOnly` drops the owner's unpublished ones.
-func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg statusPageConfig, publicOnly bool) []map[string]any {
+func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, publicOnly bool) []map[string]any {
 	type monRow struct {
 		id          int64
 		key         string
@@ -1263,7 +1329,7 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 	}
 	var mons []monRow
 	rows, err := h.pool.Raw().Query(ctx,
-		`SELECT id, public_id, name, interval_sec FROM monitor WHERE tenant_id = $1 ORDER BY id`, tenantID)
+		`SELECT id, public_id, name, interval_sec FROM monitor WHERE project_id = $1 ORDER BY id`, projectID)
 	if err == nil {
 		for rows.Next() {
 			var m monRow
@@ -1286,10 +1352,12 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 	type day struct{ ok, total uint64 }
 	oldest := map[int64]time.Time{}
 	if h.pgs != nil {
+		// tenant_id keeps the index; the project narrows through its monitors.
 		chRows, cerr := h.pgs.Raw().Query(ctx, `
 			SELECT monitor_id, min(ts) FROM checks
 			 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
-			 GROUP BY monitor_id`, tenantID)
+			   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)
+			 GROUP BY monitor_id`, tenantID, projectID)
 		if cerr == nil {
 			for chRows.Next() {
 				var monID int64
@@ -1324,7 +1392,9 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID int64, cfg sta
 	if h.pgs != nil && !rawFrom.IsZero() {
 		chRows, cerr := h.pgs.Raw().Query(ctx, `
 			SELECT monitor_id, ts, ok FROM checks
-			 WHERE tenant_id = $1 AND ts >= $2`, tenantID, rawFrom)
+			 WHERE tenant_id = $1 AND ts >= $2
+			   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $3)`,
+			tenantID, rawFrom, projectID)
 		if cerr == nil {
 			for chRows.Next() {
 				var monID int64
@@ -1405,7 +1475,7 @@ func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 // (owner decision, 2026-08-27) — do not add a TLS tile back thinking it was
 // dropped by accident. tls_ms is still measured and still stored; it is only
 // not published here.
-func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[string]any {
+func (h *writeAPI) statusNetwork(ctx context.Context, tenantID, projectID int64) []map[string]any {
 	if h.pgs == nil {
 		return []map[string]any{}
 	}
@@ -1418,8 +1488,9 @@ func (h *writeAPI) statusNetwork(ctx context.Context, tenantID int64) []map[stri
 		       count(*)
 		  FROM checks
 		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '24 hours' AND ok
-		   AND region <> 'heartbeat'`,
-		tenantID).Scan(&dns, &connect, &total, &samples)
+		   AND region <> 'heartbeat'
+		   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)`,
+		tenantID, projectID).Scan(&dns, &connect, &total, &samples)
 	if err != nil || samples == 0 {
 		// Nothing measured in the window: no tiles. An empty section is the
 		// honest answer for an account whose first probe has not run yet.
@@ -1708,9 +1779,14 @@ func (h *writeAPI) getIncident(w http.ResponseWriter, r *http.Request, tenantID 
 	// never reaches a caller.
 	var title, status string
 	var affected int
+	// The current project's incident, not any incident of the workspace: an id
+	// from a sibling project reads as not found here.
+	vs, _ := h.sess.FromRequest(r.Context(), r)
+	projectID := currentProjectID(r.Context(), h.pool, vs, tenantID)
 	if err := h.pool.Raw().QueryRow(r.Context(),
-		`SELECT title, status, affected_count FROM incident WHERE public_id = $1 AND tenant_id = $2`,
-		parseUUID(idStr), tenantID).Scan(&title, &status, &affected); err != nil {
+		`SELECT title, status, affected_count FROM incident
+		  WHERE public_id = $1 AND tenant_id = $2 AND project_id = $3`,
+		parseUUID(idStr), tenantID, projectID).Scan(&title, &status, &affected); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			slog.Error("get incident: read failed", "err", err, "tenant_id", tenantID)
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -2332,7 +2408,8 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	for _, t := range wanted {
 		var monitorID int64
 		_ = h.pool.Raw().QueryRow(ctx,
-			`SELECT id FROM monitor WHERE tenant_id = $1 AND target = $2`, tenantID, t).Scan(&monitorID)
+			`SELECT id FROM monitor WHERE tenant_id = $1 AND target = $2 AND project_id = $3`,
+			tenantID, t, projectID).Scan(&monitorID)
 		if monitorID != 0 {
 			watching++
 			continue
@@ -2352,10 +2429,10 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// account would watch the host and tell nobody.
 	if req.Email != "" {
 		_, _ = h.pool.Raw().Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
-			 SELECT gen_random_uuid(), $1, 'email', $2
-			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
-			tenantID, req.Email)
+			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+			 SELECT gen_random_uuid(), $1, $2, 'email', $3
+			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND target = $3)`,
+			tenantID, projectID, req.Email)
 	}
 
 	// The page's public address is the site's name, not our internal id.
@@ -2553,7 +2630,7 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	// The public page shows the same measured components as the config screen,
 	// minus the ones the owner unpublished. Nothing here is typed in by hand.
 	ctx := r.Context()
-	var tenantID int64
+	var tenantID, projectID int64
 	var claimed bool
 	// A request without a slug arrives on somebody's custom domain: the Host
 	// header (lowercased, port stripped) is the address, and only a domain we
@@ -2564,23 +2641,22 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			host = bare
 		}
 		if err := h.pool.Raw().QueryRow(ctx,
-			`SELECT sp.tenant_id, (t.claim_token_hash IS NULL)
+			`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL)
 			   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
-			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &claimed); err != nil {
+			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &projectID, &claimed); err != nil {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
 			return
 		}
-		h.renderPublicStatus(w, r, tenantID, claimed)
+		h.renderPublicStatus(w, r, tenantID, projectID, claimed)
 		return
 	}
 	slug := pathLast(r.URL.Path)
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT sp.tenant_id, (t.claim_token_hash IS NULL)
+		`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL)
 		   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
-		  WHERE sp.slug = $1`, slug).Scan(&tenantID, &claimed); err != nil {
-		// A page not yet configured resolves by its project slug. The parsed id
-		// is a PROJECT id, kept apart from the tenant id.
-		var projectID int64
+		  WHERE sp.slug = $1`, slug).Scan(&tenantID, &projectID, &claimed); err != nil {
+		// A page not yet configured resolves by its project slug: the parsed
+		// id already IS the project, so only its workspace is looked up.
 		if _, perr := fmt.Sscanf(slug, "prj-%d", &projectID); perr != nil || projectID == 0 {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
 			return
@@ -2593,22 +2669,20 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.renderPublicStatus(w, r, tenantID, claimed)
+	h.renderPublicStatus(w, r, tenantID, projectID, claimed)
 }
 
-// renderPublicStatus is the tail both doors share once the tenant is found:
-// the config load, the components, the incidents, the response map. A slug in
-// the path and a Host header differ only in how the tenant is looked up.
-func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, tenantID int64, claimed bool) {
+// renderPublicStatus is the tail both doors share once the page's project is
+// found: the config load, the components, the incidents, the response map. A
+// slug in the path and a Host header differ only in how it is looked up.
+func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, claimed bool) {
 	ctx := r.Context()
-	// The public door has no viewer session to honour: the page's tenant
-	// decides, and a tenant-only session lands on the lowest project id —
-	// exactly the pre-projects pick. A signed-in viewer's own session must
-	// not bend somebody else's page toward their current project.
-	cfg, storedDomain, _ := h.statusConfig(ctx, sqlc.Session{TenantID: tenantID}, tenantID)
+	// The page's OWN project decides what is rendered: a signed-in viewer's
+	// session must not bend somebody else's page toward their current project.
+	cfg, storedDomain, _ := h.statusConfig(ctx, projectID)
 	resp := map[string]any{
 		"title":      cfg.Title,
-		"components": h.statusComponents(ctx, tenantID, cfg, true),
+		"components": h.statusComponents(ctx, tenantID, projectID, cfg, true),
 		"incidents":  []map[string]any{},
 		"network":    []map[string]any{},
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
@@ -2616,10 +2690,11 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 		"poweredBy":  h.poweredBy(cfg),
 	}
 	// The viewer's own page says so: mine is present and true only when a
-	// session resolves AND belongs to the page's tenant. Absent = not the
-	// viewer's page (signed out, or somebody else's); errors are ignored —
-	// the door is public and must answer the same either way.
-	if vs, verr := h.sess.FromRequest(ctx, r); verr == nil && vs.TenantID == tenantID {
+	// session resolves AND that person reaches THIS project — a member of a
+	// sibling project is a visitor here. Absent = not the viewer's page
+	// (signed out, or somebody else's); errors are ignored — the door is
+	// public and must answer the same either way.
+	if vs, verr := h.sess.FromRequest(ctx, r); verr == nil && h.reachesProject(ctx, vs.PersonID, projectID) {
 		resp["mine"] = true
 		// Same visibility rule, one purpose: the owner reading their own page on
 		// our link is the one viewer the upgrade banner speaks to, and it must
@@ -2631,15 +2706,15 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 	// The owner's switch decides whether the section is published at all; what it
 	// then shows is measured, never sample data.
 	if cfg.ShowNetwork {
-		resp["network"] = h.statusNetwork(ctx, tenantID)
+		resp["network"] = h.statusNetwork(ctx, tenantID, projectID)
 	}
 	incidents := []map[string]any{}
 	if rows, rerr := h.pool.Raw().Query(ctx,
 		// monitor_id IS NOT NULL drops incidents of DELETED checks: the
 		// component is gone from the page; the detector filter does the rest.
 		`SELECT title, status, detected_at FROM incident
-		  WHERE tenant_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
-		  ORDER BY detected_at DESC LIMIT 10`, tenantID); rerr == nil {
+		  WHERE project_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
+		  ORDER BY detected_at DESC LIMIT 10`, projectID); rerr == nil {
 		for rows.Next() {
 			var title, status string
 			var at time.Time
@@ -2655,6 +2730,18 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 	}
 	resp["incidents"] = incidents
 	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+// reachesProject answers whether this person owns the project's workspace or
+// is an active member of it: the public page's `mine`.
+func (h *writeAPI) reachesProject(ctx context.Context, personID, projectID int64) bool {
+	if personID == 0 || projectID == 0 {
+		return false
+	}
+	_, err := h.pool.Queries().ProjectScope(ctx, sqlc.ProjectScopeParams{
+		PersonID: &personID, ProjectID: projectID,
+	})
+	return err == nil
 }
 
 func pathLast(path string) string {
