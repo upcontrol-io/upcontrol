@@ -2,7 +2,7 @@
 // env var and --endpoint exist for self-hosted stacks and local development.
 
 const DEFAULT_ENDPOINT = 'https://upcontrol.io';
-export const CLI_VERSION = '0.1.6';
+export const CLI_VERSION = '0.1.7';
 
 export function endpointFrom(env: NodeJS.ProcessEnv, flag?: string): string {
   return (flag || env.UPCONTROL_ENDPOINT || DEFAULT_ENDPOINT).replace(/\/+$/, '');

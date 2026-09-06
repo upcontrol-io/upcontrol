@@ -1,12 +1,22 @@
-// @upcontrol/sdk - the push library. Public surface: track(), flush(), funnel(), and the logger bridges.
+// @upcontrol/sdk - the push library. Public surface: track(), flush(), the analytics feeds
+// (funnel, experiment, retention, breakdown), and the logger bridges.
 // Configuration is environment-only; track() never throws and without a key is a warned no-op.
 
 import { hostname } from 'node:os';
 import { Client, scrubFields, type Attrs } from './client.js';
 import { createFunnel, type Funnel } from './funnel.js';
+import {
+  createBreakdown,
+  createExperiment,
+  createRetention,
+  type Breakdown,
+  type Experiment,
+  type Retention,
+} from './analytics.js';
 
 export type { Attrs };
 export type { Funnel, RequestLike } from './funnel.js';
+export type { Breakdown, Experiment, Retention } from './analytics.js';
 export { SDK_VERSION } from './client.js';
 
 const client = new Client();
@@ -48,6 +58,39 @@ export function funnel(name: string, steps: string[]): Funnel {
     return createFunnel(name, steps, { client, env: process.env });
   } catch {
     return { step() {} };
+  }
+}
+
+/** experiment declares an A/B test by name and variants, control first. `expose()` counts a
+ *  person once in the variant they landed in, `convert()` once at the goal; the readings go
+ *  out every minute with the variant's declaration index in `i`. Never throws, never blocks. */
+export function experiment(name: string, variants: string[]): Experiment {
+  try {
+    return createExperiment(name, variants, { client, env: process.env });
+  } catch {
+    return { expose() {}, convert() {} };
+  }
+}
+
+/** retention declares a weekly retention feed by name. `seen(userId)` counts a signed-in
+ *  user into the Monday-week cohort they were first seen in, once per cohort-week. Never
+ *  throws, never blocks. */
+export function retention(name: string): Retention {
+  try {
+    return createRetention(name, { client, env: process.env });
+  } catch {
+    return { seen() {} };
+  }
+}
+
+/** breakdown declares a dimension by name. `value(v)` counts events carrying the value —
+ *  events, not people, no dedup — keeping its first 200 distinct values. Never throws,
+ *  never blocks. */
+export function breakdown(name: string): Breakdown {
+  try {
+    return createBreakdown(name, { client, env: process.env });
+  } catch {
+    return { value() {} };
   }
 }
 

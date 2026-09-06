@@ -1,6 +1,6 @@
 ---
 name: upcontrol
-description: Wire monitoring and logging into this app with upcontrol - uptime checks, log window, incident alerts. Use when the user asks to send logs to upcontrol, add logging/observability/monitoring, add a funnel (visit to paid), track user behavior or churn, watch payments, cron jobs or errors, or to set up, verify or debug an upcontrol integration.
+description: Wire monitoring and logging into this app with upcontrol - uptime checks, log window, incident alerts. Use when the user asks to send logs to upcontrol, add logging/observability/monitoring, add a funnel (visit to paid), an A/B test, a retention cohort or a breakdown, track user behavior or churn, watch payments, cron jobs or errors, or to set up, verify or debug an upcontrol integration.
 ---
 
 # upcontrol
@@ -29,6 +29,9 @@ The user states a goal in plain language; you translate it to a topic:
 | "send all my logs to upcontrol"    | `logs`     | wrap their existing logger, add SDK   |
 | "track user behavior / churn"      | `behavior` | place events in checkout, billing, auth |
 | "add a funnel visit to paid"       | `funnel`   | declare the funnel, one `step()` line per step |
+| "add an A/B test checkout CTA"     | `experiment` | declare the test, `expose()` where the arm is chosen, `convert()` where it converts |
+| "how many users come back"         | `retention` | declare it, `seen(userId)` where the app knows who it is |
+| "top pages" / "breakdown by country" | `breakdown` | declare the dimension, `value()` where the thing happens |
 | "tell me when my app is down"      | `uptime`   | no code - point them at the app       |
 | "my cron / queue died silently"    | `jobs`     | job_* events + heartbeat              |
 | "catch errors / exceptions"        | `logs`     | SDK auto-captures; add request_failed points |

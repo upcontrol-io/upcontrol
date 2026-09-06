@@ -3,6 +3,29 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-06 — upcontrol 0.1.7
+
+- `SDK_PIN` moves to `0.4.0`. The bundled skill gains three topics beside `funnel`:
+  `experiment` (declare the arms, `expose()` where the arm is chosen, `convert()` where it
+  converts), `retention` (`seen(userId)`, and the page is blunt that it must be the app's own
+  stable id, because an address is not the same person a week later) and `breakdown`
+  (`value()`, counting events rather than people). Nothing else in the installer changed.
+
+## 2026-09-06 — @upcontrol/sdk 0.4.0
+
+- `experiment(name, variants)`, `retention(name)` and `breakdown(name)` join `funnel()` on
+  the same counter machinery, extracted once instead of copied: counts that only grow, one
+  report a minute, one state file. An experiment counts a person once per variant per stat
+  (`expose`/`convert`; control is the first variant declared, and `i` carries the variant's
+  declaration index so the board orders the card's rows by it). Retention buckets people
+  into the Monday-week cohort they were FIRST seen in and reports cohort-by-week, keeping
+  the last 12 weekly cohorts so the state cannot grow without limit. A breakdown counts
+  events, not people (no `who`, no dedup), and keeps its first 200 distinct values so a
+  dimension fed a request id cannot grow without limit either. The funnel's on-disk state
+  (`node_modules/.cache/upcontrol/funnels.json`, or `UPCONTROL_STATE_DIR`) is read forward:
+  a 0.3.0 file loads with its salt and its counts, and the file is written from now on in a
+  new shape (`v: 2`) that carries every feed. `SDK_VERSION` is `0.4.0`.
+
 ## 2026-09-06 — upcontrol 0.1.6
 
 - `SDK_PIN` moves to `0.3.0`. The skill's `funnel` topic is now the funnel feed (declare once,
