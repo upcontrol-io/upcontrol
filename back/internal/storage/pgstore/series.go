@@ -341,7 +341,7 @@ func (s *Store) MetricLast(ctx context.Context, tenantID, projectID int64, name 
 		return 0, false, err
 	}
 	defer rows.Close()
-	for rows.Next() {
+	if rows.Next() {
 		var v float64
 		if err := rows.Scan(&v); err != nil {
 			return 0, false, err
