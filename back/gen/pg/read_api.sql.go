@@ -24,12 +24,12 @@ func (q *Queries) CountMonitors(ctx context.Context, tenantID int64) (int32, err
 	return column_1, err
 }
 
-const getAPIKeyForTenant = `-- name: GetAPIKeyForTenant :one
+const getAPIKeyForProject = `-- name: GetAPIKeyForProject :one
 SELECT id, prefix, state, created_at, last_used_at
-  FROM api_key WHERE tenant_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
+  FROM api_key WHERE project_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
 `
 
-type GetAPIKeyForTenantRow struct {
+type GetAPIKeyForProjectRow struct {
 	ID         int64
 	Prefix     string
 	State      string
@@ -37,9 +37,9 @@ type GetAPIKeyForTenantRow struct {
 	LastUsedAt pgtype.Timestamptz
 }
 
-func (q *Queries) GetAPIKeyForTenant(ctx context.Context, tenantID int64) (GetAPIKeyForTenantRow, error) {
-	row := q.db.QueryRow(ctx, getAPIKeyForTenant, tenantID)
-	var i GetAPIKeyForTenantRow
+func (q *Queries) GetAPIKeyForProject(ctx context.Context, projectID int64) (GetAPIKeyForProjectRow, error) {
+	row := q.db.QueryRow(ctx, getAPIKeyForProject, projectID)
+	var i GetAPIKeyForProjectRow
 	err := row.Scan(
 		&i.ID,
 		&i.Prefix,
@@ -84,9 +84,61 @@ func (q *Queries) GetTenantPlan(ctx context.Context, id int64) (string, error) {
 	return plan, err
 }
 
+const listChannelsByProject = `-- name: ListChannelsByProject :many
+SELECT id, public_id, kind, target, notify, breaker_open_until, created_at,
+       muted_until, label, recipient_person_id, project_id
+  FROM alert_channel WHERE project_id = $1 ORDER BY created_at
+`
+
+type ListChannelsByProjectRow struct {
+	ID                int64
+	PublicID          pgtype.UUID
+	Kind              string
+	Target            string
+	Notify            []byte
+	BreakerOpenUntil  pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	MutedUntil        pgtype.Timestamptz
+	Label             *string
+	RecipientPersonID *int64
+	ProjectID         int64
+}
+
+func (q *Queries) ListChannelsByProject(ctx context.Context, projectID int64) ([]ListChannelsByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listChannelsByProject, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListChannelsByProjectRow
+	for rows.Next() {
+		var i ListChannelsByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.Kind,
+			&i.Target,
+			&i.Notify,
+			&i.BreakerOpenUntil,
+			&i.CreatedAt,
+			&i.MutedUntil,
+			&i.Label,
+			&i.RecipientPersonID,
+			&i.ProjectID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listChannelsByTenant = `-- name: ListChannelsByTenant :many
 SELECT id, public_id, kind, target, notify, breaker_open_until, created_at,
-       muted_until, label, recipient_person_id
+       muted_until, label, recipient_person_id, project_id
   FROM alert_channel WHERE tenant_id = $1 ORDER BY created_at
 `
 
@@ -101,8 +153,11 @@ type ListChannelsByTenantRow struct {
 	MutedUntil        pgtype.Timestamptz
 	Label             *string
 	RecipientPersonID *int64
+	ProjectID         int64
 }
 
+// Every channel in the workspace, whichever project owns it: the export is
+// tenant-wide, the Alerts screen reads ListChannelsByProject instead.
 func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]ListChannelsByTenantRow, error) {
 	rows, err := q.db.Query(ctx, listChannelsByTenant, tenantID)
 	if err != nil {
@@ -123,6 +178,76 @@ func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]L
 			&i.MutedUntil,
 			&i.Label,
 			&i.RecipientPersonID,
+			&i.ProjectID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIncidentsByProject = `-- name: ListIncidentsByProject :many
+SELECT id, tenant_id, project_id, public_id, title, status, detected_at, resolved_at, affected_count, close_reason
+  FROM incident
+ WHERE tenant_id = $1
+   AND project_id = $2
+   AND (resolved_at IS NULL
+        OR $3::int <= 0
+        OR detected_at >= now() - make_interval(days => $3::int))
+ ORDER BY detected_at DESC LIMIT $4
+`
+
+type ListIncidentsByProjectParams struct {
+	TenantID  int64
+	ProjectID int64
+	SinceDays int32
+	RowLimit  int32
+}
+
+type ListIncidentsByProjectRow struct {
+	ID            int64
+	TenantID      int64
+	ProjectID     int64
+	PublicID      pgtype.UUID
+	Title         string
+	Status        string
+	DetectedAt    pgtype.Timestamptz
+	ResolvedAt    pgtype.Timestamptz
+	AffectedCount int32
+	CloseReason   *string
+}
+
+// The same window as ListIncidentsByTenant, narrowed to one project: the
+// Incidents screen reads this, the export reads the tenant-wide one.
+func (q *Queries) ListIncidentsByProject(ctx context.Context, arg ListIncidentsByProjectParams) ([]ListIncidentsByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listIncidentsByProject,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.SinceDays,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListIncidentsByProjectRow
+	for rows.Next() {
+		var i ListIncidentsByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.ProjectID,
+			&i.PublicID,
+			&i.Title,
+			&i.Status,
+			&i.DetectedAt,
+			&i.ResolvedAt,
+			&i.AffectedCount,
+			&i.CloseReason,
 		); err != nil {
 			return nil, err
 		}
@@ -135,7 +260,7 @@ func (q *Queries) ListChannelsByTenant(ctx context.Context, tenantID int64) ([]L
 }
 
 const listIncidentsByTenant = `-- name: ListIncidentsByTenant :many
-SELECT id, tenant_id, public_id, title, status, detected_at, resolved_at, affected_count, close_reason
+SELECT id, tenant_id, project_id, public_id, title, status, detected_at, resolved_at, affected_count, close_reason
   FROM incident
  WHERE tenant_id = $1
    AND (resolved_at IS NULL
@@ -153,6 +278,7 @@ type ListIncidentsByTenantParams struct {
 type ListIncidentsByTenantRow struct {
 	ID            int64
 	TenantID      int64
+	ProjectID     int64
 	PublicID      pgtype.UUID
 	Title         string
 	Status        string
@@ -180,6 +306,7 @@ func (q *Queries) ListIncidentsByTenant(ctx context.Context, arg ListIncidentsBy
 		if err := rows.Scan(
 			&i.ID,
 			&i.TenantID,
+			&i.ProjectID,
 			&i.PublicID,
 			&i.Title,
 			&i.Status,
@@ -199,8 +326,9 @@ func (q *Queries) ListIncidentsByTenant(ctx context.Context, arg ListIncidentsBy
 }
 
 const listKeyUsage = `-- name: ListKeyUsage :many
-SELECT at, source, outcome FROM key_usage_log
-  WHERE tenant_id = $1 ORDER BY at DESC LIMIT 10
+SELECT l.at, l.source, l.outcome FROM key_usage_log l
+  JOIN api_key k ON k.id = l.key_id
+  WHERE k.project_id = $1 ORDER BY l.at DESC LIMIT 10
 `
 
 type ListKeyUsageRow struct {
@@ -209,8 +337,9 @@ type ListKeyUsageRow struct {
 	Outcome string
 }
 
-func (q *Queries) ListKeyUsage(ctx context.Context, tenantID int64) ([]ListKeyUsageRow, error) {
-	rows, err := q.db.Query(ctx, listKeyUsage, tenantID)
+// Scoped through the key, since key_usage_log carries only the tenant.
+func (q *Queries) ListKeyUsage(ctx context.Context, projectID int64) ([]ListKeyUsageRow, error) {
+	rows, err := q.db.Query(ctx, listKeyUsage, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -229,15 +358,15 @@ func (q *Queries) ListKeyUsage(ctx context.Context, tenantID int64) ([]ListKeyUs
 	return items, nil
 }
 
-const listRecipientsByTenant = `-- name: ListRecipientsByTenant :many
-SELECT tm.role, tm.status, p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
-  FROM tenant_member tm
-  JOIN person p ON p.id = tm.person_id
- WHERE tm.tenant_id = $1
- ORDER BY tm.status, p.name
+const listRecipientsByProject = `-- name: ListRecipientsByProject :many
+SELECT m.role, m.status, p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
+  FROM project_member m
+  JOIN person p ON p.id = m.person_id
+ WHERE m.project_id = $1
+ ORDER BY m.status, p.name
 `
 
-type ListRecipientsByTenantRow struct {
+type ListRecipientsByProjectRow struct {
 	Role             string
 	Status           string
 	ID               int64
@@ -248,15 +377,17 @@ type ListRecipientsByTenantRow struct {
 	TelegramUsername *string
 }
 
-func (q *Queries) ListRecipientsByTenant(ctx context.Context, tenantID int64) ([]ListRecipientsByTenantRow, error) {
-	rows, err := q.db.Query(ctx, listRecipientsByTenant, tenantID)
+// The project's team. The workspace owner is not a row here: handlers prepend
+// it from TenantOwner, because ownership is a column on the workspace.
+func (q *Queries) ListRecipientsByProject(ctx context.Context, projectID int64) ([]ListRecipientsByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listRecipientsByProject, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListRecipientsByTenantRow
+	var items []ListRecipientsByProjectRow
 	for rows.Next() {
-		var i ListRecipientsByTenantRow
+		var i ListRecipientsByProjectRow
 		if err := rows.Scan(
 			&i.Role,
 			&i.Status,
@@ -277,9 +408,51 @@ func (q *Queries) ListRecipientsByTenant(ctx context.Context, tenantID int64) ([
 	return items, nil
 }
 
+const listRecipientsByTenant = `-- name: ListRecipientsByTenant :many
+SELECT role, status, email FROM (
+  SELECT 'login'::text AS role, 'active'::text AS status, p.email
+    FROM tenant t JOIN person p ON p.id = t.owner_person_id
+   WHERE t.id = $1
+  UNION
+  SELECT m.role, m.status, p.email
+    FROM project_member m JOIN person p ON p.id = m.person_id
+   WHERE m.tenant_id = $1
+) x ORDER BY email
+`
+
+type ListRecipientsByTenantRow struct {
+	Role   string
+	Status string
+	Email  *string
+}
+
+// Every person in the workspace, for the takeout only: the owner (a column on
+// the tenant, never a membership row) plus the members of its projects. The
+// screens read ListRecipientsByProject — this one is the export's, so the same
+// person in two projects is one row.
+func (q *Queries) ListRecipientsByTenant(ctx context.Context, tenantID int64) ([]ListRecipientsByTenantRow, error) {
+	rows, err := q.db.Query(ctx, listRecipientsByTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecipientsByTenantRow
+	for rows.Next() {
+		var i ListRecipientsByTenantRow
+		if err := rows.Scan(&i.Role, &i.Status, &i.Email); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSourceConnections = `-- name: ListSourceConnections :many
 SELECT id, kind, status, last_signal_at, paused, hook_token, last_event
-  FROM source_connection WHERE tenant_id = $1 AND status != 'draft' ORDER BY id
+  FROM source_connection WHERE project_id = $1 AND status != 'draft' ORDER BY id
 `
 
 type ListSourceConnectionsRow struct {
@@ -292,15 +465,15 @@ type ListSourceConnectionsRow struct {
 	LastEvent    *string
 }
 
-// Sources the tenant connected by hand (deploy hooks, receivers). The built-in
+// Sources the project connected by hand (deploy hooks, receivers). The built-in
 // two — site checks and app logs — are not rows here: they are facts derived
 // from what has arrived, and there is nothing to disconnect. hook_token is the
 // connection's inbound URL (universal hooks): the front renders it, so it
 // travels with the row rather than through a second endpoint. Drafts are the
 // token's storage for a panel someone opened to look — hidden until the first
 // event promotes them, because looking must not leave a connection card behind.
-func (q *Queries) ListSourceConnections(ctx context.Context, tenantID int64) ([]ListSourceConnectionsRow, error) {
-	rows, err := q.db.Query(ctx, listSourceConnections, tenantID)
+func (q *Queries) ListSourceConnections(ctx context.Context, projectID int64) ([]ListSourceConnectionsRow, error) {
+	rows, err := q.db.Query(ctx, listSourceConnections, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +500,44 @@ func (q *Queries) ListSourceConnections(ctx context.Context, tenantID int64) ([]
 	return items, nil
 }
 
+const projectSignals = `-- name: ProjectSignals :one
+SELECT
+  (SELECT count(*)::int FROM monitor m WHERE m.project_id = $1) AS monitor_count,
+  (SELECT count(*)::int FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
+    WHERE m.project_id = $1 AND f.status = 'down') AS monitors_down,
+  (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
+    WHERE m.project_id = $1) AS last_check_at,
+  $1::bigint AS project_id,
+  (SELECT count(*)::int FROM alert_channel c WHERE c.project_id = $1) AS channel_count
+`
+
+type ProjectSignalsRow struct {
+	MonitorCount int32
+	MonitorsDown int32
+	LastCheckAt  pgtype.Timestamptz
+	ProjectID    int64
+	ChannelCount int32
+}
+
+// What the project has actually connected, in one round trip: the source list,
+// the effort ladder and the "no data yet" copy all derive from these counters
+// rather than from a static list that says "Site checks" to a project with no
+// checks at all. Log volume is deliberately NOT here: it would answer "no lines"
+// to a project that is streaming. The line count comes from
+// ring.QueryBuilder.Summary instead, which is why this row carries the project id.
+func (q *Queries) ProjectSignals(ctx context.Context, projectID int64) (ProjectSignalsRow, error) {
+	row := q.db.QueryRow(ctx, projectSignals, projectID)
+	var i ProjectSignalsRow
+	err := row.Scan(
+		&i.MonitorCount,
+		&i.MonitorsDown,
+		&i.LastCheckAt,
+		&i.ProjectID,
+		&i.ChannelCount,
+	)
+	return i, err
+}
+
 const setSourcePaused = `-- name: SetSourcePaused :exec
 UPDATE source_connection SET paused = $1 WHERE id = $2 AND tenant_id = $3
 `
@@ -340,42 +551,4 @@ type SetSourcePausedParams struct {
 func (q *Queries) SetSourcePaused(ctx context.Context, arg SetSourcePausedParams) error {
 	_, err := q.db.Exec(ctx, setSourcePaused, arg.Paused, arg.ID, arg.TenantID)
 	return err
-}
-
-const tenantSignals = `-- name: TenantSignals :one
-SELECT
-  (SELECT count(*)::int FROM monitor m WHERE m.tenant_id = $1) AS monitor_count,
-  (SELECT count(*)::int FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
-    WHERE m.tenant_id = $1 AND f.status = 'down') AS monitors_down,
-  (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
-    WHERE m.tenant_id = $1) AS last_check_at,
-  (SELECT p.id FROM project p WHERE p.tenant_id = $1 ORDER BY p.id LIMIT 1) AS project_id,
-  (SELECT count(*)::int FROM alert_channel c WHERE c.tenant_id = $1) AS channel_count
-`
-
-type TenantSignalsRow struct {
-	MonitorCount int32
-	MonitorsDown int32
-	LastCheckAt  pgtype.Timestamptz
-	ProjectID    int64
-	ChannelCount int32
-}
-
-// What the tenant has actually connected, in one round trip: the source list,
-// the effort ladder and the "no data yet" copy all derive from these counters
-// rather than from a static list that says "Site checks" to an account with no
-// checks at all. Log volume is deliberately NOT here: it would answer "no lines"
-// to a project that is streaming. The line count comes from
-// ring.QueryBuilder.Summary instead, which is why this row carries the project id.
-func (q *Queries) TenantSignals(ctx context.Context, tenantID int64) (TenantSignalsRow, error) {
-	row := q.db.QueryRow(ctx, tenantSignals, tenantID)
-	var i TenantSignalsRow
-	err := row.Scan(
-		&i.MonitorCount,
-		&i.MonitorsDown,
-		&i.LastCheckAt,
-		&i.ProjectID,
-		&i.ChannelCount,
-	)
-	return i, err
 }

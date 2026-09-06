@@ -16,6 +16,8 @@ import (
 func TestTelegramSeatsCountDestinations(t *testing.T) {
 	h, tenantID, inviterID := openRecipientsDB(t)
 	ctx := context.Background()
+	// A channel belongs to one project; the seat count stays per workspace.
+	projectID := recipientsProjectID(t, h, tenantID)
 	// person.telegram_id is UNIQUE across the whole database, which survives
 	// between runs — a constant here collides with its own previous run.
 	tgID := time.Now().UnixNano()
@@ -35,8 +37,8 @@ func TestTelegramSeatsCountDestinations(t *testing.T) {
 	// A connected group holds a seat — before broadcasts counted, a redeemed
 	// group FREED the seat its pending invite had held.
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, label)
-		 VALUES (gen_random_uuid(), $1, 'telegram', '-4200200', 'Ops room')`, tenantID); err != nil {
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target, label)
+		 VALUES (gen_random_uuid(), $1, $2, 'telegram', '-4200200', 'Ops room')`, tenantID, projectID); err != nil {
 		t.Fatalf("seed broadcast row: %v", err)
 	}
 	if used, _ := seats(); used != 1 {
@@ -46,9 +48,9 @@ func TestTelegramSeatsCountDestinations(t *testing.T) {
 	// A person's own channel row is the delivery leg of a seat already counted
 	// through person.telegram_id — never a second seat.
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, recipient_person_id)
-		 VALUES (gen_random_uuid(), $1, 'telegram', $2, $3)`,
-		tenantID, strconv.FormatInt(tgID, 10), inviterID); err != nil {
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target, recipient_person_id)
+		 VALUES (gen_random_uuid(), $1, $2, 'telegram', $3, $4)`,
+		tenantID, projectID, strconv.FormatInt(tgID, 10), inviterID); err != nil {
 		t.Fatalf("seed personal row: %v", err)
 	}
 	if used, _ := seats(); used != 1 {

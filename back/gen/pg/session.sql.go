@@ -11,6 +11,39 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const activateInvites = `-- name: ActivateInvites :many
+UPDATE project_member SET status = 'active'
+ WHERE person_id = $1 AND status = 'pending'
+RETURNING project_id, tenant_id
+`
+
+type ActivateInvitesRow struct {
+	ProjectID int64
+	TenantID  int64
+}
+
+// Redeeming an identity accepts every project invite waiting on it, and the
+// rows come back so the caller knows where the session may now land.
+func (q *Queries) ActivateInvites(ctx context.Context, personID int64) ([]ActivateInvitesRow, error) {
+	rows, err := q.db.Query(ctx, activateInvites, personID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActivateInvitesRow
+	for rows.Next() {
+		var i ActivateInvitesRow
+		if err := rows.Scan(&i.ProjectID, &i.TenantID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createPerson = `-- name: CreatePerson :one
 INSERT INTO person (public_id, email, name)
 VALUES ($1, $2, $3)
@@ -44,25 +77,28 @@ func (q *Queries) CreatePerson(ctx context.Context, arg CreatePersonParams) (Cre
 }
 
 const createSession = `-- name: CreateSession :exec
-INSERT INTO session (token_hash, person_id, tenant_id, expires_at)
-VALUES ($1, $2, $3,
-        now() + make_interval(secs => $4::double precision))
+INSERT INTO session (token_hash, person_id, tenant_id, project_id, expires_at)
+VALUES ($1, $2, $3, $4,
+        now() + make_interval(secs => $5::double precision))
 `
 
 type CreateSessionParams struct {
 	TokenHash []byte
 	PersonID  int64
 	TenantID  int64
+	ProjectID *int64
 	TtlSecs   float64
 }
 
 // A session is keyed by sha256(cookie_value); the cookie value itself is never
 // stored. expires_at is set at creation; the middleware checks it on every /v1/*.
+// project_id is the scope the session opens on: NULL until one is resolved.
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) error {
 	_, err := q.db.Exec(ctx, createSession,
 		arg.TokenHash,
 		arg.PersonID,
 		arg.TenantID,
+		arg.ProjectID,
 		arg.TtlSecs,
 	)
 	return err
@@ -77,21 +113,28 @@ func (q *Queries) DeleteSession(ctx context.Context, tokenHash []byte) error {
 	return err
 }
 
-const ensureTenantMember = `-- name: EnsureTenantMember :exec
-INSERT INTO tenant_member (tenant_id, person_id, role, status)
-VALUES ($1, $2, 'login', 'active')
-ON CONFLICT (tenant_id, person_id) DO NOTHING
+const firstReachableProject = `-- name: FirstReachableProject :one
+SELECT p.id, p.tenant_id
+  FROM project p
+  JOIN tenant t ON t.id = p.tenant_id
+  LEFT JOIN project_member m ON m.project_id = p.id AND m.person_id = $1 AND m.status = 'active'
+ WHERE t.owner_person_id = $1 OR m.person_id IS NOT NULL
+ ORDER BY (t.owner_person_id = $1) DESC, p.id
+ LIMIT 1
 `
 
-type EnsureTenantMemberParams struct {
+type FirstReachableProjectRow struct {
+	ID       int64
 	TenantID int64
-	PersonID int64
 }
 
-// First member of a tenant becomes the owner (role=login). Idempotent.
-func (q *Queries) EnsureTenantMember(ctx context.Context, arg EnsureTenantMemberParams) error {
-	_, err := q.db.Exec(ctx, ensureTenantMember, arg.TenantID, arg.PersonID)
-	return err
+// Their own workspace's lowest project, else the lowest one they were invited
+// to: where a session lands when it has no remembered scope.
+func (q *Queries) FirstReachableProject(ctx context.Context, personID int64) (FirstReachableProjectRow, error) {
+	row := q.db.QueryRow(ctx, firstReachableProject, personID)
+	var i FirstReachableProjectRow
+	err := row.Scan(&i.ID, &i.TenantID)
+	return i, err
 }
 
 const getMe = `-- name: GetMe :one
@@ -100,21 +143,33 @@ SELECT
   p.public_id AS person_public_id,
   p.email,
   p.name     AS person_name,
-  tm.role    AS member_role,
+  (CASE WHEN t.owner_person_id = p.id THEN 'login' ELSE COALESCE(pm.role, 'notify') END)::text AS member_role,
   t.id       AS tenant_id,
   t.plan,
+  COALESCE(t.owner_person_id = p.id, false)::bool AS owned,
+  o.email    AS owner_email,
   s.project_id AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
   pr.created_at AS project_created_at
 FROM session s
-JOIN person p       ON p.id = s.person_id
-JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = s.tenant_id
-JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.id = COALESCE((SELECT id FROM project WHERE id = s.project_id AND tenant_id = t.id), (SELECT min(id) FROM project WHERE tenant_id = t.id))
+JOIN person p ON p.id = s.person_id
+JOIN tenant t ON t.id = s.tenant_id
+LEFT JOIN person o ON o.id = t.owner_person_id
+LEFT JOIN project pr ON pr.id = COALESCE(
+  (SELECT x.id FROM project x
+    WHERE x.id = s.project_id AND x.tenant_id = t.id
+      AND (t.owner_person_id = p.id
+           OR EXISTS (SELECT 1 FROM project_member m
+                       WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active'))),
+  (SELECT min(x.id) FROM project x
+    WHERE x.tenant_id = t.id
+      AND (t.owner_person_id = p.id
+           OR EXISTS (SELECT 1 FROM project_member m
+                       WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active'))))
+LEFT JOIN project_member pm ON pm.project_id = pr.id AND pm.person_id = p.id AND pm.status = 'active'
 WHERE s.token_hash = $1 AND s.expires_at > now()
-ORDER BY pr.created_at
 LIMIT 1
 `
 
@@ -126,6 +181,8 @@ type GetMeRow struct {
 	MemberRole       string
 	TenantID         int64
 	Plan             string
+	Owned            bool
+	OwnerEmail       *string
 	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
@@ -133,10 +190,11 @@ type GetMeRow struct {
 	ProjectCreatedAt pgtype.Timestamptz
 }
 
-// The /v1/me aggregate: person + tenant + current project, joined off the
-// session. The project is the session's own when it still belongs to the
-// tenant, else the tenant's lowest id — a session whose project was deleted
-// (or never set) still answers instead of going NULL while projects exist.
+// The /v1/me aggregate: person + workspace + current project, joined off the
+// session. `owned` says whether the reader owns the workspace; member_role is
+// their role in the CURRENT project, and the owner always answers 'login'.
+// The project is the session's own while it still belongs to the workspace and
+// the reader can reach it, else the lowest project there they can reach.
 func (q *Queries) GetMe(ctx context.Context, tokenHash []byte) (GetMeRow, error) {
 	row := q.db.QueryRow(ctx, getMe, tokenHash)
 	var i GetMeRow
@@ -148,6 +206,8 @@ func (q *Queries) GetMe(ctx context.Context, tokenHash []byte) (GetMeRow, error)
 		&i.MemberRole,
 		&i.TenantID,
 		&i.Plan,
+		&i.Owned,
+		&i.OwnerEmail,
 		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,
@@ -163,20 +223,27 @@ SELECT
   p.public_id AS person_public_id,
   p.email,
   p.name     AS person_name,
-  tm.role    AS member_role,
+  (CASE WHEN t.owner_person_id = p.id THEN 'login' ELSE COALESCE(pm.role, 'notify') END)::text AS member_role,
   t.id       AS tenant_id,
   t.plan,
+  COALESCE(t.owner_person_id = p.id, false)::bool AS owned,
+  o.email    AS owner_email,
   NULL::bigint AS session_project_id,
   pr.id       AS project_id,
   pr.public_id AS project_public_id,
   pr.domain   AS project_domain,
   pr.created_at AS project_created_at
 FROM person p
-JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = $1
-JOIN tenant t       ON t.id = tm.tenant_id
-LEFT JOIN project pr ON pr.id = (SELECT min(id) FROM project WHERE tenant_id = t.id)
+JOIN tenant t ON t.id = $1
+LEFT JOIN person o ON o.id = t.owner_person_id
+LEFT JOIN project pr ON pr.id = (
+  SELECT min(x.id) FROM project x
+   WHERE x.tenant_id = t.id
+     AND (t.owner_person_id = p.id
+          OR EXISTS (SELECT 1 FROM project_member m
+                      WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active')))
+LEFT JOIN project_member pm ON pm.project_id = pr.id AND pm.person_id = p.id AND pm.status = 'active'
 WHERE p.id = $2
-ORDER BY pr.created_at
 LIMIT 1
 `
 
@@ -193,6 +260,8 @@ type GetMeByIdentityRow struct {
 	MemberRole       string
 	TenantID         int64
 	Plan             string
+	Owned            bool
+	OwnerEmail       *string
 	SessionProjectID *int64
 	ProjectID        *int64
 	ProjectPublicID  pgtype.UUID
@@ -204,7 +273,7 @@ type GetMeByIdentityRow struct {
 // (UC_AUTH=none) has no session row, so the token-hash join above can never
 // answer for it. Columns mirror GetMe exactly — the handler converts between
 // the two generated row types. session_project_id is the NULL literal (no
-// session row exists here) and the project is the tenant's lowest id.
+// session row exists here) and the project is the lowest reachable one.
 func (q *Queries) GetMeByIdentity(ctx context.Context, arg GetMeByIdentityParams) (GetMeByIdentityRow, error) {
 	row := q.db.QueryRow(ctx, getMeByIdentity, arg.TenantID, arg.PersonID)
 	var i GetMeByIdentityRow
@@ -216,6 +285,8 @@ func (q *Queries) GetMeByIdentity(ctx context.Context, arg GetMeByIdentityParams
 		&i.MemberRole,
 		&i.TenantID,
 		&i.Plan,
+		&i.Owned,
+		&i.OwnerEmail,
 		&i.SessionProjectID,
 		&i.ProjectID,
 		&i.ProjectPublicID,
@@ -276,6 +347,105 @@ func (q *Queries) GetSessionByToken(ctx context.Context, tokenHash []byte) (Sess
 	return i, err
 }
 
+const lastSessionScope = `-- name: LastSessionScope :one
+SELECT tenant_id, project_id FROM session
+ WHERE person_id = $1 AND project_id IS NOT NULL
+ ORDER BY last_seen_at DESC LIMIT 1
+`
+
+type LastSessionScopeRow struct {
+	TenantID  int64
+	ProjectID *int64
+}
+
+// Where this person was last working: a new session reopens on it instead of
+// on whichever project happens to sort lowest.
+func (q *Queries) LastSessionScope(ctx context.Context, personID int64) (LastSessionScopeRow, error) {
+	row := q.db.QueryRow(ctx, lastSessionScope, personID)
+	var i LastSessionScopeRow
+	err := row.Scan(&i.TenantID, &i.ProjectID)
+	return i, err
+}
+
+const ownTenant = `-- name: OwnTenant :one
+SELECT id FROM tenant WHERE owner_person_id = $1 ORDER BY id LIMIT 1
+`
+
+// The workspace this person owns; no row means they own none yet.
+func (q *Queries) OwnTenant(ctx context.Context, ownerPersonID *int64) (int64, error) {
+	row := q.db.QueryRow(ctx, ownTenant, ownerPersonID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const projectScope = `-- name: ProjectScope :one
+SELECT p.id, p.tenant_id,
+       COALESCE(t.owner_person_id = $1, false)::bool AS owned,
+       (CASE WHEN t.owner_person_id = $1 THEN 'login' ELSE COALESCE(m.role, '') END)::text AS role
+  FROM project p
+  JOIN tenant t ON t.id = p.tenant_id
+  LEFT JOIN project_member m ON m.project_id = p.id AND m.person_id = $1 AND m.status = 'active'
+ WHERE p.id = $2
+   AND (t.owner_person_id = $1 OR m.person_id IS NOT NULL)
+`
+
+type ProjectScopeParams struct {
+	PersonID  *int64
+	ProjectID int64
+}
+
+type ProjectScopeRow struct {
+	ID       int64
+	TenantID int64
+	Owned    bool
+	Role     string
+}
+
+// Can this person reach this project, and as what: no row means not reachable,
+// which is the same answer whether the project is a stranger's or unknown.
+func (q *Queries) ProjectScope(ctx context.Context, arg ProjectScopeParams) (ProjectScopeRow, error) {
+	row := q.db.QueryRow(ctx, projectScope, arg.PersonID, arg.ProjectID)
+	var i ProjectScopeRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Owned,
+		&i.Role,
+	)
+	return i, err
+}
+
+const reachableProjectInTenant = `-- name: ReachableProjectInTenant :one
+SELECT COALESCE(
+  (SELECT x.id FROM project x
+    WHERE x.id = $1 AND x.tenant_id = $2
+      AND (EXISTS (SELECT 1 FROM tenant t WHERE t.id = x.tenant_id AND t.owner_person_id = $3)
+           OR EXISTS (SELECT 1 FROM project_member m
+                       WHERE m.project_id = x.id AND m.person_id = $3 AND m.status = 'active'))),
+  (SELECT min(x.id) FROM project x
+    WHERE x.tenant_id = $2
+      AND (EXISTS (SELECT 1 FROM tenant t WHERE t.id = x.tenant_id AND t.owner_person_id = $3)
+           OR EXISTS (SELECT 1 FROM project_member m
+                       WHERE m.project_id = x.id AND m.person_id = $3 AND m.status = 'active'))),
+  0)::bigint
+`
+
+type ReachableProjectInTenantParams struct {
+	Pick     int64
+	TenantID int64
+	PersonID *int64
+}
+
+// The session's current-project resolver: the session's own pick while it is
+// still reachable, else the lowest reachable project in that workspace, else 0.
+func (q *Queries) ReachableProjectInTenant(ctx context.Context, arg ReachableProjectInTenantParams) (int64, error) {
+	row := q.db.QueryRow(ctx, reachableProjectInTenant, arg.Pick, arg.TenantID, arg.PersonID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const setSessionProject = `-- name: SetSessionProject :exec
 UPDATE session SET project_id = $2 WHERE id = $1
 `
@@ -289,6 +459,24 @@ type SetSessionProjectParams struct {
 // already verified belongs to the session's tenant.
 func (q *Queries) SetSessionProject(ctx context.Context, arg SetSessionProjectParams) error {
 	_, err := q.db.Exec(ctx, setSessionProject, arg.ID, arg.ProjectID)
+	return err
+}
+
+const setSessionScope = `-- name: SetSessionScope :exec
+UPDATE session SET tenant_id = $1, project_id = $2
+ WHERE id = $3
+`
+
+type SetSessionScopeParams struct {
+	TenantID  int64
+	ProjectID *int64
+	ID        int64
+}
+
+// The same switch across workspaces: a project reached by invite lives in
+// somebody else's workspace, so the session's tenant follows the project.
+func (q *Queries) SetSessionScope(ctx context.Context, arg SetSessionScopeParams) error {
+	_, err := q.db.Exec(ctx, setSessionScope, arg.TenantID, arg.ProjectID, arg.ID)
 	return err
 }
 

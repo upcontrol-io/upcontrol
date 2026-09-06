@@ -43,7 +43,7 @@ func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notify members read, login members change: creating/editing/deleting a
 	// check is a settings act.
-	if r.Method != http.MethodGet && !roleAtLeastLogin(r.Context(), h.pool, s.PersonID, s.TenantID) {
+	if r.Method != http.MethodGet && !canManage(r.Context(), h.pool, s) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}
@@ -51,7 +51,7 @@ func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	switch {
 	case r.Method == http.MethodGet && id == "":
-		h.list(w, r, tenantID)
+		h.list(w, r, currentProjectID(r.Context(), h.pool, s, tenantID))
 	case r.Method == http.MethodPost && id == "":
 		h.create(w, r, tenantID)
 	case r.Method == http.MethodGet && id != "":
@@ -65,8 +65,8 @@ func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *monitors) list(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	rows, err := h.pool.Queries().ListMonitorsByTenant(r.Context(), tenantID)
+func (h *monitors) list(w http.ResponseWriter, r *http.Request, projectID int64) {
+	rows, err := h.pool.Queries().ListMonitorsByProject(r.Context(), projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return

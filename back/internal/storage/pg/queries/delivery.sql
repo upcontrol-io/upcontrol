@@ -16,14 +16,14 @@ RETURNING id, tenant_id, incident_id, channel_id, class, payload, attempts;
 
 -- name: GetChannelForDelivery :one
 SELECT ac.id, ac.public_id, ac.kind, ac.target, ac.breaker_open_until,
-       ac.recipient_person_id, ac.muted_until
+       ac.recipient_person_id, ac.muted_until, ac.project_id
   FROM alert_channel ac
  WHERE ac.id = $1;
 
 -- name: GetEmailChannelTarget :one
 -- The backup address a channel fails over to when its own breaker trips. NULL
--- if the tenant has no email channel (the delivery then goes dead).
-SELECT target FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' ORDER BY created_at LIMIT 1;
+-- if the project has no email channel (the delivery then goes dead).
+SELECT target FROM alert_channel WHERE project_id = $1 AND kind = 'email' ORDER BY created_at LIMIT 1;
 
 -- name: RecordDeliveryAttempt :exec
 INSERT INTO delivery_attempt (queue_id, outcome, detail)

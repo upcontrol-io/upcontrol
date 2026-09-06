@@ -148,6 +148,7 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		var lastFire time.Time
 		if st, err := q.GetErrorAlertState(ctx, sqlc.GetErrorAlertStateParams{
 			TenantID:    proj.TenantID,
+			ProjectID:   proj.ID,
 			Fingerprint: fp,
 			Kind:        "detect:errorrate",
 		}); err == nil {
@@ -200,6 +201,7 @@ func (s *Scanner) scanProject(ctx context.Context, proj sqlc.ListProjectsForDete
 		if created {
 			if err := q.UpsertErrorAlertState(ctx, sqlc.UpsertErrorAlertStateParams{
 				TenantID:    proj.TenantID,
+				ProjectID:   proj.ID,
 				Fingerprint: fp,
 				Kind:        "detect:errorrate",
 			}); err != nil {

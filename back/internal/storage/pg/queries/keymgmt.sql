@@ -7,13 +7,15 @@ VALUES (sqlc.arg(tenant_id), sqlc.arg(project_id), sqlc.arg(prefix), sqlc.arg(se
 RETURNING id, prefix, state, created_at;
 
 -- name: RotateAPIKey :one
--- Atomic: set old key to rotating, insert new key, return new key.
+-- Atomic: set the project's old key to rotating, insert the new one, return it.
+-- Scoped to one project: a workspace's other projects keep their keys.
 WITH old AS (
     UPDATE api_key
        SET state = 'rotating', rotating_until = now() + INTERVAL '24 hours'
-     WHERE tenant_id = $1 AND state = 'active'
+     WHERE api_key.tenant_id = sqlc.arg(tenant_id)
+       AND api_key.project_id = sqlc.arg(project_id) AND api_key.state = 'active'
     RETURNING project_id
 )
 INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state)
-SELECT $1, old.project_id, $2, $3, 'active' FROM old
+SELECT sqlc.arg(tenant_id), old.project_id, sqlc.arg(prefix), sqlc.arg(secret_hash), 'active' FROM old
 RETURNING id, prefix, created_at;

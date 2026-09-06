@@ -56,22 +56,18 @@ func newWatchFixture(t *testing.T) *watchFixture {
 	uniq := time.Now().UnixNano()
 	f := &watchFixture{pool: pool}
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("watcher-%d", uniq)).Scan(&f.tenantID); err != nil {
-		t.Fatalf("tenant: %v", err)
-	}
-	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Owner') RETURNING id`,
 		fmt.Sprintf("watcher-%d@example.com", uniq)).Scan(&f.personID); err != nil {
 		t.Fatalf("person: %v", err)
 	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		f.tenantID, f.personID); err != nil {
-		t.Fatalf("tenant_member: %v", err)
+	// Ownership is the workspace's column: no membership row for the owner.
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("watcher-%d", uniq), f.personID).Scan(&f.tenantID); err != nil {
+		t.Fatalf("tenant: %v", err)
 	}
 	f.sess = session.New(pool, session.DefaultTTL, nil)
-	token, err := f.sess.Create(ctx, f.personID, f.tenantID)
+	token, err := f.sess.Create(ctx, f.personID, f.tenantID, nil)
 	if err != nil {
 		t.Fatalf("mint session: %v", err)
 	}
@@ -292,21 +288,16 @@ func TestPublicStatusAnswersMineOnlyForTheOwner(t *testing.T) {
 	uniq := time.Now().UnixNano()
 	var otherTenant, otherPerson int64
 	if err := f.pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("other-%d", uniq)).Scan(&otherTenant); err != nil {
-		t.Fatalf("other tenant: %v", err)
-	}
-	if err := f.pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Other') RETURNING id`,
 		fmt.Sprintf("other-%d@example.com", uniq)).Scan(&otherPerson); err != nil {
 		t.Fatalf("other person: %v", err)
 	}
-	if _, err := f.pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		otherTenant, otherPerson); err != nil {
-		t.Fatalf("other tenant_member: %v", err)
+	if err := f.pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("other-%d", uniq), otherPerson).Scan(&otherTenant); err != nil {
+		t.Fatalf("other tenant: %v", err)
 	}
-	otherToken, err := f.sess.Create(ctx, otherPerson, otherTenant)
+	otherToken, err := f.sess.Create(ctx, otherPerson, otherTenant, nil)
 	if err != nil {
 		t.Fatalf("mint other session: %v", err)
 	}
@@ -328,5 +319,119 @@ func TestPublicStatusAnswersMineOnlyForTheOwner(t *testing.T) {
 	if _, ok := resp["hasCustomDomain"]; ok {
 		t.Fatalf("a signed-out visitor reads hasCustomDomain = %v, want the field absent",
 			resp["hasCustomDomain"])
+	}
+}
+
+// Two projects in one workspace are two pages: each answers its own slug and
+// only its own components, and `mine` follows the PROJECT's team — a member
+// of the sibling project is a visitor here, not an owner.
+func TestStatusPageIsPerProject(t *testing.T) {
+	f := newWatchFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+
+	type page struct {
+		projectID int64
+		slug      string
+		monitor   string
+	}
+	seed := func(n int) page {
+		p := page{
+			slug:    fmt.Sprintf("page%d-%d", n, uniq),
+			monitor: fmt.Sprintf("Check %d-%d", n, uniq%100000),
+		}
+		if err := f.pool.Raw().QueryRow(ctx,
+			`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+			f.tenantID, fmt.Sprintf("p%d-%d.example.com", n, uniq%100000)).Scan(&p.projectID); err != nil {
+			t.Fatalf("seed project %d: %v", n, err)
+		}
+		if _, err := f.pool.Raw().Exec(ctx,
+			`INSERT INTO status_page (tenant_id, project_id, slug, title) VALUES ($1, $2, $3, $4)`,
+			f.tenantID, p.projectID, p.slug, p.slug); err != nil {
+			t.Fatalf("seed status_page %d: %v", n, err)
+		}
+		if _, err := f.pool.Raw().Exec(ctx,
+			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
+			 VALUES (gen_random_uuid(), $1, $2, 'website', $3, $4, 300)`,
+			f.tenantID, p.projectID, p.monitor,
+			fmt.Sprintf("https://p%d-%d.example.com", n, uniq%100000)); err != nil {
+			t.Fatalf("seed monitor %d: %v", n, err)
+		}
+		return p
+	}
+	one, two := seed(1), seed(2)
+
+	wa := NewWriteAPI(f.pool, nil, f.sess, false, nil, nil, false)
+	mux := http.NewServeMux()
+	mux.Handle("GET /v1/status-page", wa)
+	mux.Handle("GET /public/status/{slug}", wa)
+
+	// The owner's own page, read from inside each project in turn.
+	config := func(projectID int64) map[string]any {
+		token, err := f.sess.Create(ctx, f.personID, f.tenantID, &projectID)
+		if err != nil {
+			t.Fatalf("mint session on project %d: %v", projectID, err)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
+		r.AddCookie(&http.Cookie{Name: session.CookieName, Value: token})
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /v1/status-page on %d = %d (%s)", projectID, w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode status page: %v", err)
+		}
+		return body
+	}
+	names := func(body map[string]any) []string {
+		rows, _ := body["components"].([]any)
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if m, ok := row.(map[string]any); ok {
+				out = append(out, fmt.Sprint(m["name"]))
+			}
+		}
+		return out
+	}
+
+	first, second := config(one.projectID), config(two.projectID)
+	if first["slug"] != one.slug || second["slug"] != two.slug {
+		t.Fatalf("slugs = %v / %v, want %q / %q", first["slug"], second["slug"], one.slug, two.slug)
+	}
+	if got := names(first); len(got) != 1 || got[0] != one.monitor {
+		t.Fatalf("project 1 components = %v, want only %q", got, one.monitor)
+	}
+	if got := names(second); len(got) != 1 || got[0] != two.monitor {
+		t.Fatalf("project 2 components = %v, want only %q", got, two.monitor)
+	}
+
+	// A member of project 1: their own page says mine, the sibling's does not.
+	memberID := seedPerson(t, f.pool, fmt.Sprintf("pagemember-%d@example.com", uniq))
+	seedProjectMember(t, f.pool, one.projectID, memberID, f.tenantID, "notify", "active")
+	memberToken, err := f.sess.Create(ctx, memberID, f.tenantID, &one.projectID)
+	if err != nil {
+		t.Fatalf("mint member session: %v", err)
+	}
+	public := func(slug string) map[string]any {
+		r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
+		r.AddCookie(&http.Cookie{Name: session.CookieName, Value: memberToken})
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /public/status/%s = %d (%s)", slug, w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode public status: %v", err)
+		}
+		return body
+	}
+	if got := public(one.slug); got["mine"] != true {
+		t.Fatalf("an active member of the page's project reads mine = %v, want true", got["mine"])
+	}
+	if got := public(two.slug); got["mine"] != nil {
+		t.Fatalf("a member of the SIBLING project reads mine = %v, want the field absent", got["mine"])
 	}
 }

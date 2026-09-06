@@ -55,7 +55,8 @@ const rotateAPIKey = `-- name: RotateAPIKey :one
 WITH old AS (
     UPDATE api_key
        SET state = 'rotating', rotating_until = now() + INTERVAL '24 hours'
-     WHERE tenant_id = $1 AND state = 'active'
+     WHERE api_key.tenant_id = $1
+       AND api_key.project_id = $4 AND api_key.state = 'active'
     RETURNING project_id
 )
 INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state)
@@ -67,6 +68,7 @@ type RotateAPIKeyParams struct {
 	TenantID   int64
 	Prefix     string
 	SecretHash []byte
+	ProjectID  int64
 }
 
 type RotateAPIKeyRow struct {
@@ -75,9 +77,15 @@ type RotateAPIKeyRow struct {
 	CreatedAt pgtype.Timestamptz
 }
 
-// Atomic: set old key to rotating, insert new key, return new key.
+// Atomic: set the project's old key to rotating, insert the new one, return it.
+// Scoped to one project: a workspace's other projects keep their keys.
 func (q *Queries) RotateAPIKey(ctx context.Context, arg RotateAPIKeyParams) (RotateAPIKeyRow, error) {
-	row := q.db.QueryRow(ctx, rotateAPIKey, arg.TenantID, arg.Prefix, arg.SecretHash)
+	row := q.db.QueryRow(ctx, rotateAPIKey,
+		arg.TenantID,
+		arg.Prefix,
+		arg.SecretHash,
+		arg.ProjectID,
+	)
 	var i RotateAPIKeyRow
 	err := row.Scan(&i.ID, &i.Prefix, &i.CreatedAt)
 	return i, err

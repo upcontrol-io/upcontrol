@@ -124,16 +124,30 @@ components:
         email: { type: string, format: email }
         initials: { type: string, example: "AK" }
         plan: { $ref: "#/components/schemas/Plan" }
-        # The member's role in this workspace (from tenant_member). Absent for
-        # accounts predating roles; `notify` gates every management write.
+        # The person's role in the CURRENT project (from project_member), not a
+        # standing rank in the workspace: switching projects can change it. The
+        # project's workspace owner always answers `login`; `notify` gates every
+        # management write.
         role: { type: string, enum: [notify, login] }
     Project:
       type: object
-      required: [id, domain, createdAt]
+      required: [id, domain, createdAt, owned]
       properties:
         id: { type: string, example: "prj_1" }
         domain: { type: string, example: "example.com" }
         createdAt: { type: string, format: date-time }
+        owned:
+          type: boolean
+          description: >-
+            Whether the session's person owns the workspace this project lives
+            in. False inside a project somebody else owns, where the plan is a
+            fact rather than a purchase and the owner-only doors are closed.
+        ownerEmail:
+          type: string
+          format: email
+          description: >-
+            The workspace owner's address, sent for every project so a guest
+            card can name whose it is.
     MeResponse:
       type: object
       required: [account, project]
@@ -146,16 +160,25 @@ components:
           description: >-
             The tenant's current project, or null when the tenant has no projects
             (possible after a lost claim race or deleting the last project; Decision 15).
-    # One row of GET /v1/projects. The id is the same public-id encoding
-    # /v1/me's project carries, so the front's "current row" is an equality
-    # check against me.project.id — no second source of that fact here.
+    # One row of GET /v1/projects: every project the person can reach, own ones
+    # first, then the ones they were invited to. The id is the same public-id
+    # encoding /v1/me's project carries, so the front's "current row" is an
+    # equality check against me.project.id — no second source of that fact here.
     ProjectListItem:
       type: object
-      required: [id, domain, createdAt]
+      required: [id, domain, createdAt, owned, role]
       properties:
         id: { type: string, example: "6f9619ff8b86d97111d1c1e4bba1f0b2" }
         domain: { type: string, example: "example.com" }
         createdAt: { type: string, format: date-time }
+        owned:
+          type: boolean
+          description: Whether the caller owns the workspace this project lives in.
+        role: { $ref: "#/components/schemas/RecipientRole" }
+        ownerEmail:
+          type: string
+          format: email
+          description: The workspace owner's address, so a guest row can name whose project it is.
 
     # --- dashboard / monitors ----------------------------------------------
     HealthStatus:
@@ -459,6 +482,11 @@ components:
           description: Present when this person is a verified Telegram recipient.
         role: { $ref: "#/components/schemas/RecipientRole" }
         status: { type: string, enum: [active, pending] }
+        owner:
+          type: boolean
+          description: >-
+            Present and true on the workspace owner's row, which has no role
+            control and cannot be removed.
     TelegramInvite:
       type: object
       required: [id, status]
@@ -862,6 +890,12 @@ components:
       required: [plan, httpChecks, logWindow, incidentHistoryDays]
       properties:
         plan: { $ref: "#/components/schemas/Plan" }
+        owned:
+          type: boolean
+          description: >
+            Whether the caller owns the workspace whose plan this is; false
+            inside a project somebody else owns, where the plan is a fact, not
+            a purchase.
         minIntervalSec:
           type: integer
           example: 300
@@ -1683,7 +1717,8 @@ paths:
       description: >
         Checks, incidents (with their frozen log slices), channels and people.
         Secrets are never included: an export is a copy of the record, not of
-        the credentials.
+        the credentials. The workspace owner only: a takeout is the whole
+        account, which a guest invited to one project may not read.
       responses:
         "200":
           description: OK
@@ -1691,6 +1726,11 @@ paths:
             application/json:
               schema: { type: object }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Not the workspace owner (`owner_only`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/project:
     delete:
@@ -1710,9 +1750,9 @@ paths:
         The project's STATUS PAGE is not destroyed. It moves to a fresh
         unclaimed tenant, keeping its slug and its address, so a link somebody
         already holds still resolves and anyone may claim the page again
-        through `POST /v1/claim`. An ownerless page alerts nobody (channels are
-        tenant-scoped and stay with the account) and stops probing; the reaper
-        collects it if nobody claims it.
+        through `POST /v1/claim`. Its channels, invites and team rows are
+        removed with the project; the released page alerts nobody and stops
+        probing, and the reaper collects it if nobody claims it.
       responses:
         "200":
           description: Deleted. `accountDeleted` true means the session cookie was cleared too.
@@ -1724,16 +1764,27 @@ paths:
                 properties:
                   accountDeleted: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >-
+            Not the workspace owner (`owner_only`). A guest invited to the
+            project, even with the `login` role, cannot delete it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/projects:
     get:
       tags: [account]
-      summary: Every project in this tenant, oldest first.
+      summary: Every project the caller can reach, their own first.
       description: >
-        The projects axis (plan-limited: Free 1, Indie 2, Growth 5, Agency 10,
-        self-hosted unlimited). No `current` flag rides these rows: the
-        current project's id already comes from /v1/me, and a second source
-        for the same fact is how the two start disagreeing.
+        Their own workspace's projects first, oldest first, then the ones they
+        were invited to. Each row carries `owned`, the caller's `role` in that
+        project and the workspace's `ownerEmail`, so a guest row can say whose
+        project it is. The projects axis (plan-limited: Free 1, Indie 2, Growth
+        5, Agency 10, self-hosted unlimited) counts only the caller's own.
+        No `current` flag rides these rows: the current project's id already
+        comes from /v1/me, and a second source for the same fact is how the two
+        start disagreeing.
       responses:
         "200":
           description: OK
@@ -1749,13 +1800,14 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [account]
-      summary: Create a project in this tenant and switch the session to it.
+      summary: Create a project in the caller's own workspace and switch the session to it.
       description: >
-        Provisions what a project needs to receive logs from the first
-        minute: the project row, its project_seq and an active API key. The
-        plan gate runs first (402 with the cheapest lifting plan in
-        `upgrade.plan`); on success the session's current project points at
-        the new row.
+        Always in the caller's OWN workspace, created on first use when they
+        have none: a project is never added to somebody else's. Provisions what
+        a project needs to receive logs from the first minute: the project row,
+        its project_seq and an active API key. That workspace's plan is the
+        gate and it runs first (402 with the cheapest lifting plan in
+        `upgrade.plan`); on success the session points at the new project.
       requestBody:
         required: true
         content:
@@ -1784,14 +1836,15 @@ paths:
   /v1/project/switch:
     post:
       tags: [account]
-      summary: Point this session at another of the tenant's projects.
+      summary: Point this session at any project the caller can reach.
       description: >
-        The switcher's per-row action. The id must be one of this tenant's
-        projects (as GET /v1/projects listed it); anything else, whether
-        another tenant's, stale or unknown, is the same 404 `unknown_project`,
-        so the endpoint never confirms which ids exist. Single-user
-        (self-host) sessions have no session row: the call answers 204
-        without writing.
+        The switcher's per-row action. The id must be one GET /v1/projects
+        listed — their own or one they were invited to; the session's workspace
+        follows the project, so switching into a shared one moves the whole
+        scope with it. Anything else, whether a stranger's, stale or unknown,
+        is the same 404 `unknown_project`, so the endpoint never confirms which
+        ids exist. Single-user (self-host) sessions have no session row: the
+        call answers 204 without writing.
       requestBody:
         required: true
         content:
@@ -2021,6 +2074,10 @@ paths:
     post:
       tags: [alerts]
       summary: Invite a person (role chosen at invite, default notify).
+      description: >
+        The invite lands in the session's CURRENT project, not in the whole
+        workspace: a teammate sees the projects they were invited to and
+        nothing else.
       requestBody:
         required: true
         content:

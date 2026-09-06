@@ -322,13 +322,13 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
-	var tenantID int64
+	var tenantID, projectID int64
 	var role string
 	var invitePersonID *int64 // the person row a bound link was minted for
 	if err := tx.QueryRow(ctx,
 		`UPDATE telegram_invite SET redeemed_at = now()
 		  WHERE token_hash = $1 AND redeemed_at IS NULL AND expires_at > now()
-		 RETURNING tenant_id, role, person_id`, hash).Scan(&tenantID, &role, &invitePersonID); err != nil {
+		 RETURNING tenant_id, project_id, role, person_id`, hash).Scan(&tenantID, &projectID, &role, &invitePersonID); err != nil {
 		b.send(msg.Chat.ID, "This invite link is no longer valid. Ask the project owner for a fresh one from the Alerts screen.")
 		return
 	}
@@ -366,11 +366,11 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		// The channel's label is the group's own title; a titleless group
 		// stores NULL, so the row falls back to the target.
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, kind, target, label)
-			 SELECT gen_random_uuid(), $1, 'telegram', $2, $3
+			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target, label)
+			 SELECT gen_random_uuid(), $1, $2, 'telegram', $3, $4
 			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel
-			                    WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2)`,
-			tenantID, strconv.FormatInt(msg.Chat.ID, 10), nullableLabel(msg.Chat.Title)); err != nil {
+			                    WHERE project_id = $2 AND kind = 'telegram' AND target = $3)`,
+			tenantID, projectID, strconv.FormatInt(msg.Chat.ID, 10), nullableLabel(msg.Chat.Title)); err != nil {
 			b.log.Warn("telegram: could not add group channel", "err", err)
 			b.send(msg.Chat.ID, "Something went wrong connecting this group. Try the link again.")
 			return
@@ -397,8 +397,9 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		// identity — person carries e-mail, telegram_id AND google_sub, and
 		// the table's CHECK lets a google_sub row live without an e-mail, so
 		// either one is a login identity somebody signs in with and is never
-		// absorbed. A tenant_member row ANYWHERE, this tenant included, says
-		// the same thing: that row is a live teammate, and absorbing it would
+		// absorbed. A project_member row ANYWHERE, this project included, and a
+		// workspace they own, say the same thing: that row is a live teammate,
+		// and absorbing it would
 		// delete their person row, cascade their membership and session, and
 		// hand their Telegram to the invitee — who would then sign in AS them
 		// through /v1/auth/telegram, which resolves a session by telegram_id
@@ -415,7 +416,8 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		var holderHasLogin, holderIsMember bool
 		holderErr := tx.QueryRow(ctx,
 			`SELECT p.id, p.email IS NOT NULL OR p.google_sub IS NOT NULL,
-			        EXISTS (SELECT 1 FROM tenant_member tm WHERE tm.person_id = p.id)
+			        EXISTS (SELECT 1 FROM project_member pm WHERE pm.person_id = p.id)
+			        OR EXISTS (SELECT 1 FROM tenant t WHERE t.owner_person_id = p.id)
 			   FROM person p WHERE p.telegram_id = $1 AND p.id <> $2`,
 			msg.From.ID, personID).Scan(&holderID, &holderHasLogin, &holderIsMember)
 		switch {
@@ -477,19 +479,20 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		// Existing members keep the role they have (ON CONFLICT DO NOTHING);
 		// a re-invite is not a way to re-role anybody.
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, $3, 'active')
-			 ON CONFLICT (tenant_id, person_id) DO NOTHING`, tenantID, personID, role); err != nil {
+			`INSERT INTO project_member (project_id, person_id, tenant_id, role, status)
+			 VALUES ($1, $2, $3, $4, 'active')
+			 ON CONFLICT DO NOTHING`, projectID, personID, tenantID, role); err != nil {
 			b.log.Warn("telegram: member insert failed", "err", err)
 		}
 	}
 	// The channel's label is the person's name plus @username; neither stores
 	// NULL, so the row falls back to the target.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target, recipient_person_id, label)
-		 SELECT gen_random_uuid(), $1, 'telegram', $2, $3, $4
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target, recipient_person_id, label)
+		 SELECT gen_random_uuid(), $1, $2, 'telegram', $3, $4, $5
 		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel
-		                    WHERE tenant_id = $1 AND kind = 'telegram' AND target = $2)`,
-		tenantID, strconv.FormatInt(msg.Chat.ID, 10), personID, nullableLabel(inviteLabel(name, msg.From.Username))); err != nil {
+		                    WHERE project_id = $2 AND kind = 'telegram' AND target = $3)`,
+		tenantID, projectID, strconv.FormatInt(msg.Chat.ID, 10), personID, nullableLabel(inviteLabel(name, msg.From.Username))); err != nil {
 		b.log.Warn("telegram: could not add channel", "err", err)
 		b.send(msg.Chat.ID, "Something went wrong connecting this chat. Try the link again.")
 		return
@@ -505,7 +508,7 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 
 // mergeFork folds a telegram-only person row into the person the invite is
 // bound to, inside the caller's transaction. Seven FKs reference person(id):
-// tenant_member.person_id, session.person_id, telegram_invite.invited_by and
+// project_member.person_id, session.person_id, telegram_invite.invited_by and
 // telegram_invite.person_id all CASCADE and leave with the row, and
 // web_visitor.person_id is ON DELETE SET NULL, so the analytics row survives
 // the DELETE and reads as anonymous again. The merge does NOT carry that
@@ -518,7 +521,7 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 //
 // An invite grants authority over ONE tenant, so identity does not follow the
 // fork into tenants the invite never named — deleteRecipient drops a member's
-// tenant_member row and telegram channel while leaving their acks behind, so
+// project_member row and telegram channel while leaving their acks behind, so
 // a fork CAN still hold rows in a tenant this invite says nothing about.
 // Inside tenantID rows are repointed at the survivor; outside it the channel
 // is deleted and the ack is NULLed, each for the reason at its statement.
@@ -605,20 +608,43 @@ func nullableLabel(label string) any {
 	return nil
 }
 
-// memberForChat resolves the presser AND the chat's tenant in one round trip:
-// the presser must be a member of the tenant whose alerts land here.
-func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, name string) {
-	err := b.pool.Raw().QueryRow(ctx,
-		`SELECT p.id, ac.tenant_id, p.name
+// memberForChat resolves the presser AND the chat's projects in one round
+// trip: every project this chat is a destination of, within the workspace of
+// its first channel, that the presser owns or holds an active membership in.
+// A chat connected to two projects answers for both. The owner has no
+// project_member row — ownership is a column on the workspace.
+func (b *bot) memberForChat(ctx context.Context, chatID, fromID int64) (personID, tenantID int64, projectIDs []int64, name string) {
+	rows, err := b.pool.Raw().Query(ctx,
+		`SELECT p.id, ac.tenant_id, ac.project_id, p.name
 		   FROM alert_channel ac
 		   JOIN person p ON p.telegram_id = $2
-		   JOIN tenant_member tm ON tm.person_id = p.id AND tm.tenant_id = ac.tenant_id
-		  WHERE ac.kind = 'telegram' AND ac.target = $1 LIMIT 1`,
-		strconv.FormatInt(chatID, 10), fromID).Scan(&personID, &tenantID, &name)
+		   JOIN tenant t ON t.id = ac.tenant_id
+		  WHERE ac.kind = 'telegram' AND ac.target = $1
+		    AND (t.owner_person_id = p.id
+		         OR EXISTS (SELECT 1 FROM project_member pm
+		                     WHERE pm.person_id = p.id AND pm.project_id = ac.project_id
+		                       AND pm.status = 'active'))
+		  ORDER BY ac.id`,
+		strconv.FormatInt(chatID, 10), fromID)
 	if err != nil {
-		return 0, 0, ""
+		return 0, 0, nil, ""
 	}
-	return personID, tenantID, name
+	defer rows.Close()
+	for rows.Next() {
+		var pid, tid, prid int64
+		var n string
+		if rows.Scan(&pid, &tid, &prid, &n) != nil {
+			continue
+		}
+		// The first channel's workspace decides: a chat that also serves a
+		// second workspace's project is not that workspace's here.
+		if tenantID != 0 && tid != tenantID {
+			continue
+		}
+		personID, tenantID, name = pid, tid, n
+		projectIDs = append(projectIDs, prid)
+	}
+	return personID, tenantID, projectIDs, name
 }
 
 // handleHelp answers /help: the command list plus the Open Mini App button.
@@ -634,10 +660,11 @@ func (b *bot) handleHelp(msg *tgMessage) {
 			"Acknowledge and Resolve buttons arrive on the alerts themselves.")
 }
 
-// handleStatus answers /status; only a member of the chat's tenant gets an
-// answer, anyone else learns nothing.
+// handleStatus answers /status; only a member of the chat's project gets an
+// answer, anyone else learns nothing. A chat reports the projects it is
+// connected to, not the whole workspace.
 func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
-	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	_, tenantID, projectIDs, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
@@ -645,8 +672,8 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	rows, err := b.pool.Raw().Query(ctx,
 		`SELECT mf.status, count(*), array_agg(m.name ORDER BY m.name) FILTER (WHERE mf.status <> 'ok')
 		   FROM monitor m LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
-		  WHERE m.tenant_id = $1 AND m.paused = false
-		  GROUP BY mf.status`, tenantID)
+		  WHERE m.tenant_id = $1 AND m.project_id = ANY($2) AND m.paused = false
+		  GROUP BY mf.status`, tenantID, projectIDs)
 	if err != nil {
 		b.send(msg.Chat.ID, "Could not read the checks right now.")
 		return
@@ -673,7 +700,7 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 	}
 	// Incidents are their own question: a detector incident has no monitor,
 	// so zero checks can still be on fire.
-	incidents, incidentsOK := b.openIncidentTitles(ctx, tenantID)
+	incidents, incidentsOK := b.openIncidentTitles(ctx, tenantID, projectIDs)
 	switch {
 	case up+failing+nodata == 0:
 		b.send(msg.Chat.ID, "No checks yet — nothing is being monitored."+incidentsLine(incidents, incidentsOK))
@@ -693,16 +720,17 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 
 // openIncidentTitles reads the still-open incidents; ok=false means the read
 // failed, which /status says rather than implying "there are none".
-func (b *bot) openIncidentTitles(ctx context.Context, tenantID int64) (titles []string, ok bool) {
+func (b *bot) openIncidentTitles(ctx context.Context, tenantID int64, projectIDs []int64) (titles []string, ok bool) {
 	rows, err := b.pool.Raw().Query(ctx,
 		`SELECT title FROM incident
-		  WHERE tenant_id = $1 AND resolved_at IS NULL
-		  ORDER BY detected_at DESC`, tenantID)
+		  WHERE tenant_id = $1 AND project_id = ANY($2) AND resolved_at IS NULL
+		  ORDER BY detected_at DESC`, tenantID, projectIDs)
 	if err == nil {
 		titles, err = pgx.CollectRows(rows, pgx.RowTo[string])
 	}
 	if err != nil {
-		b.log.Warn("telegram: open incident read failed", "err", err, "tenant_id", tenantID)
+		b.log.Warn("telegram: open incident read failed", "err", err,
+			"tenant_id", tenantID, "project_ids", projectIDs)
 		return nil, false
 	}
 	return titles, true
@@ -748,7 +776,7 @@ func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 		b.send(msg.Chat.ID, "How long? Try /mute 30m, /mute 2h or /mute 1d (up to 7d).")
 		return
 	}
-	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	personID, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
@@ -768,7 +796,7 @@ func (b *bot) handleMute(ctx context.Context, msg *tgMessage, arg string) {
 // handleUnmute lifts the mute early AND un-parks what the window deferred:
 // the worker defers muted alerts to the mute's end, it does not drop them.
 func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
-	personID, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	personID, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
@@ -807,7 +835,7 @@ func (b *bot) handleUnmute(ctx context.Context, msg *tgMessage) {
 // handleStop disconnects THIS chat: the destination goes, membership and
 // role stay. A fresh invite link brings the chat back.
 func (b *bot) handleStop(ctx context.Context, msg *tgMessage) {
-	_, tenantID, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
+	_, tenantID, _, _ := b.memberForChat(ctx, msg.Chat.ID, msg.From.ID)
 	if tenantID == 0 {
 		b.send(msg.Chat.ID, notConnected)
 		return
@@ -863,14 +891,14 @@ func (b *bot) handleCallback(ctx context.Context, cb *tgCallback) {
 	}
 	// Authorisation is the person, not the chat: a forwarded message or a
 	// stranger pressing a screenshot's button stops here.
-	personID, tenantID, name := b.memberForChat(ctx, cb.Message.Chat.ID, cb.From.ID)
+	personID, tenantID, projectIDs, name := b.memberForChat(ctx, cb.Message.Chat.ID, cb.From.ID)
 	if personID == 0 {
 		b.answerCallback(cb.ID, "Your Telegram account is not connected to this project.")
 		return
 	}
 	// The id in the payload is attacker-controlled: the incident must belong
-	// to this tenant, whatever the button claims.
-	incID, ok := b.incidentByPublicID(ctx, pubID, tenantID)
+	// to one of this chat's projects, whatever the button claims.
+	incID, ok := b.incidentByPublicID(ctx, pubID, tenantID, projectIDs)
 	if !ok {
 		b.answerCallback(cb.ID, "That incident is not yours.")
 		return
@@ -947,15 +975,16 @@ func parseCallback(data string) (action, id string, ok bool) {
 }
 
 // incidentByPublicID resolves the callback's uuid-hex payload to an incident
-// of THIS tenant, or reports that it is not theirs.
-func (b *bot) incidentByPublicID(ctx context.Context, pubHex string, tenantID int64) (int64, bool) {
+// of one of THIS chat's projects, or reports that it is not theirs.
+func (b *bot) incidentByPublicID(ctx context.Context, pubHex string, tenantID int64, projectIDs []int64) (int64, bool) {
 	raw, err := hex.DecodeString(pubHex)
 	if err != nil || len(raw) != 16 {
 		return 0, false
 	}
 	var id int64
 	err = b.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM incident WHERE public_id = $1 AND tenant_id = $2`, raw, tenantID).Scan(&id)
+		`SELECT id FROM incident WHERE public_id = $1 AND tenant_id = $2 AND project_id = ANY($3)`,
+		raw, tenantID, projectIDs).Scan(&id)
 	return id, err == nil
 }
 

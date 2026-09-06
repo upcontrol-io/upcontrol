@@ -196,8 +196,8 @@ exists, the queries around it may exist, but no binary writes it in this
 repo.
 
 **Postgres, system of record**: alert_channel, api_key, ingest_batch,
-monitor, monitor_facts, monitor_schedule, person, project, project_seq,
-session, source_connection, status_page, tenant, tenant_member,
+monitor, monitor_facts, monitor_schedule, person, project, project_member,
+project_seq, session, source_connection, status_page, tenant,
 webhook_seen (ucapi); delivery_attempt (ucworker);
 delivery_queue, incident, incident_slice, incident_update
 (ucapi+ucworker); error_alert_state (ucworker); install_token,

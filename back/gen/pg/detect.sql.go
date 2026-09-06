@@ -27,17 +27,23 @@ func (q *Queries) CloseIncidentByFingerprint(ctx context.Context, arg CloseIncid
 }
 
 const getErrorAlertState = `-- name: GetErrorAlertState :one
-SELECT last_alerted FROM error_alert_state WHERE tenant_id = $1 AND fingerprint = $2 AND kind = $3
+SELECT last_alerted FROM error_alert_state WHERE tenant_id = $1 AND project_id = $2 AND fingerprint = $3 AND kind = $4
 `
 
 type GetErrorAlertStateParams struct {
 	TenantID    int64
+	ProjectID   int64
 	Fingerprint int64
 	Kind        string
 }
 
 func (q *Queries) GetErrorAlertState(ctx context.Context, arg GetErrorAlertStateParams) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, getErrorAlertState, arg.TenantID, arg.Fingerprint, arg.Kind)
+	row := q.db.QueryRow(ctx, getErrorAlertState,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.Fingerprint,
+		arg.Kind,
+	)
 	var last_alerted pgtype.Timestamptz
 	err := row.Scan(&last_alerted)
 	return last_alerted, err

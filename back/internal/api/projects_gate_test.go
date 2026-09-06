@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
@@ -38,14 +39,23 @@ func openProjectsGateDB(t *testing.T) *pg.Pool {
 	return pool
 }
 
-// seedPlanTenant inserts a tenant on the plan holding count projects.
+// seedPlanTenant inserts a tenant on the plan holding count projects, owned
+// by a person of its own: everything a screen reads now resolves through the
+// reader, so a workspace with no owner reaches none of its projects.
 func seedPlanTenant(t *testing.T, pool *pg.Pool, plan string, count int) int64 {
 	t.Helper()
 	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+	var ownerID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Gate') RETURNING id`,
+		fmt.Sprintf("gate-%d@example.com", uniq)).Scan(&ownerID); err != nil {
+		t.Fatalf("seed owner for %s: %v", plan, err)
+	}
 	var tenantID int64
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name, plan) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
-		fmt.Sprintf("projects-gate-%d", time.Now().UnixNano()), plan).Scan(&tenantID); err != nil {
+		`INSERT INTO tenant (public_id, name, plan, owner_person_id) VALUES (gen_random_uuid(), $1, $2, $3) RETURNING id`,
+		fmt.Sprintf("projects-gate-%d", uniq), plan, ownerID).Scan(&tenantID); err != nil {
 		t.Fatalf("seed tenant on %s: %v", plan, err)
 	}
 	for i := 0; i < count; i++ {
@@ -56,6 +66,19 @@ func seedPlanTenant(t *testing.T, pool *pg.Pool, plan string, count int) int64 {
 		}
 	}
 	return tenantID
+}
+
+// planTenantAPI is a writeAPI whose fixed identity is the workspace's owner:
+// the handlers resolve the current project off it, as a cookie session would.
+func planTenantAPI(t *testing.T, pool *pg.Pool, tenantID int64) *writeAPI {
+	t.Helper()
+	var ownerID int64
+	if err := pool.Raw().QueryRow(context.Background(),
+		`SELECT owner_person_id FROM tenant WHERE id = $1`, tenantID).Scan(&ownerID); err != nil {
+		t.Fatalf("read the workspace owner: %v", err)
+	}
+	return &writeAPI{pool: pool, sess: session.New(pool, session.DefaultTTL, nil).
+		WithFixedIdentity(ownerID, tenantID)}
 }
 
 func TestProjectsRefusal(t *testing.T) {

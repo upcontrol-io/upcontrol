@@ -74,7 +74,7 @@ func (q *Queries) EnqueueDeliveryAt(ctx context.Context, arg EnqueueDeliveryAtPa
 
 const getChannelForDelivery = `-- name: GetChannelForDelivery :one
 SELECT ac.id, ac.public_id, ac.kind, ac.target, ac.breaker_open_until,
-       ac.recipient_person_id, ac.muted_until
+       ac.recipient_person_id, ac.muted_until, ac.project_id
   FROM alert_channel ac
  WHERE ac.id = $1
 `
@@ -87,6 +87,7 @@ type GetChannelForDeliveryRow struct {
 	BreakerOpenUntil  pgtype.Timestamptz
 	RecipientPersonID *int64
 	MutedUntil        pgtype.Timestamptz
+	ProjectID         int64
 }
 
 func (q *Queries) GetChannelForDelivery(ctx context.Context, id int64) (GetChannelForDeliveryRow, error) {
@@ -100,18 +101,19 @@ func (q *Queries) GetChannelForDelivery(ctx context.Context, id int64) (GetChann
 		&i.BreakerOpenUntil,
 		&i.RecipientPersonID,
 		&i.MutedUntil,
+		&i.ProjectID,
 	)
 	return i, err
 }
 
 const getEmailChannelTarget = `-- name: GetEmailChannelTarget :one
-SELECT target FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' ORDER BY created_at LIMIT 1
+SELECT target FROM alert_channel WHERE project_id = $1 AND kind = 'email' ORDER BY created_at LIMIT 1
 `
 
 // The backup address a channel fails over to when its own breaker trips. NULL
-// if the tenant has no email channel (the delivery then goes dead).
-func (q *Queries) GetEmailChannelTarget(ctx context.Context, tenantID int64) (string, error) {
-	row := q.db.QueryRow(ctx, getEmailChannelTarget, tenantID)
+// if the project has no email channel (the delivery then goes dead).
+func (q *Queries) GetEmailChannelTarget(ctx context.Context, projectID int64) (string, error) {
+	row := q.db.QueryRow(ctx, getEmailChannelTarget, projectID)
 	var target string
 	err := row.Scan(&target)
 	return target, err

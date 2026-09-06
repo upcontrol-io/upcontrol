@@ -27,6 +27,22 @@ func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID int64) (in
 	return count, err
 }
 
+const isTenantOwner = `-- name: IsTenantOwner :one
+SELECT EXISTS (SELECT 1 FROM tenant WHERE id = $1 AND owner_person_id = $2)
+`
+
+type IsTenantOwnerParams struct {
+	TenantID int64
+	PersonID *int64
+}
+
+func (q *Queries) IsTenantOwner(ctx context.Context, arg IsTenantOwnerParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isTenantOwner, arg.TenantID, arg.PersonID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listProjectsByTenant = `-- name: ListProjectsByTenant :many
 SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id
 `
@@ -62,4 +78,91 @@ func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+const listProjectsForPerson = `-- name: ListProjectsForPerson :many
+SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
+       COALESCE(t.owner_person_id = $1, false)::bool AS owned,
+       (CASE WHEN t.owner_person_id = $1 THEN 'login' ELSE m.role END)::text AS role,
+       o.email AS owner_email
+  FROM project p
+  JOIN tenant t ON t.id = p.tenant_id
+  LEFT JOIN person o ON o.id = t.owner_person_id
+  LEFT JOIN project_member m ON m.project_id = p.id AND m.person_id = $1 AND m.status = 'active'
+ WHERE t.owner_person_id = $1 OR m.person_id IS NOT NULL
+ ORDER BY owned DESC, p.id
+`
+
+type ListProjectsForPersonRow struct {
+	ID         int64
+	PublicID   pgtype.UUID
+	Domain     string
+	CreatedAt  pgtype.Timestamptz
+	TenantID   int64
+	Owned      bool
+	Role       string
+	OwnerEmail *string
+}
+
+// Every project this person can reach: their own workspace's first, then the
+// ones they were invited to, oldest first within each. owner_email names whose
+// workspace a guest row lives in.
+func (q *Queries) ListProjectsForPerson(ctx context.Context, personID *int64) ([]ListProjectsForPersonRow, error) {
+	rows, err := q.db.Query(ctx, listProjectsForPerson, personID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListProjectsForPersonRow
+	for rows.Next() {
+		var i ListProjectsForPersonRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.Domain,
+			&i.CreatedAt,
+			&i.TenantID,
+			&i.Owned,
+			&i.Role,
+			&i.OwnerEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const tenantOwner = `-- name: TenantOwner :one
+SELECT p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
+  FROM tenant t JOIN person p ON p.id = t.owner_person_id
+ WHERE t.id = $1
+`
+
+type TenantOwnerRow struct {
+	ID               int64
+	PublicID         pgtype.UUID
+	Email            *string
+	Name             string
+	TelegramID       *int64
+	TelegramUsername *string
+}
+
+// The workspace's owner as a person row: the Team list prepends it, since
+// ownership is a column on the workspace and never a membership row.
+func (q *Queries) TenantOwner(ctx context.Context, id int64) (TenantOwnerRow, error) {
+	row := q.db.QueryRow(ctx, tenantOwner, id)
+	var i TenantOwnerRow
+	err := row.Scan(
+		&i.ID,
+		&i.PublicID,
+		&i.Email,
+		&i.Name,
+		&i.TelegramID,
+		&i.TelegramUsername,
+	)
+	return i, err
 }

@@ -19,6 +19,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 
+	"go.upcontrol.io/back/internal/account/auth"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -53,25 +54,82 @@ func upgradePlanForProjects(ctx context.Context, pool *pg.Pool, count int64) str
 	}))
 }
 
+// scope is what a request acts on: the session's person, the current
+// project and its workspace. ProjectID is 0 when the person reaches no
+// project in the session's workspace (removed from every team, or a
+// workspace with no project yet).
+type scope struct {
+	PersonID  int64
+	TenantID  int64 // the current project's workspace: s.TenantID
+	ProjectID int64
+	Owned     bool   // PersonID owns TenantID
+	Role      string // "login" for the owner or an Admin member, "notify" for a Member, "" when ProjectID is 0
+}
+
+// resolveScope answers all four facts in two reads. Every failure reads as
+// "reaches nothing", which is what the gates below already refuse on.
+func resolveScope(ctx context.Context, pool *pg.Pool, s sqlc.Session) scope {
+	sc := scope{PersonID: s.PersonID, TenantID: s.TenantID}
+	q := pool.Queries()
+	var pick int64
+	if s.ProjectID != nil {
+		pick = *s.ProjectID
+	}
+	sc.ProjectID, _ = q.ReachableProjectInTenant(ctx, sqlc.ReachableProjectInTenantParams{
+		Pick: pick, TenantID: s.TenantID, PersonID: &sc.PersonID,
+	})
+	// ProjectScope answers ownership and role together; only a person who
+	// reaches no project here needs the ownership question on its own.
+	if sc.ProjectID != 0 {
+		if row, err := q.ProjectScope(ctx, sqlc.ProjectScopeParams{
+			PersonID: &sc.PersonID, ProjectID: sc.ProjectID,
+		}); err == nil {
+			sc.Owned, sc.Role = row.Owned, row.Role
+		}
+		return sc
+	}
+	sc.Owned, _ = q.IsTenantOwner(ctx, sqlc.IsTenantOwnerParams{
+		TenantID: s.TenantID, PersonID: &sc.PersonID,
+	})
+	return sc
+}
+
+// canManage: the owner of the workspace, or an Admin of the current project.
+// A Member (notify) reads.
+func (sc scope) canManage() bool { return sc.Owned || sc.Role == "login" }
+
+// canManage is the same question for a handler holding only the session.
+func canManage(ctx context.Context, pool *pg.Pool, s sqlc.Session) bool {
+	return resolveScope(ctx, pool, s).canManage()
+}
+
+// isOwner gates the two acts nobody but the workspace's owner may perform:
+// deleting the project and taking the account's data out.
+func isOwner(ctx context.Context, pool *pg.Pool, s sqlc.Session) bool {
+	personID := s.PersonID
+	owned, _ := pool.Queries().IsTenantOwner(ctx, sqlc.IsTenantOwnerParams{
+		TenantID: s.TenantID, PersonID: &personID,
+	})
+	return owned
+}
+
 // currentProjectID resolves the session's current project within tenantID:
 // the session's pick, but only when the session belongs to that tenant
 // (cross-tenant discipline: a foreign or empty session never bends the
-// answer), else the tenant's lowest project id (Decision 14 — single-user
-// self-host and an unset or stale pick all land there). The caller's
-// gate-authenticated tenantID is the tenant, never s.TenantID: a failed
-// session re-read must not turn the query into tenant 0. 0 means the tenant
-// has no project; every caller treats that as the no-project miss it already
-// tolerates. A dead read is 0, same thing.
+// answer) and the person still reaches it, else the lowest project there
+// they reach. The caller's gate-authenticated tenantID is the tenant, never
+// s.TenantID: a failed session re-read must not turn the query into tenant 0.
+// 0 means the person reaches no project there; every caller treats that as
+// the no-project miss it already tolerates. A dead read is 0, same thing.
 func currentProjectID(ctx context.Context, pool *pg.Pool, s sqlc.Session, tenantID int64) int64 {
 	var pick int64
 	if s.TenantID == tenantID && s.ProjectID != nil {
 		pick = *s.ProjectID
 	}
-	var id int64
-	_ = pool.Raw().QueryRow(ctx,
-		`SELECT COALESCE((SELECT id FROM project WHERE id = $2 AND tenant_id = $1),
-				(SELECT min(id) FROM project WHERE tenant_id = $1), 0)`,
-		tenantID, pick).Scan(&id)
+	personID := s.PersonID
+	id, _ := pool.Queries().ReachableProjectInTenant(ctx, sqlc.ReachableProjectInTenantParams{
+		Pick: pick, TenantID: tenantID, PersonID: &personID,
+	})
 	return id
 }
 
@@ -111,23 +169,32 @@ func (h *writeAPI) projectsRefusal(ctx context.Context, tenantID int64) (msg, pl
 	return projectsRefusalQ(ctx, h.pool, h.pool.Queries(), tenantID)
 }
 
-// listProjects answers GET /v1/projects: every project in the tenant, oldest
-// first, no `current` flag — /v1/me owns that fact, and a second source for
-// it is how the two start disagreeing. The ids are the same uuidStr encoding
+// listProjects answers GET /v1/projects: every project this PERSON reaches —
+// their own workspace's first, then the ones they were invited to — no
+// `current` flag, since /v1/me owns that fact and a second source for it is
+// how the two start disagreeing. The ids are the same uuidStr encoding
 // /v1/me's project id uses, so the front's active row is an equality check.
-func (h *writeAPI) listProjects(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	rows, err := h.pool.Queries().ListProjectsByTenant(r.Context(), tenantID)
+func (h *writeAPI) listProjects(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
+	personID := s.PersonID
+	rows, err := h.pool.Queries().ListProjectsForPerson(r.Context(), &personID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	items := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"id":        uuidStr(row.PublicID),
 			"domain":    row.Domain,
 			"createdAt": row.CreatedAt,
-		})
+			"owned":     row.Owned,
+			"role":      row.Role,
+		}
+		// Zero is silence: a workspace with no owner row names nobody.
+		if row.OwnerEmail != nil && *row.OwnerEmail != "" {
+			item["ownerEmail"] = *row.OwnerEmail
+		}
+		items = append(items, item)
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"projects": items})
 }
@@ -142,7 +209,7 @@ func (h *writeAPI) listProjects(w http.ResponseWriter, r *http.Request, tenantID
 // session at the new project (a single-user session has no row; the UPDATE
 // matches nothing there), after the commit: the pick is idempotent and never
 // gates the provisioning.
-func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, tenantID int64, s sqlc.Session) {
+func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 	var req struct {
 		Domain string `json:"domain"`
 	}
@@ -151,6 +218,13 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, tenantI
 		return
 	}
 	ctx := r.Context()
+	// A project is always created in the caller's OWN workspace against their
+	// own plan, whatever guest project they happen to stand in.
+	tenantID, err := auth.OwnTenantID(ctx, h.pool, s.PersonID, h.selfHosted)
+	if err != nil || tenantID == 0 {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	pubID := newUUID()
 	var projectID int64
 	var createdAt pgtype.Timestamptz
@@ -204,25 +278,34 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// The caller may have been standing in somebody else's project: the switch
+	// carries the workspace too, or the session would read the new project
+	// against the guest workspace it came from.
 	if s.ID != 0 {
-		_ = h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
-			ID: s.ID, ProjectID: &projectID,
+		_ = h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
+			ID: s.ID, TenantID: tenantID, ProjectID: &projectID,
 		})
 	}
+	// Their own workspace, by construction; the front names an owner only on
+	// somebody else's card, so no ownerEmail travels here.
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"id":        uuidStr(pubID),
 		"domain":    req.Domain,
 		"createdAt": createdAt,
+		"owned":     true,
+		"role":      "login",
 	})
 }
 
 // switchProject answers POST /v1/project/switch. The id is compared against
-// the tenant's own rows as encoded on the wire (uuidStr), never decoded into
-// a lookup: an id of another tenant, a stale one and an unknown one all read
-// the same 404 unknown_project, so the endpoint confirms nothing about which
-// ids exist. A single-user session (no session row) answers 204 without
-// writing: the resolver's fallback owns its current project there.
-func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, tenantID int64, s sqlc.Session) {
+// the rows this PERSON reaches as encoded on the wire (uuidStr), never
+// decoded into a lookup: a stranger's id, a stale one and an unknown one all
+// read the same 404 unknown_project, so the endpoint confirms nothing about
+// which ids exist. The workspace follows the project — a project reached by
+// invite lives in somebody else's. A single-user session (no session row)
+// answers 204 without writing: the resolver's fallback owns its current
+// project there.
+func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -238,7 +321,8 @@ func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, tenantI
 		return
 	}
 	ctx := r.Context()
-	rows, err := h.pool.Queries().ListProjectsByTenant(ctx, tenantID)
+	personID := s.PersonID
+	rows, err := h.pool.Queries().ListProjectsForPerson(ctx, &personID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -247,8 +331,8 @@ func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, tenantI
 		if uuidStr(row.PublicID) != req.ID {
 			continue
 		}
-		if err := h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
-			ID: s.ID, ProjectID: &row.ID,
+		if err := h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
+			ID: s.ID, TenantID: row.TenantID, ProjectID: &row.ID,
 		}); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return

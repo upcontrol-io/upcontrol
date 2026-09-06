@@ -13,8 +13,13 @@ import (
 
 const listErrorAlertState = `-- name: ListErrorAlertState :many
 SELECT fingerprint, kind, last_alerted FROM error_alert_state
- WHERE tenant_id = $1
+ WHERE tenant_id = $1 AND project_id = $2
 `
+
+type ListErrorAlertStateParams struct {
+	TenantID  int64
+	ProjectID int64
+}
 
 type ListErrorAlertStateRow struct {
 	Fingerprint int64
@@ -22,8 +27,8 @@ type ListErrorAlertStateRow struct {
 	LastAlerted pgtype.Timestamptz
 }
 
-func (q *Queries) ListErrorAlertState(ctx context.Context, tenantID int64) ([]ListErrorAlertStateRow, error) {
-	rows, err := q.db.Query(ctx, listErrorAlertState, tenantID)
+func (q *Queries) ListErrorAlertState(ctx context.Context, arg ListErrorAlertStateParams) ([]ListErrorAlertStateRow, error) {
+	rows, err := q.db.Query(ctx, listErrorAlertState, arg.TenantID, arg.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -44,16 +49,17 @@ func (q *Queries) ListErrorAlertState(ctx context.Context, tenantID int64) ([]Li
 
 const listErrorSubscribedChannels = `-- name: ListErrorSubscribedChannels :many
 
-SELECT id, tenant_id, notify FROM alert_channel
+SELECT id, tenant_id, project_id, notify FROM alert_channel
  WHERE (notify->>'errorLogs')::boolean IS TRUE
     OR (notify->>'repeatingErrorLogs')::boolean IS TRUE
- ORDER BY tenant_id
+ ORDER BY tenant_id, project_id
 `
 
 type ListErrorSubscribedChannelsRow struct {
-	ID       int64
-	TenantID int64
-	Notify   []byte
+	ID        int64
+	TenantID  int64
+	ProjectID int64
+	Notify    []byte
 }
 
 // The error-log scanner's queries (docs/plans/channel-notify-settings.md).
@@ -61,7 +67,7 @@ type ListErrorSubscribedChannelsRow struct {
 // and remember what was already alerted so a persisting error does not page
 // every 60-second tick.
 // Channels that asked to hear about error logs at all. The scanner groups the
-// rows by tenant and reads each channel's window out of `notify` itself.
+// rows by project and reads each channel's window out of `notify` itself.
 func (q *Queries) ListErrorSubscribedChannels(ctx context.Context) ([]ListErrorSubscribedChannelsRow, error) {
 	rows, err := q.db.Query(ctx, listErrorSubscribedChannels)
 	if err != nil {
@@ -71,7 +77,12 @@ func (q *Queries) ListErrorSubscribedChannels(ctx context.Context) ([]ListErrorS
 	var items []ListErrorSubscribedChannelsRow
 	for rows.Next() {
 		var i ListErrorSubscribedChannelsRow
-		if err := rows.Scan(&i.ID, &i.TenantID, &i.Notify); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.ProjectID,
+			&i.Notify,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -83,18 +94,24 @@ func (q *Queries) ListErrorSubscribedChannels(ctx context.Context) ([]ListErrorS
 }
 
 const upsertErrorAlertState = `-- name: UpsertErrorAlertState :exec
-INSERT INTO error_alert_state (tenant_id, fingerprint, kind, last_alerted)
-VALUES ($1, $2, $3, now())
-ON CONFLICT (tenant_id, fingerprint, kind) DO UPDATE SET last_alerted = now()
+INSERT INTO error_alert_state (tenant_id, project_id, fingerprint, kind, last_alerted)
+VALUES ($1, $2, $3, $4, now())
+ON CONFLICT (tenant_id, project_id, fingerprint, kind) DO UPDATE SET last_alerted = now()
 `
 
 type UpsertErrorAlertStateParams struct {
 	TenantID    int64
+	ProjectID   int64
 	Fingerprint int64
 	Kind        string
 }
 
 func (q *Queries) UpsertErrorAlertState(ctx context.Context, arg UpsertErrorAlertStateParams) error {
-	_, err := q.db.Exec(ctx, upsertErrorAlertState, arg.TenantID, arg.Fingerprint, arg.Kind)
+	_, err := q.db.Exec(ctx, upsertErrorAlertState,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.Fingerprint,
+		arg.Kind,
+	)
 	return err
 }

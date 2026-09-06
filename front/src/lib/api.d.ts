@@ -668,7 +668,7 @@ export interface paths {
         };
         /**
          * Everything this account owns, as one JSON document.
-         * @description Checks, incidents (with their frozen log slices), channels and people. Secrets are never included: an export is a copy of the record, not of the credentials.
+         * @description Checks, incidents (with their frozen log slices), channels and people. Secrets are never included: an export is a copy of the record, not of the credentials. The workspace owner only: a takeout is the whole account, which a guest invited to one project may not read.
          */
         get: {
             parameters: {
@@ -689,6 +689,15 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description Not the workspace owner (`owner_only`). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         put?: never;
@@ -713,7 +722,7 @@ export interface paths {
          * Remove the session's current project from the account, releasing its status page.
          * @description Irreversible for the ACCOUNT: the current project leaves it, its monitors stop and the owner's API key is destroyed. Other projects in the tenant are untouched and the session survives, falling back to the tenant's lowest project. When the current project is the LAST one the tenant is deleted too — that is how an account is closed — and only then is the session cookie cleared. `accountDeleted` reports which of the two happened: the caller's project count was read before the write, and a destructive action is the last place to let the client guess.
          *
-         *     The project's STATUS PAGE is not destroyed. It moves to a fresh unclaimed tenant, keeping its slug and its address, so a link somebody already holds still resolves and anyone may claim the page again through `POST /v1/claim`. An ownerless page alerts nobody (channels are tenant-scoped and stay with the account) and stops probing; the reaper collects it if nobody claims it.
+         *     The project's STATUS PAGE is not destroyed. It moves to a fresh unclaimed tenant, keeping its slug and its address, so a link somebody already holds still resolves and anyone may claim the page again through `POST /v1/claim`. Its channels, invites and team rows are removed with the project; the released page alerts nobody and stops probing, and the reaper collects it if nobody claims it.
          */
         delete: {
             parameters: {
@@ -736,6 +745,15 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description Not the workspace owner (`owner_only`). A guest invited to the project, even with the `login` role, cannot delete it. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         options?: never;
@@ -751,8 +769,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Every project in this tenant, oldest first.
-         * @description The projects axis (plan-limited: Free 1, Indie 2, Growth 5, Agency 10, self-hosted unlimited). No `current` flag rides these rows: the current project's id already comes from /v1/me, and a second source for the same fact is how the two start disagreeing.
+         * Every project the caller can reach, their own first.
+         * @description Their own workspace's projects first, oldest first, then the ones they were invited to. Each row carries `owned`, the caller's `role` in that project and the workspace's `ownerEmail`, so a guest row can say whose project it is. The projects axis (plan-limited: Free 1, Indie 2, Growth 5, Agency 10, self-hosted unlimited) counts only the caller's own. No `current` flag rides these rows: the current project's id already comes from /v1/me, and a second source for the same fact is how the two start disagreeing.
          */
         get: {
             parameters: {
@@ -779,8 +797,8 @@ export interface paths {
         };
         put?: never;
         /**
-         * Create a project in this tenant and switch the session to it.
-         * @description Provisions what a project needs to receive logs from the first minute: the project row, its project_seq and an active API key. The plan gate runs first (402 with the cheapest lifting plan in `upgrade.plan`); on success the session's current project points at the new row.
+         * Create a project in the caller's own workspace and switch the session to it.
+         * @description Always in the caller's OWN workspace, created on first use when they have none: a project is never added to somebody else's. Provisions what a project needs to receive logs from the first minute: the project row, its project_seq and an active API key. That workspace's plan is the gate and it runs first (402 with the cheapest lifting plan in `upgrade.plan`); on success the session points at the new project.
          */
         post: {
             parameters: {
@@ -836,8 +854,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Point this session at another of the tenant's projects.
-         * @description The switcher's per-row action. The id must be one of this tenant's projects (as GET /v1/projects listed it); anything else, whether another tenant's, stale or unknown, is the same 404 `unknown_project`, so the endpoint never confirms which ids exist. Single-user (self-host) sessions have no session row: the call answers 204 without writing.
+         * Point this session at any project the caller can reach.
+         * @description The switcher's per-row action. The id must be one GET /v1/projects listed — their own or one they were invited to; the session's workspace follows the project, so switching into a shared one moves the whole scope with it. Anything else, whether a stranger's, stale or unknown, is the same 404 `unknown_project`, so the endpoint never confirms which ids exist. Single-user (self-host) sessions have no session row: the call answers 204 without writing.
          */
         post: {
             parameters: {
@@ -1298,7 +1316,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Invite a person (role chosen at invite, default notify). */
+        /**
+         * Invite a person (role chosen at invite, default notify).
+         * @description The invite lands in the session's CURRENT project, not in the whole workspace: a teammate sees the projects they were invited to and nothing else.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1873,6 +1894,13 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 /** @description notify_role */
                 403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description The tenant holds no project, so there is nothing to keep a board for. */
+                404: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2834,6 +2862,13 @@ export interface components {
             domain: string;
             /** Format: date-time */
             createdAt: string;
+            /** @description Whether the session's person owns the workspace this project lives in. False inside a project somebody else owns, where the plan is a fact rather than a purchase and the owner-only doors are closed. */
+            owned: boolean;
+            /**
+             * Format: email
+             * @description The workspace owner's address, sent for every project so a guest card can name whose it is.
+             */
+            ownerEmail?: string;
         };
         MeResponse: {
             account: components["schemas"]["Account"];
@@ -2847,6 +2882,14 @@ export interface components {
             domain: string;
             /** Format: date-time */
             createdAt: string;
+            /** @description Whether the caller owns the workspace this project lives in. */
+            owned: boolean;
+            role: components["schemas"]["RecipientRole"];
+            /**
+             * Format: email
+             * @description The workspace owner's address, so a guest row can name whose project it is.
+             */
+            ownerEmail?: string;
         };
         /** @enum {string} */
         HealthStatus: "ok" | "check" | "down" | "nodata";
@@ -3047,6 +3090,8 @@ export interface components {
             role: components["schemas"]["RecipientRole"];
             /** @enum {string} */
             status: "active" | "pending";
+            /** @description Present and true on the workspace owner's row, which has no role control and cannot be removed. */
+            owner?: boolean;
         };
         TelegramInvite: {
             id: string;
@@ -3290,6 +3335,8 @@ export interface components {
         };
         PlanResponse: {
             plan: components["schemas"]["Plan"];
+            /** @description Whether the caller owns the workspace whose plan this is; false inside a project somebody else owns, where the plan is a fact, not a purchase. */
+            owned?: boolean;
             /**
              * @description The fastest a check may run on this plan — 300 on Free, 60 on every paid one. The picker still offers the faster options and opens the upgrade prompt when one is chosen (a paid wall is never a disabled control); this number is only how it knows where the wall is.
              * @example 300

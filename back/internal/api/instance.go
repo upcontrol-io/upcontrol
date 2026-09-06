@@ -76,7 +76,7 @@ func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Changing how the instance talks to the world is a settings act, not a
 	// notify-role one.
-	if !roleAtLeastLogin(ctx, h.pool, s.PersonID, s.TenantID) {
+	if !canManage(ctx, h.pool, s) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
 	}

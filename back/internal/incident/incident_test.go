@@ -131,22 +131,43 @@ func TestDetectAlertPayload_SurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
-// Pins the timeline wording: the raw reason is storage detail and must not
-// leak. UC_TEST_POSTGRES unset = skip.
-func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
+// openTestDB applies the migrations and returns a pool, or skips. The
+// migration runs under an advisory lock: `go test ./...` runs packages in
+// parallel and two goose runs against one fresh database collide on the
+// objects they are both creating.
+func openTestDB(t *testing.T, why string) *pg.Pool {
+	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
 	if dsn == "" {
-		t.Skip("UC_TEST_POSTGRES not set; skipping close-wording test")
+		t.Skip("UC_TEST_POSTGRES not set; skipping " + why)
 	}
 	ctx := context.Background()
-	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
 	pool, err := pg.Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	conn, err := pool.Raw().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("lock connection: %v", err)
+	}
+	defer conn.Release()
+	const migrateLock = 0x75636d67 // "ucmg"
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLock); err != nil {
+		t.Fatalf("migration lock: %v", err)
+	}
+	defer func() { _, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrateLock) }()
+	if err := migrate.Run(ctx, dsn, "../../../db/postgres"); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	return pool
+}
+
+// Pins the timeline wording: the raw reason is storage detail and must not
+// leak. UC_TEST_POSTGRES unset = skip.
+func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestDB(t, "close-wording test")
 
 	var tenantID, projectID int64
 	if err := pool.Raw().QueryRow(ctx,
@@ -184,5 +205,73 @@ func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
 	}
 	if kind != "resolved" || text != "Monitor deleted" {
 		t.Fatalf("newest update = kind %q text %q, want resolved / \"Monitor deleted\"", kind, text)
+	}
+}
+
+// A project's incident reaches that project's destinations and nobody else's:
+// a sibling project of the same workspace shares a tenant and shares nothing
+// else. UC_TEST_POSTGRES unset = skip.
+func TestOpen_NotifiesOnlyTheIncidentsProject(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestDB(t, "fan-out scope test")
+
+	var tenantID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
+		fmt.Sprintf("fanout-%d", time.Now().UnixNano())).Scan(&tenantID); err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	project := func(domain string) int64 {
+		var id int64
+		if err := pool.Raw().QueryRow(ctx,
+			`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+			tenantID, domain).Scan(&id); err != nil {
+			t.Fatalf("project %s: %v", domain, err)
+		}
+		return id
+	}
+	channel := func(projectID int64, target string) int64 {
+		var id int64
+		if err := pool.Raw().QueryRow(ctx,
+			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+			 VALUES (gen_random_uuid(), $1, $2, 'email', $3) RETURNING id`,
+			tenantID, projectID, target).Scan(&id); err != nil {
+			t.Fatalf("channel %s: %v", target, err)
+		}
+		return id
+	}
+	mineProject, theirsProject := project("mine.example"), project("theirs.example")
+	mineChannel, theirsChannel := channel(mineProject, "mine@example.com"), channel(theirsProject, "theirs@example.com")
+
+	var monitorID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
+		 VALUES (gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://mine.example', 300)
+		 RETURNING id`, tenantID, mineProject).Scan(&monitorID); err != nil {
+		t.Fatalf("monitor: %v", err)
+	}
+
+	incidentID, created, err := New(pool, nil).Open(ctx, monitorID, "mine.example is down")
+	if err != nil || !created {
+		t.Fatalf("open incident: created=%v err=%v", created, err)
+	}
+
+	var channels []int64
+	rows, err := pool.Raw().Query(ctx,
+		`SELECT channel_id FROM delivery_queue WHERE incident_id = $1 ORDER BY channel_id`, incidentID)
+	if err != nil {
+		t.Fatalf("read the queue: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan queue row: %v", err)
+		}
+		channels = append(channels, id)
+	}
+	if len(channels) != 1 || channels[0] != mineChannel {
+		t.Fatalf("queued for channels %v, want exactly the incident's project channel %d (the sibling's is %d)",
+			channels, mineChannel, theirsChannel)
 	}
 }

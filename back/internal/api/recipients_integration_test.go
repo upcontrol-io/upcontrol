@@ -17,12 +17,16 @@ import (
 	"testing"
 	"time"
 
+	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
 // openRecipientsDB applies migrations and returns a writeAPI over a fresh
-// tenant, with a named active inviter as ServeHTTP would supply.
+// workspace whose OWNER is the inviter (ownership is a column now, never a
+// membership row), holding one project — the team every handler here writes
+// to. The session is a fixed identity: the handlers resolve the current
+// project off it exactly as a cookie session would.
 func openRecipientsDB(t *testing.T) (*writeAPI, int64, int64) {
 	t.Helper()
 	dsn := os.Getenv("UC_TEST_POSTGRES")
@@ -38,24 +42,39 @@ func openRecipientsDB(t *testing.T) (*writeAPI, int64, int64) {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	var tenantID int64
-	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("recipients-api-%d", time.Now().UnixNano())).Scan(&tenantID); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
 	var inviterID int64
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
 		fmt.Sprintf("inviter-%d@example.com", time.Now().UnixNano()), "Ada Inviter").Scan(&inviterID); err != nil {
 		t.Fatalf("seed inviter: %v", err)
 	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		tenantID, inviterID); err != nil {
-		t.Fatalf("seed inviter membership: %v", err)
+	var tenantID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("recipients-api-%d", time.Now().UnixNano()), inviterID).Scan(&tenantID); err != nil {
+		t.Fatalf("seed tenant: %v", err)
 	}
-	return &writeAPI{pool: pool}, tenantID, inviterID
+	// An unnamed project: the invitation mail then falls back to the
+	// workspace name, which is what the mail assertions below pin.
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, '')`,
+		tenantID); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	sm := session.New(pool, session.DefaultTTL, nil).WithFixedIdentity(inviterID, tenantID)
+	return &writeAPI{pool: pool, sess: sm}, tenantID, inviterID
+}
+
+// recipientsProjectID is the workspace's one project: the team, the channels
+// and the invites all hang off it now.
+func recipientsProjectID(t *testing.T, h *writeAPI, tenantID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := h.pool.Raw().QueryRow(context.Background(),
+		`SELECT min(id) FROM project WHERE tenant_id = $1`, tenantID).Scan(&id); err != nil {
+		t.Fatalf("read the fixture project: %v", err)
+	}
+	return id
 }
 
 // inviteMailer records the invitation and can fail it as a down agent does.
@@ -136,8 +155,8 @@ func TestCreateRecipient_SecondInviteAddsNoMembership(t *testing.T) {
 	}
 	var n int
 	if err := h.pool.Raw().QueryRow(context.Background(),
-		`SELECT count(*) FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-		  WHERE tm.tenant_id = $1 AND p.email = 'bob@example.com'`, tenantID).Scan(&n); err != nil || n != 1 {
+		`SELECT count(*) FROM project_member m JOIN person p ON p.id = m.person_id
+		  WHERE m.tenant_id = $1 AND p.email = 'bob@example.com'`, tenantID).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("membership rows for that address = %d (err %v), want exactly 1", n, err)
 	}
 }
@@ -184,8 +203,8 @@ func TestDeleteRecipient_EmailChannelLeavesWithThePerson(t *testing.T) {
 	// input, not its output.
 	for _, addr := range []string{"gone@example.com", "stays@example.com"} {
 		if _, err := h.pool.Raw().Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, kind, target) VALUES (gen_random_uuid(), $1, 'email', $2)`,
-			tenantID, addr); err != nil {
+			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target) VALUES (gen_random_uuid(), $1, $2, 'email', $3)`,
+			tenantID, recipientsProjectID(t, h, tenantID), addr); err != nil {
 			t.Fatalf("seed email channel %s: %v", addr, err)
 		}
 	}
@@ -261,8 +280,8 @@ func TestCreateRecipient_SendsOneInvitation(t *testing.T) {
 	}
 	var n int
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT count(*) FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-		  WHERE tm.tenant_id = $1 AND p.email = $2 AND tm.status = 'pending'`,
+		`SELECT count(*) FROM project_member m JOIN person p ON p.id = m.person_id
+		  WHERE m.tenant_id = $1 AND p.email = $2 AND m.status = 'pending'`,
 		tenantID, want).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("pending membership rows = %d (err %v), want 1 — the send succeeded, so the invite landed", n, err)
 	}
@@ -288,8 +307,8 @@ func TestCreateRecipient_FailingMailerRollsBack(t *testing.T) {
 	ctx := context.Background()
 	var members, persons int
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT count(*) FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-		  WHERE tm.tenant_id = $1 AND p.email = $2`,
+		`SELECT count(*) FROM project_member m JOIN person p ON p.id = m.person_id
+		  WHERE m.tenant_id = $1 AND p.email = $2`,
 		tenantID, addr).Scan(&members); err != nil {
 		t.Fatalf("count memberships: %v", err)
 	}
@@ -317,8 +336,8 @@ func TestCreateRecipient_ActiveMemberShortCircuits(t *testing.T) {
 		t.Fatalf("seed member: %v", err)
 	}
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		tenantID, memberID); err != nil {
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, 'login', 'active')`,
+		recipientsProjectID(t, h, tenantID), memberID, tenantID); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 
@@ -362,8 +381,8 @@ func seedMember(t *testing.T, h *writeAPI, tenantID int64, status string) (int64
 		t.Fatalf("seed person: %v", err)
 	}
 	if _, err := h.pool.Raw().Exec(context.Background(),
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'notify', $3)`,
-		tenantID, personID, status); err != nil {
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, 'notify', $4)`,
+		recipientsProjectID(t, h, tenantID), personID, tenantID, status); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	return personID, addr
@@ -394,8 +413,8 @@ func TestResendInvite_FailingMailerKeepsPending(t *testing.T) {
 	}
 	var n int
 	if err := h.pool.Raw().QueryRow(context.Background(),
-		`SELECT count(*) FROM tenant_member tm JOIN person p ON p.id = tm.person_id
-		  WHERE tm.tenant_id = $1 AND p.email = $2 AND tm.status = 'pending'`,
+		`SELECT count(*) FROM project_member m JOIN person p ON p.id = m.person_id
+		  WHERE m.tenant_id = $1 AND p.email = $2 AND m.status = 'pending'`,
 		tenantID, addr).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("pending membership rows = %d (err %v), want 1 — the failed resend changed nothing", n, err)
 	}
@@ -479,5 +498,115 @@ func TestCreateChannel_PendingAddressIsUnknownRecipient(t *testing.T) {
 	}
 	if pending != 0 || active != 1 {
 		t.Fatalf("email channels: pending = %d, active = %d — want 0 and 1: the status decides, not the address", pending, active)
+	}
+}
+
+// An invitation lands on the CURRENT project's team, and the Team list is
+// that project's: the owner first (ownership is the workspace's column, so
+// they have no membership row), then this project's members and nobody
+// else's. A sibling project of the same workspace answers only its owner.
+func TestRecipientsAreScopedToTheCurrentProject(t *testing.T) {
+	h, tenantID, inviterID := openRecipientsDB(t)
+	ctx := context.Background()
+	first := recipientsProjectID(t, h, tenantID)
+	addr := fmt.Sprintf("teammate-%d@example.com", time.Now().UnixNano())
+
+	w := httptest.NewRecorder()
+	h.createRecipient(w, inviteRequest(t, addr), tenantID, inviterID)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("invite = %d (%s), want 201", w.Code, w.Body.String())
+	}
+	var here, elsewhere int
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE m.project_id = $1), count(*) FILTER (WHERE m.project_id <> $1)
+		   FROM project_member m JOIN person p ON p.id = m.person_id WHERE p.email = $2`,
+		first, addr).Scan(&here, &elsewhere); err != nil {
+		t.Fatalf("count memberships: %v", err)
+	}
+	if here != 1 || elsewhere != 0 {
+		t.Fatalf("memberships = %d here / %d elsewhere, want 1 / 0", here, elsewhere)
+	}
+
+	// A second project in the same workspace: its team is empty.
+	var second int64
+	if err := h.pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		tenantID, fmt.Sprintf("sibling-%d.example.com", time.Now().UnixNano()%100000)).Scan(&second); err != nil {
+		t.Fatalf("seed sibling project: %v", err)
+	}
+
+	rd := NewReadAPI(h.pool, nil, nil, func(context.Context) string { return "" })
+	list := func(projectID int64) []map[string]any {
+		rec := httptest.NewRecorder()
+		rd.recipients(rec, httptest.NewRequest(http.MethodGet, "/v1/recipients", nil), tenantID, projectID)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("recipients(%d) = %d (%s), want 200", projectID, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Recipients []map[string]any `json:"recipients"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode recipients: %v", err)
+		}
+		return body.Recipients
+	}
+
+	rows := list(first)
+	if len(rows) != 2 {
+		t.Fatalf("the invited project lists %d rows, want the owner and the invitee", len(rows))
+	}
+	if rows[0]["owner"] != true || rows[0]["role"] != "login" || rows[0]["status"] != "active" {
+		t.Fatalf("the first row must be the owner (owner/login/active); got %v", rows[0])
+	}
+	if rows[1]["email"] != addr {
+		t.Fatalf("second row = %v, want the invitee %q", rows[1], addr)
+	}
+
+	rows = list(second)
+	if len(rows) != 1 || rows[0]["owner"] != true {
+		t.Fatalf("the sibling project lists %v, want the owner alone", rows)
+	}
+}
+
+// Inviting the address that already OWNS the workspace answers with the row
+// it already has: no membership row is minted for an owner, and no mail goes.
+func TestCreateRecipientOwnerAddressAnswersTheOwnerRow(t *testing.T) {
+	h, tenantID, inviterID := openRecipientsDB(t)
+	h.mailer = &inviteMailer{}
+	ctx := context.Background()
+	var ownerAddr string
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT email FROM person WHERE id = $1`, inviterID).Scan(&ownerAddr); err != nil {
+		t.Fatalf("read owner address: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	h.createRecipient(w, inviteRequest(t, ownerAddr), tenantID, inviterID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("inviting the owner = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Owner  bool   `json:"owner"`
+		Role   string `json:"role"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Owner || resp.Role != "login" || resp.Status != "active" {
+		t.Fatalf("owner row = %+v, want owner/login/active", resp)
+	}
+	if n := func() int {
+		var n int
+		if err := h.pool.Raw().QueryRow(ctx,
+			`SELECT count(*) FROM project_member WHERE person_id = $1`, inviterID).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}(); n != 0 {
+		t.Fatalf("the owner gained %d membership rows, want 0", n)
+	}
+	if m := h.mailer.(*inviteMailer); m.calls != 0 {
+		t.Fatalf("SendInvite calls = %d, want 0 — the owner is already in", m.calls)
 	}
 }

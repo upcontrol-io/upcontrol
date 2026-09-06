@@ -80,7 +80,7 @@ func newMeFixture(t *testing.T) *meFixture {
 	f.topID = seed(f.topDomain)
 
 	f.sm = session.New(pool, session.DefaultTTL, nil)
-	f.token, err = f.sm.Create(ctx, f.personID, f.tenantID)
+	f.token, err = f.sm.Create(ctx, f.personID, f.tenantID, nil)
 	if err != nil {
 		t.Fatalf("mint session: %v", err)
 	}
@@ -225,5 +225,85 @@ func TestMeZeroProjectsAnswersNullProject(t *testing.T) {
 	}
 	if string(body["project"]) != "null" {
 		t.Fatalf(`identity /v1/me project = %s, want null (the GetMeByIdentity conversion must emit nil too)`, body["project"])
+	}
+}
+
+// The project map says whose workspace it is: `owned` for the reader who owns
+// it, and `ownerEmail` naming the owner so a guest card can say whose project
+// it is. A guest reading the same project gets owned:false and their own role.
+func TestMeOwnedAndOwnerEmail(t *testing.T) {
+	f := newMeFixture(t)
+	ctx := context.Background()
+
+	body := f.me(t)
+	var mine struct {
+		Owned      bool   `json:"owned"`
+		OwnerEmail string `json:"ownerEmail"`
+	}
+	if err := json.Unmarshal(body["project"], &mine); err != nil {
+		t.Fatalf("decode project %s: %v", body["project"], err)
+	}
+	if !mine.Owned {
+		t.Fatal("the owner reads owned:false on their own project")
+	}
+	var ownerEmail string
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT email FROM person WHERE id = $1`, f.personID).Scan(&ownerEmail); err != nil {
+		t.Fatalf("read owner email: %v", err)
+	}
+	if mine.OwnerEmail != ownerEmail {
+		t.Fatalf("ownerEmail = %q, want the workspace owner's %q", mine.OwnerEmail, ownerEmail)
+	}
+
+	// A guest invited into the same project: not theirs, and the role is the
+	// membership's, not a standing rank in the workspace.
+	uniq := time.Now().UnixNano()
+	var guestID, firstProject int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Guest') RETURNING id`,
+		fmt.Sprintf("meguest-%d@example.com", uniq)).Scan(&guestID); err != nil {
+		t.Fatalf("seed guest: %v", err)
+	}
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT min(id) FROM project WHERE tenant_id = $1`, f.tenantID).Scan(&firstProject); err != nil {
+		t.Fatalf("read first project: %v", err)
+	}
+	if _, err := f.pool.Raw().Exec(ctx,
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status)
+		 VALUES ($1, $2, $3, 'notify', 'active')`,
+		firstProject, guestID, f.tenantID); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	guestToken, err := f.sm.Create(ctx, guestID, f.tenantID, &firstProject)
+	if err != nil {
+		t.Fatalf("mint guest session: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/v1/me", nil)
+	req.AddCookie(&http.Cookie{Name: session.CookieName, Value: guestToken})
+	rec := httptest.NewRecorder()
+	NewMe(f.pool, f.sm).ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("guest /v1/me = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var guestBody struct {
+		Account struct {
+			Role string `json:"role"`
+		} `json:"account"`
+		Project struct {
+			Owned      bool   `json:"owned"`
+			OwnerEmail string `json:"ownerEmail"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &guestBody); err != nil {
+		t.Fatalf("decode guest /v1/me: %v", err)
+	}
+	if guestBody.Project.Owned {
+		t.Fatal("the guest reads owned:true on somebody else's project")
+	}
+	if guestBody.Project.OwnerEmail != ownerEmail {
+		t.Fatalf("guest ownerEmail = %q, want %q", guestBody.Project.OwnerEmail, ownerEmail)
+	}
+	if guestBody.Account.Role != "notify" {
+		t.Fatalf("guest role = %q, want notify (the membership's role)", guestBody.Account.Role)
 	}
 }

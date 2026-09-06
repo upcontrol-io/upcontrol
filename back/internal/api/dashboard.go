@@ -213,7 +213,7 @@ func (h *writeAPI) getDashboardCatalog(w http.ResponseWriter, r *http.Request, t
 		{"services", func() ([]map[string]any, error) { return h.catalogServices(ctx, qb) }},
 		{"groups", func() ([]map[string]any, error) { return h.catalogGroups(ctx, qb) }},
 		{"attrs", func() ([]map[string]any, error) { return h.catalogAttrs(ctx, qb) }},
-		{"checks", func() ([]map[string]any, error) { return h.catalogChecks(ctx, tenantID) }},
+		{"checks", func() ([]map[string]any, error) { return h.catalogChecks(ctx, projectID) }},
 		{"events", func() ([]map[string]any, error) { return h.catalogEvents(ctx, tenantID, projectID, since) }},
 		{"metrics", func() ([]map[string]any, error) { return h.catalogMetrics(ctx, tenantID, projectID, since) }},
 		{"funnels", func() ([]map[string]any, error) { return h.catalogFunnels(ctx, tenantID, projectID, since) }},
@@ -303,12 +303,12 @@ func (h *writeAPI) catalogAttrs(ctx context.Context, qb *query.QueryBuilder) ([]
 	})
 }
 
-// catalogChecks is the tenant's monitors in the same id and type shape
+// catalogChecks is the project's monitors in the same id and type shape
 // GET /v1/monitors hands out: two shapes for one entity is how a board ends up
 // asking for a check the checks list never named.
-func (h *writeAPI) catalogChecks(ctx context.Context, tenantID int64) ([]map[string]any, error) {
+func (h *writeAPI) catalogChecks(ctx context.Context, projectID int64) ([]map[string]any, error) {
 	out := []map[string]any{}
-	rows, err := h.pool.Queries().ListMonitorsByTenant(ctx, tenantID)
+	rows, err := h.pool.Queries().ListMonitorsByProject(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

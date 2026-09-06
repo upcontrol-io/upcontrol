@@ -76,9 +76,10 @@ func (w *worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 	target := ch.Target
 	if breaker.IsOpen(time.Now()) && channelKind != "email" {
 		channelKind = "email"
-		// Fail over to the tenant's email channel; without the lookup the
-		// payload was silently dropped with the recipient lost.
-		if t, terr := q.GetEmailChannelTarget(ctx, item.TenantID); terr == nil && t != "" {
+		// Fail over to the failing channel's OWN project's email channel;
+		// without the lookup the payload was silently dropped with the
+		// recipient lost, and a sibling project is not a fallback audience.
+		if t, terr := q.GetEmailChannelTarget(ctx, ch.ProjectID); terr == nil && t != "" {
 			target = t
 		} else {
 			// No email channel to fail over to: this delivery can't reach anyone.

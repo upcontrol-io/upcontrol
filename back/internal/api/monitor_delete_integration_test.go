@@ -52,27 +52,22 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 	uniq := time.Now().UnixNano()
 	title := fmt.Sprintf("Checkout down %d", uniq%100000)
 	var tenantID, projectID, personID, monitorID int64
+	// Deleting a check is a settings act: the handler refuses a notify-role
+	// session before any row is touched, so the caller is the workspace owner.
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), $1) RETURNING id`,
-		fmt.Sprintf("orphan-%d", uniq)).Scan(&tenantID); err != nil {
+		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Owner') RETURNING id`,
+		fmt.Sprintf("owner-%d@example.com", uniq)).Scan(&personID); err != nil {
+		t.Fatalf("person: %v", err)
+	}
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, owner_person_id) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		fmt.Sprintf("orphan-%d", uniq), personID).Scan(&tenantID); err != nil {
 		t.Fatalf("tenant: %v", err)
 	}
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, '') RETURNING id`,
 		tenantID).Scan(&projectID); err != nil {
 		t.Fatalf("project: %v", err)
-	}
-	// Deleting a check is a settings act: the handler refuses a notify-role
-	// session before any row is touched, so the member must carry login.
-	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Owner') RETURNING id`,
-		fmt.Sprintf("owner-%d@example.com", uniq)).Scan(&personID); err != nil {
-		t.Fatalf("person: %v", err)
-	}
-	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO tenant_member (tenant_id, person_id, role, status) VALUES ($1, $2, 'login', 'active')`,
-		tenantID, personID); err != nil {
-		t.Fatalf("tenant_member: %v", err)
 	}
 	// replace() renders the uuid the way the API returns it: lowercase hex, no
 	// dashes — the shape parseUUID on the other side of the route expects.
@@ -90,7 +85,7 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 	}
 
 	sm := session.New(pool, session.DefaultTTL, nil)
-	token, err := sm.Create(ctx, personID, tenantID)
+	token, err := sm.Create(ctx, personID, tenantID, &projectID)
 	if err != nil {
 		t.Fatalf("mint session: %v", err)
 	}

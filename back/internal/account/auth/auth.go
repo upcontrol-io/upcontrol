@@ -215,8 +215,9 @@ func (h *magicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 	}
 	// Ownership is proven here and only here; the request path must never
 	// activate invites, it proves nothing about the caller.
-	h.activateInvites(ctx, person.ID, email)
-	sessToken, err := h.sess.Create(ctx, person.ID, person.TenantID)
+	activated := h.activateInvites(ctx, person.ID, email)
+	landTenant, landProject := h.landing(ctx, person, activated)
+	sessToken, err := h.sess.Create(ctx, person.ID, landTenant, landProject)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -277,6 +278,35 @@ func (h *magicLink) ensurePerson(ctx context.Context, email string) (personInfo,
 	return h.ensureAccount(ctx, email, "")
 }
 
+// OwnTenantID is the workspace this person OWNS, created on first ask. An
+// invitee reaching only somebody else's projects still owns a workspace of
+// their own; it stays empty (no project, no key, no channel) until they
+// create a project in it.
+func OwnTenantID(ctx context.Context, pool *pg.Pool, personID int64, selfHosted bool) (int64, error) {
+	q := pool.Queries()
+	if id, err := q.OwnTenant(ctx, &personID); err == nil && id != 0 {
+		return id, nil
+	}
+	var name, email string
+	_ = pool.Raw().QueryRow(ctx,
+		`SELECT name, COALESCE(email, '') FROM person WHERE id = $1`, personID).Scan(&name, &email)
+	if name == "" {
+		name = NameFromEmail(email)
+	}
+	if name == "" {
+		name = "My"
+	}
+	plan := "Free"
+	if selfHosted {
+		plan = "Self-hosted"
+	}
+	var tenantID int64
+	err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, plan, owner_person_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+		newUUID(), name+"'s workspace", plan, personID).Scan(&tenantID)
+	return tenantID, err
+}
+
 func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (personInfo, error) {
 	// Defensive: every caller normalises, and this is where it would matter
 	// if one ever forgot — the UNIQUE column below is byte-exact.
@@ -284,7 +314,7 @@ func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	q := h.pool.Queries()
 	existing, err := q.GetPersonByEmail(ctx, &email)
 	if err == nil {
-		tenantID, _ := h.tenantForPerson(ctx, existing.ID)
+		tenantID, _ := OwnTenantID(ctx, h.pool, existing.ID, h.selfHosted)
 		return personInfo{
 			ID: existing.ID, PublicID: existing.PublicID,
 			Name: existing.Name, Email: ptrStr(existing.Email),
@@ -307,11 +337,8 @@ func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 		plan = "Self-hosted"
 	}
 	_ = h.pool.Raw().QueryRow(ctx,
-		`INSERT INTO tenant (public_id, name, plan) VALUES ($1, $2, $3) RETURNING id`,
-		tenantPubID, NameFromEmail(email)+"'s workspace", plan).Scan(&tenantID)
-	_ = q.EnsureTenantMember(ctx, sqlc.EnsureTenantMemberParams{
-		TenantID: tenantID, PersonID: p.ID,
-	})
+		`INSERT INTO tenant (public_id, name, plan, owner_person_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+		tenantPubID, NameFromEmail(email)+"'s workspace", plan, p.ID).Scan(&tenantID)
 	// Create a default project and issue an API key.
 	var projectID int64
 	_ = h.pool.Raw().QueryRow(ctx,
@@ -330,11 +357,7 @@ func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 		tenantID, projectID, keyPrefix, keyHash[:])
 	// An account is born with a way to be told: the email channel is seeded
 	// once at creation; NOT EXISTS keeps it idempotent on retry.
-	_, _ = h.pool.Raw().Exec(ctx,
-		`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
-		 SELECT gen_random_uuid(), $1, 'email', $2
-		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
-		tenantID, email)
+	seedEmailChannel(ctx, h.pool, tenantID, projectID, email)
 	// Fired only on the NEW-account path: the funnel's account_created step,
 	// scoped to whichever door created the account.
 	h.rec.ServerEvent(ctx, "account_created", p.ID, tenantID, nil)
@@ -346,38 +369,55 @@ func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 	}, nil
 }
 
-func (h *magicLink) tenantForPerson(ctx context.Context, personID int64) (int64, error) {
-	var tenantID int64
-	err := h.pool.Raw().QueryRow(ctx,
-		`SELECT tenant_id FROM tenant_member WHERE person_id = $1 ORDER BY tenant_id LIMIT 1`,
-		personID).Scan(&tenantID)
-	return tenantID, err
+// seedEmailChannel gives one PROJECT a way to reach this address. NOT EXISTS
+// keeps it idempotent: the sign-up, the invitation redeem and the claim's
+// re-seed all run it against the same pair.
+func seedEmailChannel(ctx context.Context, pool *pg.Pool, tenantID, projectID int64, email string) {
+	_, _ = pool.Raw().Exec(ctx,
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+		 SELECT gen_random_uuid(), $1, $2, 'email', $3
+		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND target = $3)`,
+		tenantID, projectID, email)
 }
 
 // activateInvites is the proof-of-ownership half of an invitation, called only
-// from the redeem doors: pending memberships activate, tenants get the channel.
-func (h *magicLink) activateInvites(ctx context.Context, personID int64, email string) {
+// from the redeem doors: pending memberships activate, each project gets the
+// channel. The rows come back so the session may land on one of them.
+func (h *magicLink) activateInvites(ctx context.Context, personID int64, email string) []sqlc.ActivateInvitesRow {
 	// Defensive, same reason as in ensureAccount: the NOT EXISTS below
 	// compares target byte for byte, so the one spelling is the normalised one.
 	email = NormalizeEmail(email)
-	rows, err := h.pool.Raw().Query(ctx,
-		`UPDATE tenant_member SET status = 'active' WHERE person_id = $1 AND status = 'pending' RETURNING tenant_id`,
-		personID)
+	rows, err := h.pool.Queries().ActivateInvites(ctx, personID)
 	if err != nil {
-		return
+		return nil
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var tenantID int64
-		if err := rows.Scan(&tenantID); err != nil {
-			return
+	for _, row := range rows {
+		seedEmailChannel(ctx, h.pool, row.TenantID, row.ProjectID, email)
+	}
+	return rows
+}
+
+// landing is where a fresh session opens: the first project an invitation just
+// activated, else where this person was last working while they still reach
+// it, else their lowest reachable project, else their own workspace with no
+// project at all.
+func (h *magicLink) landing(ctx context.Context, person personInfo, just []sqlc.ActivateInvitesRow) (tenantID int64, projectID *int64) {
+	q := h.pool.Queries()
+	if len(just) > 0 {
+		id := just[0].ProjectID
+		return just[0].TenantID, &id
+	}
+	if last, err := q.LastSessionScope(ctx, person.ID); err == nil && last.ProjectID != nil {
+		if row, serr := q.ProjectScope(ctx, sqlc.ProjectScopeParams{
+			PersonID: &person.ID, ProjectID: *last.ProjectID,
+		}); serr == nil {
+			return row.TenantID, &row.ID
 		}
-		_, _ = h.pool.Raw().Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, kind, target)
-			 SELECT gen_random_uuid(), $1, 'email', $2
-			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE tenant_id = $1 AND kind = 'email' AND target = $2)`,
-			tenantID, email)
 	}
+	if first, err := q.FirstReachableProject(ctx, person.ID); err == nil {
+		return first.TenantID, &first.ID
+	}
+	return person.TenantID, nil
 }
 
 // me handles GET /v1/me.
@@ -421,11 +461,18 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// are converted to GetMeRow above, so the identity path emits null too.
 	var project any
 	if row.ProjectID != nil {
-		project = map[string]any{
+		p := map[string]any{
 			"id":        uuidStr(row.ProjectPublicID),
 			"domain":    row.ProjectDomain,
 			"createdAt": row.ProjectCreatedAt,
+			// Whose workspace this project lives in: false closes the
+			// owner-only doors and turns the plan into a fact, not an offer.
+			"owned": row.Owned,
 		}
+		if row.OwnerEmail != nil && *row.OwnerEmail != "" {
+			p["ownerEmail"] = *row.OwnerEmail
+		}
+		project = p
 	}
 	resp := map[string]any{
 		"account": map[string]any{

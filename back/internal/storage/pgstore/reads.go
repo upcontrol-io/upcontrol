@@ -18,15 +18,16 @@ import (
 // reads stay behind ring.QueryBuilder; this is the seam.
 func (s *Store) Raw() *pgxpool.Pool { return s.pool }
 
-// EventsAround returns the events in [from, to] CLOSEST to `at`, returned
-// in time order; bounded by limit and window (this runs on the card's read path).
-func (s *Store) EventsAround(ctx context.Context, tenantID int64, from, to, at time.Time, limit int) ([]EventRow, error) {
+// EventsAround returns one project's events in [from, to] CLOSEST to `at`,
+// returned in time order; bounded by limit and window (this runs on the
+// card's read path). A sibling project's deploy is not this incident's evidence.
+func (s *Store) EventsAround(ctx context.Context, tenantID, projectID int64, from, to, at time.Time, limit int) ([]EventRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT ts, name, labels, amount_minor, currency
 		  FROM events
-		 WHERE tenant_id = $1 AND ts >= $2 AND ts <= $3
-		 ORDER BY abs(extract(epoch from ($4 - ts))) ASC, ts ASC
-		 LIMIT $5`, tenantID, from, to, at, limit)
+		 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND ts <= $4
+		 ORDER BY abs(extract(epoch from ($5 - ts))) ASC, ts ASC
+		 LIMIT $6`, tenantID, projectID, from, to, at, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -95,9 +96,9 @@ var metricTileUnits = map[string]string{
 // builder. Read-only by convention: callers must not mutate.
 func MetricTileUnits() map[string]string { return metricTileUnits }
 
-// MetricSummary reads the tenant's metrics for the tiles: latest value of
+// MetricSummary reads one project's metrics for the tiles: latest value of
 // every named metric with 7+ days of history, its range, and a 12-point spark.
-func (s *Store) MetricSummary(ctx context.Context, tenantID int64) ([]MetricStat, error) {
+func (s *Store) MetricSummary(ctx context.Context, tenantID, projectID int64) ([]MetricStat, error) {
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
 	// Latest + spark per name. Latest is max(ts) row's value; spark is the
@@ -109,20 +110,20 @@ func (s *Store) MetricSummary(ctx context.Context, tenantID int64) ([]MetricStat
 			       (extract(epoch from (max(ts) - min(ts))) / 86400)::bigint + 1 AS days,
 			       count(*) AS readings
 			  FROM metrics
-			 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '30 days'
+			 WHERE tenant_id = $1 AND project_id = $2 AND ts >= now() - INTERVAL '30 days'
 			 GROUP BY name
 		), ranges AS (
 			SELECT name,
 			       percentile_cont(0.10) WITHIN GROUP (ORDER BY value) AS p10,
 			       percentile_cont(0.90) WITHIN GROUP (ORDER BY value) AS p90
 			  FROM metrics
-			 WHERE tenant_id = $2 AND ts >= $3
+			 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3
 			 GROUP BY name
 		), sparks AS (
 			SELECT name, array_agg(h ORDER BY b) AS spark FROM (
 				SELECT name, date_trunc('hour', ts) AS b, avg(value)::float8 AS h
 				  FROM metrics
-				 WHERE tenant_id = $4 AND ts >= now() - INTERVAL '12 hours'
+				 WHERE tenant_id = $1 AND project_id = $2 AND ts >= now() - INTERVAL '12 hours'
 				 GROUP BY name, b
 			) hourly GROUP BY name
 		)
@@ -134,7 +135,7 @@ func (s *Store) MetricSummary(ctx context.Context, tenantID int64) ([]MetricStat
 		  LEFT JOIN sparks s ON s.name = l.name
 		 WHERE l.days >= 7
 		 ORDER BY l.name`,
-		tenantID, tenantID, since, tenantID)
+		tenantID, projectID, since)
 	if err != nil {
 		return nil, err
 	}

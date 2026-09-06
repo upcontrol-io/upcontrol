@@ -297,6 +297,8 @@ func TestEventsAroundPicksClosestAndReturnsTimeOrder(t *testing.T) {
 		{TenantID: 1, ProjectID: 1, TS: now.Add(-1 * time.Minute), Name: "payment_failed"},
 		// Another tenant's event: must not leak into the answer.
 		{TenantID: 2, ProjectID: 1, TS: now, Name: "payment_failed"},
+		// A sibling project of the same tenant: not this project's evidence either.
+		{TenantID: 1, ProjectID: 2, TS: now.Add(-3 * time.Minute), Name: "deploy.sibling"},
 		// Outside the window entirely.
 		{TenantID: 1, ProjectID: 1, TS: now.Add(-30 * time.Minute), Name: "deploy.ancient"},
 	}
@@ -304,12 +306,12 @@ func TestEventsAroundPicksClosestAndReturnsTimeOrder(t *testing.T) {
 		t.Fatalf("InsertEvents: %v", err)
 	}
 	pivot := now.Add(-2 * time.Minute)
-	got, err := s.EventsAround(ctx, 1, now.Add(-10*time.Minute), now, pivot, 5)
+	got, err := s.EventsAround(ctx, 1, 1, now.Add(-10*time.Minute), now, pivot, 5)
 	if err != nil {
 		t.Fatalf("EventsAround: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (tenant+window scoped): %+v", len(got), got)
+		t.Fatalf("got %d events, want 2 (tenant+project+window scoped): %+v", len(got), got)
 	}
 	// Time order, not distance order: the chronology renders, the pivot only
 	// spent the budget.
@@ -366,11 +368,14 @@ func TestMetricSummaryShipsOnlySevenDayNames(t *testing.T) {
 		{TenantID: 1, ProjectID: 1, TS: now.Add(-1 * time.Hour), Name: "signups", Value: 30},
 		// A young name: one day of history produces no tile.
 		{TenantID: 1, ProjectID: 1, TS: now.Add(-1 * time.Hour), Name: "brand_new", Value: 5},
+		// A sibling project's mature metric: the same tenant, not this project's tile.
+		{TenantID: 1, ProjectID: 2, TS: now.Add(-9 * 24 * time.Hour), Name: "sibling_orders", Value: 1},
+		{TenantID: 1, ProjectID: 2, TS: now.Add(-1 * time.Hour), Name: "sibling_orders", Value: 2},
 	}
 	if err := s.InsertMetrics(ctx, rows); err != nil {
 		t.Fatalf("InsertMetrics: %v", err)
 	}
-	stats, err := s.MetricSummary(ctx, 1)
+	stats, err := s.MetricSummary(ctx, 1, 1)
 	if err != nil {
 		t.Fatalf("MetricSummary: %v", err)
 	}
