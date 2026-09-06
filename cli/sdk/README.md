@@ -66,5 +66,33 @@ dir, up to a million per step, and each process keeps its own, so a cluster of
 workers counts a visitor once per worker. A filesystem that does not survive a
 deploy starts the counts again, which is what `UPCONTROL_STATE_DIR` is for.
 
+## A/B tests, retention and breakdowns
+
+Three more feeds on the same machine: counts that only grow, reported every
+minute, nothing that identifies a person on the wire or on disk.
+
+```ts
+import { experiment, retention, breakdown } from '@upcontrol/sdk';
+
+// 2 to 8 arms, control first. A person counts once per arm per stat.
+const cta = experiment('checkout CTA', ['control', 'B']);
+cta.expose('B', req);
+cta.convert('B', req);
+
+// Weekly cohorts. The id must be your own stable user id, the same string
+// every week for the same person: an address is not, a week later.
+const signups = retention('signups');
+signups.seen(user.id);
+
+// Counts events, not people. At most 200 distinct values.
+const pages = breakdown('page');
+pages.value('/pricing');
+```
+
+`expose` and `convert` take the same `who` a funnel step takes, a request or a
+string id. `seen()` takes a string id only, and keeps the last 12 weekly
+cohorts. A breakdown does no deduplication, so never feed it something
+unbounded like a request id or a URL with a query string.
+
 Install and instrumentation are normally driven by your coding agent via
 `npx upcontrol init` - see the [upcontrol package](https://www.npmjs.com/package/upcontrol).
