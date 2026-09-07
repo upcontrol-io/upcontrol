@@ -6,6 +6,17 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-09-07
+
+### Changed
+- **`DashboardLayout.version` is `1 | 2`.** The board's row halved to 14px and its resize step
+  to 26px, so a card can be tuned to what it holds; every stored height doubled with it. A card
+  of H rows is `26H - 12` and the old one of h rows was `52h - 12`, so `H = 2h` is the same
+  pixels and no existing board changes shape. The front's `normalizeLayout` is the one place a
+  version 1 document gains its factor of two, once, on the way in; a save rewrites it as 2. **A
+  server older than this refuses a version 2 layout**, which is what makes this release a
+  prerequisite for the board work rather than a companion to it.
+
 ### Fixed
 - **A new project reaches its owner.** `POST /v1/projects` now seeds that project's e-mail
   channel from the creator's own address, as sign-up and the invitation redeem already did.
