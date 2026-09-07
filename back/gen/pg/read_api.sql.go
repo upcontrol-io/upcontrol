@@ -25,16 +25,18 @@ func (q *Queries) CountMonitors(ctx context.Context, tenantID int64) (int32, err
 }
 
 const getAPIKeyForProject = `-- name: GetAPIKeyForProject :one
-SELECT id, prefix, state, created_at, last_used_at
+SELECT id, prefix, name, state, created_at, last_used_at, revoked_at
   FROM api_key WHERE project_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
 `
 
 type GetAPIKeyForProjectRow struct {
 	ID         int64
 	Prefix     string
+	Name       string
 	State      string
 	CreatedAt  pgtype.Timestamptz
 	LastUsedAt pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
 }
 
 func (q *Queries) GetAPIKeyForProject(ctx context.Context, projectID int64) (GetAPIKeyForProjectRow, error) {
@@ -43,9 +45,11 @@ func (q *Queries) GetAPIKeyForProject(ctx context.Context, projectID int64) (Get
 	err := row.Scan(
 		&i.ID,
 		&i.Prefix,
+		&i.Name,
 		&i.State,
 		&i.CreatedAt,
 		&i.LastUsedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }

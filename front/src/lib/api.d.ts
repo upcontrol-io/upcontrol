@@ -912,7 +912,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The active API key + recent usage (Sources */
+        /**
+         * The project's API keys + recent usage (Sources
+         * @description A project keeps a SET of keys, not one key it rotates: one per environment, one per service, and a leaked one withdrawn without touching the others. Revoked keys stay in the list, because the last use of a withdrawn key is what tells you what it reached before you noticed.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -935,8 +938,115 @@ export interface paths {
             };
         };
         put?: never;
-        post?: never;
+        /**
+         * Issue another key for the current project.
+         * @description The full key is in the answer and nowhere else, ever again. A project is capped at 10 keys that still work (active or rotating); revoked ones do not count, so the cap is on live credentials rather than on history. The cap is a fixed number and NOT a plan axis: there is no key row in Pricing, so there is no wall.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /**
+                         * @description What to call it, so two keys are told apart by something other than their prefix. Empty is allowed and prints as the prefix.
+                         * @example staging
+                         */
+                        name?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Issued; the full key is returned exactly once. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IssuedKey"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `key_limit`: the project already holds 10 keys that work. Revoke one first. This is a fixed ceiling, never a 402 — no plan buys more. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/keys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one key.
+         * @description The key stops being accepted at once — there is no overlap window, because withdrawing a key is what you do when it leaked. The row is kept and marked, never deleted: `lastUsedAt` on a revoked key is evidence. Revoking the last one is allowed and leaves the project unable to ingest until another is issued; refusing it would be guessing at what the owner meant.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Revoked */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description No such key in the current project. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -952,8 +1062,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Rotate the active key. The old key stays valid for a 24h overlap window,
-         *     then 401s — a rotation that kills a deployed app fails at the customer.
+         * Rotate every working key of the project at once. Each stays valid for a
+         *     24h overlap window, then 401s — a rotation that kills a deployed app
+         *     fails at the customer.
+         * @description Sugar over the two calls below, kept because "I just leaked it" wants one button: it marks every ACTIVE key of the project `rotating` and issues one replacement. To withdraw ONE key without touching the others, revoke it with DELETE /v1/keys/{id} and issue its replacement with POST /v1/keys.
          */
         post: {
             parameters: {
@@ -970,7 +1082,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["RotatedKey"];
+                        "application/json": components["schemas"]["IssuedKey"];
                     };
                 };
                 401: components["responses"]["Unauthorized"];
@@ -1865,8 +1977,10 @@ export interface paths {
             };
         };
         /**
-         * Replace the board of the session's current project.
-         * @description The whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
+         * Replace the board of the session's current project, or lay down a first one with a key.
+         * @description With a session: the whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
+         *
+         *     With an ingest key instead (`X-Upcontrol-Key` or a bearer), this is the agent's one door into the board and it opens once: the key may store a layout for a project that has none, and a project that already has a row answers 409 `board_exists`. That is deliberately narrow — the key lives in `.env` on every server the customer deploys, so one that could replace a curated board would be a wipe waiting to leak. It grants no read of any kind, here or anywhere: the agent knows what it declared, so it needs no catalog to build the first board from.
          */
         put: {
             parameters: {
@@ -1905,6 +2019,15 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content?: never;
+                };
+                /** @description `board_exists`. Key-authenticated only: this project already has a board, and a key may lay down the first one alone. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
                 };
             };
         };
@@ -2979,9 +3102,9 @@ export interface components {
             connectableSources: components["schemas"]["ConnectableSource"][];
         };
         /**
-         * @description The active API key. The full secret is never stored and never returned
-         *     by GET /v1/keys — only this identifier (the prefix). The full key is
-         *     returned exactly once by POST /v1/keys/rotate.
+         * @description One of the project's API keys. The full secret is never stored and never
+         *     returned by a read — only this identifier (the prefix). The full key is
+         *     returned exactly once, by the call that issues it.
          */
         ApiKey: {
             /** @example key_1 */
@@ -2990,19 +3113,39 @@ export interface components {
             prefix: string;
             /** Format: date-time */
             createdAt: string;
+            /**
+             * @description What the person called it. Empty is a real answer — every key issued before names existed has one, and the app falls back to the prefix.
+             * @example staging
+             */
+            name: string;
+            /**
+             * @description `rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence.
+             * @enum {string}
+             */
+            state: "active" | "rotating" | "revoked";
+            /**
+             * Format: date-time
+             * @description Null for a key nothing has ever presented.
+             */
+            lastUsedAt?: string | null;
+            /** Format: date-time */
+            revokedAt?: string | null;
         };
         /**
-         * @description POST /v1/keys/rotate's answer — the ONE place the full key ever
-         *     appears. `value` is shown exactly once and is not retrievable again;
-         *     `prefix` is what GET /v1/keys lists from here on.
+         * @description The answer of the two calls that issue a key — POST /v1/keys and
+         *     POST /v1/keys/rotate — and the ONE place the full key ever appears.
+         *     `value` is shown exactly once and is not retrievable again; `prefix` is
+         *     what every later read lists instead.
          */
-        RotatedKey: {
+        IssuedKey: {
             /** @example key_2 */
             id: string;
             /** @example uc_live_8f2ac41d9b0e */
             prefix: string;
             /** Format: date-time */
             createdAt: string;
+            /** @example staging */
+            name?: string;
             /** @example uc_live_8f2ac41d9b0e6c31a57f92d4 */
             value: string;
         };
@@ -3015,7 +3158,10 @@ export interface components {
             status: number;
         };
         KeysResponse: {
-            key: components["schemas"]["ApiKey"];
+            /** @description DEPRECATED, and kept only so a front older than the key list keeps working against a newer core: the newest key that is not revoked, exactly what this field has always meant. Read `keys` instead. */
+            key: components["schemas"]["ApiKey"] | null;
+            /** @description Every key of the current project, newest first, revoked ones included — a withdrawn key with a last use is the record of what happened. */
+            keys: components["schemas"]["ApiKey"][];
             usage: components["schemas"]["KeyUsageEntry"][];
         };
         /** @enum {string} */
@@ -3203,7 +3349,7 @@ export interface components {
         /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. */
         DashboardMetricRef: {
             /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "dimension";
+            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "retention" | "dimension";
             name?: string;
             where?: {
                 [key: string]: string;
@@ -3242,6 +3388,9 @@ export interface components {
             events: components["schemas"]["CatalogEvent"][];
             metrics: components["schemas"]["CatalogMetric"][];
             funnels: components["schemas"]["CatalogFunnel"][];
+            experiments: components["schemas"]["CatalogExperiment"][];
+            retentions: components["schemas"]["CatalogRetention"][];
+            dimensions: components["schemas"]["CatalogDimension"][];
         };
         /** @description One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service. */
         CatalogGroup: {
@@ -3280,10 +3429,25 @@ export interface components {
             /** @description The label keys seen on this metric's readings — what a widget can narrow it by. */
             labels: string[];
         };
-        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`. */
+        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`). */
         CatalogFunnel: {
             name: string;
             steps: string[];
+        };
+        /** @description One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list. */
+        CatalogExperiment: {
+            name: string;
+            variants: string[];
+        };
+        /** @description One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series. */
+        CatalogRetention: {
+            name: string;
+            cohorts: number;
+        };
+        /** @description One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series. */
+        CatalogDimension: {
+            name: string;
+            values: number;
         };
         /** @description One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws. */
         SeriesQuery: {
@@ -3293,11 +3457,13 @@ export interface components {
             source: "logs" | "check" | "event" | "metric";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response` or `uptime`; event: the event name; metric: the metric name. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name. */
             name?: string;
             where?: {
                 [key: string]: string;
             };
+            /** @description Label keys to fold the counter by, for the metric source only. With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold. */
+            group?: string[];
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {
@@ -3316,6 +3482,8 @@ export interface components {
             step: number;
             /** @description One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing. */
             points: (number | null)[];
+            /** @description Present only when the query carried `group`: the counter's increase over the range, one entry per label combination, ordered by value descending and capped at 200. `points` is empty on a grouped answer — the fold has no time axis, and a series of nulls would claim one. */
+            rows?: components["schemas"]["SeriesRow"][];
             /** @description The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge. */
             total?: number | null;
             /** @description The same reading over the span before `from`, which is what a card's delta is measured against. */
@@ -3323,6 +3491,12 @@ export interface components {
         };
         SeriesResponse: {
             series: components["schemas"]["Series"][];
+        };
+        SeriesRow: {
+            labels: {
+                [key: string]: string;
+            };
+            value: number;
         };
         UsedMax: {
             used: number;

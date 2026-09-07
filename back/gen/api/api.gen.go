@@ -27,6 +27,27 @@ func (e AccountRole) Valid() bool {
 	}
 }
 
+// Defines values for ApiKeyState.
+const (
+	ApiKeyStateActive   ApiKeyState = "active"
+	ApiKeyStateRevoked  ApiKeyState = "revoked"
+	ApiKeyStateRotating ApiKeyState = "rotating"
+)
+
+// Valid indicates whether the value is a known member of the ApiKeyState enum.
+func (e ApiKeyState) Valid() bool {
+	switch e {
+	case ApiKeyStateActive:
+		return true
+	case ApiKeyStateRevoked:
+		return true
+	case ApiKeyStateRotating:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ChannelKind.
 const (
 	Discord  ChannelKind = "discord"
@@ -727,18 +748,33 @@ type AlertChannel struct {
 	Target string `json:"target"`
 }
 
-// ApiKey The active API key. The full secret is never stored and never returned
-// by GET /v1/keys — only this identifier (the prefix). The full key is
-// returned exactly once by POST /v1/keys/rotate.
+// ApiKey One of the project's API keys. The full secret is never stored and never
+// returned by a read — only this identifier (the prefix). The full key is
+// returned exactly once, by the call that issues it.
 type ApiKey struct {
 	CreatedAt time.Time `json:"createdAt"`
 
 	// Id Example: key_1
 	Id string `json:"id"`
 
+	// LastUsedAt Null for a key nothing has ever presented.
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+
+	// Name What the person called it. Empty is a real answer — every key issued before names existed has one, and the app falls back to the prefix.
+	//
+	// Example: staging
+	Name string `json:"name"`
+
 	// Prefix Example: uc_live_8f2ac41d9b0e
-	Prefix string `json:"prefix"`
+	Prefix    string     `json:"prefix"`
+	RevokedAt *time.Time `json:"revokedAt,omitempty"`
+
+	// State `rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence.
+	State ApiKeyState `json:"state"`
 }
+
+// ApiKeyState `rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence.
+type ApiKeyState string
 
 // CatalogAttr One attribute pair seen on a service's recent lines, counted over the newest lines of the window rather than all of them: expanding every line into one row per attribute is not what a picker is worth.
 type CatalogAttr struct {
@@ -1034,6 +1070,26 @@ type IngestWarning struct {
 // IngestWarningCode defines model for IngestWarning.Code.
 type IngestWarningCode string
 
+// IssuedKey The answer of the two calls that issue a key — POST /v1/keys and
+// POST /v1/keys/rotate — and the ONE place the full key ever appears.
+// `value` is shown exactly once and is not retrievable again; `prefix` is
+// what every later read lists instead.
+type IssuedKey struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Id Example: key_2
+	Id string `json:"id"`
+
+	// Name Example: staging
+	Name *string `json:"name,omitempty"`
+
+	// Prefix Example: uc_live_8f2ac41d9b0e
+	Prefix string `json:"prefix"`
+
+	// Value Example: uc_live_8f2ac41d9b0e6c31a57f92d4
+	Value string `json:"value"`
+}
+
 // KeyUsageEntry defines model for KeyUsageEntry.
 type KeyUsageEntry struct {
 	// Endpoint Example: POST /v1/event
@@ -1048,10 +1104,11 @@ type KeyUsageEntry struct {
 
 // KeysResponse defines model for KeysResponse.
 type KeysResponse struct {
-	// Key The active API key. The full secret is never stored and never returned
-	// by GET /v1/keys — only this identifier (the prefix). The full key is
-	// returned exactly once by POST /v1/keys/rotate.
-	Key   ApiKey          `json:"key"`
+	// Key DEPRECATED, and kept only so a front older than the key list keeps working against a newer core: the newest key that is not revoked, exactly what this field has always meant. Read `keys` instead.
+	Key *ApiKey `json:"key"`
+
+	// Keys Every key of the current project, newest first, revoked ones included — a withdrawn key with a last use is the record of what happened.
+	Keys  []ApiKey        `json:"keys"`
 	Usage []KeyUsageEntry `json:"usage"`
 }
 
@@ -1405,22 +1462,6 @@ type RecipientsResponse struct {
 
 	// TelegramInvites Pending one-time invite links (token not yet redeemed).
 	TelegramInvites *[]TelegramInvite `json:"telegramInvites,omitempty"`
-}
-
-// RotatedKey POST /v1/keys/rotate's answer — the ONE place the full key ever
-// appears. `value` is shown exactly once and is not retrievable again;
-// `prefix` is what GET /v1/keys lists from here on.
-type RotatedKey struct {
-	CreatedAt time.Time `json:"createdAt"`
-
-	// Id Example: key_2
-	Id string `json:"id"`
-
-	// Prefix Example: uc_live_8f2ac41d9b0e
-	Prefix string `json:"prefix"`
-
-	// Value Example: uc_live_8f2ac41d9b0e6c31a57f92d4
-	Value string `json:"value"`
 }
 
 // Series defines model for Series.
@@ -1800,6 +1841,14 @@ type PutV1InstanceTelegramBotJSONBody struct {
 	Username string `json:"username"`
 }
 
+// PostV1KeysJSONBody defines parameters for PostV1Keys.
+type PostV1KeysJSONBody struct {
+	// Name What to call it, so two keys are told apart by something other than their prefix. Empty is allowed and prints as the prefix.
+	//
+	// Example: staging
+	Name *string `json:"name,omitempty"`
+}
+
 // GetV1LogsParams defines parameters for GetV1Logs.
 type GetV1LogsParams struct {
 	// Window A trailing window for `total` and `services`, kept from before the timeline existed. An explicit `from`/`to` always wins: the two are the same question asked twice, and honouring both would count a slice of a slice.
@@ -1926,6 +1975,9 @@ type PutV1InstanceSmtpJSONRequestBody PutV1InstanceSmtpJSONBody
 
 // PutV1InstanceTelegramBotJSONRequestBody defines body for PutV1InstanceTelegramBot for application/json ContentType.
 type PutV1InstanceTelegramBotJSONRequestBody PutV1InstanceTelegramBotJSONBody
+
+// PostV1KeysJSONRequestBody defines body for PostV1Keys for application/json ContentType.
+type PostV1KeysJSONRequestBody PostV1KeysJSONBody
 
 // PostV1MonitorsJSONRequestBody defines body for PostV1Monitors for application/json ContentType.
 type PostV1MonitorsJSONRequestBody = MonitorCreate

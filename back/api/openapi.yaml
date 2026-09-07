@@ -307,26 +307,45 @@ components:
     # --- keys ---------------------------------------------------------------
     ApiKey:
       type: object
-      required: [id, prefix, createdAt]
+      required: [id, prefix, createdAt, name, state]
       description: |
-        The active API key. The full secret is never stored and never returned
-        by GET /v1/keys — only this identifier (the prefix). The full key is
-        returned exactly once by POST /v1/keys/rotate.
+        One of the project's API keys. The full secret is never stored and never
+        returned by a read — only this identifier (the prefix). The full key is
+        returned exactly once, by the call that issues it.
       properties:
         id: { type: string, example: "key_1" }
         prefix: { type: string, example: "uc_live_8f2ac41d9b0e" }
         createdAt: { type: string, format: date-time }
-    RotatedKey:
+        name:
+          type: string
+          description: "What the person called it. Empty is a real answer — every key issued before names existed has one, and the app falls back to the prefix."
+          example: "staging"
+        state:
+          type: string
+          enum: [active, rotating, revoked]
+          description: "`rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence."
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Null for a key nothing has ever presented."
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+    IssuedKey:
       type: object
       required: [id, prefix, createdAt, value]
       description: |
-        POST /v1/keys/rotate's answer — the ONE place the full key ever
-        appears. `value` is shown exactly once and is not retrievable again;
-        `prefix` is what GET /v1/keys lists from here on.
+        The answer of the two calls that issue a key — POST /v1/keys and
+        POST /v1/keys/rotate — and the ONE place the full key ever appears.
+        `value` is shown exactly once and is not retrievable again; `prefix` is
+        what every later read lists instead.
       properties:
         id: { type: string, example: "key_2" }
         prefix: { type: string, example: "uc_live_8f2ac41d9b0e" }
         createdAt: { type: string, format: date-time }
+        name: { type: string, example: "staging" }
         value: { type: string, example: "uc_live_8f2ac41d9b0e6c31a57f92d4" }
     KeyUsageEntry:
       type: object
@@ -337,9 +356,19 @@ components:
         status: { type: integer, example: 202 }
     KeysResponse:
       type: object
-      required: [key, usage]
+      required: [key, keys, usage]
       properties:
-        key: { $ref: "#/components/schemas/ApiKey" }
+        key:
+          allOf: [{ $ref: "#/components/schemas/ApiKey" }]
+          nullable: true
+          description: >
+            DEPRECATED, and kept only so a front older than the key list keeps
+            working against a newer core: the newest key that is not revoked,
+            exactly what this field has always meant. Read `keys` instead.
+        keys:
+          type: array
+          description: "Every key of the current project, newest first, revoked ones included — a withdrawn key with a last use is the record of what happened."
+          items: { $ref: "#/components/schemas/ApiKey" }
         usage:
           type: array
           items: { $ref: "#/components/schemas/KeyUsageEntry" }
@@ -1916,7 +1945,12 @@ paths:
   /v1/keys:
     get:
       tags: [sources]
-      summary: The active API key + recent usage (Sources #key).
+      summary: The project's API keys + recent usage (Sources #key).
+      description: >
+        A project keeps a SET of keys, not one key it rotates: one per
+        environment, one per service, and a leaked one withdrawn without
+        touching the others. Revoked keys stay in the list, because the last use
+        of a withdrawn key is what tells you what it reached before you noticed.
       responses:
         "200":
           description: OK
@@ -1926,20 +1960,91 @@ paths:
                 { schema: { $ref: "#/components/schemas/KeysResponse" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [sources]
+      summary: Issue another key for the current project.
+      description: >
+        The full key is in the answer and nowhere else, ever again. A project is
+        capped at 10 keys that still work (active or rotating); revoked ones do
+        not count, so the cap is on live credentials rather than on history. The
+        cap is a fixed number and NOT a plan axis: there is no key row in
+        Pricing, so there is no wall.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 60
+                  description: "What to call it, so two keys are told apart by something other than their prefix. Empty is allowed and prints as the prefix."
+                  example: "staging"
+      responses:
+        "201":
+          description: Issued; the full key is returned exactly once.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/IssuedKey" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "409":
+          description: >
+            `key_limit`: the project already holds 10 keys that work. Revoke one
+            first. This is a fixed ceiling, never a 402 — no plan buys more.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/keys/{id}:
+    delete:
+      tags: [sources]
+      summary: Revoke one key.
+      description: >
+        The key stops being accepted at once — there is no overlap window,
+        because withdrawing a key is what you do when it leaked. The row is kept
+        and marked, never deleted: `lastUsedAt` on a revoked key is evidence.
+        Revoking the last one is allowed and leaves the project unable to ingest
+        until another is issued; refusing it would be guessing at what the owner
+        meant.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, example: "key_2" }
+      responses:
+        "204": { description: Revoked, or already was. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404":
+          description: No such key in the current project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/keys/rotate:
     post:
       tags: [sources]
       summary: |
-        Rotate the active key. The old key stays valid for a 24h overlap window,
-        then 401s — a rotation that kills a deployed app fails at the customer.
+        Rotate every working key of the project at once. Each stays valid for a
+        24h overlap window, then 401s — a rotation that kills a deployed app
+        fails at the customer.
+      description: >
+        Sugar over the two calls below, kept because "I just leaked it" wants one
+        button: it marks every ACTIVE key of the project `rotating` and issues one
+        replacement. To withdraw ONE key without touching the others, revoke it
+        with DELETE /v1/keys/{id} and issue its replacement with POST /v1/keys.
       responses:
         "200":
           description: Rotated; the new key is returned.
           content:
             {
               application/json:
-                { schema: { $ref: "#/components/schemas/RotatedKey" } },
+                { schema: { $ref: "#/components/schemas/IssuedKey" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
 

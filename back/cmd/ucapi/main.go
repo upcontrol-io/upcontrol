@@ -208,8 +208,14 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("GET /v1/incidents", rd)
 	mux.Handle("GET /v1/overview", rd)
 
+	// A project keeps a SET of keys: one per environment, one per service, and a
+	// leaked one withdrawn without taking the others down. `rotate` is registered
+	// before the {id} pattern would ever see it, and the mux prefers the more
+	// specific literal anyway.
 	keys := api.NewKeys(pgPool, sm)
 	mux.Handle("GET /v1/keys", keys)
+	mux.Handle("POST /v1/keys", keys)
+	mux.Handle("DELETE /v1/keys/{id}", keys)
 	mux.Handle("POST /v1/keys/rotate", keys)
 
 	// Instance settings (self-host only; the hosted cloud answers 404): the

@@ -65,19 +65,52 @@
   align-self: stretch;
 }
 
-.keyRow {
+.keyList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.keyRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
 }
 
-.keyValue {
-  font-family: var(--font-mono);
+/* Withdrawn, not deleted: a revoked key's last use is evidence. */
+.keyRowOff {
+  border-style: dashed;
+}
+
+.keyRowOff .keyName,
+.keyRowOff .keyMeta {
+  color: var(--text-faint);
+}
+
+.keyName {
   font-size: var(--text-sm);
   color: var(--text-primary);
+}
+
+.keyFlag {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}
+
+.keyMeta {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.keyRevoke {
+  margin-left: auto;
 }
 
 .stepLabel {
