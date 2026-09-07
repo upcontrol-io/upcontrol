@@ -11,10 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countLiveAPIKeys = `-- name: CountLiveAPIKeys :one
+SELECT count(*) FROM api_key
+ WHERE project_id = $1 AND state <> 'revoked'
+`
+
+// The cap counts credentials that still work, not history: a revoked key is a
+// record, and keeping it should never stop anyone issuing a replacement.
+func (q *Queries) CountLiveAPIKeys(ctx context.Context, projectID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countLiveAPIKeys, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state)
-VALUES ($1, $2, $3, $4, 'active')
-RETURNING id, prefix, state, created_at
+INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, name)
+VALUES ($1, $2, $3, $4, 'active', $5)
+RETURNING id, prefix, name, state, created_at
 `
 
 type CreateAPIKeyParams struct {
@@ -22,11 +36,13 @@ type CreateAPIKeyParams struct {
 	ProjectID  int64
 	Prefix     string
 	SecretHash []byte
+	Name       string
 }
 
 type CreateAPIKeyRow struct {
 	ID        int64
 	Prefix    string
+	Name      string
 	State     string
 	CreatedAt pgtype.Timestamptz
 }
@@ -40,15 +56,85 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		arg.ProjectID,
 		arg.Prefix,
 		arg.SecretHash,
+		arg.Name,
 	)
 	var i CreateAPIKeyRow
 	err := row.Scan(
 		&i.ID,
 		&i.Prefix,
+		&i.Name,
 		&i.State,
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listAPIKeysForProject = `-- name: ListAPIKeysForProject :many
+SELECT id, prefix, name, state, created_at, last_used_at, revoked_at
+  FROM api_key WHERE project_id = $1
+ ORDER BY created_at DESC
+`
+
+type ListAPIKeysForProjectRow struct {
+	ID         int64
+	Prefix     string
+	Name       string
+	State      string
+	CreatedAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+}
+
+// Every key of one project, newest first, revoked ones included: the last use of
+// a withdrawn key is the record of what it reached before anyone noticed.
+func (q *Queries) ListAPIKeysForProject(ctx context.Context, projectID int64) ([]ListAPIKeysForProjectRow, error) {
+	rows, err := q.db.Query(ctx, listAPIKeysForProject, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAPIKeysForProjectRow
+	for rows.Next() {
+		var i ListAPIKeysForProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Prefix,
+			&i.Name,
+			&i.State,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAPIKey = `-- name: RevokeAPIKey :execrows
+UPDATE api_key
+   SET state = 'revoked', revoked_at = now()
+ WHERE id = $1 AND project_id = $2 AND state <> 'revoked'
+`
+
+type RevokeAPIKeyParams struct {
+	ID        int64
+	ProjectID int64
+}
+
+// Scoped to the project so an id from another workspace matches nothing. No
+// overlap window: withdrawing a key is what you do when it leaked. The row is
+// marked, never deleted.
+func (q *Queries) RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAPIKey, arg.ID, arg.ProjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const rotateAPIKey = `-- name: RotateAPIKey :one

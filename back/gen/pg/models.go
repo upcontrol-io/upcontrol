@@ -34,6 +34,8 @@ type ApiKey struct {
 	RotatingUntil pgtype.Timestamptz
 	CreatedAt     pgtype.Timestamptz
 	LastUsedAt    pgtype.Timestamptz
+	Name          string
+	RevokedAt     pgtype.Timestamptz
 }
 
 type Check struct {

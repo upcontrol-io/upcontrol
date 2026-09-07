@@ -5,9 +5,11 @@ import { CopyField } from '@/components/code';
 import { invalidateApiData, useApiData } from '@/lib/useApiData';
 import {
 	channels as channelsApi,
+	createKey,
 	installToken as installTokenApi,
 	instance,
 	keys as keysApi,
+	revokeKey,
 	rotateKey,
 	statusPage as statusPageApi,
 } from '@/lib/client';
@@ -15,6 +17,11 @@ import styles from './Settings.module.css';
 
 /** How long a rotated key keeps working, so a deployed app can catch up. */
 const ROTATE_OVERLAP = '24 hours';
+
+/** One modal asks every key question; after an issue it flips to the copy view. */
+type KeyAsk = { kind: 'add' } | { kind: 'rotate' } | { kind: 'revoke'; id: string; label: string };
+
+const whenFmt = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 
 function useSectionAction() {
 	const [busy, setBusy] = useState(false);
@@ -40,7 +47,7 @@ function useSectionAction() {
 }
 
 /** The instance's few real knobs. Project name is the status page's title (the
- *  only name with a write behind it); the ingest key arrives via install token. */
+ *  only name with a write behind it); the ingest keys arrive via install token. */
 export function Settings() {
 	const { data: page, live: pageLive, loading: pageLoading, failed: pageFailed } = useApiData(
 		'statusPage',
@@ -58,10 +65,13 @@ export function Settings() {
 	const [installCmd, setInstallCmd] = useState<{ command: string; expiresAt: string } | null>(null);
 	const [tokenBusy, setTokenBusy] = useState(false);
 	const [tokenError, setTokenError] = useState<string | null>(null);
-	const [rotateOpen, setRotateOpen] = useState(false);
-	const [rotating, setRotating] = useState(false);
-	// The full key exists only at rotate; this is the one place it is shown.
-	const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+	// One modal asks every key question — add, rotate, revoke — and after an
+	// issue flips to the one-time copy view. The full key lives in state
+	// only while that view is open.
+	const [keyAsk, setKeyAsk] = useState<KeyAsk | null>(null);
+	const [newKeyName, setNewKeyName] = useState('');
+	const [fullKey, setFullKey] = useState<string | null>(null);
+	const keyAction = useSectionAction();
 	// Write-only fields: the server seals what is typed here and never
 	// returns it, so these inputs always start empty.
 	const [tgToken, setTgToken] = useState('');
@@ -80,7 +90,7 @@ export function Settings() {
 	}, [page]);
 
 	// Declared once, rendered by every branch (loading, failed, empty, live).
-	const header = <PageHeader title="Settings" description="This instance's few real knobs: the project name, the ingest key, and the services it talks to." />;
+	const header = <PageHeader title="Settings" description="This instance's few real knobs: the project name, the ingest keys, and the services it talks to." />;
 
 	if (pageLoading || keysLoading) {
 		return (
@@ -185,6 +195,37 @@ export function Settings() {
 		setSmtpRemoveAsking(false);
 	}
 
+	async function runKeyAsk() {
+		if (!keyAsk || keyAction.busy) return;
+		const ask = keyAsk;
+		let done = false;
+		await keyAction.run(
+			async () => {
+				if (ask.kind === 'add') {
+					setFullKey((await createKey(newKeyName.trim())).value);
+					setNewKeyName('');
+				} else if (ask.kind === 'rotate') {
+					setFullKey((await rotateKey()).value);
+				} else {
+					await revokeKey(ask.id);
+				}
+				done = true;
+				invalidateApiData('keys');
+				return ask.kind === 'revoke'
+					? `Revoked. ${ask.label} stopped being accepted at once; its row stays as the record of what it reached.`
+					: `${ask.kind === 'add' ? 'Added' : 'Rotated'}. The full key was shown once — it cannot be shown again.`;
+			},
+			ask.kind === 'add'
+				? 'Could not add the key. Try again.'
+				: ask.kind === 'rotate'
+					? 'Could not rotate. Try again.'
+					: 'Could not revoke. Try again.',
+		);
+		// A revoke has nothing to copy; a failure closes the ask so the
+		// server's own refusal (the 409 names the fix) is readable below.
+		if (!done || ask.kind === 'revoke') setKeyAsk(null);
+	}
+
 	return (
 		<div className={styles.wrap}>
 			{header}
@@ -213,17 +254,50 @@ export function Settings() {
 			</section>
 
 			<section className={styles.section}>
-				<h2 className={styles.sectionTitle}>Ingest key</h2>
+				<h2 className={styles.sectionTitle}>Ingest keys</h2>
 				{/* Write-only is a trust argument: a key that leaks out of a repo
-				    can only send, never read. One project, one key. */}
+				    can only send, never read. */}
 				<span className={styles.hint}>
-					Write-only — it can send data, never read it. Only the prefix is stored; the full key is shown once,
-					when you rotate it.
+					Write-only — they can send data, never read it. Only each prefix is kept, an identifier
+					not a credential; the full key is shown once, when it is issued.
 				</span>
-				<div className={styles.keyRow}>
-					<span className={styles.keyValue}>{liveKeys.key?.prefix ?? '—'}</span>
-					<span className={styles.hint}>Key prefix — an identifier, not a credential.</span>
-				</div>
+				{liveKeys.keys.length === 0 ? (
+					<span className={styles.hint}>No keys yet. Add one to start sending data in.</span>
+				) : (
+					<ul className={styles.keyList}>
+						{liveKeys.keys.map((k) => (
+							<li
+								key={k.id}
+								className={k.state === 'revoked' ? `${styles.keyRow} ${styles.keyRowOff}` : styles.keyRow}
+							>
+								<span className={styles.keyName}>{k.name || k.prefix}</span>
+								{k.state !== 'active' && (
+									<span className={styles.keyFlag}>
+										{k.state === 'revoked' ? 'revoked' : `replaced — works ${ROTATE_OVERLAP} longer`}
+									</span>
+								)}
+								<span className={styles.keyMeta}>
+									{k.name ? `${k.prefix} · ` : ''}Created {whenFmt.format(new Date(k.createdAt))} ·{' '}
+									{k.lastUsedAt ? `Last used ${whenFmt.format(new Date(k.lastUsedAt))}` : 'Never used'}
+								</span>
+								{k.state !== 'revoked' && (
+									<Button
+										variant="ghost"
+										size="sm"
+										className={styles.keyRevoke}
+										disabled={keyAction.busy}
+										onClick={() => setKeyAsk({ kind: 'revoke', id: k.id, label: k.name || k.prefix })}
+									>
+										Revoke
+									</Button>
+								)}
+							</li>
+						))}
+					</ul>
+				)}
+				{keyAction.note && (
+					<span className={keyAction.note.failed ? styles.tokenError : styles.hint}>{keyAction.note.text}</span>
+				)}
 
 				<span className={styles.stepLabel}>Wire the SDK — one command, whatever agent you use</span>
 				{installCmd ? (
@@ -245,10 +319,16 @@ export function Settings() {
 				{tokenError && <span className={styles.tokenError}>{tokenError}</span>}
 
 				<div className={styles.rotateRow}>
-					<Button variant="secondary" size="sm" onClick={() => setRotateOpen(true)}>
-						Rotate key
+					<Button variant="secondary" size="sm" onClick={() => setKeyAsk({ kind: 'add' })}>
+						Add a key
 					</Button>
-					<span className={styles.hint}>The manual path: rotate, copy the key once, run npx upcontrol init --key yourself.</span>
+					<Button variant="secondary" size="sm" onClick={() => setKeyAsk({ kind: 'rotate' })}>
+						Rotate every key
+					</Button>
+					<span className={styles.hint}>
+						Leaked? Rotate replaces every working key at once. One key gone bad: revoke that row
+						and add a replacement.
+					</span>
 				</div>
 			</section>
 
@@ -392,65 +472,99 @@ export function Settings() {
 			</p>
 
 			<Modal
-				open={rotateOpen}
+				open={keyAsk !== null || fullKey !== null}
 				onClose={() => {
-					setRotateOpen(false);
-					setRotatedKey(null);
+					setKeyAsk(null);
+					setFullKey(null);
 				}}
-				title={rotatedKey ? 'Copy your new key' : 'Rotate this key?'}
+				title={
+					fullKey
+						? 'Copy your new key'
+						: keyAsk?.kind === 'add'
+							? 'Add a key'
+							: keyAsk?.kind === 'rotate'
+								? 'Rotate every key?'
+								: 'Revoke this key?'
+				}
 			>
-				{rotatedKey ? (
+				{fullKey ? (
 					<>
 						{/* Not "the old key stops immediately": a rotation that breaks a
 						    deployed app fails at the customer. */}
 						<p className={styles.modalWarning}>
-							Copy it now — this is the only time the full key is shown. The old one keeps working for{' '}
-							{ROTATE_OVERLAP}, then stops.
+							Copy it now — this is the only time the full key is shown.
+							{keyAsk?.kind === 'rotate' && <> The old ones keep working for {ROTATE_OVERLAP}, then stop.</>}
 						</p>
-						<CopyField text={rotatedKey} />
+						<CopyField text={fullKey} />
 						<div className={styles.modalActions}>
 							<Button
 								variant="primary"
 								onClick={() => {
-									setRotateOpen(false);
-									setRotatedKey(null);
+									setKeyAsk(null);
+									setFullKey(null);
 								}}
 							>
 								Done
 							</Button>
 						</div>
 					</>
-				) : (
-					<>
+				) : keyAsk?.kind === 'add' ? (
+					<form
+						onSubmit={(event) => {
+							event.preventDefault();
+							void runKeyAsk();
+						}}
+					>
+						<Input
+							value={newKeyName}
+							onChange={(event) => setNewKeyName(event.target.value)}
+							placeholder="staging"
+							aria-label="Key name"
+							autoComplete="off"
+						/>
 						<p className={styles.modalWarning}>
-							A new key is issued now. The old one keeps working for {ROTATE_OVERLAP}, so anything already
-							deployed has time to pick up the new one — after that it stops.
+							A name tells two keys apart by something other than their prefix. Optional.
 						</p>
 						<div className={styles.modalActions}>
-							<Button variant="ghost" disabled={rotating} onClick={() => setRotateOpen(false)}>
+							<Button type="button" variant="ghost" disabled={keyAction.busy} onClick={() => setKeyAsk(null)}>
 								Cancel
 							</Button>
-							<Button
-								variant="primary"
-								disabled={rotating}
-								onClick={async () => {
-									setRotating(true);
-									try {
-										const res = await rotateKey();
-										setRotatedKey(res.value);
-										invalidateApiData('keys');
-									} catch {
-										// network/401 — leave the modal in its confirm state
-									} finally {
-										setRotating(false);
-									}
-								}}
-							>
-								{rotating ? 'Rotating…' : 'Rotate key'}
+							<Button type="submit" variant="primary" disabled={keyAction.busy}>
+								{keyAction.busy ? 'Adding…' : 'Add key'}
+							</Button>
+						</div>
+					</form>
+				) : keyAsk?.kind === 'rotate' ? (
+					<>
+						<p className={styles.modalWarning}>
+							Every working key is replaced at once. Each old one keeps working for {ROTATE_OVERLAP}, so
+							anything already deployed has time to pick up the new key — after that it stops.
+						</p>
+						<div className={styles.modalActions}>
+							<Button variant="ghost" disabled={keyAction.busy} onClick={() => setKeyAsk(null)}>
+								Cancel
+							</Button>
+							<Button variant="primary" disabled={keyAction.busy} onClick={() => void runKeyAsk()}>
+								{keyAction.busy ? 'Rotating…' : 'Rotate every key'}
 							</Button>
 						</div>
 					</>
-				)}
+				) : keyAsk?.kind === 'revoke' ? (
+					<>
+						<p className={styles.modalWarning}>
+							Revoke {keyAsk.label}? It stops being accepted at once — no overlap window. The row stays
+							listed, its last use still readable.
+						</p>
+						<div className={styles.modalActions}>
+							<Button variant="ghost" disabled={keyAction.busy} onClick={() => setKeyAsk(null)}>
+								Keep
+							</Button>
+							<Button variant="danger" disabled={keyAction.busy} onClick={() => void runKeyAsk()}>
+								{keyAction.busy ? 'Revoking…' : 'Revoke'}
+							</Button>
+						</div>
+					</>
+				) : null}
 			</Modal>
 		</div>
 	);

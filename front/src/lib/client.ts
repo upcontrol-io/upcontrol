@@ -66,13 +66,21 @@ export const sources = () =>
 	fetchJSON<components["schemas"]["SourcesResponse"]>("/v1/sources");
 export const keys = () =>
 	fetchJSON<components["schemas"]["KeysResponse"]>("/v1/keys");
-// Rotate returns the FULL key exactly once. The caller shows it once and
-// never stores it.
+// Create and rotate both answer with the FULL key exactly once; the caller
+// shows it once and never stores it.
+export const createKey = (name: string) =>
+	fetchJSON<components["schemas"]["IssuedKey"]>("/v1/keys", {
+		method: "POST",
+		body: JSON.stringify({ name }),
+	});
 export const rotateKey = () =>
-	fetchJSON<{ id: string; value: string; createdAt: string }>(
+	fetchJSON<components["schemas"]["IssuedKey"]>(
 		"/v1/keys/rotate",
 		{ method: "POST" },
 	);
+// Withdraws one key at once (no overlap); the server keeps the row.
+export const revokeKey = (id: string) =>
+	fetchJSON<undefined>(`/v1/keys/${id}`, { method: "DELETE" });
 // One-time install token: the key never travels here; the CLI redeems the
 // token server-side and writes .env itself.
 export const installToken = () =>
