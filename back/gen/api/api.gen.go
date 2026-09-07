@@ -78,6 +78,7 @@ const (
 	DashboardMetricRefSourceFunnel     DashboardMetricRefSource = "funnel"
 	DashboardMetricRefSourceLogs       DashboardMetricRefSource = "logs"
 	DashboardMetricRefSourceMetric     DashboardMetricRefSource = "metric"
+	DashboardMetricRefSourceRetention  DashboardMetricRefSource = "retention"
 	DashboardMetricRefSourceService    DashboardMetricRefSource = "service"
 )
 
@@ -97,6 +98,8 @@ func (e DashboardMetricRefSource) Valid() bool {
 	case DashboardMetricRefSourceLogs:
 		return true
 	case DashboardMetricRefSourceMetric:
+		return true
+	case DashboardMetricRefSourceRetention:
 		return true
 	case DashboardMetricRefSourceService:
 		return true

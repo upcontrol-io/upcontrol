@@ -64,6 +64,9 @@ type writeAPI struct {
 	// Sends the watch door's login code by e-mail. nil means no mailer: prod
 	// stores the code unsent; a fresh link still signs the visitor in.
 	mailer auth.Mailer
+	// Resolves an ingest key for the one key-authenticated write there is,
+	// PUT /v1/dashboard on a project with no board. Same pool, no extra wiring.
+	keys *pg.KeyResolver
 }
 
 // checkCacheTTL is short enough that a reader who just fixed their site sees the
@@ -76,7 +79,7 @@ type cachedCheck struct {
 }
 
 func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
-	return &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted}
+	return &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted, keys: pg.NewKeyResolver(p, nil)}
 }
 
 func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +94,14 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// it sits before the session gate because the ask carries no cookie.
 	if r.URL.Path == "/internal/domain-allowed" && r.Method == http.MethodGet {
 		h.domainAllowed(w, r)
+		return
+	}
+
+	// The agent's one key-authenticated write: a first board for a project that has
+	// none (see putFirstDashboard). Taken only when a key is actually presented, so a
+	// browser session, which sends no such header, never reaches it.
+	if r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut && presentedKey(r) != "" {
+		h.putFirstDashboard(w, r)
 		return
 	}
 

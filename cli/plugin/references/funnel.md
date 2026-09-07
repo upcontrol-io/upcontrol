@@ -105,8 +105,10 @@ is nothing to gitignore, because the default lives inside `node_modules`. Point
 `UPCONTROL_STATE_DIR` at a path on a volume when the deploy rebuilds
 `node_modules`, otherwise the counts start again after such a deploy. Each
 process counts its own people, so an app in cluster mode counts a visitor once
-per worker; say so to the user if you see a cluster. Without a key the funnel
-still counts locally and sends nothing, like the rest of the SDK.
+per worker; say so to the user if you see a cluster. Every reading also carries
+the reporter id of the process that sent it, so the board can tell the workers
+apart and sum them correctly. Without a key the funnel still counts locally and
+sends nothing, like the rest of the SDK.
 
 ## Verify
 

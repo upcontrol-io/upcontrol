@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFunnel, type FunnelDeps } from '../dist/esm/funnel.js';
 import { Client } from '../dist/esm/client.js';
+import { REPORTER } from '../dist/esm/counters.js';
 import { startServer } from './server.ts';
 
 // The funnel feed: counters that only grow, one person counted once per step, nothing that
@@ -70,7 +71,7 @@ test('a funnel reports every step as a counter the moment it is declared', async
     assert.equal(line.value, 0);
     assert.equal(line.level, 'metric');
     // Zero-padded, so twelve steps sort as strings the way they were declared.
-    assert.deepEqual(line.labels, { funnel: 'declared', step: steps[i], i: String(i + 1).padStart(2, '0') });
+    assert.deepEqual(line.labels, { funnel: 'declared', step: steps[i], i: String(i + 1).padStart(2, '0'), 'uc.reporter': REPORTER });
     assert.ok(!Number.isNaN(Date.parse(String(line.ts))), 'ts parses as a date');
   });
   await f.stop();

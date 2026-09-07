@@ -17,6 +17,10 @@ const EVERY_MS = 60_000;
 const SLOW_SAVE_BYTES = 4 * 1024 * 1024;
 const SLOW_SAVE_MS = 10 * EVERY_MS;
 
+// Stamped on every counter reading: a reading carries no other way to say which process
+// sent it, and the server's fold needs that to keep two instances of one app apart.
+export const REPORTER = randomBytes(4).toString('hex');
+
 type HeaderBag = { get(name: string): string | null } | Record<string, string | string[] | undefined>;
 
 /** The shape every Node request has: `http.IncomingMessage`, Express's `req` (`ip`), a
