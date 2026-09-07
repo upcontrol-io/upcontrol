@@ -610,3 +610,146 @@ func TestCreateRecipientOwnerAddressAnswersTheOwnerRow(t *testing.T) {
 		t.Fatalf("SendInvite calls = %d, want 0 — the owner is already in", m.calls)
 	}
 }
+
+// seedSiblingSession adds a SECOND project to the same workspace and swaps the
+// fixed identity for a real session row pointed at it: with no pick of its own,
+// the resolver always lands on the lowest project, and these tests write into
+// the sibling. Answers the sibling's id and the session's cookie.
+func seedSiblingSession(t *testing.T, h *writeAPI, tenantID, inviterID int64) (int64, *http.Cookie) {
+	t.Helper()
+	ctx := context.Background()
+	var second int64
+	if err := h.pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		tenantID, fmt.Sprintf("sibling-%d.example.com", time.Now().UnixNano()%100000)).Scan(&second); err != nil {
+		t.Fatalf("seed sibling project: %v", err)
+	}
+	sm := session.New(h.pool, session.DefaultTTL, nil)
+	token, err := sm.Create(ctx, inviterID, tenantID, &second)
+	if err != nil {
+		t.Fatalf("mint a session opened on the sibling project: %v", err)
+	}
+	h.sess = sm
+	return second, &http.Cookie{Name: session.CookieName, Value: token}
+}
+
+// A person who already accepted somewhere in the workspace is proven: invited
+// into a sibling project they land ACTIVE, with no code minted and no mail —
+// the second invite is an access decision, not an identity one.
+func TestCreateRecipient_ProvenPersonJoinsASecondProjectActive(t *testing.T) {
+	h, tenantID, inviterID := openRecipientsDB(t)
+	h.mailer = &inviteMailer{}
+	ctx := context.Background()
+	personID, addr := seedMember(t, h, tenantID, "active")
+	second, cookie := seedSiblingSession(t, h, tenantID, inviterID)
+
+	r := inviteRequest(t, addr)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.createRecipient(w, r, tenantID, inviterID)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d (%s), want 201", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Status   string `json:"status"`
+		DevToken string `json:"dev_token"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "active" {
+		t.Fatalf("status = %q, want active — the person is proven in this workspace", resp.Status)
+	}
+	if resp.DevToken != "" {
+		t.Fatalf("dev_token = %q, want none — a proven person is never mailed a code", resp.DevToken)
+	}
+	var status string
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT status FROM project_member WHERE project_id = $1 AND person_id = $2`,
+		second, personID).Scan(&status); err != nil || status != "active" {
+		t.Fatalf("sibling membership status = %q (err %v), want active", status, err)
+	}
+	if m := h.mailer.(*inviteMailer); m.calls != 0 {
+		t.Fatalf("SendInvite calls = %d, want 0 — no mail leaves for a proven person", m.calls)
+	}
+	var codes int
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT count(*) FROM magic_link_code WHERE email = $1`, addr).Scan(&codes); err != nil || codes != 0 {
+		t.Fatalf("magic-link rows = %d (err %v), want 0 — no code is minted for a proven person", codes, err)
+	}
+}
+
+// A pending row an earlier invite left in the sibling heals on the next one:
+// the same call flips it active, keeps the planted role against the request's,
+// and still sends no mail.
+func TestCreateRecipient_PendingRowInASecondProjectHealsActive(t *testing.T) {
+	h, tenantID, inviterID := openRecipientsDB(t)
+	h.mailer = &inviteMailer{}
+	ctx := context.Background()
+	personID, addr := seedMember(t, h, tenantID, "active")
+	second, cookie := seedSiblingSession(t, h, tenantID, inviterID)
+	// The row the old behaviour left: pending on the sibling with role login,
+	// while the invite below asks for notify.
+	if _, err := h.pool.Raw().Exec(ctx,
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, 'login', 'pending')`,
+		second, personID, tenantID); err != nil {
+		t.Fatalf("seed pending membership: %v", err)
+	}
+
+	r := inviteRequest(t, addr)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.createRecipient(w, r, tenantID, inviterID)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d (%s), want 201", w.Code, w.Body.String())
+	}
+	var role, status string
+	var rows int
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT role, status, count(*) OVER () FROM project_member WHERE project_id = $1 AND person_id = $2`,
+		second, personID).Scan(&role, &status, &rows); err != nil {
+		t.Fatalf("read the sibling membership: %v", err)
+	}
+	if status != "active" || role != "login" || rows != 1 {
+		t.Fatalf("sibling membership = %s/%s in %d rows, want active/login in 1 — the row heals and the planted role survives", status, role, rows)
+	}
+	if m := h.mailer.(*inviteMailer); m.calls != 0 {
+		t.Fatalf("SendInvite calls = %d, want 0 — a healed row mints no code and sends no mail", m.calls)
+	}
+}
+
+// The short-circuit did not swallow the ordinary path: an address no project of
+// the workspace holds is still invited — pending, exactly one mail.
+func TestCreateRecipient_AStrangerIsStillInvited(t *testing.T) {
+	h, tenantID, inviterID := openRecipientsDB(t)
+	h.mailer = &inviteMailer{}
+	_, cookie := seedSiblingSession(t, h, tenantID, inviterID)
+	addr := fmt.Sprintf("stranger%d@example.com", time.Now().UnixNano())
+
+	r := inviteRequest(t, addr)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.createRecipient(w, r, tenantID, inviterID)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d (%s), want 201", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "pending" {
+		t.Fatalf("status = %q, want pending — nobody in this workspace holds that address", resp.Status)
+	}
+	if m := h.mailer.(*inviteMailer); m.calls != 1 {
+		t.Fatalf("SendInvite calls = %d, want exactly 1", m.calls)
+	}
+	var n int
+	if err := h.pool.Raw().QueryRow(context.Background(),
+		`SELECT count(*) FROM project_member m JOIN person p ON p.id = m.person_id
+		  WHERE m.tenant_id = $1 AND p.email = $2 AND m.status = 'pending'`,
+		tenantID, addr).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("pending membership rows = %d (err %v), want 1", n, err)
+	}
+}

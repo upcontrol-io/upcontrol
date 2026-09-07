@@ -469,9 +469,26 @@ func (h *writeAPI) createRecipient(w http.ResponseWriter, r *http.Request, tenan
 		})
 		return
 	}
+	// A person already inside this workspace has been let in once: an active
+	// membership is written by the magic-link redeem and by the unbound
+	// Telegram redeem, and by nothing else — a BOUND redeem deliberately never
+	// writes status. Adding them to a SECOND project is an access decision, not
+	// an identity one, so the row lands active with no code minted and no mail
+	// sent. Left pending they are refused by createChannel's e-mail gate and
+	// never offered by the picker, which reads as "this address cannot be added
+	// here". This never mints the first proof, it only carries an existing one
+	// across the workspace's own projects. The conflict arm heals a row an
+	// earlier invite left pending, and only upward: a stranger's stays pending,
+	// and a re-invite is still not a way to re-role anybody.
 	_, _ = tx.Exec(ctx,
-		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status) VALUES ($1, $2, $3, $4, 'pending')
-		 ON CONFLICT DO NOTHING`, projectID, personID, tenantID, req.Role)
+		`INSERT INTO project_member (project_id, person_id, tenant_id, role, status)
+		 SELECT $1, $2, $3, $4,
+		        CASE WHEN EXISTS (SELECT 1 FROM project_member m JOIN project pr ON pr.id = m.project_id
+		                           WHERE m.person_id = $2 AND pr.tenant_id = $3 AND m.status = 'active')
+		             THEN 'active' ELSE 'pending' END
+		 ON CONFLICT (project_id, person_id) DO UPDATE SET status = 'active'
+		  WHERE project_member.status = 'pending' AND EXCLUDED.status = 'active'`,
+		projectID, personID, tenantID, req.Role)
 	// Read the status inside the same transaction: an already-active invitee
 	// needs no mail and no code.
 	var status string

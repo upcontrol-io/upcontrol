@@ -1430,7 +1430,7 @@ export interface paths {
         put?: never;
         /**
          * Invite a person (role chosen at invite, default notify).
-         * @description The invite lands in the session's CURRENT project, not in the whole workspace: a teammate sees the projects they were invited to and nothing else.
+         * @description The invite lands in the session's CURRENT project, not in the whole workspace: a teammate sees the projects they were invited to and nothing else. Identity, however, is a workspace fact: an address that already holds an ACTIVE membership in one of this workspace's projects has been proved once, so it joins the second one `active` with no invitation mail — and a row an earlier invite left `pending` is healed by the same call. A stranger is invited as before. The address that OWNS the workspace answers 200 with the owner's row and no membership.
          */
         post: {
             parameters: {
@@ -1449,7 +1449,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created (pending until accepted). */
+                /** @description Created. `status` says which happened: `pending` when an invitation mail went out, `active` when the person was already inside the workspace and needed none. */
                 201: {
                     headers: {
                         [name: string]: unknown;
