@@ -635,25 +635,6 @@ func previousTotal(rows []pgstore.Bucket, from time.Time, span time.Duration, o 
 	return previous
 }
 
-// sumPoints is countPoints for a counter's folded increments: the database
-// summed the deltas, and a bucket the counter did not move in is a measured 0
-// rather than a gap.
-func sumPoints(rows []pgstore.SumBucket, r seriesRange) ([]any, float64) {
-	points := make([]any, r.buckets)
-	var total float64
-	for i := range points {
-		points[i] = float64(0)
-	}
-	for _, b := range rows {
-		if b.Index < 0 || b.Index >= int64(r.buckets) {
-			continue
-		}
-		points[b.Index] = b.Sum
-		total += b.Sum
-	}
-	return points, total
-}
-
 // logsFilter reads the widget's `where` into the builder's filter. Unknown
 // keys are ignored: a board saved against a newer front must still draw.
 func logsFilter(where map[string]string) query.SeriesFilter {

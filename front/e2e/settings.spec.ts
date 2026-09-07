@@ -10,7 +10,7 @@ test("the key is a prefix, and the command carries a token — never the key", a
 
 	await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 	await expect(page.getByText("uc_live_a1b2c3d4e5f6")).toBeVisible();
-	await expect(page.getByText("the full key is shown once, when you rotate it", { exact: false })).toBeVisible();
+	await expect(page.getByText("the full key is shown once, when it is issued", { exact: false })).toBeVisible();
 
 	// Created by an explicit click, never on render.
 	await page.getByRole("button", { name: "Generate install command" }).click();

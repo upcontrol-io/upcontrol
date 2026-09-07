@@ -6,7 +6,25 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
-## [0.21.0] — 2026-09-07
+## [0.21.1] — 2026-09-07
+
+### Security
+- **Four advisories closed, one critical.** `github.com/getkin/kin-openapi` 0.142.0 → 0.149.0
+  (GHSA-r277-6w6q-xmqw critical, CVE-2026-73502 medium), `google.golang.org/grpc` 1.82.1 →
+  1.83.2 (CVE-2026-84304 high) and `github.com/moby/go-archive` 0.2.0 → 0.3.3 (CVE-2026-17106
+  high, an indirect dependency of testcontainers and so test-only). Generation is unchanged by
+  the kin-openapi bump: `api.gen.go` regenerates byte for byte.
+
+### Fixed
+- **CI is green again.** Two jobs had been red since before 0.19.1, and no release since looked
+  at them. `lint`: an import group separator in `internal/api/keys.go`, a tagged switch on
+  `r.URL.Path` in the same file, and a dead `sumPoints` in `internal/api/dashboard.go`, deleted
+  (`pgstore.FunnelBuckets`, its only caller, now has no production consumer either — named, not
+  removed, because that is a code change and not a lint fix). `front`: the OSS app's e2e fixture
+  still answered `GET /v1/keys` with the pre-key-set shape, so `Settings.tsx` read `keys.length`
+  off `undefined` and the whole route threw — which is why both failures pointed at a missing
+  `Settings` heading rather than at a key. The fixture now answers the contract, one row per
+  key state.
 
 ### Changed
 - **`DashboardLayout.version` is `1 | 2`.** The board's row halved to 14px and its resize step

@@ -117,6 +117,40 @@ const INCIDENTS = { items: [] as unknown[] };
 
 const LOGS = { lines: [], volume: [], total: 0, services: [] };
 
+/** Every key of the project, newest first, revoked ones included. One row per
+ *  state, because each one renders differently: only a live key offers Revoke. */
+const KEYS = [
+	{
+		id: "key_3",
+		prefix: "uc_live_9f8e7d6c5b4a",
+		createdAt: "2026-09-06T18:00:00Z",
+		name: "staging",
+		state: "active",
+		lastUsedAt: "2026-09-07T07:12:00Z",
+		revokedAt: null,
+	},
+	{
+		id: "key_2",
+		prefix: "uc_live_1122334455aa",
+		createdAt: "2026-07-14T10:00:00Z",
+		name: "old laptop",
+		state: "revoked",
+		lastUsedAt: "2026-07-30T08:05:00Z",
+		revokedAt: "2026-08-01T12:00:00Z",
+	},
+	// An empty name is a real answer — keys issued before names existed have one,
+	// and the row falls back to the prefix.
+	{
+		id: "key_1",
+		prefix: "uc_live_a1b2c3d4e5f6",
+		createdAt: "2026-06-01T09:00:00Z",
+		name: "",
+		state: "rotating",
+		lastUsedAt: "2026-09-06T17:55:00Z",
+		revokedAt: null,
+	},
+];
+
 /** Serve the app's reads, signed in. Routes are per-page state: a write
  *  survives the re-read that follows, so specs test the round trip. */
 export async function stubApi(page: Page, opts?: { monitors?: Record<string, unknown>[] }) {
@@ -161,11 +195,9 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 	);
 	await page.route("**/v1/keys", (route) =>
 		json(route, {
-			key: {
-				id: "key_1",
-				prefix: "uc_live_a1b2c3d4e5f6",
-				createdAt: "2026-06-01T09:00:00Z",
-			},
+			// Deprecated, and exactly what it always meant: the newest key not revoked.
+			key: KEYS.find((k) => k.state !== "revoked") ?? null,
+			keys: KEYS,
 			usage: [],
 		}),
 	);

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/storage/pg"
@@ -44,8 +45,8 @@ func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The key is the project's, not the workspace's: a sibling project keeps
 	// its own.
 	projectID := currentProjectID(r.Context(), h.pool, s, s.TenantID)
-	switch {
-	case r.URL.Path == "/v1/keys":
+	switch r.URL.Path {
+	case "/v1/keys":
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, projectID)
@@ -59,7 +60,7 @@ func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	case r.URL.Path == "/v1/keys/rotate": // exact arm first: as an {id}, "rotate" would be a key id
+	case "/v1/keys/rotate": // exact arm first: as an {id}, "rotate" would be a key id
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
