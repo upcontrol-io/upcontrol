@@ -1318,7 +1318,7 @@ export interface paths {
         put?: never;
         /**
          * Invite a person (role chosen at invite, default notify).
-         * @description The invite lands in the session's CURRENT project, not in the whole workspace: a teammate sees the projects they were invited to and nothing else.
+         * @description The invite lands in the session's CURRENT project, not in the whole workspace: a teammate sees the projects they were invited to and nothing else. Identity, however, is a workspace fact: an address that already holds an ACTIVE membership in one of this workspace's projects has been proved once, so it joins the second one `active` with no invitation mail — and a row an earlier invite left `pending` is healed by the same call. A stranger is invited as before. The address that OWNS the workspace answers 200 with the owner's row and no membership.
          */
         post: {
             parameters: {
@@ -1337,7 +1337,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created (pending until accepted). */
+                /** @description Created. `status` says which happened: `pending` when an invitation mail went out, `active` when the person was already inside the workspace and needed none. */
                 201: {
                     headers: {
                         [name: string]: unknown;
@@ -1865,8 +1865,10 @@ export interface paths {
             };
         };
         /**
-         * Replace the board of the session's current project.
-         * @description The whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
+         * Replace the board of the session's current project, or lay down a first one with a key.
+         * @description With a session: the whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
+         *
+         *     With an ingest key instead (`X-Upcontrol-Key` or a bearer), this is the agent's one door into the board and it opens once: the key may store a layout for a project that has none, and a project that already has a row answers 409 `board_exists`. That is deliberately narrow — the key lives in `.env` on every server the customer deploys, so one that could replace a curated board would be a wipe waiting to leak. It grants no read of any kind, here or anywhere: the agent knows what it declared, so it needs no catalog to build the first board from.
          */
         put: {
             parameters: {
@@ -1905,6 +1907,15 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content?: never;
+                };
+                /** @description `board_exists`. Key-authenticated only: this project already has a board, and a key may lay down the first one alone. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
                 };
             };
         };
@@ -3203,7 +3214,7 @@ export interface components {
         /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. */
         DashboardMetricRef: {
             /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "dimension";
+            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "retention" | "dimension";
             name?: string;
             where?: {
                 [key: string]: string;
@@ -3242,6 +3253,9 @@ export interface components {
             events: components["schemas"]["CatalogEvent"][];
             metrics: components["schemas"]["CatalogMetric"][];
             funnels: components["schemas"]["CatalogFunnel"][];
+            experiments: components["schemas"]["CatalogExperiment"][];
+            retentions: components["schemas"]["CatalogRetention"][];
+            dimensions: components["schemas"]["CatalogDimension"][];
         };
         /** @description One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service. */
         CatalogGroup: {
@@ -3280,10 +3294,25 @@ export interface components {
             /** @description The label keys seen on this metric's readings — what a widget can narrow it by. */
             labels: string[];
         };
-        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; a step becomes a metric series named `funnel` filtered by `funnel` and `step`. */
+        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`). */
         CatalogFunnel: {
             name: string;
             steps: string[];
+        };
+        /** @description One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list. */
+        CatalogExperiment: {
+            name: string;
+            variants: string[];
+        };
+        /** @description One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series. */
+        CatalogRetention: {
+            name: string;
+            cohorts: number;
+        };
+        /** @description One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series. */
+        CatalogDimension: {
+            name: string;
+            values: number;
         };
         /** @description One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws. */
         SeriesQuery: {
@@ -3293,11 +3322,13 @@ export interface components {
             source: "logs" | "check" | "event" | "metric";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response` or `uptime`; event: the event name; metric: the metric name. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name. */
             name?: string;
             where?: {
                 [key: string]: string;
             };
+            /** @description Label keys to fold the counter by, for the metric source only. With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold. */
+            group?: string[];
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {
@@ -3316,6 +3347,8 @@ export interface components {
             step: number;
             /** @description One value per bucket, oldest first. `null` is a bucket with no reading — zero is silence for a gauge, while a count with nothing in it is a measured 0. A log count is `null` too for a bucket older than the project's oldest stored row (the rollup's first hour, or the ring's first line): nothing was there to count, which is not the same as counting nothing. */
             points: (number | null)[];
+            /** @description Present only when the query carried `group`: the counter's increase over the range, one entry per label combination, ordered by value descending and capped at 200. `points` is empty on a grouped answer — the fold has no time axis, and a series of nulls would claim one. */
+            rows?: components["schemas"]["SeriesRow"][];
             /** @description The range as one number: a sum for a count, an average for a check's response time, the latest reading for a gauge. */
             total?: number | null;
             /** @description The same reading over the span before `from`, which is what a card's delta is measured against. */
@@ -3323,6 +3356,12 @@ export interface components {
         };
         SeriesResponse: {
             series: components["schemas"]["Series"][];
+        };
+        SeriesRow: {
+            labels: {
+                [key: string]: string;
+            };
+            value: number;
         };
         UsedMax: {
             used: number;
