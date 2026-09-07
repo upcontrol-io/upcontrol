@@ -23,7 +23,7 @@ import (
 // maxLiveAPIKeys caps how many working keys one project holds. A fixed
 // ceiling, never a plan axis: no plan row sells more keys, so the full
 // refusal is a 409, never a 402.
-const maxLiveAPIKeys = 10
+const maxLiveAPIKeys = 5
 
 // keys handles GET/POST /v1/keys, DELETE /v1/keys/{id} and POST /v1/keys/rotate.
 type keys struct {

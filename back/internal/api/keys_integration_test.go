@@ -195,17 +195,17 @@ func TestRevokeRefusesRepeatsGarbageAndOtherProjects(t *testing.T) {
 	}
 }
 
-func TestTheEleventhLiveKeyIsA409NeverAWall(t *testing.T) {
+func TestTheSixthLiveKeyIsA409NeverAWall(t *testing.T) {
 	pool := openProjectsGateDB(t)
 	tenantID := seedPlanTenant(t, pool, "Free", 1)
-	for i := 0; i < maxLiveAPIKeys; i++ { // ten that work
+	for i := 0; i < maxLiveAPIKeys; i++ { // the ceiling, all of them working
 		mintCreationKey(t, pool, tenantID, boardOf(t, pool, tenantID))
 	}
 	h := keysAPI(t, pool, tenantID)
 
 	code, body := callKeys(t, h, http.MethodPost, "/v1/keys", "")
 	if code != http.StatusConflict || !strings.Contains(body, "key_limit") {
-		t.Fatalf("the eleventh live key is a 409 key_limit; got %d %s", code, body)
+		t.Fatalf("the key past the ceiling is a 409 key_limit; got %d %s", code, body)
 	}
 	if !strings.Contains(body, "revoke one first") {
 		t.Fatalf("the refusal names the fix; got %s", body)

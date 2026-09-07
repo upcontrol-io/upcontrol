@@ -940,7 +940,7 @@ export interface paths {
         put?: never;
         /**
          * Issue another key for the current project.
-         * @description The full key is in the answer and nowhere else, ever again. A project is capped at 10 keys that still work (active or rotating); revoked ones do not count, so the cap is on live credentials rather than on history. The cap is a fixed number and NOT a plan axis: there is no key row in Pricing, so there is no wall.
+         * @description The full key is in the answer and nowhere else, ever again. A project is capped at 5 keys that still work (active or rotating); revoked ones do not count, so the cap is on live credentials rather than on history. The cap is a fixed number and NOT a plan axis: there is no key row in Pricing, so there is no wall.
          */
         post: {
             parameters: {
@@ -979,7 +979,7 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description `key_limit`: the project already holds 10 keys that work. Revoke one first. This is a fixed ceiling, never a 402 — no plan buys more. */
+                /** @description `key_limit`: the project already holds 5 keys that work. Revoke one first. This is a fixed ceiling, never a 402 — no plan buys more. */
                 409: {
                     headers: {
                         [name: string]: unknown;
