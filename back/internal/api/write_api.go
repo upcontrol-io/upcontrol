@@ -239,9 +239,12 @@ func (h *writeAPI) createChannel(w http.ResponseWriter, r *http.Request, tenantI
 	// Returns the SAME id shape GET /v1/channels hands out (public_id hex):
 	// two id shapes for one entity is how callers parsed a uuid as an integer.
 	var pubID pgtype.UUID
-	_ = h.pool.Raw().QueryRow(ctx,
+	if err := h.pool.Raw().QueryRow(ctx,
 		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target) VALUES (gen_random_uuid()::text::uuid, $1, $2, $3, $4) RETURNING public_id`,
-		tenantID, projectID, req.Kind, req.Target).Scan(&pubID)
+		tenantID, projectID, req.Kind, req.Target).Scan(&pubID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	writeAPIJSON(w, http.StatusCreated, map[string]any{
 		"id":     uuidStr(pubID),
 		"kind":   req.Kind,

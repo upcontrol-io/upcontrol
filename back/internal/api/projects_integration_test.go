@@ -382,6 +382,83 @@ func TestCreateProjectProvisionsAndSwitches(t *testing.T) {
 	}
 }
 
+// The provisioning also owes the new project a way to reach its owner: the
+// same e-mail channel sign-up and the invitation redeem seed. Without it a
+// project created by hand pages nobody and never says so. The stored address
+// is mixed-case on purpose — the target must be the normalised spelling, or
+// seedEmailChannel's NOT EXISTS stops matching it and a second row appears
+// the next time any other door seeds this pair.
+func TestCreateProjectSeedsTheOwnersEmailChannel(t *testing.T) {
+	f := newProjectsFixture(t)
+	ctx := context.Background()
+	mixed := fmt.Sprintf("Owner-%d@Example.COM", time.Now().UnixNano())
+	if _, err := f.pool.Raw().Exec(ctx,
+		`UPDATE person SET email = $1 WHERE id = $2`, mixed, f.personID); err != nil {
+		t.Fatalf("set the owner's address: %v", err)
+	}
+	// Room for a second project: Indie allows 2.
+	if _, err := f.pool.Raw().Exec(ctx,
+		`UPDATE tenant SET plan = 'Indie' WHERE id = $1`, f.tenantID); err != nil {
+		t.Fatalf("set plan: %v", err)
+	}
+
+	w := f.do(t, http.MethodPost, "/v1/projects", `{"domain":"seeded.example.com"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	var id int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT id FROM project WHERE tenant_id = $1 AND domain = 'seeded.example.com'`,
+		f.tenantID).Scan(&id); err != nil {
+		t.Fatalf("created project row: %v", err)
+	}
+	want := strings.ToLower(mixed)
+	if n := f.count(t,
+		`SELECT count(*) FROM alert_channel WHERE project_id = $1 AND kind = 'email' AND target = $2`,
+		id, want); n != 1 {
+		t.Fatalf("e-mail channels on the new project targeting %q = %d, want exactly 1", want, n)
+	}
+	if n := f.count(t, `SELECT count(*) FROM alert_channel WHERE project_id = $1`, id); n != 1 {
+		t.Fatalf("channels on the new project = %d, want exactly 1 — no duplicate, no second spelling", n)
+	}
+}
+
+// A Telegram-only person owns a workspace like anybody else and has no
+// address: person.email is nullable for exactly them. The seed writes NO row
+// rather than one targeting the empty string, which would be a destination
+// that can never be delivered to and would sit in the list looking valid.
+func TestCreateProjectSeedsNoChannelForAnAddresslessOwner(t *testing.T) {
+	f := newProjectsFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+	// person's CHECK demands an address OR a telegram id; this is the second.
+	var personID int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`INSERT INTO person (public_id, telegram_id, name) VALUES (gen_random_uuid(), $1, 'Telegram Only') RETURNING id`,
+		uniq).Scan(&personID); err != nil {
+		t.Fatalf("seed a telegram-only person: %v", err)
+	}
+	tenantID := seedOwnedTenant(t, f.pool, personID, fmt.Sprintf("addressless-%d", uniq))
+	// A fixed identity: this person holds no cookie session, and createProject
+	// resolves their own workspace off the person id either way.
+	sm := session.New(f.pool, session.DefaultTTL, nil).WithFixedIdentity(personID, tenantID)
+	r := httptest.NewRequest(http.MethodPost, "/v1/projects",
+		strings.NewReader(`{"domain":"silent.example.com"}`))
+	w := httptest.NewRecorder()
+	projectsRoutes(f.pool, sm).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	var id int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT id FROM project WHERE tenant_id = $1`, tenantID).Scan(&id); err != nil {
+		t.Fatalf("created project row: %v", err)
+	}
+	if n := f.count(t, `SELECT count(*) FROM alert_channel WHERE project_id = $1`, id); n != 0 {
+		t.Fatalf("channels on an addressless owner's project = %d, want 0 — an empty target is not a destination", n)
+	}
+}
+
 // A single-user session (self-host fixed identity, no session row) answers
 // 204 without writing anything: the resolver's fallback owns its project.
 func TestSwitchIsANoOpForASingleUserSession(t *testing.T) {

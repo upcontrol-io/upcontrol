@@ -6,6 +6,16 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A new project reaches its owner.** `POST /v1/projects` now seeds that project's e-mail
+  channel from the creator's own address, as sign-up and the invitation redeem already did.
+  A project created by hand had no destination at all, so nothing it detected was ever sent.
+  An owner with no address (Telegram-only) still gets no row, and no existing project is
+  backfilled — a channel deleted on purpose stays deleted.
+- **`POST /v1/channels` no longer answers `201 Created` for a write that failed.** The INSERT's
+  error was discarded, so a failure came back as Created with a zero UUID and the row was
+  simply absent from the next read. It answers 500 `internal` instead.
+
 ## [0.17.1] — 2026-09-06
 
 ### Fixed

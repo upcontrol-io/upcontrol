@@ -501,6 +501,37 @@ func TestCreateChannel_PendingAddressIsUnknownRecipient(t *testing.T) {
 	}
 }
 
+// A write that did not happen is not a Created. The NUL byte is an honest
+// failure — Postgres refuses it in a text column, nothing is stubbed — and the
+// kind is not 'email', so the unknown_recipient gate is not what refuses this.
+// While the error was discarded it answered 201 with a zero uuid and no row.
+func TestCreateChannel_AFailedInsertIsNotACreated(t *testing.T) {
+	h, tenantID, _ := openRecipientsDB(t)
+	// Marshalled, not hand-written: only encoding/json spells U+0000 the way
+	// JSON allows, and a hand-rolled \x00 would not decode at all.
+	body, err := json.Marshal(map[string]string{
+		"kind": "slack", "target": "https://hooks.example.com/\x00",
+	})
+	if err != nil {
+		t.Fatalf("marshal the body: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/channels", strings.NewReader(string(body)))
+	w := httptest.NewRecorder()
+	h.createChannel(w, r, tenantID)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d (%s), want 500 — a failed INSERT may not answer Created", w.Code, w.Body.String())
+	}
+	var n int
+	if err := h.pool.Raw().QueryRow(context.Background(),
+		`SELECT count(*) FROM alert_channel WHERE tenant_id = $1 AND kind = 'slack'`,
+		tenantID).Scan(&n); err != nil {
+		t.Fatalf("count slack channels: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("slack channels after a refused insert = %d, want 0", n)
+	}
+}
+
 // An invitation lands on the CURRENT project's team, and the Team list is
 // that project's: the owner first (ownership is the workspace's column, so
 // they have no membership row), then this project's members and nobody
