@@ -74,3 +74,12 @@ within seconds of the first request.
 - Do not send secrets knowingly. The SDK scrubs known secret shapes (tokens,
   JWTs, card numbers, emails, connection strings) before the wire and the
   server scrubs again, but scrubbing is defense, not permission.
+- Do not `mirrorConsole()` an app that already logs structured JSON: the whole
+  line ships as one opaque text message, its fields are not searchable, and the
+  level comes from the console method, not the line's own `level`. Bridge the
+  real logger instead (Step 2).
+- Do not statically import the SDK before the key exists: the client reads
+  `process.env` when the module loads, so an app whose key arrives from a
+  secrets file or a config loader captures an empty key and every call becomes
+  a silent no-op. Set `process.env.UPCONTROL_API_KEY` first, then
+  `await import('@upcontrol/sdk')`.

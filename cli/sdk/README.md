@@ -63,8 +63,10 @@ lives and picks up from its last save, at most a minute behind, after a restart.
 The counts go out every minute as one metric reading per step, so the board can
 show any range as a slice of that series. The people seen are kept in the state
 dir, up to a million per step, and each process keeps its own, so a cluster of
-workers counts a visitor once per worker. A filesystem that does not survive a
-deploy starts the counts again, which is what `UPCONTROL_STATE_DIR` is for.
+workers counts a visitor once per worker. Each process also stamps its readings
+with a reporter id of its own, so the board can tell the workers apart and sum
+them correctly. A filesystem that does not survive a deploy starts the counts
+again, which is what `UPCONTROL_STATE_DIR` is for.
 
 Install and instrumentation are normally driven by your coding agent via
 `npx upcontrol init` - see the [upcontrol package](https://www.npmjs.com/package/upcontrol).

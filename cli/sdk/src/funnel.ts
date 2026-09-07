@@ -4,7 +4,7 @@
 // The counting, the persistence and the timer live in counters.ts, shared with the other
 // feeds; this file is the funnel's validation and its labels.
 
-import { declare, warnOnce, type CounterDeps, type Counters, type Who } from './counters.js';
+import { REPORTER, declare, warnOnce, type CounterDeps, type Counters, type Who } from './counters.js';
 
 export type { RequestLike, Who } from './counters.js';
 export type FunnelDeps = CounterDeps;
@@ -56,7 +56,7 @@ export function createFunnel(name: string, steps: string[], deps: FunnelDeps): D
       // Zero-padded: the server keeps labels as strings, and a reader sorting twelve steps
       // by `i` must not put 10 before 2.
       deps.client.enqueue(
-        { ts, metric: 'funnel', value, labels: { funnel: label, step, i: String(names.indexOf(step) + 1).padStart(2, '0') } },
+        { ts, metric: 'funnel', value, labels: { funnel: label, step, i: String(names.indexOf(step) + 1).padStart(2, '0'), 'uc.reporter': REPORTER } },
         'metric',
       );
     },

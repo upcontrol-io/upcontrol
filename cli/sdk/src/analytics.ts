@@ -2,7 +2,7 @@
 // dimension breakdown. The funnel's laws bind all three: never throw, never block, a bad
 // declaration warns once and returns a no-op, and nothing reaches the wire but counts.
 
-import { declare, warnOnce, type CounterDeps, type Counters, type Who } from './counters.js';
+import { REPORTER, declare, warnOnce, type CounterDeps, type Counters, type Who } from './counters.js';
 
 export interface Experiment {
   /** expose counts `who` once in the variant they landed in. Never throws. */
@@ -70,7 +70,7 @@ export function createExperiment(name: string, variants: string[], deps: Counter
         value,
         // Zero-padded and control first: the board orders the card's rows by `i`, which is
         // the variant's 1-based declaration index.
-        labels: { experiment: label, variant, i: String(list.indexOf(variant) + 1).padStart(2, '0'), stat },
+        labels: { experiment: label, variant, i: String(list.indexOf(variant) + 1).padStart(2, '0'), stat, 'uc.reporter': REPORTER },
       },
       'metric',
     );
@@ -124,7 +124,7 @@ export function createRetention(name: string, deps: CounterDeps): Declared<Reten
   const counters = declare('retention', label, deps, (bucket, value, ts) => {
     const [cohort, week] = bucket.split('\n');
     deps.client.enqueue(
-      { ts, metric: 'retention', value, labels: { retention: label, cohort, week } },
+      { ts, metric: 'retention', value, labels: { retention: label, cohort, week, 'uc.reporter': REPORTER } },
       'metric',
     );
   });
@@ -177,7 +177,7 @@ export function createBreakdown(name: string, deps: CounterDeps): Declared<Break
 
   const counters = declare('breakdown', label, deps, (value, count, ts) => {
     deps.client.enqueue(
-      { ts, metric: 'breakdown', value: count, labels: { dimension: label, value } },
+      { ts, metric: 'breakdown', value: count, labels: { dimension: label, value, 'uc.reporter': REPORTER } },
       'metric',
     );
   });

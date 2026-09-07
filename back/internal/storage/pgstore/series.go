@@ -457,6 +457,14 @@ func (s *Store) CounterGroups(ctx context.Context, tenantID, projectID int64, na
 	if len(group) == 2 {
 		sel, keys, g2not = "labels->>$5 AS g1, labels->>$6 AS g2", "g1, g2", " AND g2 IS NOT NULL"
 	}
+	// A counter only grows within ONE reporting process. Two instances of the same app
+	// interleave on the same label tuple, and every dip between them reads as a reset
+	// worth its whole value — so the fold keeps reporters apart and adds them up only
+	// after stepping each one. Readings written before the SDK stamped `uc.reporter`
+	// carry NULL, and both PARTITION BY and DISTINCT ON keep NULLs together, so
+	// everything already stored folds exactly as it did.
+	sel += ", labels->>'uc.reporter' AS reporter"
+	part := keys + ", reporter"
 	fromP := fmt.Sprintf("$%d", 5+len(group))
 	toP := fmt.Sprintf("$%d", 6+len(group))
 	limitP := fmt.Sprintf("$%d", 7+len(group))
@@ -471,13 +479,13 @@ func (s *Store) CounterGroups(ctx context.Context, tenantID, projectID int64, na
 			  WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND labels @> $4::jsonb
 			    AND ts >= `+fromP+` AND ts < `+toP+`)
 			UNION ALL
-			(SELECT DISTINCT ON (`+keys+`) ts, value, `+sel+` FROM metrics
+			(SELECT DISTINCT ON (`+part+`) ts, value, `+sel+` FROM metrics
 			  WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND labels @> $4::jsonb
 			    AND ts < `+fromP+`
-			  ORDER BY `+keys+`, ts DESC)
+			  ORDER BY `+part+`, ts DESC)
 		), stepped AS (
 			SELECT `+keys+`, ts, value,
-			       lag(value) OVER (PARTITION BY `+keys+` ORDER BY ts) AS prev FROM span
+			       lag(value) OVER (PARTITION BY `+part+` ORDER BY ts) AS prev FROM span
 		)
 		SELECT `+keys+`, sum(CASE WHEN prev IS NULL THEN 0
 		                WHEN value < prev THEN value

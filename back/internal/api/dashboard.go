@@ -955,16 +955,93 @@ func (h *writeAPI) getDashboard(w http.ResponseWriter, r *http.Request, tenantID
 	}
 }
 
-func (h *writeAPI) putDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// presentedKey reads an ingest key off the request. Header or bearer only: a key in a
+// query string lands in every access log between here and the caller, and the body of
+// this particular request is the layout.
+func presentedKey(r *http.Request) string {
+	if k := strings.TrimSpace(r.Header.Get("X-Upcontrol-Key")); k != "" {
+		return k
+	}
+	if k := r.Header.Get("Authorization"); strings.HasPrefix(k, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(k, "Bearer "))
+	}
+	return ""
+}
+
+// putFirstDashboard is the agent's one door into the board, and it opens once: an
+// ingest key may store a layout for a project that has none. Any stored row refuses
+// with 409, including one holding an empty board — a reader who cleared their board
+// decided that, and a key may not undo it.
+//
+// The narrowness is the point. This key lives in `.env` on every server the customer
+// deploys; one that could replace a curated board would be a wipe waiting to leak. It
+// grants no read of any kind, which costs the agent nothing: it knows what it declared.
+func (h *writeAPI) putFirstDashboard(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// An unwired resolver refuses rather than panics: a missing dependency must cost a
+	// caller a 401, never the process.
+	if h.keys == nil {
+		writeAPIErr(w, http.StatusUnauthorized, "bad_key")
+		return
+	}
+	tenant, err := h.keys.Resolve(ctx, presentedKey(r))
+	if err != nil {
+		writeAPIErr(w, http.StatusUnauthorized, "bad_key")
+		return
+	}
+	doc, ok := readLayout(w, r)
+	if !ok {
+		return
+	}
+	_, err = h.pool.Queries().GetDashboard(ctx, sqlc.GetDashboardParams{
+		TenantID: tenant.TenantID, ProjectID: tenant.ProjectID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// No board yet: this is the one write the key is for.
+	case err != nil:
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	default:
+		writeAPIErrMsg(w, http.StatusConflict, "board_exists",
+			"this project already has a board, and a key may lay down the first one only")
+		return
+	}
+	stored, err := json.Marshal(doc)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if err := h.pool.Queries().PutDashboard(ctx, sqlc.PutDashboardParams{
+		TenantID: tenant.TenantID, ProjectID: tenant.ProjectID, Layout: stored,
+	}); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	writeLayout(w, stored)
+}
+
+// readLayout is the one way a layout enters this server, whichever door it came
+// through: two paths validating a stored document differently is how one of them
+// eventually accepts what the other refuses.
+func readLayout(w http.ResponseWriter, r *http.Request) (apigen.DashboardLayout, bool) {
 	// The tighter reader wraps the body first, so it is the one that fires;
 	// decodeStrict's own 1 MB limit sits outside it and never applies here.
 	r.Body = http.MaxBytesReader(w, r.Body, dashboardMaxBody)
 	var doc apigen.DashboardLayout
 	if !decodeStrict(w, r, &doc) {
-		return
+		return doc, false
 	}
 	if reason := validateLayout(doc); reason != "" {
 		writeAPIErrMsg(w, http.StatusBadRequest, "bad_layout", reason)
+		return doc, false
+	}
+	return doc, true
+}
+
+func (h *writeAPI) putDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	doc, ok := readLayout(w, r)
+	if !ok {
 		return
 	}
 	ctx := r.Context()

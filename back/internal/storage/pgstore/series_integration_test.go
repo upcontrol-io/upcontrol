@@ -23,9 +23,10 @@ import (
 // One tenant, two projects: the catalog is asserted on the first and the
 // bucket arithmetic on the second, so neither seed can bend the other's counts.
 const (
-	seriesTenant   = 91
-	catalogProject = 92
-	bucketProject  = 93
+	seriesTenant    = 91
+	catalogProject  = 92
+	bucketProject   = 93
+	reporterProject = 94
 )
 
 // wrappedFingerprint is above MaxInt64, so it lands in the bigint column as
@@ -495,5 +496,64 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 	// NULL trims nothing: that is what makes Self-hosted unlimited.
 	if n := left(self, selfProject); n != 2 {
 		t.Fatalf("a NULL depth keeps everything; got %d rows", n)
+	}
+}
+
+// Two instances of one app report the same counter. Each is its own series that only
+// grows, and interleaved on one partition every dip between them reads as a reset worth
+// its whole value: the card inflates by the counters' own size rather than by 2x. The
+// fold keeps reporters apart and only then adds them up.
+func TestCounterGroupsKeepsReportersApart(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	from := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute)
+
+	stamped := func(reporter string) map[string]string {
+		return map[string]string{"funnel": "two instances", "step": "visit", "uc.reporter": reporter}
+	}
+	// The same interleaving with no reporter label at all: readings written by an SDK
+	// that predates the stamp. They must fold exactly as they always did, dips and all,
+	// because rewriting history for stored data would be its own kind of lie.
+	bare := map[string]string{"funnel": "one series", "step": "visit"}
+	rows := []MetricRow{
+		{Name: "funnel", TS: from, Labels: stamped("aaaa"), Value: 10},
+		{Name: "funnel", TS: from.Add(1 * time.Minute), Labels: stamped("bbbb"), Value: 5},
+		{Name: "funnel", TS: from.Add(2 * time.Minute), Labels: stamped("aaaa"), Value: 11},
+		{Name: "funnel", TS: from.Add(3 * time.Minute), Labels: stamped("bbbb"), Value: 6},
+		{Name: "funnel", TS: from.Add(4 * time.Minute), Labels: stamped("aaaa"), Value: 12},
+		{Name: "funnel", TS: from.Add(5 * time.Minute), Labels: stamped("bbbb"), Value: 7},
+		{Name: "funnel", TS: from, Labels: bare, Value: 10},
+		{Name: "funnel", TS: from.Add(1 * time.Minute), Labels: bare, Value: 5},
+		{Name: "funnel", TS: from.Add(2 * time.Minute), Labels: bare, Value: 11},
+		{Name: "funnel", TS: from.Add(3 * time.Minute), Labels: bare, Value: 6},
+		{Name: "funnel", TS: from.Add(4 * time.Minute), Labels: bare, Value: 12},
+		{Name: "funnel", TS: from.Add(5 * time.Minute), Labels: bare, Value: 7},
+	}
+	for i := range rows {
+		rows[i].TenantID, rows[i].ProjectID = seriesTenant, reporterProject
+	}
+	if err := s.InsertMetrics(ctx, rows); err != nil {
+		t.Fatalf("insert metrics: %v", err)
+	}
+
+	fold := func(funnel string) []LabelSum {
+		t.Helper()
+		got, err := s.CounterGroups(ctx, seriesTenant, reporterProject, "funnel",
+			map[string]string{"funnel": funnel}, []string{"step"},
+			from.Add(-time.Minute), from.Add(10*time.Minute))
+		if err != nil {
+			t.Fatalf("counter groups: %v", err)
+		}
+		return got
+	}
+
+	// Each reporter's first reading has nothing to measure against, so 10 and 5 count
+	// as nothing; a grew by 2 and b grew by 2.
+	if two := fold("two instances"); len(two) != 1 || two[0].Sum != 4 {
+		t.Fatalf("two instances that each grew by 2 make 4; got %+v", two)
+	}
+	// 0, then the 5 as a reset, +6, the 6 as a reset, +6, the 7 as a reset.
+	if one := fold("one series"); len(one) != 1 || one[0].Sum != 30 {
+		t.Fatalf("unstamped readings must fold exactly as they did before; got %+v", one)
 	}
 }

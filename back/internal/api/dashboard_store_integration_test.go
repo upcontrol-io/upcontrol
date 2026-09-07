@@ -9,7 +9,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -204,5 +206,50 @@ func TestDashboardFollowsTheProject(t *testing.T) {
 	}
 	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || !sameBoard(t, body, string(emptyLayout)) {
 		t.Fatalf("B's save must take the row over; B reads %d %s", code, body)
+	}
+}
+
+// The agent's one key-authenticated write: a first board for a project that has none.
+// The narrowness IS the security property, so the refusals are asserted as hard as the
+// success — this key lives in `.env` on every server the customer deploys.
+func TestFirstBoardThroughAnIngestKey(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	projectID := boardOf(t, pool, tenantID)
+
+	// Minted the way issueKey mints: the stored prefix is the secret's first twelve
+	// characters, and the hash is over the whole key including its scheme.
+	// Unique per run: the prefix column is unique, and this database outlives one test.
+	// The stored prefix is the first twelve characters, so the varying part goes first.
+	secret := fmt.Sprintf("%012d%020d", tenantID, tenantID)
+	full := pg.KeyScheme + secret
+	hash := sha256.Sum256([]byte(full))
+	if _, err := pool.Raw().Exec(t.Context(),
+		`INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash) VALUES ($1, $2, $3, $4)`,
+		tenantID, projectID, secret[:pg.KeyPrefixLen], hash[:]); err != nil {
+		t.Fatalf("seed api_key: %v", err)
+	}
+
+	withKey := func(key, body string) (int, string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPut, "/v1/dashboard", bytes.NewBufferString(body))
+		r.Header.Set("X-Upcontrol-Key", key)
+		h.putFirstDashboard(w, r)
+		return w.Code, strings.TrimSpace(w.Body.String())
+	}
+
+	if code, body := withKey(pg.KeyScheme+"deadbeefdeadbeefdeadbeefdeadbeef", oneWidgetBoard); code != http.StatusUnauthorized {
+		t.Fatalf("a key that resolves to nothing writes nothing; got %d %s", code, body)
+	}
+	if code, body := withKey(full, oneWidgetBoard); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
+		t.Fatalf("the first board is the one write this key is for; got %d %s", code, body)
+	}
+	if code, body := withKey(full, `{"version":1,"widgets":[]}`); code != http.StatusConflict {
+		t.Fatalf("a project that already has a board refuses the key; got %d %s", code, body)
+	}
+	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
+		t.Fatalf("the refused write must not have touched the board; got %d %s", code, got)
 	}
 }

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBreakdown, createExperiment, createRetention } from '../dist/esm/analytics.js';
 import { createFunnel } from '../dist/esm/funnel.js';
-import type { CounterDeps } from '../dist/esm/counters.js';
+import { REPORTER, type CounterDeps } from '../dist/esm/counters.js';
 
 // The three feeds that joined the funnel on the shared counter machinery: counts that only
 // grow, a person counted once per bucket, and nothing on the wire that identifies anyone.
@@ -113,9 +113,10 @@ test('retention puts a first-seen id in week 00 of its cohort and does not count
   assert.match(buckets[0], /^\d{4}-\d{2}-\d{2}\|00$/);
   assert.equal(at[buckets[0]], 2);
 
-  // The id never leaves the process: the wire carries counts and a cohort date, nothing else.
+  // The id never leaves the process: the wire carries counts, a cohort date and the
+  // process's reporter stamp, nothing else.
   const line = f.lines.find((l) => l.metric === 'retention') as Line;
-  assert.deepEqual(Object.keys(line.labels as object).sort(), ['cohort', 'retention', 'week']);
+  assert.deepEqual(Object.keys(line.labels as object).sort(), ['cohort', 'retention', 'uc.reporter', 'week']);
   assert.ok(!JSON.stringify(f.lines).includes('user-1'));
 
   await (signups as unknown as { stop(): Promise<void> }).stop();
@@ -163,6 +164,26 @@ test('a breakdown stops at its distinct-value ceiling instead of growing without
   assert.equal(at['/p/259'], undefined);
 
   await (pages as unknown as { stop(): Promise<void> }).stop();
+});
+
+test('readings carry one reporter id per process, shared by every feed', async () => {
+  const f = fake();
+  const pages = createBreakdown('page', deps(tmp(), f.client));
+  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(tmp(), f.client));
+  pages.value('/pricing');
+  cta.expose('control', 'user-1');
+  pages.report();
+  cta.report();
+
+  // The stamp names the process, not the feed: the server folds each reporter's counters
+  // apart, so two instances of one app must not share a series.
+  const reporters = (metric: string) =>
+    new Set(f.lines.filter((l) => l.metric === metric).map((l) => (l.labels as Record<string, string>)['uc.reporter']));
+  assert.deepEqual(reporters('breakdown'), new Set([REPORTER]));
+  assert.deepEqual(reporters('experiment'), new Set([REPORTER]));
+
+  await (pages as unknown as { stop(): Promise<void> }).stop();
+  await (cta as unknown as { stop(): Promise<void> }).stop();
 });
 
 test('a 0.3.0 funnel state file is read forward, so nobody is counted twice after the upgrade', async () => {

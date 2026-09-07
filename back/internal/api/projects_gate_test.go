@@ -77,7 +77,7 @@ func planTenantAPI(t *testing.T, pool *pg.Pool, tenantID int64) *writeAPI {
 		`SELECT owner_person_id FROM tenant WHERE id = $1`, tenantID).Scan(&ownerID); err != nil {
 		t.Fatalf("read the workspace owner: %v", err)
 	}
-	return &writeAPI{pool: pool, sess: session.New(pool, session.DefaultTTL, nil).
+	return &writeAPI{pool: pool, keys: pg.NewKeyResolver(pool, nil), sess: session.New(pool, session.DefaultTTL, nil).
 		WithFixedIdentity(ownerID, tenantID)}
 }
 

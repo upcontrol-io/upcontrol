@@ -3,6 +3,18 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-07 — @upcontrol/sdk 0.5.0
+
+- Every counter reading now carries a `uc.reporter` label naming the process that sent it,
+  which is what lets the server keep two instances of one app apart when it folds the
+  counters. Before this, an app running more than one instance reported feeds the board
+  could not separate: the instances interleaved on one series and every dip between them
+  read as a counter reset worth the counter's whole value, so a funnel, A/B test, retention
+  grid or breakdown read far too high: not doubled, but inflated by roughly the counters'
+  own size, an error that grew with uptime. No application code changes; the fix needs a
+  server that understands the label (upcontrol.io already does; a self-hosted core needs
+  0.19.0 or newer). `SDK_VERSION` is `0.5.0`.
+
 ## 2026-09-06 — upcontrol 0.1.7
 
 - `SDK_PIN` moves to `0.4.0`. The bundled skill gains three topics beside `funnel`:

@@ -2463,13 +2463,24 @@ paths:
       tags: [dashboard]
       security:
         - cookieAuth: []
+        - apiKey: []
       x-hand-written: true
-      summary: Replace the board of the session's current project.
+      summary: Replace the board of the session's current project, or lay down a first one with a key.
       description: >
-        The whole layout, overwritten whole; last write wins. Only the envelope
-        is validated (the version, the ids, the kinds, the grid), because a
-        widget's refs are the front's own to interpret. A notify member may
-        read the board and may not write it.
+        With a session: the whole layout, overwritten whole; last write wins.
+        Only the envelope is validated (the version, the ids, the kinds, the
+        grid), because a widget's refs are the front's own to interpret. A
+        notify member may read the board and may not write it.
+
+
+        With an ingest key instead (`X-Upcontrol-Key` or a bearer), this is the
+        agent's one door into the board and it opens once: the key may store a
+        layout for a project that has none, and a project that already has a
+        row answers 409 `board_exists`. That is deliberately narrow — the key
+        lives in `.env` on every server the customer deploys, so one that could
+        replace a curated board would be a wipe waiting to leak. It grants no
+        read of any kind, here or anywhere: the agent knows what it declared,
+        so it needs no catalog to build the first board from.
       requestBody:
         required: true
         content:
@@ -2490,6 +2501,13 @@ paths:
         "403": { description: notify_role }
         "404":
           description: The tenant holds no project, so there is nothing to keep a board for.
+        "409":
+          description: >
+            `board_exists`. Key-authenticated only: this project already has a
+            board, and a key may lay down the first one alone.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/dashboard/catalog:
     get:
