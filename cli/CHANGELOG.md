@@ -3,6 +3,12 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-07 — upcontrol 0.1.8
+
+- `SDK_PIN` moves to `0.5.0`, so a fresh install gets the multi-instance fix below rather
+  than a version that reports feeds the board cannot separate. Nothing else changes: same
+  commands, same skill.
+
 ## 2026-09-07 — @upcontrol/sdk 0.5.0
 
 - Every counter reading now carries a `uc.reporter` label naming the process that sent it,
