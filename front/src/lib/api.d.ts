@@ -3375,8 +3375,11 @@ export interface components {
         };
         /** @description The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB. */
         DashboardLayout: {
-            /** @enum {integer} */
-            version: 1;
+            /**
+             * @description The unit `h` is counted in. Version 2 halved the row so a card can be tuned in finer steps, which doubled every height: a version 1 board is read by doubling each `h`, and is rewritten as 2. Both are stored as given; the server never converts one into the other, because `h` is a drawing decision and the front is what draws.
+             * @enum {integer}
+             */
+            version: 1 | 2;
             widgets: components["schemas"]["DashboardWidget"][];
         };
         /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */

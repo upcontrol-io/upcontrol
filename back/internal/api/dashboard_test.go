@@ -305,8 +305,13 @@ func TestValidateLayout(t *testing.T) {
 				return b
 			}()},
 		}, true},
-		{"a version this server does not store", apigen.DashboardLayout{
+		// 2 is the halved-row unit and stores like any other; 3 is nothing yet, and a server
+		// that took it would be storing a board no front can read back.
+		{"the halved-row unit stores", apigen.DashboardLayout{
 			Version: 2, Widgets: []apigen.DashboardWidget{widget("w_1")},
+		}, true},
+		{"a version this server does not store", apigen.DashboardLayout{
+			Version: 3, Widgets: []apigen.DashboardWidget{widget("w_1")},
 		}, false},
 		{"an empty id", apigen.DashboardLayout{
 			Version: 1, Widgets: []apigen.DashboardWidget{widget("")},

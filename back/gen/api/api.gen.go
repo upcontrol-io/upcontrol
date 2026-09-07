@@ -78,12 +78,15 @@ func (e ChannelKind) Valid() bool {
 // Defines values for DashboardLayoutVersion.
 const (
 	N1 DashboardLayoutVersion = 1
+	N2 DashboardLayoutVersion = 2
 )
 
 // Valid indicates whether the value is a known member of the DashboardLayoutVersion enum.
 func (e DashboardLayoutVersion) Valid() bool {
 	switch e {
 	case N1:
+		return true
+	case N2:
 		return true
 	default:
 		return false
@@ -922,11 +925,12 @@ type DashboardCatalog struct {
 
 // DashboardLayout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
 type DashboardLayout struct {
+	// Version The unit `h` is counted in. Version 2 halved the row so a card can be tuned in finer steps, which doubled every height: a version 1 board is read by doubling each `h`, and is rewritten as 2. Both are stored as given; the server never converts one into the other, because `h` is a drawing decision and the front is what draws.
 	Version DashboardLayoutVersion `json:"version"`
 	Widgets []DashboardWidget      `json:"widgets"`
 }
 
-// DashboardLayoutVersion defines model for DashboardLayout.Version.
+// DashboardLayoutVersion The unit `h` is counted in. Version 2 halved the row so a card can be tuned in finer steps, which doubled every height: a version 1 board is read by doubling each `h`, and is rewritten as 2. Both are stored as given; the server never converts one into the other, because `h` is a drawing decision and the front is what draws.
 type DashboardLayoutVersion int
 
 // DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it.

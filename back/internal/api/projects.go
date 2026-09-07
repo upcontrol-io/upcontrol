@@ -274,6 +274,18 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, s sqlc.
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Sign-up and the invitation redeem both seed one (auth.seedEmailChannel);
+	// a project created by hand is the third door, and one that reaches nobody
+	// is a silent alerting hole.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+		 SELECT gen_random_uuid(), $1, $2, 'email', lower(btrim(p.email))
+		   FROM person p
+		  WHERE p.id = $3 AND btrim(COALESCE(p.email, '')) <> ''`,
+		tenantID, projectID, s.PersonID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	if err := tx.Commit(ctx); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
