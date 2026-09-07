@@ -370,6 +370,24 @@ func TestValidateLayout(t *testing.T) {
 				return b
 			}()},
 		}, false},
+		// Every source the catalog hands the picker must survive a save. `retention` was
+		// missing from the enum, so a board carrying a retention card was refused whole.
+		{"a ref for every source the catalog mints", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Metrics = nil
+				for _, source := range []apigen.DashboardMetricRefSource{
+					apigen.DashboardMetricRefSourceLogs, apigen.DashboardMetricRefSourceCheck,
+					apigen.DashboardMetricRefSourceEvent, apigen.DashboardMetricRefSourceMetric,
+					apigen.DashboardMetricRefSourceService, apigen.DashboardMetricRefSourceFunnel,
+					apigen.DashboardMetricRefSourceExperiment, apigen.DashboardMetricRefSourceRetention,
+					apigen.DashboardMetricRefSourceDimension,
+				} {
+					b.Metrics = append(b.Metrics, apigen.DashboardMetricRef{Source: source})
+				}
+				return b
+			}()},
+		}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
