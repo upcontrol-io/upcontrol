@@ -265,6 +265,14 @@ export function declare(
   } else if (stored) {
     for (const [b, s] of stored.buckets) buckets.set(b, s);
   }
+  // Buckets that exist before the first report of this process must NOT emit a fresh zero:
+  // a seeded one already starts at zero, and one restored from disk is mid-flight, so a zero
+  // after its running total would read as a reset. Anything born later — a breakdown value,
+  // a retention cohort — is new to the series and gets its zero in report(). A save only
+  // happens inside report(), so a stored bucket has always been reported at least once; one
+  // that was reported but lost before the save restarts its count at zero anyway, which is
+  // exactly what the zero then says.
+  const emitted = new Set<string>(buckets.keys());
   const decl: DeclState = { buckets, first: stored?.first ?? new Map() };
   state.counters.set(`${kind}\n${label}`, decl);
 
@@ -337,7 +345,19 @@ export function declare(
   function report(): void {
     try {
       const ts = new Date().toISOString();
-      for (const [bucket, s] of buckets) emit(bucket, s.seen, ts);
+      const before = new Date(Date.parse(ts) - 1).toISOString();
+      for (const [bucket, s] of buckets) {
+        // The reader measures a reading against the one before it and counts the very first
+        // as nothing, having nothing to subtract. A bucket whose first reading already
+        // carries its whole value is therefore invisible for good — the funnel escapes it by
+        // declaring its steps up front, but a breakdown's values and a retention's cohorts
+        // appear as they are counted. So the rise from zero is stated rather than implied.
+        if (!emitted.has(bucket)) {
+          emit(bucket, 0, before);
+          emitted.add(bucket);
+        }
+        emit(bucket, s.seen, ts);
+      }
       maybeSave(state, Date.now());
     } catch {
       /* reporting never throws */

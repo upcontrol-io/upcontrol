@@ -3,6 +3,18 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-08 — @upcontrol/sdk 0.7.0
+
+- **A bucket that appears mid-flight now states its rise from zero, so its first count is
+  no longer invisible.** The reader folds a counter by subtracting each reading from the one
+  before it and counts the very first as nothing, having nothing to subtract. A funnel and an
+  A/B test escape that by declaring their buckets up front and reporting them at 0 from the
+  first minute — but a breakdown's values and a retention's cohorts appear as they are
+  counted, so each one's first increment was dropped for good. A country with exactly one
+  visitor never appeared at all. Such a bucket now reports a 0 a millisecond before its first
+  real count. A bucket restored from the state file does NOT, because a zero under a running
+  total is a drop, and a drop reads as a reset worth its whole value.
+
 ## 2026-09-08 — @upcontrol/sdk 0.6.0
 
 - `breakdown()`'s `value(v, who?)` takes an optional second argument. Additive: a call

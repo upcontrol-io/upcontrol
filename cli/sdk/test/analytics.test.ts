@@ -179,6 +179,59 @@ test('a breakdown passed a who counts two people as 2', async () => {
   await (pages as unknown as { stop(): Promise<void> }).stop();
 });
 
+// The reader folds a counter by subtracting each reading from the one before it and counts
+// the very first as nothing. A value that appears mid-flight would therefore be invisible for
+// good unless its rise from zero is stated.
+test('a value seen for the first time reports a zero before its own count', async () => {
+  const f = fake();
+  const pages = createBreakdown('page', deps(tmp(), f.client));
+
+  pages.value('/pricing');
+  pages.value('/pricing');
+  pages.report();
+
+  const mine = f.lines.filter((l) => l.metric === 'breakdown');
+  assert.equal(mine.length, 2, 'the zero and the count');
+  assert.equal(mine[0].value, 0);
+  assert.equal(mine[1].value, 2);
+  assert.ok(
+    Date.parse(mine[0].ts as string) < Date.parse(mine[1].ts as string),
+    'the zero is stamped before the count, so the fold orders them',
+  );
+
+  await (pages as unknown as { stop(): Promise<void> }).stop();
+});
+
+// The dangerous half: a zero emitted after a running total is a DROP, and the fold reads a
+// drop as a reset worth its whole value — so a restored bucket re-seeding would double it.
+test('a bucket restored from the state file never re-emits its zero', async () => {
+  const dir = tmp();
+  // What a previous process left behind: one dimension value, one person already counted.
+  // A restart must continue that count, never re-announce a zero underneath it.
+  writeFileSync(
+    join(dir, 'funnels.json'),
+    JSON.stringify({
+      v: 2,
+      salt: 'a'.repeat(32),
+      counters: { 'breakdown\npage': { '/pricing': { seen: 1, ids: ['deadbeefdeadbeef'] } } },
+    }),
+  );
+
+  const f = fake();
+  const pages = createBreakdown('page', deps(dir, f.client));
+  pages.value('/pricing', 'someone-else');
+  pages.report();
+
+  // Two readings, because declaring reports at once: the restored 1, then the 2 it became.
+  // Neither is a zero, which is the whole point — a zero under a running total is a drop, and
+  // the fold reads a drop as a reset worth its whole value.
+  const mine = f.lines.filter((l) => l.metric === 'breakdown');
+  assert.deepEqual(mine.map((l) => l.value), [1, 2], 'the stored count continues');
+  assert.ok(!mine.some((l) => l.value === 0), 'no zero is announced under a count already reported');
+
+  await (pages as unknown as { stop(): Promise<void> }).stop();
+});
+
 test('a breakdown stops at its distinct-value ceiling instead of growing without limit', async () => {
   const f = fake();
   const pages = createBreakdown('page', deps(tmp(), f.client));

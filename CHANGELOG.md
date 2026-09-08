@@ -6,6 +6,20 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-09-08
+
+### Fixed
+- **A dynamically-appearing counter bucket no longer loses its first count**
+  (`@upcontrol/sdk` 0.7.0). `FunnelBuckets` folds a counter by subtracting each reading from
+  the one before it and counts the very first as nothing, having nothing to measure it
+  against — correct for a counter that has been running, but a breakdown's values and a
+  retention's cohorts appear as they are counted, so each one's first increment was invisible
+  for good. A dimension value with exactly one person never drew at all. The SDK now reports
+  a 0 a millisecond before such a bucket's first real count, the same rise from zero a funnel
+  gets by declaring its steps up front. A bucket restored from the state file is untouched: a
+  zero under a running total is a drop, and the fold reads a drop as a reset worth its whole
+  value.
+
 ## [0.23.0] — 2026-09-08
 
 ### Changed
