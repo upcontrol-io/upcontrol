@@ -3,6 +3,18 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-08 — upcontrol 0.1.9
+
+- `SDK_PIN` moves to `0.7.0`. The pin is exact, so a fresh `npx upcontrol init` was
+  installing `0.5.0` — a version whose breakdowns cannot count people at all (no `who`
+  argument) and whose every dimension value silently lost its first count. The two SDK
+  releases below are only reachable through this bump.
+- The bundled skill is rebuilt from `cli/plugin/`, so the breakdown recipe no longer tells
+  an agent that `value()` "takes the value and nothing else: no request, no user id". It
+  now teaches both modes, which is what the SDK has done since 0.6.0.
+- The README no longer enumerates agent products by name; the badge links to the list the
+  detector actually supports.
+
 ## 2026-09-08 — @upcontrol/sdk 0.7.0
 
 - **A bucket that appears mid-flight now states its rise from zero, so its first count is
