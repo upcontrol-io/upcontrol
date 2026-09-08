@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	
 	"go.upcontrol.io/back/internal/ingest/cardinality"
 	"go.upcontrol.io/back/internal/ingest/decode"
 	"go.upcontrol.io/back/internal/ingest/normalize"
@@ -425,7 +424,7 @@ func capAttrs(attrs map[string]string) (out map[string]string, keysCapped, valsC
 }
 
 // liftActor removes the reserved uc.actor from attrs and returns it trimmed
-// and capped. Absent, empty or whitespace-only yields '' — a real answer, a
+// and capped. Absent, empty or whitespace-only yields ” — a real answer, a
 // server-side event with nobody behind it. The delete runs on every lift: the
 // reserved key must never survive into the stored attrs, because an actor is
 // the highest-cardinality value in the system and may never become a label.

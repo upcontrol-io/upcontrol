@@ -2,6 +2,7 @@
 // gated on three axes a secret key never sees — an exact Origin match, a rate
 // limit per key+IP, and named events only. The gates themselves live in
 // Handle; this file holds the pieces they call.
+
 package ingest
 
 import (

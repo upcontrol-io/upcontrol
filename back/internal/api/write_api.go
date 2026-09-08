@@ -2549,14 +2549,20 @@ func createTenantProject(ctx context.Context, pool *pg.Pool, tenantID int64, dom
 		return 0, err
 	}
 	// The key insert is tx-bound (createProject's pattern): a pool-bound
-	// issueKey would autocommit outside the transaction.
+	// issueKeyOfKind would autocommit outside the transaction. This is the THIRD
+	// copy of that mint in this package — the comment on issueNamedKey claiming
+	// "nothing else here mints" was wrong three ways, and every copy had to gain
+	// Kind and Origins by hand when the columns arrived, because a missing
+	// `text[] NOT NULL` field encodes as NULL and fails the insert.
 	secret := randomHex()
-	hash := sha256.Sum256([]byte("uc_live_" + secret))
+	hash := sha256.Sum256([]byte(keyScheme(keyKindSecret) + secret))
 	if _, err := pool.Queries().WithTx(tx).CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
 		TenantID:   tenantID,
 		ProjectID:  projectID,
 		Prefix:     secret[:12],
 		SecretHash: hash[:],
+		Kind:       keyKindSecret,
+		Origins:    []string{},
 	}); err != nil {
 		return 0, err
 	}

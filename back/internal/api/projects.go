@@ -259,17 +259,26 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, s sqlc.
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The api_key INSERT is issueKey's, tx-bound: a pool-bound call would
+	// The api_key INSERT is issueKeyOfKind's, tx-bound: a pool-bound call would
 	// autocommit outside the transaction. The full key stays server-side,
 	// exactly as the pool-bound call left it.
+	//
+	// It is a SECOND copy of that mint and the two must be kept in step. Kind and
+	// Origins are here because they were not: `origins` is `text[] NOT NULL`, a
+	// missing field encodes as NULL, and every project creation answered 500. The
+	// scheme is keyScheme(keyKindSecret) rather than a literal for the same reason —
+	// a hand-written prefix here and a derived one there is how a key gets minted
+	// under one scheme and looked up under the other.
 	secret := randomHex()
-	fullKey := "uc_live_" + secret
+	fullKey := keyScheme(keyKindSecret) + secret
 	hash := sha256.Sum256([]byte(fullKey))
 	if _, err := h.pool.Queries().WithTx(tx).CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
 		TenantID:   tenantID,
 		ProjectID:  projectID,
 		Prefix:     secret[:12],
 		SecretHash: hash[:],
+		Kind:       keyKindSecret,
+		Origins:    []string{},
 	}); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return

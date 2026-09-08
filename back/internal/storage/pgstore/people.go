@@ -15,7 +15,7 @@ import (
 )
 
 // peopleCount is the one expression every people answer is made of. The
-// actor <> '' in each WHERE keeps nobody-behind-it rows out before the count,
+// actor <> ” in each WHERE keeps nobody-behind-it rows out before the count,
 // so the DISTINCT sees people and only people; spelling the count once is
 // what keeps the two readings apart everywhere.
 const peopleCount = "count(DISTINCT actor) AS people"
