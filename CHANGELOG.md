@@ -6,6 +6,64 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-09-08
+
+### Added
+- **The agent can build, rebuild and extend the dashboard at any point, not only once.**
+  `npx upcontrol board` reads the project's board, `--apply` replaces it and `--add <file|->`
+  appends widgets to it, all on the ingest key already in `.env` — no second credential and
+  nothing for the reader to paste. `references/dashboard.md` (`npx upcontrol skills dashboard`)
+  documents the document: the 12-column grid, `h` in half-rows, every kind's default and floor
+  size, the `source` each kind's refs must take, and the exact shape of what the command
+  expects. The skill offers the board once `verify` reports data arriving, which is the moment
+  it knows what the board should hold.
+- `POST /v1/dashboard/widgets` — the additive door. The incoming block lands whole below the
+  board's bottom and cannot collide with it; a colliding widget id is re-minted rather than
+  refused. Appending never asks for confirmation, because it removes nothing.
+- `GET /v1/dashboard/proposal` and `DELETE /v1/dashboard/proposal` — the session's side of a
+  layout the key offered.
+
+### Changed
+- **An ingest key's board write is gated by PROVENANCE, not by existence.** `dashboard`
+  gained `written_by` (migration 006, default `'session'`), and `PUT /v1/dashboard` with a key
+  now replaces a board a key wrote instead of refusing it. A board a SESSION saved is still
+  never overwritten by a credential that lives in `.env`: the layout is kept in
+  `dashboard.proposed` and answered **202** `{"status":"proposed"}`, and the app resolves it in
+  one click. The old 409 `board_exists` is gone — it approximated "did a human curate this
+  board?" with "does one exist?", and the column answers that directly.
+- The key may now `GET /v1/dashboard`. The catalog and the series stay session-only: the
+  catalog reports what actually arrived, including attribute values, while the board's refs
+  name events the agent itself declared.
+
+### Fixed
+- **`POST /v1/recipients/{id}/resend` was dead in production**, and had been since it shipped.
+  `http.ServeMux` matches patterns segment by segment, so `POST /v1/recipients/{id}` never
+  reached the sub-path: the handler's resend arm was unreachable and the app's Resend button
+  answered 404. Unrelated to the board work — found while checking that the board's own new
+  paths were wired, which they were not either.
+- **Nothing tested that a contract path is actually routed.** Handler tests drive
+  `writeAPI.ServeHTTP` and skip the mux entirely, so a path can be in `openapi.yaml`, answered
+  by a handler, covered by a green test, and still 404 on a running server.
+  `internal/api/routes_test.go` now reads every path out of the contract and fails when one is
+  missing from `cmd/ucapi/main.go`.
+- **The empty board answered `version: 1`**, left over from before the row was halved. An agent
+  that read an empty board, filled it in and sent it back would have returned version-2 sizes
+  under a version-1 label, which the front draws at twice the height asked for. An empty board
+  has no heights, so the field says nothing except which unit the next writer should use.
+- **An append no longer resolves a pending proposal.** Clearing it is right for a session
+  write, which is the reader answering; an append is the agent writing, so a second agent run
+  was deleting the offer the first one had told the reader to go and press Review on.
+- **`npm run typecheck` in `cli/installer` had rotted red.** `test/version.test.ts` imported
+  `CLI_VERSION` from `../dist/net.js` while `tsconfig.json` sets `declaration: false`, so no
+  `.d.ts` is ever emitted beside it. The test now spawns the built binary and compares
+  `--version` against package.json, which is what the claim is actually about. CI gained a
+  `Typecheck` step for both cli packages — it ran only `npm test`, which is how this stayed
+  invisible.
+- Appending onto a board still stored at `version: 1` is refused with a sentence naming the
+  fix, instead of silently drawing the agent's cards at twice their height — the agent writes
+  version-2 heights and the front doubles a version-1 document whole. The server does not
+  convert between the units, because `h` is a drawing decision and the front is what draws.
+
 ## [0.21.1] — 2026-09-07
 
 ### Security

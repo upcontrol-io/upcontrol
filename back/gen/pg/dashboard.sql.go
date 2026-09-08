@@ -9,9 +9,45 @@ import (
 	"context"
 )
 
+const appendDashboardLayout = `-- name: AppendDashboardLayout :exec
+UPDATE dashboard SET layout = $3, updated_at = now()
+ WHERE tenant_id = $1 AND project_id = $2
+`
+
+type AppendDashboardLayoutParams struct {
+	TenantID  int64
+	ProjectID int64
+	Layout    []byte
+}
+
+// The append path's write: the layout alone. Provenance is NOT touched, because
+// appending to a curated board keeps it curated, and the pending proposal is NOT
+// cleared, because only the reader resolves an offer the agent made them. The
+// tenant rides in the predicate.
+func (q *Queries) AppendDashboardLayout(ctx context.Context, arg AppendDashboardLayoutParams) error {
+	_, err := q.db.Exec(ctx, appendDashboardLayout, arg.TenantID, arg.ProjectID, arg.Layout)
+	return err
+}
+
+const clearDashboardProposal = `-- name: ClearDashboardProposal :exec
+UPDATE dashboard SET proposed = NULL, proposed_at = NULL
+ WHERE tenant_id = $1 AND project_id = $2
+`
+
+type ClearDashboardProposalParams struct {
+	TenantID  int64
+	ProjectID int64
+}
+
+// Drop the proposal without applying it. The tenant rides in the predicate.
+func (q *Queries) ClearDashboardProposal(ctx context.Context, arg ClearDashboardProposalParams) error {
+	_, err := q.db.Exec(ctx, clearDashboardProposal, arg.TenantID, arg.ProjectID)
+	return err
+}
+
 const getDashboard = `-- name: GetDashboard :one
 
-SELECT layout FROM dashboard WHERE tenant_id = $1 AND project_id = $2
+SELECT layout, written_by FROM dashboard WHERE tenant_id = $1 AND project_id = $2
 `
 
 type GetDashboardParams struct {
@@ -19,35 +55,85 @@ type GetDashboardParams struct {
 	ProjectID int64
 }
 
+type GetDashboardRow struct {
+	Layout    []byte
+	WrittenBy string
+}
+
 // Dashboard queries: the one stored board per project, read and replaced whole.
 // The tenant rides in the predicate even though project_id is the key: a
 // project id from another tenant must read as "no board", never as theirs.
-func (q *Queries) GetDashboard(ctx context.Context, arg GetDashboardParams) ([]byte, error) {
+func (q *Queries) GetDashboard(ctx context.Context, arg GetDashboardParams) (GetDashboardRow, error) {
 	row := q.db.QueryRow(ctx, getDashboard, arg.TenantID, arg.ProjectID)
-	var layout []byte
-	err := row.Scan(&layout)
-	return layout, err
+	var i GetDashboardRow
+	err := row.Scan(&i.Layout, &i.WrittenBy)
+	return i, err
+}
+
+const getDashboardProposal = `-- name: GetDashboardProposal :one
+SELECT proposed FROM dashboard WHERE tenant_id = $1 AND project_id = $2
+`
+
+type GetDashboardProposalParams struct {
+	TenantID  int64
+	ProjectID int64
+}
+
+// The pending proposal, NULL when there is none. The tenant rides in the
+// predicate.
+func (q *Queries) GetDashboardProposal(ctx context.Context, arg GetDashboardProposalParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, getDashboardProposal, arg.TenantID, arg.ProjectID)
+	var proposed []byte
+	err := row.Scan(&proposed)
+	return proposed, err
+}
+
+const proposeDashboard = `-- name: ProposeDashboard :exec
+UPDATE dashboard SET proposed = $3, proposed_at = now()
+ WHERE tenant_id = $1 AND project_id = $2
+`
+
+type ProposeDashboardParams struct {
+	TenantID  int64
+	ProjectID int64
+	Proposed  []byte
+}
+
+// The key's answer to a curated board: keep the offered layout beside it,
+// never over it. The tenant rides in the predicate.
+func (q *Queries) ProposeDashboard(ctx context.Context, arg ProposeDashboardParams) error {
+	_, err := q.db.Exec(ctx, proposeDashboard, arg.TenantID, arg.ProjectID, arg.Proposed)
+	return err
 }
 
 const putDashboard = `-- name: PutDashboard :exec
-INSERT INTO dashboard (tenant_id, project_id, layout)
-VALUES ($1, $2, $3)
+INSERT INTO dashboard (tenant_id, project_id, layout, written_by)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (project_id) DO UPDATE
-   SET tenant_id = EXCLUDED.tenant_id, layout = EXCLUDED.layout, updated_at = now()
+   SET tenant_id = EXCLUDED.tenant_id, layout = EXCLUDED.layout,
+       written_by = EXCLUDED.written_by,
+       proposed = NULL, proposed_at = NULL, updated_at = now()
 `
 
 type PutDashboardParams struct {
 	TenantID  int64
 	ProjectID int64
 	Layout    []byte
+	WrittenBy string
 }
 
 // Replace the board wholesale. The project id is already the caller's own
 // (currentProject resolves it inside the tenant), so the row simply follows
 // the project: a board left behind by an earlier tenant of a released and
 // re-claimed project is overwritten, tenant and all, rather than silently
-// kept while the save answers 200.
+// kept while the save answers 200. A real write also resolves any pending
+// proposal: the proposal was about the board that just changed.
 func (q *Queries) PutDashboard(ctx context.Context, arg PutDashboardParams) error {
-	_, err := q.db.Exec(ctx, putDashboard, arg.TenantID, arg.ProjectID, arg.Layout)
+	_, err := q.db.Exec(ctx, putDashboard,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.Layout,
+		arg.WrittenBy,
+	)
 	return err
 }

@@ -55,10 +55,13 @@ type Check struct {
 }
 
 type Dashboard struct {
-	TenantID  int64
-	ProjectID int64
-	Layout    []byte
-	UpdatedAt pgtype.Timestamptz
+	TenantID   int64
+	ProjectID  int64
+	Layout     []byte
+	UpdatedAt  pgtype.Timestamptz
+	WrittenBy  string
+	Proposed   []byte
+	ProposedAt pgtype.Timestamptz
 }
 
 type DeliveryAttempt struct {

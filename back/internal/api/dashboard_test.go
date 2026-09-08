@@ -407,10 +407,13 @@ func TestValidateLayout(t *testing.T) {
 	}
 }
 
-// The empty answer is the contract's own literal: the front compares against
-// it, and a re-spelling here (a space, "widgets" first) would break that.
+// The empty answer is the contract's own literal, and its version is the
+// CURRENT one: an empty board has no heights, so the field says nothing except
+// which unit the next writer should use. It read 1 until 2026-09-08, which
+// invited an agent to fill it in and send it back with version-2 sizes under a
+// version-1 label.
 func TestEmptyLayoutIsTheDocumentedEmptyBoard(t *testing.T) {
-	if string(emptyLayout) != `{"version":1,"widgets":[]}` {
+	if string(emptyLayout) != `{"version":2,"widgets":[]}` {
 		t.Fatalf("the empty board is %s", emptyLayout)
 	}
 	var doc apigen.DashboardLayout

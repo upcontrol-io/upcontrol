@@ -16,12 +16,23 @@ import {
   skillFresh,
   writeDotenvKey,
 } from './files.js';
-import { CLI_VERSION, endpointFrom, fetchInstallStatus, mintAnonymousProject, redeemInstallToken } from './net.js';
+import {
+  CLI_VERSION,
+  appendBoard,
+  applyBoard,
+  endpointFrom,
+  fetchInstallStatus,
+  mintAnonymousProject,
+  readBoard,
+  redeemInstallToken,
+} from './net.js';
 
 interface Flags {
   key?: string;
   token?: string;
   endpoint?: string;
+  apply?: string;
+  add?: string;
   copilot: boolean;
   noKey: boolean;
   json: boolean;
@@ -44,6 +55,12 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags 
         break;
       case '--endpoint':
         flags.endpoint = argv[++i];
+        break;
+      case '--apply':
+        flags.apply = argv[++i];
+        break;
+      case '--add':
+        flags.add = argv[++i];
         break;
       case '--copilot':
         flags.copilot = true;
@@ -77,6 +94,12 @@ function out(line: string): void {
   process.stdout.write(line + '\n');
 }
 
+// Board failures go to stderr: the plain read's stdout is piped JSON, and an
+// error line in it would ride into whatever consumed the pipe.
+function err(line: string): void {
+  process.stderr.write(line + '\n');
+}
+
 const HELP = `upcontrol ${CLI_VERSION} - monitoring wired in by the agent you already use
 
 Usage:
@@ -84,6 +107,7 @@ Usage:
   npx upcontrol skills     list agent reference topics (skills <topic> prints one)
   npx upcontrol verify     wait until data provably arrives (exit 4 on failure)
   npx upcontrol status     one JSON line: endpoint, key source, skill freshness
+  npx upcontrol board      print the project's dashboard layout as JSON
 
 Init flags:
   --token <uct_...>    one-time token from your dashboard's install card - lands
@@ -96,6 +120,13 @@ Init flags:
 Verify flags:
   --timeout <sec>      how long to wait (default 120)
   --json               machine-readable output
+
+Board flags:
+  --apply <file|->     replace the board with the layout in that file
+  --add <file|->       append the widgets in that file to the board
+
+  A single dash reads stdin for either flag. On a human-curated board --apply is kept
+  as a proposal: open /app/dashboard in the app and press Review to apply it.
 
 The skill teaches your agent event names and placement
 rules; say what you want in plain language ("send all my logs to upcontrol")
@@ -342,6 +373,87 @@ async function cmdVerify(det: Detection, flags: Flags): Promise<number> {
   return 4;
 }
 
+// Reads the board input spec: `-` is stdin (fd 0), anything else a file path.
+function readBoardInput(spec: string): string | null {
+  try {
+    return readFileSync(spec === '-' ? 0 : spec, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+// One failure path for every board call: unreachable keeps verify's exit 3,
+// a refused write prints the server's own sentence (what is wrong with the
+// layout) instead of a bare status.
+function boardFail(endpoint: string, r: { error?: string; status?: number; message?: string }): number {
+  if (r.error === 'unreachable') {
+    err(`board: cannot reach ${endpoint} - is the endpoint right (UPCONTROL_ENDPOINT)?`);
+    return 3;
+  }
+  err(r.message ?? `board: refused (HTTP ${r.status ?? '?'})`);
+  return 1;
+}
+
+async function cmdBoard(flags: Flags): Promise<number> {
+  const endpoint = endpointFrom(process.env, flags.endpoint);
+  if (flags.apply !== undefined && flags.add !== undefined) {
+    err('board: --apply and --add are mutually exclusive - pick one');
+    return 1;
+  }
+  const key = process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(process.cwd());
+  if (!key) {
+    err('board: no key found (UPCONTROL_API_KEY or .env) - run `npx upcontrol init` first');
+    return 2;
+  }
+
+  if (flags.apply === undefined && flags.add === undefined) {
+    const r = await readBoard(endpoint, key);
+    if (!r.ok) return boardFail(endpoint, r);
+    out((r.text ?? '').trim());
+    return 0;
+  }
+
+  const spec = (flags.apply ?? flags.add)!;
+  const raw = readBoardInput(spec);
+  if (raw === null) {
+    err(`board: cannot read ${spec}`);
+    return 1;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    err(`board: ${spec} is not JSON`);
+    return 1;
+  }
+
+  if (flags.apply !== undefined) {
+    const r = await applyBoard(endpoint, key, parsed);
+    if (!r.ok) return boardFail(endpoint, r);
+    const widgets = (parsed as { widgets?: unknown[] }).widgets;
+    const n = Array.isArray(widgets) ? widgets.length : 0;
+    if (r.status === 202) {
+      out('The board was edited in the app, so this layout is waiting there as a proposal.');
+      out(`Open ${endpoint}/app/dashboard and press Review to apply it.`);
+      return 0;
+    }
+    out(`stored - ${n} widgets.`);
+    return 0;
+  }
+
+  // --add takes a bare widget array or a document carrying one (the shape
+  // `board` itself prints), so an agent can model its file on the live board.
+  const widgets = Array.isArray(parsed) ? parsed : (parsed as { widgets?: unknown[] }).widgets;
+  if (!Array.isArray(widgets)) {
+    err(`board: ${spec} holds no widgets array`);
+    return 1;
+  }
+  const r = await appendBoard(endpoint, key, widgets);
+  if (!r.ok) return boardFail(endpoint, r);
+  out(`added ${widgets.length} widgets - the board now has ${r.total}.`);
+  return 0;
+}
+
 async function main(): Promise<number> {
   const { cmd, args, flags } = parseArgs(process.argv.slice(2));
   const det = detect();
@@ -362,6 +474,8 @@ async function main(): Promise<number> {
       return cmdVerify(det, flags);
     case 'status':
       return cmdStatus(flags);
+    case 'board':
+      return cmdBoard(flags);
     default:
       out(`unknown command "${cmd}"\n`);
       out(HELP);
