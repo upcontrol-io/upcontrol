@@ -2,8 +2,8 @@
 
 A breakdown is a dimension the user names: how often each value of it occurs.
 By default it counts events, not people - it is a ranking of volume, not a
-count of users. Passing a `who` to value() counts distinct people instead.
-upcontrol receives each value's count and nothing else.
+count of users. Passing a `who` to value() counts distinct people instead: each
+call is one event, and the server does the counting.
 
 The request usually arrives as a sentence copied from the board's form:
 
@@ -35,10 +35,8 @@ the value, and an optional `who` to count distinct people instead of events.
 pageViews.value('/pricing');
 ```
 
-The value must be bounded. The SDK keeps at most 200 distinct values per
-dimension; a new value past that is ignored, with one line on stderr. Never
-feed it something unbounded - a request id, an email, a full URL with its
-query string. Normalise before counting:
+The value must be bounded. Never feed it something unbounded - a request id,
+an email, a full URL with its query string. Normalise before counting:
 
 ```ts
 const path = new URL(req.url, 'http://localhost').pathname; // /checkout?plan=growth -> /checkout
@@ -55,28 +53,17 @@ pageViews.value(path);
 - Bounded values only: a normalised path, a country code, a plan name. Never
   a request id, an email, a full URL with a query string - the value names
   itself on the board, so keep personal data out of it.
-- At most 200 distinct values per dimension; past that, new values are
-  ignored with one line on stderr.
-- The same name declared twice in one process is one breakdown: the first
-  declaration wins.
-
-## State and cadence
-
-The counters run since the breakdown was first declared on that machine, and
-they go out every minute as one metric reading per value, like the funnel, so
-the board can slice any range. State is kept in memory and on disk under
-`node_modules/.cache/upcontrol/`; point `UPCONTROL_STATE_DIR` at a path on a
-volume when the deploy rebuilds `node_modules`. Without a key the breakdown
-still counts locally and sends nothing, like the rest of the SDK.
+- A `who` rides the event as `uc.actor`, which is what lets the same numbers
+  be produced from any language - see `npx upcontrol skills wire`.
 
 ## Verify
 
-Ask the user to run the app. Within a minute the SDK sends the readings;
+Ask the user to run the app. The events go out with the next batch, and
 `npx upcontrol verify` proves the key, transport and scrubber as usual. The
-board's breakdown card reads them once its live feed lands (the SDK is ahead
-of the board here); until then the Dashboard draws sample data behind a
-`Sample` badge, so do not send the user there for proof. Report what is
-proven: the dimension is declared and its counters are on the wire.
+board's breakdown card reads the same events, so the ranking appears there as
+they land; while a project has no live feed the Dashboard draws sample data
+behind a `Sample` badge, so do not send the user there for proof. Report what
+is proven: the dimension is declared and its events are on the wire.
 
 ## Report
 

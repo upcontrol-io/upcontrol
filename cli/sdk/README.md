@@ -26,9 +26,6 @@ Configuration is environment-only:
   line (`api`, `worker`, `front`); the dashboard's service column and filter
   read it. A `service` attribute passed to `track()` or `upcontrolLine()` wins
   over it. Unset, the line carries no service.
-- `UPCONTROL_STATE_DIR` - optional. Where a funnel keeps the people it has seen
-  (default `node_modules/.cache/upcontrol/`). Point it at a volume when a deploy
-  rebuilds `node_modules`.
 
 What it does on the wire: batches lines (1.5 s / 64 KB), keeps at most 8 MB in
 memory (oldest lines are evicted WITH an explicit drop line - silent loss is
@@ -53,25 +50,20 @@ visitToPaid.step('signup', user.id);
 ```
 
 A request is fingerprinted on your own server (a salted hash of the address and
-the user-agent, with known crawlers skipped) and never sent, and a string id is
-hashed the same way, so only the counts leave the process. The address is the
-framework's own `ip` first (behind a proxy, set its trust-proxy so that is the
-client's), then the first `x-forwarded-for` hop, then the socket; a request with
-none is not counted. Each step counts a person once, and its value is a counter
-since the funnel was first declared on that machine: it grows while the process
-lives and picks up from its last save, at most a minute behind, after a restart.
-The counts go out every minute as one metric reading per step, so the board can
-show any range as a slice of that series. The people seen are kept in the state
-dir, up to a million per step, and each process keeps its own, so a cluster of
-workers counts a visitor once per worker. Each process also stamps its readings
-with a reporter id of its own, so the board can tell the workers apart and sum
-them correctly. A filesystem that does not survive a deploy starts the counts
-again, which is what `UPCONTROL_STATE_DIR` is for.
+the user-agent, with known crawlers skipped) so a raw address never leaves, and
+a string id passes through unchanged. Whichever it is rides the event as
+`uc.actor`. The address is the framework's own `ip` first (behind a proxy, set
+its trust-proxy so that is the client's), then the first `x-forwarded-for` hop,
+then the socket; a request with none is not counted. Each `step()` line is one
+event named by the step, and the server counts a person once per step from the
+events it stores - nothing is deduped in the process, and the count stays
+honest anyway. An event carrying `uc.actor` is all a sender needs, from any
+language.
 
 ## A/B tests, retention and breakdowns
 
-Three more feeds on the same machine: counts that only grow, reported every
-minute, nothing that identifies a person on the wire or on disk.
+Three more feeds on the same events: each call is one event, and the server
+counts distinct people from the `uc.actor` on it.
 
 ```ts
 import { experiment, retention, breakdown } from '@upcontrol/sdk';
@@ -87,17 +79,14 @@ const signups = retention('signups');
 signups.seen(user.id);
 
 // Counts events; pass a who to count distinct people instead.
-// At most 200 distinct values.
 const pages = breakdown('page');
 pages.value('/pricing');
 pages.value('/pricing', user.id);
 ```
 
 `expose` and `convert` take the same `who` a funnel step takes, a request or a
-string id. `seen()` takes a string id only, and keeps the last 12 weekly
-cohorts. A breakdown does not deduplicate unless you pass it a
-`who`. Never feed it something unbounded like a request id
-or a URL with a query string.
+string id. `seen()` takes a string id only. Never feed a breakdown something
+unbounded like a request id or a URL with a query string.
 
 Install and instrumentation are normally driven by your coding agent via
 `npx upcontrol init` - see the [upcontrol package](https://www.npmjs.com/package/upcontrol).

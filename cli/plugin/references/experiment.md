@@ -1,9 +1,9 @@
 # "Add an A/B test" - arms counted once per person, exposure and conversion
 
 An A/B test is a name the user gives plus its arms: how many people were
-exposed to each arm and how many of those converted. The SDK counts a person
-once per arm per stat on the user's own server; upcontrol receives counts and
-nothing else.
+exposed to each arm and how many of those converted. Each expose() and
+convert() line is one event; the server counts a person once per arm per stat
+from the events it stores.
 
 The request usually arrives as a sentence copied from the board's form:
 
@@ -54,8 +54,8 @@ app.use(async (ctx, next) => { checkoutCta.expose(arm, ctx.request); await next(
 ```
 
 Next.js: a route handler's `request`, or the page or layout that renders the
-variant with the request headers. The SDK needs Node (`node:fs`,
-`node:crypto`), so not `middleware.ts` unless it declares `runtime: 'nodejs'`:
+variant with the request headers. The SDK needs Node (`node:crypto`), so not
+`middleware.ts` unless it declares `runtime: 'nodejs'`:
 
 ```ts
 export async function GET(request: Request) { checkoutCta.expose(arm, request); /* existing handler stays */ }
@@ -83,43 +83,29 @@ checkoutCta.convert(arm, userId);  // the payment success branch, the arm they s
   `expose()` and `convert()` never throw and never block.
 - The request or the user id, never an email, never a session token.
 - Control is first in the declaration; the board draws the arms in that order.
-- The same name declared twice in one process is one test: the first
-  declaration wins.
-- A person counts once per arm per stat, so a reload does not inflate the
-  rate and a second conversion does not move it. Keep the calls at the moment
-  anyway, out of per-item loops.
+- The server counts a person once per arm per stat, so a reload does not
+  inflate the rate and a second conversion does not move it. Keep the calls at
+  the moment anyway, out of per-item loops.
 - The card reports counts and an uplift, and claims nothing more: no
   significance testing, no confidence intervals. Do not promise those to the
   user.
-- What leaves the process is counts. A request is fingerprinted on the user's
-  own server (the same salted hash of address plus user-agent a funnel uses),
-  a string id is hashed with the same salt, and neither the hash nor its
-  input is ever sent. A request with no address at all is not counted (one
-  warning on stderr), and known crawler user-agents are not counted either.
-
-## State and cadence
-
-Each arm's exposure and conversion counters run since the test was first
-declared on that machine: there is no window, they pick up from their last
-save, at most a minute behind, after a restart, and they go out every minute
-as one metric reading per arm per stat, so the board can slice any range. The
-people already counted are kept in memory and on disk under
-`node_modules/.cache/upcontrol/`; point `UPCONTROL_STATE_DIR` at a path on a
-volume when the deploy rebuilds `node_modules`, otherwise the counts start
-again after such a deploy. Each process counts its own people, so an app in
-cluster mode counts a person once per worker; say so to the user if you see a
-cluster. Without a key the test still counts locally and sends nothing, like
-the rest of the SDK.
+- What leaves the process is one event per call, the person on it as `uc.actor`.
+  A request is fingerprinted on the user's own server (the same salted hash of
+  address plus user-agent a funnel uses), so the raw address never leaves, and
+  a string id passes through unchanged as the caller's own identifier. A
+  request with no address at all is not counted (one warning on stderr), and
+  known crawler user-agents are not counted either.
+- The events carry `uc.actor`, which is what lets the same numbers be produced
+  from any language - see `npx upcontrol skills wire`.
 
 ## Verify
 
-Ask the user to run the app. Within a minute the SDK sends one reading per arm
-per stat; `npx upcontrol verify` proves the key, transport and scrubber as
-usual, and the readings arrive with the next batch. The board's A/B card reads
-them once its live feed lands (the SDK is ahead of the board here); until then
-the Dashboard draws sample data behind a `Sample` badge, so do not send the
-user there for proof. Report what is proven: the test is declared and its
-counters are on the wire.
+Ask the user to run the app. The events go out with the next batch, and
+`npx upcontrol verify` proves the key, transport and scrubber as usual. The
+board's A/B card reads the same events, so the arms appear there as they land;
+while a project has no live feed the Dashboard draws sample data behind a
+`Sample` badge, so do not send the user there for proof. Report what is
+proven: the test is declared and its events are on the wire.
 
 ## Report
 

@@ -1,8 +1,8 @@
 # "Add a funnel" - a journey counted step by step, once per person
 
 A funnel is a journey the user names, plus its steps in order: how many people
-reached each one. The SDK counts a person once per step on the user's own
-server; upcontrol receives counts and nothing else.
+reached each one. Each step() line is one event, and the server counts a person
+once per step from the events it stores.
 
 The request usually arrives as a sentence copied from the board's form:
 
@@ -48,8 +48,8 @@ app.use(async (ctx, next) => { visitToPaid.step('visit', ctx.request); await nex
 ```
 
 Next.js: a route handler's `request`, or a server component with the request
-headers (the root layout sees every page). The SDK needs Node (`node:fs`,
-`node:crypto`), so not `middleware.ts` unless it declares `runtime: 'nodejs'`:
+headers (the root layout sees every page). The SDK needs Node (`node:crypto`),
+so not `middleware.ts` unless it declares `runtime: 'nodejs'`:
 
 ```ts
 export async function GET(request: Request) { visitToPaid.step('visit', request); /* existing handler stays */ }
@@ -77,48 +77,29 @@ visitToPaid.step('paid', userId);        // the payment success branch, not the 
 - One line per step. No wrappers, no control-flow changes, no `await` -
   `step()` never throws and never blocks.
 - The request or the user id, never an email, never a session token.
-- Steps go in journey order in the declaration; that is the order the board
-  draws them in.
-- The same name declared twice in one process is one funnel: the first
-  declaration wins.
-- Hot loops: a step counts a person once, so a repeat costs nothing, but keep
-  it out of per-item loops anyway - it belongs at the moment, not inside the
+- Steps go in journey order in the declaration. The declaration scopes and
+  validates the calls in code; the board's card names the step events itself,
+  and the card is what defines the journey.
+- Keep it out of per-item loops - it belongs at the moment, not inside the
   work.
-- What leaves the process is counts. A request is fingerprinted on the user's
-  own server (a salted hash of the address plus the user-agent: the framework's
-  `ip` first, then the first `x-forwarded-for` hop, then the socket), a string
-  id is hashed with the same salt, and neither the hash nor its input is ever
-  sent. A request with no address at all is not counted (one warning on
-  stderr). Known crawler user-agents (bot, crawl, spider, slurp, headless) are
-  not counted either.
-
-## State and cadence
-
-Each step's value is a counter since the funnel was first declared on that
-machine: there is no window; it grows while the process lives and picks up from
-its last save, at most a minute behind, after a restart. The counters go out
-every minute as one metric reading per step, so they never land in the log
-window and the board can slice any range out of them, an hour or a week or a
-month. The people already counted are kept in memory and in
-`node_modules/.cache/upcontrol/funnels.json`, up to a million per step; there
-is nothing to gitignore, because the default lives inside `node_modules`. Point
-`UPCONTROL_STATE_DIR` at a path on a volume when the deploy rebuilds
-`node_modules`, otherwise the counts start again after such a deploy. Each
-process counts its own people, so an app in cluster mode counts a visitor once
-per worker; say so to the user if you see a cluster. Every reading also carries
-the reporter id of the process that sent it, so the board can tell the workers
-apart and sum them correctly. Without a key the funnel still counts locally and
-sends nothing, like the rest of the SDK.
+- What leaves the process is one event per step, the person on it as `uc.actor`.
+  A request is fingerprinted on the user's own server (a salted hash of the
+  address plus the user-agent: the framework's `ip` first, then the first
+  `x-forwarded-for` hop, then the socket), so the raw address never leaves; a
+  string id passes through unchanged as the caller's own identifier. A request
+  with no address at all is not counted (one warning on stderr). Known crawler
+  user-agents (bot, crawl, spider, slurp, headless) are not counted either.
+- The events carry `uc.actor`, which is what lets the same numbers be produced
+  from any language - see `npx upcontrol skills wire`.
 
 ## Verify
 
-Ask the user to run the app. Within a minute the SDK sends one reading per step;
-`npx upcontrol verify` proves the key, transport and scrubber as usual, and the
-readings arrive with the next batch. The board's funnel card reads them once its
-live feed lands (the SDK is ahead of the board here); until then the Dashboard
-draws sample data behind a `Sample` badge, so do not send the user there for
-proof. Report what is proven: the funnel is declared and its counters are on
-the wire.
+Ask the user to run the app. The step events go out with the next batch, and
+`npx upcontrol verify` proves the key, transport and scrubber as usual. The
+board's funnel card reads the same events, so the journey appears there as they
+land; while a project has no live feed the Dashboard draws sample data behind a
+`Sample` badge, so do not send the user there for proof. Report what is
+proven: the funnel is declared and its events are on the wire.
 
 ## Report
 

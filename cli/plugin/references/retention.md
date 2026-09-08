@@ -1,8 +1,9 @@
 # "Add retention" - weekly cohorts, each person once a week
 
 Retention is a name the user gives plus weekly cohorts: of the people first
-seen in a week, how many were seen again in each week after. The SDK buckets
-people on the user's own server; upcontrol receives counts and nothing else.
+seen in a week, how many were seen again in each week after. Each seen() line
+is one event carrying the person as `uc.actor`; the server works out the
+cohorts from the actor's first event.
 
 The request usually arrives as a sentence copied from the board's form:
 
@@ -55,8 +56,8 @@ app.use(async (ctx, next) => { if (ctx.state.user) signups.seen(String(ctx.state
 ```
 
 Next.js - in the root layout, once the session is read (it sees every page).
-The SDK needs Node (`node:fs`, `node:crypto`), so not `middleware.ts` unless
-it declares `runtime: 'nodejs'`:
+The SDK needs Node (`node:crypto`), so not `middleware.ts` unless it
+declares `runtime: 'nodejs'`:
 
 ```ts
 const session = await auth();
@@ -69,31 +70,21 @@ if (session?.user) signups.seen(String(session.user.id)); // in the root layout,
   never throws and never blocks.
 - The stable user id, never an email, never a session token, never a request
   object.
-- The same name declared twice in one process is one cohort set: the first
-  declaration wins.
 - A person counts once per ISO week (Monday). The week they were first seen
   starts their cohort; every later week they are seen again counts them once
   in that week.
-- The SDK keeps the last 12 weekly cohorts; older ones roll off. Say so if
-  the user asks for a year of retention.
-
-## State and cadence
-
-The cohorts run since the name was first declared on that machine, and they
-go out every minute as metric readings, like the funnel, so the board can
-slice any range. The people already seen are kept in memory and on disk under
-`node_modules/.cache/upcontrol/`; point `UPCONTROL_STATE_DIR` at a path on a
-volume when the deploy rebuilds `node_modules`. Without a key the cohort
-still counts locally and sends nothing, like the rest of the SDK.
+- The events carry `uc.actor`, which is what lets the same numbers be produced
+  from any language - see `npx upcontrol skills wire`.
 
 ## Verify
 
-Ask the user to run the app and sign in. Within a minute the SDK sends the
-readings; `npx upcontrol verify` proves the key, transport and scrubber as
-usual. The board's retention card reads them once its live feed lands (the
-SDK is ahead of the board here); until then the Dashboard draws sample data
-behind a `Sample` badge, so do not send the user there for proof. Report what
-is proven: the cohort is declared and its readings are on the wire.
+Ask the user to run the app and sign in. The events go out with the next
+batch, and `npx upcontrol verify` proves the key, transport and scrubber as
+usual. The board's retention card reads the same events, so the cohorts
+appear there as they land; while a project has no live feed the Dashboard
+draws sample data behind a `Sample` badge, so do not send the user there for
+proof. Report what is proven: the cohort is declared and its events are on
+the wire.
 
 ## Report
 
