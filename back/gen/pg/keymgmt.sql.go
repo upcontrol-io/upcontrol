@@ -26,9 +26,9 @@ func (q *Queries) CountLiveAPIKeys(ctx context.Context, projectID int64) (int64,
 }
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, name)
-VALUES ($1, $2, $3, $4, 'active', $5)
-RETURNING id, prefix, name, state, created_at
+INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, name, kind, origins)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7)
+RETURNING id, prefix, name, state, created_at, kind, origins
 `
 
 type CreateAPIKeyParams struct {
@@ -37,6 +37,8 @@ type CreateAPIKeyParams struct {
 	Prefix     string
 	SecretHash []byte
 	Name       string
+	Kind       string
+	Origins    []string
 }
 
 type CreateAPIKeyRow struct {
@@ -45,11 +47,15 @@ type CreateAPIKeyRow struct {
 	Name      string
 	State     string
 	CreatedAt pgtype.Timestamptz
+	Kind      string
+	Origins   []string
 }
 
 // Issue a new API key. The prefix is indexed and visible; the secret_hash is
-// sha256 of the full key (uc_live_<prefix><secret>). The full key is shown to
-// the user exactly once at creation.
+// sha256 of the full key (<scheme><prefix><secret>). The full key is shown to
+// the user exactly once at creation. `kind` picks the scheme the caller hashed:
+// a public key is a browser credential and carries the origins it may be sent
+// from, which is the whole of its scope.
 func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (CreateAPIKeyRow, error) {
 	row := q.db.QueryRow(ctx, createAPIKey,
 		arg.TenantID,
@@ -57,6 +63,8 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		arg.Prefix,
 		arg.SecretHash,
 		arg.Name,
+		arg.Kind,
+		arg.Origins,
 	)
 	var i CreateAPIKeyRow
 	err := row.Scan(
@@ -65,12 +73,14 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		&i.Name,
 		&i.State,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Origins,
 	)
 	return i, err
 }
 
 const listAPIKeysForProject = `-- name: ListAPIKeysForProject :many
-SELECT id, prefix, name, state, created_at, last_used_at, revoked_at
+SELECT id, prefix, name, state, created_at, last_used_at, revoked_at, kind, origins
   FROM api_key WHERE project_id = $1
  ORDER BY created_at DESC
 `
@@ -83,6 +93,8 @@ type ListAPIKeysForProjectRow struct {
 	CreatedAt  pgtype.Timestamptz
 	LastUsedAt pgtype.Timestamptz
 	RevokedAt  pgtype.Timestamptz
+	Kind       string
+	Origins    []string
 }
 
 // Every key of one project, newest first, revoked ones included: the last use of
@@ -104,6 +116,8 @@ func (q *Queries) ListAPIKeysForProject(ctx context.Context, projectID int64) ([
 			&i.CreatedAt,
 			&i.LastUsedAt,
 			&i.RevokedAt,
+			&i.Kind,
+			&i.Origins,
 		); err != nil {
 			return nil, err
 		}

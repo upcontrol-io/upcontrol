@@ -27,6 +27,24 @@ func (e AccountRole) Valid() bool {
 	}
 }
 
+// Defines values for ApiKeyKind.
+const (
+	Public ApiKeyKind = "public"
+	Secret ApiKeyKind = "secret"
+)
+
+// Valid indicates whether the value is a known member of the ApiKeyKind enum.
+func (e ApiKeyKind) Valid() bool {
+	switch e {
+	case Public:
+		return true
+	case Secret:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ApiKeyState.
 const (
 	ApiKeyStateActive   ApiKeyState = "active"
@@ -555,6 +573,21 @@ func (e RecipientRole) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryCohort.
+const (
+	Week SeriesQueryCohort = "week"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryCohort enum.
+func (e SeriesQueryCohort) Valid() bool {
+	switch e {
+	case Week:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SeriesQueryRange.
 const (
 	SeriesQueryRangeN12h  SeriesQueryRange = "12h"
@@ -594,6 +627,7 @@ const (
 	SeriesQuerySourceEvent  SeriesQuerySource = "event"
 	SeriesQuerySourceLogs   SeriesQuerySource = "logs"
 	SeriesQuerySourceMetric SeriesQuerySource = "metric"
+	SeriesQuerySourcePeople SeriesQuerySource = "people"
 )
 
 // Valid indicates whether the value is a known member of the SeriesQuerySource enum.
@@ -606,6 +640,8 @@ func (e SeriesQuerySource) Valid() bool {
 	case SeriesQuerySourceLogs:
 		return true
 	case SeriesQuerySourceMetric:
+		return true
+	case SeriesQuerySourcePeople:
 		return true
 	default:
 		return false
@@ -778,6 +814,9 @@ type ApiKey struct {
 	// Id Example: key_1
 	Id string `json:"id"`
 
+	// Kind A `secret` key writes anything and belongs in `.env` on a server. A `public` key (prefix `uc_pub_`) may be shipped in a browser bundle: it writes named events only, from a listed origin, under a rate limit. Absent on a key issued before the distinction existed, which is a secret one.
+	Kind *ApiKeyKind `json:"kind,omitempty"`
+
 	// LastUsedAt Null for a key nothing has ever presented.
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 
@@ -786,6 +825,9 @@ type ApiKey struct {
 	// Example: staging
 	Name string `json:"name"`
 
+	// Origins A `public` key's allowed origins, matched byte for byte — no wildcards, no suffixes, no scheme folding. Empty is a refusal and never "any": a public key with no origin is the unscoped key it exists to replace. Meaningless on a secret key, which no browser ever presents.
+	Origins *[]string `json:"origins,omitempty"`
+
 	// Prefix Example: uc_live_8f2ac41d9b0e
 	Prefix    string     `json:"prefix"`
 	RevokedAt *time.Time `json:"revokedAt,omitempty"`
@@ -793,6 +835,9 @@ type ApiKey struct {
 	// State `rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence.
 	State ApiKeyState `json:"state"`
 }
+
+// ApiKeyKind A `secret` key writes anything and belongs in `.env` on a server. A `public` key (prefix `uc_pub_`) may be shipped in a browser bundle: it writes named events only, from a listed origin, under a rate limit. Absent on a key issued before the distinction existed, which is a secret one.
+type ApiKeyKind string
 
 // ApiKeyState `rotating` is an old key inside its 24h overlap: still accepted, already replaced. `revoked` is never accepted again, and its row is kept because the last use of a withdrawn key is evidence.
 type ApiKeyState string
@@ -1525,23 +1570,34 @@ type Series struct {
 
 // SeriesQuery One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws.
 type SeriesQuery struct {
-	// Group Label keys to fold the counter by, for the metric source only. With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold.
+	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+	Cohort *SeriesQueryCohort `json:"cohort,omitempty"`
+
+	// Group Label keys to fold by. For `metric` it folds a counter's labels; for `people` it names the label whose values a breakdown ranks (one key), or the variant label of an A/B test (two). With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold.
 	Group *[]string `json:"group,omitempty"`
 
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
 	Id string `json:"id"`
 
-	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name.
-	Name   *string            `json:"name,omitempty"`
-	Range  SeriesQueryRange   `json:"range"`
-	Source SeriesQuerySource  `json:"source"`
-	Where  *map[string]string `json:"where,omitempty"`
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name; people: the event name a breakdown or an A/B test reads.
+	Name  *string          `json:"name,omitempty"`
+	Range SeriesQueryRange `json:"range"`
+
+	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+	Source SeriesQuerySource `json:"source"`
+
+	// Steps `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order.
+	Steps *[]string          `json:"steps,omitempty"`
+	Where *map[string]string `json:"where,omitempty"`
 }
+
+// SeriesQueryCohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+type SeriesQueryCohort string
 
 // SeriesQueryRange defines model for SeriesQuery.Range.
 type SeriesQueryRange string
 
-// SeriesQuerySource defines model for SeriesQuery.Source.
+// SeriesQuerySource `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
 type SeriesQuerySource string
 
 // SeriesRequest Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer.

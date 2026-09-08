@@ -12,7 +12,7 @@ import (
 )
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT id, tenant_id, project_id, secret_hash, state, rotating_until
+SELECT id, tenant_id, project_id, secret_hash, state, rotating_until, kind, origins
   FROM api_key
  WHERE prefix = $1
 `
@@ -24,6 +24,8 @@ type GetAPIKeyByPrefixRow struct {
 	SecretHash    []byte
 	State         string
 	RotatingUntil pgtype.Timestamptz
+	Kind          string
+	Origins       []string
 }
 
 // Look up an API key by its (visible) prefix for authentication. The caller then
@@ -40,6 +42,8 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, prefix string) (GetAPIK
 		&i.SecretHash,
 		&i.State,
 		&i.RotatingUntil,
+		&i.Kind,
+		&i.Origins,
 	)
 	return i, err
 }

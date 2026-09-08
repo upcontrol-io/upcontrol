@@ -112,10 +112,12 @@ func (h *keys) get(w http.ResponseWriter, r *http.Request, projectID int64) {
 	for _, k := range rows {
 		list = append(list, map[string]any{
 			"id":         "key_" + strconv.FormatInt(k.ID, 10),
-			"prefix":     "uc_live_" + k.Prefix, // identifier only — the secret is never stored, never returned here
+			"prefix":     keyScheme(k.Kind) + k.Prefix, // identifier only — the secret is never stored, never returned here
 			"createdAt":  keyTime(k.CreatedAt),
 			"name":       k.Name,
 			"state":      k.State,
+			"kind":       k.Kind,
+			"origins":    k.Origins,
 			"lastUsedAt": keyTime(k.LastUsedAt),
 			"revokedAt":  keyTime(k.RevokedAt),
 		})
@@ -127,7 +129,7 @@ func (h *keys) get(w http.ResponseWriter, r *http.Request, projectID int64) {
 	if keyErr == nil {
 		current = map[string]any{
 			"id":        "key_" + strconv.FormatInt(key.ID, 10),
-			"prefix":    "uc_live_" + key.Prefix,
+			"prefix":    keyScheme(key.Kind) + key.Prefix,
 			"createdAt": key.CreatedAt,
 		}
 	}
@@ -141,9 +143,13 @@ func (h *keys) get(w http.ResponseWriter, r *http.Request, projectID int64) {
 func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	ctx := r.Context()
 	name := ""
-	if r.ContentLength != 0 { // the body is optional: a bare POST issues an unnamed key
+	kind := keyKindSecret
+	var origins []string
+	if r.ContentLength != 0 { // the body is optional: a bare POST issues an unnamed secret key
 		var body struct {
-			Name string `json:"name"`
+			Name    string   `json:"name"`
+			Kind    string   `json:"kind"`
+			Origins []string `json:"origins"`
 		}
 		if !decodeStrict(w, r, &body) {
 			return
@@ -152,6 +158,30 @@ func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID
 		if runes := []rune(name); len(runes) > 60 { // the contract's maxLength, rune-safe
 			name = string(runes[:60])
 		}
+		switch strings.TrimSpace(body.Kind) {
+		case "", keyKindSecret:
+		case keyKindPublic:
+			kind = keyKindPublic
+		default:
+			writeAPIErrMsg(w, http.StatusBadRequest, "bad_kind", "A key is either secret or public.")
+			return
+		}
+		for _, o := range body.Origins {
+			if o = strings.TrimSpace(o); o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
+	// A public key with no origin is the unscoped key it exists to replace, so it is refused
+	// at the door rather than minted and quietly useless. Origins on a secret key are dropped:
+	// no browser ever presents one, so honouring them would only imply a limit that is not there.
+	if kind == keyKindPublic && len(origins) == 0 {
+		writeAPIErrMsg(w, http.StatusBadRequest, "origins_required",
+			"A public key must list the origins it may be sent from — it is shipped in a browser bundle, and the origin list is its whole scope.")
+		return
+	}
+	if kind != keyKindPublic {
+		origins = nil
 	}
 	live, err := h.pool.Queries().CountLiveAPIKeys(ctx, projectID)
 	if err != nil {
@@ -163,16 +193,18 @@ func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID
 			fmt.Sprintf("This project already holds %d keys that still work; revoke one first.", maxLiveAPIKeys))
 		return
 	}
-	row, fullKey, err := issueNamedKey(ctx, h.pool, tenantID, projectID, name)
+	row, fullKey, err := issueKeyOfKind(ctx, h.pool, tenantID, projectID, name, kind, origins)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "issue_failed")
 		return
 	}
 	writeAPIJSON(w, http.StatusCreated, map[string]any{
 		"id":        "key_" + strconv.FormatInt(row.ID, 10),
-		"prefix":    "uc_live_" + row.Prefix, // what GET /v1/keys will list from now on
+		"prefix":    keyScheme(row.Kind) + row.Prefix, // what GET /v1/keys will list from now on
 		"createdAt": keyTime(row.CreatedAt),
 		"name":      row.Name,
+		"kind":      row.Kind,
+		"origins":   row.Origins,
 		"value":     fullKey, // shown exactly once
 	})
 }
@@ -235,18 +267,45 @@ func issueKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64) (fu
 // twelve chars the display prefix, sha256 of the whole key what lands in the
 // row. Nothing else in this package mints.
 func issueNamedKey(ctx context.Context, pool *pg.Pool, tenantID, projectID int64, name string) (row sqlc.CreateAPIKeyRow, fullKey string, err error) {
+	return issueKeyOfKind(ctx, pool, tenantID, projectID, name, keyKindSecret, nil)
+}
+
+// issueKey mints a key of either kind. The scheme is part of what is hashed, so
+// it is chosen here and nowhere else: a key hashed under one scheme and
+// presented under the other never authenticates.
+func issueKeyOfKind(ctx context.Context, pool *pg.Pool, tenantID, projectID int64, name, kind string, origins []string) (row sqlc.CreateAPIKeyRow, fullKey string, err error) {
 	secret := randomHex()
 	prefix := secret[:12]
-	fullKey = "uc_live_" + secret
+	fullKey = keyScheme(kind) + secret
 	hash := sha256.Sum256([]byte(fullKey))
+	if origins == nil {
+		origins = []string{}
+	}
 	row, err = pool.Queries().CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
 		TenantID:   tenantID,
 		ProjectID:  projectID,
 		Prefix:     prefix,
 		SecretHash: hash[:],
 		Name:       name,
+		Kind:       kind,
+		Origins:    origins,
 	})
 	return row, fullKey, err
+}
+
+const (
+	keyKindSecret = "secret"
+	keyKindPublic = "public"
+)
+
+// keyScheme is the visible prefix a kind is minted and presented under. Anything
+// that is not explicitly public is secret: an unknown kind must never widen a
+// key's reach by accident.
+func keyScheme(kind string) string {
+	if kind == keyKindPublic {
+		return "uc_pub_"
+	}
+	return "uc_live_"
 }
 
 // randomHex mints the 16 random bytes (32 hex chars) behind a uc_live_ key:

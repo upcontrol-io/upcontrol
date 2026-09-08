@@ -69,15 +69,7 @@ func (r *KeyResolver) Resolve(ctx context.Context, fullKey string) (ingest.Tenan
 	default: // "revoked" or unknown
 		return ingest.Tenant{}, ErrInvalidKey
 	}
-	// kind+origins by direct query until sqlc regenerates GetAPIKeyByPrefix with the new columns; collapses into the generated row then.
-	var kind string
-	var origins []string
-	if err := r.pool.Raw().QueryRow(ctx,
-		"SELECT kind, origins FROM api_key WHERE id = $1", row.ID,
-	).Scan(&kind, &origins); err != nil {
-		return ingest.Tenant{}, ErrInvalidKey
-	}
-	return ingest.Tenant{TenantID: row.TenantID, ProjectID: row.ProjectID, Kind: kind, Origins: origins}, nil
+	return ingest.Tenant{TenantID: row.TenantID, ProjectID: row.ProjectID, Kind: row.Kind, Origins: row.Origins}, nil
 }
 
 // extractPrefix returns the lookup prefix from a full key: `<scheme><prefix>

@@ -36,6 +36,8 @@ type ApiKey struct {
 	LastUsedAt    pgtype.Timestamptz
 	Name          string
 	RevokedAt     pgtype.Timestamptz
+	Kind          string
+	Origins       []string
 }
 
 type Check struct {
@@ -104,6 +106,7 @@ type Event struct {
 	Labels      []byte
 	AmountMinor *int64
 	Currency    *string
+	Actor       string
 }
 
 type Incident struct {

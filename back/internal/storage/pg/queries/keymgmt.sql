@@ -1,10 +1,12 @@
 -- name: CreateAPIKey :one
 -- Issue a new API key. The prefix is indexed and visible; the secret_hash is
--- sha256 of the full key (uc_live_<prefix><secret>). The full key is shown to
--- the user exactly once at creation.
-INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, name)
-VALUES (sqlc.arg(tenant_id), sqlc.arg(project_id), sqlc.arg(prefix), sqlc.arg(secret_hash), 'active', sqlc.arg(name))
-RETURNING id, prefix, name, state, created_at;
+-- sha256 of the full key (<scheme><prefix><secret>). The full key is shown to
+-- the user exactly once at creation. `kind` picks the scheme the caller hashed:
+-- a public key is a browser credential and carries the origins it may be sent
+-- from, which is the whole of its scope.
+INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, name, kind, origins)
+VALUES (sqlc.arg(tenant_id), sqlc.arg(project_id), sqlc.arg(prefix), sqlc.arg(secret_hash), 'active', sqlc.arg(name), sqlc.arg(kind), sqlc.arg(origins))
+RETURNING id, prefix, name, state, created_at, kind, origins;
 
 -- name: RotateAPIKey :one
 -- Atomic: set the project's old key to rotating, insert the new one, return it.
@@ -23,7 +25,7 @@ RETURNING id, prefix, created_at;
 -- name: ListAPIKeysForProject :many
 -- Every key of one project, newest first, revoked ones included: the last use of
 -- a withdrawn key is the record of what it reached before anyone noticed.
-SELECT id, prefix, name, state, created_at, last_used_at, revoked_at
+SELECT id, prefix, name, state, created_at, last_used_at, revoked_at, kind, origins
   FROM api_key WHERE project_id = sqlc.arg(project_id)
  ORDER BY created_at DESC;
 

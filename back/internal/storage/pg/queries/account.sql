@@ -3,7 +3,7 @@
 -- verifies sha256(full_key) == secret_hash and checks state. The prefix is the
 -- first segment of the key after "uc_live_", indexed uniquely so the lookup is
 -- O(1) — we never scan keys.
-SELECT id, tenant_id, project_id, secret_hash, state, rotating_until
+SELECT id, tenant_id, project_id, secret_hash, state, rotating_until, kind, origins
   FROM api_key
  WHERE prefix = $1;
 

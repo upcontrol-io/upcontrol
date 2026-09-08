@@ -73,7 +73,7 @@ SELECT id, tenant_id, project_id, public_id, title, status, detected_at, resolve
  ORDER BY detected_at DESC LIMIT sqlc.arg(row_limit);
 
 -- name: GetAPIKeyForProject :one
-SELECT id, prefix, name, state, created_at, last_used_at, revoked_at
+SELECT id, prefix, name, state, created_at, last_used_at, revoked_at, kind, origins
   FROM api_key WHERE project_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1;
 
 -- name: ListKeyUsage :many
