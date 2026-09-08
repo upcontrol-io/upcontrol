@@ -2912,6 +2912,28 @@ export interface paths {
          *     the sender is declaring an event name (the message) rather than sending
          *     a log message. Unmarked lines are identified by their fingerprint, not
          *     by a name. The `uc.` prefix is reserved.
+         *
+         *     **`uc.actor` — who did it.** An event line may name the person behind
+         *     it. That one field is what makes a funnel, a retention grid, an A/B
+         *     test and a dimension readable through `POST /v1/series` with
+         *     `source: people`, from any language that can POST a line — there is no
+         *     client library to have, and nothing is computed on the sender's side.
+         *     The value is opaque to us: send your own stable user id, or a hash of
+         *     one if you would rather we never hold it. It is lifted into a column of
+         *     its own and never becomes a label, so it is the one field here that may
+         *     carry high cardinality. Send the same string for the same person and the
+         *     counting is right; send a value that rotates and it is not.
+         *
+         *     An event with no `uc.actor` is a real event with nobody behind it: it
+         *     counts wherever events are counted and never in a count of people.
+         *
+         *     **Public keys.** A key minted as `public` (prefix `uc_pub_`) may be
+         *     shipped in a browser bundle. It writes named events only — a plain log
+         *     line from a public key is refused and tallied on the receipt — and only
+         *     from an `Origin` its owner listed, matched byte for byte. It is rate
+         *     limited per key and per address, answering `429` with `Retry-After`
+         *     past the budget. A secret key (`uc_live_`) is unchanged by all of this
+         *     and is never sent from a browser.
          */
         post: {
             parameters: {
@@ -2940,6 +2962,14 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description A public key past its per-key, per-address budget. Never returned to a secret key: unattended browser traffic is the only thing this endpoint rate limits. */
+                429: {
+                    headers: {
+                        "Retry-After"?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 /** @description Spool full (always with Retry-After). */
                 503: {
                     headers: {
@@ -2951,7 +2981,36 @@ export interface paths {
             };
         };
         delete?: never;
-        options?: never;
+        /**
+         * The CORS preflight a browser sends before posting with a public key.
+         *     Always 204. The allow-origin headers are present only when the query
+         *     string carries a public key whose origins include the request's Origin —
+         *     a preflight has no body and browsers send no custom headers on it, so
+         *     the key can only ride there. Anything else is a bare 204, which the
+         *     browser reads as "no CORS" without being told which half failed.
+         */
+        options: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No content, with or without the CORS headers. */
+                204: {
+                    headers: {
+                        "Access-Control-Allow-Origin"?: string;
+                        "Access-Control-Allow-Headers"?: string;
+                        "Access-Control-Max-Age"?: string;
+                        Vary?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         head?: never;
         patch?: never;
         trace?: never;
@@ -3234,6 +3293,14 @@ export interface components {
             prefix: string;
             /** Format: date-time */
             createdAt: string;
+            /**
+             * @description A `secret` key writes anything and belongs in `.env` on a server. A `public` key (prefix `uc_pub_`) may be shipped in a browser bundle: it writes named events only, from a listed origin, under a rate limit. Absent on a key issued before the distinction existed, which is a secret one.
+             * @default secret
+             * @enum {string}
+             */
+            kind: "secret" | "public";
+            /** @description A `public` key's allowed origins, matched byte for byte — no wildcards, no suffixes, no scheme folding. Empty is a refusal and never "any": a public key with no origin is the unscoped key it exists to replace. Meaningless on a secret key, which no browser ever presents. */
+            origins?: string[];
             /**
              * @description What the person called it. Empty is a real answer — every key issued before names existed has one, and the app falls back to the prefix.
              * @example staging
@@ -3586,17 +3653,27 @@ export interface components {
         SeriesQuery: {
             /** @description Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it. */
             id: string;
-            /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric";
+            /**
+             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+             * @enum {string}
+             */
+            source: "logs" | "check" | "event" | "metric" | "people";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name; people: the event name a breakdown or an A/B test reads. */
             name?: string;
             where?: {
                 [key: string]: string;
             };
-            /** @description Label keys to fold the counter by, for the metric source only. With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold. */
+            /** @description Label keys to fold by. For `metric` it folds a counter's labels; for `people` it names the label whose values a breakdown ranks (one key), or the variant label of an A/B test (two). With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold. */
             group?: string[];
+            /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */
+            steps?: string[];
+            /**
+             * @description `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+             * @enum {string}
+             */
+            cohort?: "week";
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {

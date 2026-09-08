@@ -3,6 +3,20 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-09 — upcontrol 0.2.0
+
+- **A new topic, `wire`: how to send from a stack that is not Node.** The SDK is a JavaScript
+  convenience, not the product — everything upcontrol does is one HTTP endpoint, and since
+  the feeds are counted on the server there is no client library to have. Funnels, retention,
+  A/B tests and breakdowns now work from Go, Rust, Python, PHP or a static page that can POST
+  a line. The topic covers `uc.actor` (what makes a person countable), the rule that the id
+  must be stable, sending off the request path, and why a browser needs a public key rather
+  than the secret one — naming a `VITE_`-prefixed variable for a secret key ships it to every
+  visitor, which is a security incident and not a bad diff.
+- The goal table gains the row that routes a non-Node repository there, so an agent stops
+  reading TypeScript recipes at a Go service.
+- `SDK_PIN` moves to `1.0.0`.
+
 ## 2026-09-08 — @upcontrol/sdk 1.0.0
 
 - **The feeds stop counting and start reporting.** The API does not change by a character —

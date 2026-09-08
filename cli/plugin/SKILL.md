@@ -36,6 +36,7 @@ The user states a goal in plain language; you translate it to a topic:
 | "my cron / queue died silently"    | `jobs`     | job_* events + heartbeat              |
 | "catch errors / exceptions"        | `logs`     | SDK auto-captures; add request_failed points |
 | "build/reorganize my dashboard"    | `dashboard` | compose a layout, apply it with `npx upcontrol board` |
+| this repo is Go / Rust / Python / static | `wire` | send over plain HTTP - the SDK is a JavaScript convenience, not the product |
 
 If the user has no specific goal, propose what you FOUND in their repo, not a
 generic list: Stripe in dependencies -> propose payments; a queue -> jobs; a
