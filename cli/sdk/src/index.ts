@@ -2,8 +2,7 @@
 // (funnel, experiment, retention, breakdown), and the logger bridges.
 // Configuration is environment-only; track() never throws and without a key is a warned no-op.
 
-import { hostname } from 'node:os';
-import { Client, scrubFields, type Attrs } from './client.js';
+import { Client, HOST, scrubFields, sendEvent, type Attrs } from './client.js';
 import { createFunnel, type Funnel } from './funnel.js';
 import {
   createBreakdown,
@@ -20,76 +19,52 @@ export type { Breakdown, Experiment, Retention } from './analytics.js';
 export { SDK_VERSION } from './client.js';
 
 const client = new Client();
-const host = safeHostname();
 const service = client.service;
-
-function safeHostname(): string {
-  try {
-    return hostname();
-  } catch {
-    return '';
-  }
-}
 
 /** track sends one event or log line (a canonical or free name). Never throws, never blocks. */
 export function track(event: string, attrs?: Attrs): void {
-  try {
-    const fields: Record<string, unknown> = {
-      ts: new Date().toISOString(),
-      level: 'info',
-      msg: String(event),
-      ...attrs,
-      // After the spread: the marker is ours, and a caller attribute may not unset it.
-      'uc.event': true,
-    };
-    if (host) fields.host = host;
-    if (service && fields.service === undefined) fields.service = service;
-    client.enqueue(scrubFields(fields), 'info');
-  } catch {
-    /* track never throws */
-  }
+  sendEvent(client, event, attrs);
 }
 
-/** funnel declares a journey by name and steps, in order. Its `step()` counts a person at a
- *  step once: a request is fingerprinted here and never sent, a string id is hashed the same
- *  way. The counts go out every minute as metric readings. Never throws, never blocks. */
+/** funnel declares a journey by name and steps, in order. Its `step()` sends one event
+ *  named by the step: a request is fingerprinted here and never sent, a string id passes
+ *  through as `uc.actor`. The server counts a person once per step. Never throws, never
+ *  blocks. */
 export function funnel(name: string, steps: string[]): Funnel {
   try {
-    return createFunnel(name, steps, { client, env: process.env });
+    return createFunnel(name, steps, { client });
   } catch {
     return { step() {} };
   }
 }
 
-/** experiment declares an A/B test by name and variants, control first. `expose()` counts a
- *  person once in the variant they landed in, `convert()` once at the goal; the readings go
- *  out every minute with the variant's declaration index in `i`. Never throws, never blocks. */
+/** experiment declares an A/B test by name and variants, control first. `expose()` and
+ *  `convert()` each send one event naming the test, the variant and the stat; the server
+ *  counts a person once per variant per stat. Never throws, never blocks. */
 export function experiment(name: string, variants: string[]): Experiment {
   try {
-    return createExperiment(name, variants, { client, env: process.env });
+    return createExperiment(name, variants, { client });
   } catch {
     return { expose() {}, convert() {} };
   }
 }
 
-/** retention declares a weekly retention feed by name. `seen(userId)` counts a signed-in
- *  user into the Monday-week cohort they were first seen in, once per cohort-week. Never
- *  throws, never blocks. */
+/** retention declares a retention feed by name. `seen(userId)` sends one event with the id
+ *  as `uc.actor`; the server owns the cohort math. Never throws, never blocks. */
 export function retention(name: string): Retention {
   try {
-    return createRetention(name, { client, env: process.env });
+    return createRetention(name, { client });
   } catch {
     return { seen() {} };
   }
 }
 
-/** breakdown declares a dimension by name. `value(v)` counts events carrying the value —
- *  events, not people, no dedup; `value(v, who)` counts DISTINCT PEOPLE carrying it, a
- *  person once per value. It keeps its first 200 distinct values. Never throws, never
- *  blocks. */
+/** breakdown declares a dimension by name. `value(v)` counts events carrying the value;
+ *  `value(v, who)` counts DISTINCT PEOPLE carrying it — the person rides as `uc.actor`, a
+ *  request fingerprinted, and the server does the deduping. Never throws, never blocks. */
 export function breakdown(name: string): Breakdown {
   try {
-    return createBreakdown(name, { client, env: process.env });
+    return createBreakdown(name, { client });
   } catch {
     return { value() {} };
   }
@@ -118,7 +93,7 @@ export function upcontrolLine(level: string, msg: unknown, extra?: unknown): voi
     } else {
       fields.msg = String(msg);
     }
-    if (host) fields.host = host;
+    if (HOST) fields.host = HOST;
     if (service && fields.service === undefined) fields.service = service;
     client.enqueue(scrubFields(fields), String(fields.level));
   } catch {

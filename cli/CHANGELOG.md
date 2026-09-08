@@ -3,6 +3,28 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-08 — @upcontrol/sdk 1.0.0
+
+- **The feeds stop counting and start reporting.** The API does not change by a character —
+  `funnel()`, `experiment()`, `retention()`, `breakdown()` and every method on them keep
+  their signatures, so no caller edits a line — but each call is now one `track()` event
+  carrying a reserved `uc.actor` attribute, and the server counts DISTINCT people from the
+  events it already stores. The SDK no longer dedups: the same person stepping twice sends
+  two events, and the count stays honest anyway. A request is still fingerprinted (address +
+  user-agent, salted) so a raw address never leaves the process; a string id passes through
+  unchanged as the caller's own stable identifier.
+- **The state file is gone, with its whole class of bugs.** No more
+  `node_modules/.cache/upcontrol/funnels.json`, no `UPCONTROL_STATE_DIR`, no unreadable-file
+  restart, no unwritable-dir silent loss, no million-id memory ceiling, no ten-minute slow
+  save, no v1→v2 state migration to carry. The salt is per-process now: nothing local is
+  deduped against it, so it no longer has to survive a restart.
+- 1.0.0 rather than 0.8.0 because a minor would lie about what a caller is upgrading into:
+  the wire changes (events with `uc.actor` where metric readings used to be) and so do the
+  storage semantics. Needs a server that understands the events (upcontrol.io already
+  does; a self-hosted core needs the matching release). `SDK_VERSION` is `1.0.0`.
+- This is also what makes the feeds reachable from any language: an event with `uc.actor`
+  is all a Go or Python client has to send.
+
 ## 2026-09-08 — upcontrol 0.1.9
 
 - `SDK_PIN` moves to `0.7.0`. The pin is exact, so a fresh `npx upcontrol init` was

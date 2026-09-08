@@ -155,6 +155,7 @@ func decodeRows(rows [][]byte) ([]pgstore.LogRow, []pgstore.EventRow) {
 				TS:          lr.TS,
 				Name:        env.Event,
 				Labels:      labels,
+				Actor:       env.Actor,
 				AmountMinor: 0,
 				Currency:    "",
 			})

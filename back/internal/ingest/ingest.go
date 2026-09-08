@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
+	
 	"go.upcontrol.io/back/internal/ingest/cardinality"
 	"go.upcontrol.io/back/internal/ingest/decode"
 	"go.upcontrol.io/back/internal/ingest/normalize"
@@ -28,12 +30,25 @@ const (
 	MaxAttrKeys     = 64
 	MaxAttrKeyBytes = 256
 	MaxAttrValBytes = 8192
+
+	// The reserved actor attribute: lifted onto the events row, never a label.
+	ActorAttr     = "uc.actor"
+	MaxActorBytes = 200
 )
 
-// Tenant identifies the authenticated source of a batch.
+// KeyKindPublic is api_key.kind for a key that may live in a browser bundle:
+// named events only, from origins its owner listed. Anything else (the column
+// default 'secret' included) keeps the unrestricted secret-key behavior.
+const KeyKindPublic = "public"
+
+// Tenant identifies the authenticated source of a batch. Kind and Origins
+// carry the public-key gates (public.go); a caller that ignores them sees only
+// the ids, which is every pre-public-key caller.
 type Tenant struct {
 	TenantID  int64
 	ProjectID int64
+	Kind      string
+	Origins   []string
 }
 
 // KeyResolver turns a presented API key into a tenant+project. 401 maps to
@@ -82,11 +97,12 @@ type Deps struct {
 
 // Ingester is the POST /i handler. It is safe for concurrent use.
 type Ingester struct {
-	d Deps
+	d          Deps
+	pubLimiter *rateLimiter // the public-key fixed window (public.go)
 }
 
 // New builds an Ingester. card may be nil (cardinality capping is skipped).
-func New(d Deps) *Ingester { return &Ingester{d: d} }
+func New(d Deps) *Ingester { return &Ingester{d: d, pubLimiter: newRateLimiter()} }
 
 // Receipt is the structured acknowledgement; empty fields stay absent
 // (zero is silence).
@@ -128,6 +144,25 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A public key is the one credential that may live in a browser bundle, so
+	// it is the only one gated: an exact Origin match (never a wildcard), a
+	// rate limit per key+IP, and the CORS headers a browser needs to read the
+	// answer. A secret key never reaches this branch.
+	if tenant.Kind == KeyKindPublic {
+		origin := matchOrigin(r.Header.Get("Origin"), tenant.Origins)
+		if origin == "" {
+			writeJSON(w, http.StatusUnauthorized, receiptErr("bad_key"))
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		if !h.pubLimiter.allow(kw.key, clientIP(r), time.Now()) {
+			w.Header().Set("Retry-After", publicRetryAfter)
+			writeJSON(w, http.StatusTooManyRequests, receiptErr("rate_limited"))
+			return
+		}
+	}
+
 	// Overload check: a full-enough spool refuses with 503 + Retry-After.
 	fill, _ := h.d.Spool.FillPercent(ctx)
 	decision := computeOverload(fill)
@@ -153,6 +188,12 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		ws.add("key_in_body", 1)
 	}
 	ws.merge(dec.Warnings)
+
+	// A public key accepts named events only; a record that would not become
+	// one is dropped with a warning, so one bad line cannot kill the batch.
+	if tenant.Kind == KeyKindPublic {
+		dec.Records = onlyEvents(dec.Records, ws)
+	}
 
 	// Metric lines leave the log path entirely: a JSON line with both `metric`
 	// and `value` is a reading, never a seq number or level shed.
@@ -241,11 +282,36 @@ type RowEnvelope struct {
 	Fingerprint uint64            `json:"fingerprint,omitempty"`
 	Attrs       map[string]string `json:"attrs,omitempty"`
 	Event       string            `json:"event,omitempty"` // non-empty → wire.go also writes an events row
+	Actor       string            `json:"actor,omitempty"` // the lifted uc.actor; '' is a real answer (nobody)
 }
 
 func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record, d overloadDecision, ws *warningAccumulator) [][]byte {
 	out := make([][]byte, 0, len(recs))
 	for _, rec := range recs {
+		// A message that names an event something queries is also stored as an
+		// event row; the reserved uc.* prefix warns and stores no name.
+		ev := normalize.Classify(rec.Message, rec.Named)
+		if ev.Reserved {
+			ws.add("reserved_prefix", 1)
+		}
+		// Who did it, lifted BEFORE the scrubber and the attr cap, and only on rows that
+		// name an event — a plain log line keeps no actor. The lift deletes the key, so the
+		// reserved namespace never lands in stored attrs or labels.
+		//
+		// Before the scrubber is the load-bearing half. An actor is whatever the caller uses
+		// to identify a person, and plenty of apps use the email; scrubbed, every one of them
+		// becomes the same "[redacted:email:16]" and the whole customer base folds into ONE
+		// person. A redacted actor is not a safer number, it is a confidently wrong one — the
+		// single failure this column exists to prevent. It is also why the SDK sends a
+		// fingerprint for a request and why the recipes tell a caller to send an opaque id:
+		// what arrives here is stored as sent.
+		//
+		// Before the cap, because capAttrs keeps the first 64 keys in sorted order and 'u'
+		// sorts late enough to be trimmed away.
+		var actor string
+		if ev.Name != "" {
+			actor = liftActor(rec.Attrs)
+		}
 		// Scrub the message and attribute values (defense in depth). An operator
 		// on their own box may turn this off; the hosted service may not, and
 		// config refuses the switch there.
@@ -284,12 +350,9 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		if !rec.Time.IsZero() {
 			env.TS = rec.Time.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 		}
-		// A message that names an event something queries is also stored as an
-		// event row; the reserved uc.* prefix warns and stores no name.
-		if ev := normalize.Classify(rec.Message, rec.Named); ev.Reserved {
-			ws.add("reserved_prefix", 1)
-		} else if ev.Name != "" {
+		if ev.Name != "" {
 			env.Event = ev.Name
+			env.Actor = actor
 		}
 		// Cardinality cap on host/service (a runaway field would blow up the CH
 		// LowCardinality dictionaries).
@@ -359,6 +422,21 @@ func capAttrs(attrs map[string]string) (out map[string]string, keysCapped, valsC
 		out[k] = v
 	}
 	return out, keysCapped, valsCapped
+}
+
+// liftActor removes the reserved uc.actor from attrs and returns it trimmed
+// and capped. Absent, empty or whitespace-only yields '' — a real answer, a
+// server-side event with nobody behind it. The delete runs on every lift: the
+// reserved key must never survive into the stored attrs, because an actor is
+// the highest-cardinality value in the system and may never become a label.
+func liftActor(attrs map[string]string) string {
+	v := attrs[ActorAttr]
+	delete(attrs, ActorAttr)
+	v = strings.TrimSpace(v)
+	if len(v) > MaxActorBytes {
+		v = v[:MaxActorBytes]
+	}
+	return v
 }
 
 // overloadDecision is the stepped response to spool fill.

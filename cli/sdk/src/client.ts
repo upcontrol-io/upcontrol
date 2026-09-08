@@ -1,9 +1,10 @@
 // The push client: batches with backoff and jitter; a failed batch is retried byte-identical,
 // safe because the server content-addresses bodies. Never throws; all timers unref'd.
 
+import { hostname } from 'node:os';
 import { scrub } from './scrub.js';
 
-export const SDK_VERSION = '0.7.0';
+export const SDK_VERSION = '1.0.0';
 
 const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const FLUSH_AFTER_MS = 1500;
@@ -215,6 +216,41 @@ export class Client {
     } finally {
       clearTimeout(kill);
     }
+  }
+}
+
+// The host stamp a line can carry, resolved once. os.hostname can throw on exotic setups
+// and a missing host is fine.
+export const HOST = (() => {
+  try {
+    return hostname();
+  } catch {
+    return '';
+  }
+})();
+
+/** sendEvent puts one track()-shaped event on the wire: the exact field-building track()
+ *  itself runs on, shared with the analytics feeds so a feed's event is indistinguishable
+ *  from a caller's own. Never throws. */
+export function sendEvent(
+  client: { enqueue(fields: Record<string, unknown>, level: string): void; service?: string },
+  event: string,
+  attrs?: Attrs,
+): void {
+  try {
+    const fields: Record<string, unknown> = {
+      ts: new Date().toISOString(),
+      level: 'info',
+      msg: String(event),
+      ...attrs,
+      // After the spread: the marker is ours, and a caller attribute may not unset it.
+      'uc.event': true,
+    };
+    if (HOST) fields.host = HOST;
+    if (client.service && fields.service === undefined) fields.service = client.service;
+    client.enqueue(scrubFields(fields), 'info');
+  } catch {
+    /* never throws */
   }
 }
 

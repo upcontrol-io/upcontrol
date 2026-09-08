@@ -14,9 +14,13 @@ import (
 	"go.upcontrol.io/back/internal/ingest"
 )
 
-// KeyScheme prefixes the visible key. It is what the CLI prints and the Sources
-// #key screen shows.
+// KeyScheme prefixes the visible secret key. It is what the CLI prints and the
+// Sources #key screen shows.
 const KeyScheme = "uc_live_"
+
+// PublicKeyScheme prefixes the browser-safe key: named events only, and only
+// from origins its owner listed.
+const PublicKeyScheme = "uc_pub_"
 
 // KeyPrefixLen is the number of chars after the scheme used as the lookup
 // prefix; the remainder is the secret.
@@ -65,16 +69,30 @@ func (r *KeyResolver) Resolve(ctx context.Context, fullKey string) (ingest.Tenan
 	default: // "revoked" or unknown
 		return ingest.Tenant{}, ErrInvalidKey
 	}
-	return ingest.Tenant{TenantID: row.TenantID, ProjectID: row.ProjectID}, nil
+	// kind+origins by direct query until sqlc regenerates GetAPIKeyByPrefix with the new columns; collapses into the generated row then.
+	var kind string
+	var origins []string
+	if err := r.pool.Raw().QueryRow(ctx,
+		"SELECT kind, origins FROM api_key WHERE id = $1", row.ID,
+	).Scan(&kind, &origins); err != nil {
+		return ingest.Tenant{}, ErrInvalidKey
+	}
+	return ingest.Tenant{TenantID: row.TenantID, ProjectID: row.ProjectID, Kind: kind, Origins: origins}, nil
 }
 
-// extractPrefix returns the lookup prefix from a full key: `uc_live_<prefix>
-// <secret>`, validating scheme and minimum length.
+// extractPrefix returns the lookup prefix from a full key: `<scheme><prefix>
+// <secret>`. Both schemes share the prefix table and the length rule; a
+// uc_pub_ key is looked up exactly like a uc_live_ one.
 func extractPrefix(fullKey string) (string, bool) {
-	if !strings.HasPrefix(fullKey, KeyScheme) {
+	var rest string
+	switch {
+	case strings.HasPrefix(fullKey, KeyScheme):
+		rest = fullKey[len(KeyScheme):]
+	case strings.HasPrefix(fullKey, PublicKeyScheme):
+		rest = fullKey[len(PublicKeyScheme):]
+	default:
 		return "", false
 	}
-	rest := fullKey[len(KeyScheme):]
 	if len(rest) < KeyPrefixLen+1 {
 		return "", false
 	}

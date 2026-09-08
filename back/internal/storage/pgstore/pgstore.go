@@ -46,6 +46,7 @@ type EventRow struct {
 	TS          time.Time
 	Name        string
 	Labels      map[string]string
+	Actor       string // who did it, the lifted uc.actor; '' is a real answer (nobody), never a label
 	AmountMinor int64
 	Currency    string
 }
@@ -143,10 +144,10 @@ func (s *Store) InsertLogs(ctx context.Context, rows []LogRow) error {
 // InsertEvents writes a batch of event rows.
 func (s *Store) InsertEvents(ctx context.Context, rows []EventRow) error {
 	return copyFrom(ctx, s.pool, "events",
-		[]string{"tenant_id", "project_id", "ts", "name", "labels", "amount_minor", "currency"},
+		[]string{"tenant_id", "project_id", "ts", "name", "labels", "actor", "amount_minor", "currency"},
 		rows, func(r EventRow) []any {
 			return []any{int64(r.TenantID), int64(r.ProjectID), r.TS, r.Name,
-				jsonb(r.Labels), r.AmountMinor, r.Currency}
+				jsonb(r.Labels), r.Actor, r.AmountMinor, r.Currency}
 		})
 }
 

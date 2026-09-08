@@ -96,6 +96,10 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 		return err
 	}
 	mux.Handle("POST /i", http.HandlerFunc(ingester.Handle))
+	// A browser's preflight: 204 always, the CORS headers only when the query
+	// string carries a public key whose origins match the Origin. Without this
+	// line a public key works everywhere except in the one place it exists for.
+	mux.Handle("OPTIONS /i", http.HandlerFunc(ingester.HandlePreflight))
 	// The endpoint the docs promise: the SAME pipeline under the name agents
 	// read in /docs/api. An alias, not a second ingest.
 	mux.Handle("POST /v1/event", http.HandlerFunc(ingester.Handle))

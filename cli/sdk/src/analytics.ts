@@ -1,36 +1,32 @@
-// Three feeds on the counter machinery: an A/B test, a weekly retention cohort and a
-// dimension breakdown. The funnel's laws bind all three: never throw, never block, a bad
-// declaration warns once and returns a no-op, and nothing reaches the wire but counts.
+// Three feeds on the identity machinery: an A/B test, a retention feed and a dimension
+// breakdown. Each call is one track()-shaped event and the server counts DISTINCT people
+// from them. The funnel's laws bind all three: never throw, never block, a bad declaration
+// warns once and returns a no-op, and nothing raw about a person reaches the wire.
 
-import { REPORTER, declare, warnOnce, type CounterDeps, type Counters, type Who } from './counters.js';
+import { sendEvent } from './client.js';
+import { actor, warnOnce, type FeedDeps, type Who } from './counters.js';
 
 export interface Experiment {
-  /** expose counts `who` once in the variant they landed in. Never throws. */
+  /** expose records `who` in the variant they landed in. Never throws. */
   expose(variant: string, who: Who): void;
-  /** convert counts `who` once as having reached the goal in that variant. Never throws. */
+  /** convert records `who` as having reached the goal in that variant. Never throws. */
   convert(variant: string, who: Who): void;
 }
 
 export interface Retention {
-  /** seen counts a signed-in user into the Monday-week cohort they were first seen in. */
+  /** seen records a signed-in user; the server owns the cohort they belong to. */
   seen(userId: string): void;
 }
 
 export interface Breakdown {
-  /** value counts one event carrying the value; with `who` it counts the person once instead —
-   *  distinct people carrying the value, not events. */
+  /** value records one event carrying the value; with `who` it records the person carrying
+   *  it — distinct people, not events, once the server folds them. */
   value(v: string, who?: Who | null): void;
 }
 
-type Declared<T> = T & { report(): void; stop(): Promise<void> };
-
-const NOOP_EXPERIMENT: Declared<Experiment> = { expose() {}, convert() {}, report() {}, stop: () => Promise.resolve() };
-const NOOP_RETENTION: Declared<Retention> = { seen() {}, report() {}, stop: () => Promise.resolve() };
-const NOOP_BREAKDOWN: Declared<Breakdown> = { value() {}, report() {}, stop: () => Promise.resolve() };
-
-const DAY_MS = 86_400_000;
-const MAX_COHORTS = 12;
-const MAX_VALUES = 200;
+const NOOP_EXPERIMENT: Experiment = { expose() {}, convert() {} };
+const NOOP_RETENTION: Retention = { seen() {} };
+const NOOP_BREAKDOWN: Breakdown = { value() {} };
 
 function nameProblem(name: string): string | null {
   if (typeof name !== 'string' || name.trim() === '') return 'the name is empty';
@@ -53,68 +49,38 @@ function experimentProblem(name: string, variants: string[]): string | null {
   return null;
 }
 
-export function createExperiment(name: string, variants: string[], deps: CounterDeps): Declared<Experiment> {
+export function createExperiment(name: string, variants: string[], deps: FeedDeps): Experiment {
   const label = typeof name === 'string' ? name.trim() : String(name);
   const problem = experimentProblem(name, variants);
   if (problem !== null) {
     warnOnce(`ignored:${label}:${problem}`, `upcontrol: A/B test "${label}" is ignored: ${problem}`);
     return NOOP_EXPERIMENT;
   }
-  const list = variants.map((v) => v.trim());
+  const list = new Set(variants.map((v) => v.trim()));
 
-  const counters = declare('experiment', label, deps, (bucket, value, ts) => {
-    const [variant, stat] = bucket.split('\n');
-    deps.client.enqueue(
-      {
-        ts,
-        metric: 'experiment',
-        value,
-        // Zero-padded and control first: the board orders the card's rows by `i`, which is
-        // the variant's 1-based declaration index.
-        labels: { experiment: label, variant, i: String(list.indexOf(variant) + 1).padStart(2, '0'), stat, 'uc.reporter': REPORTER },
-      },
-      'metric',
-    );
-  },
-    // A declared arm reports both its counts from the first minute, at 0 until someone
-    // lands in it. Without the seed an arm nobody reached is absent from the readings, so
-    // the catalog never lists it and the card silently drops a variant the test is running.
-    list.flatMap((variant) => [`${variant}\nexposed`, `${variant}\nconverted`]),
-  );
-  if (!counters) return NOOP_EXPERIMENT;
-  const on = counters;
-
-  function count(stat: 'exposed' | 'converted', variant: string, who: Who): void {
+  function record(stat: 'exposed' | 'converted', variant: string, who: Who): void {
     try {
       const v = typeof variant === 'string' ? variant.trim() : '';
-      if (!list.includes(v)) {
+      if (!list.has(v)) {
         warnOnce(`novariant:${label}:${String(variant)}`, `upcontrol: A/B test "${label}" has no variant "${String(variant)}"`);
         return;
       }
-      // A null who is the breakdown's anonymous event, not a person; a test counts people.
-      if (who === null) return;
-      on.bump(`${v}\n${stat}`, who);
+      // A test counts people: a who it cannot name sends nothing.
+      const id = actor(who);
+      if (id === null) return;
+      sendEvent(deps.client, label, { 'uc.actor': id, 'uc.variant': v, 'uc.stat': stat });
     } catch {
       /* never throws */
     }
   }
 
   return {
-    expose: (variant, who) => count('exposed', variant, who),
-    convert: (variant, who) => count('converted', variant, who),
-    report: on.report,
-    stop: on.stop,
+    expose: (variant, who) => record('exposed', variant, who),
+    convert: (variant, who) => record('converted', variant, who),
   };
 }
 
-/** The ISO date (YYYY-MM-DD) of the Monday of the week `date` falls in, in UTC so the cohort
- *  does not move with the server's timezone. */
-function mondayOf(date: Date): string {
-  const midnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-  return new Date(midnight - ((date.getUTCDay() + 6) % 7) * DAY_MS).toISOString().slice(0, 10);
-}
-
-export function createRetention(name: string, deps: CounterDeps): Declared<Retention> {
+export function createRetention(name: string, deps: FeedDeps): Retention {
   const label = typeof name === 'string' ? name.trim() : String(name);
   const problem = nameProblem(name);
   if (problem !== null) {
@@ -122,53 +88,21 @@ export function createRetention(name: string, deps: CounterDeps): Declared<Reten
     return NOOP_RETENTION;
   }
 
-  const counters = declare('retention', label, deps, (bucket, value, ts) => {
-    const [cohort, week] = bucket.split('\n');
-    deps.client.enqueue(
-      { ts, metric: 'retention', value, labels: { retention: label, cohort, week, 'uc.reporter': REPORTER } },
-      'metric',
-    );
-  });
-  if (!counters) return NOOP_RETENTION;
-  const on = counters;
-
-  function trimCohorts(): void {
-    const cohorts = new Set<string>();
-    for (const [bucket] of on.entries()) cohorts.add(bucket.split('\n')[0]);
-    while (cohorts.size > MAX_COHORTS) {
-      // ISO Mondays sort lexicographically, so the first is the oldest.
-      const oldest = [...cohorts].sort()[0];
-      for (const [bucket] of on.entries()) {
-        if (bucket.split('\n')[0] === oldest) on.drop(bucket);
-      }
-      on.forgetCohort(oldest);
-      cohorts.delete(oldest);
-      warnOnce(
-        `cohorts:${label}`,
-        `upcontrol: retention "${label}" keeps the last ${MAX_COHORTS} weekly cohorts; the oldest one stopped being counted`,
-      );
-    }
-  }
-
   function seen(userId: string): void {
     try {
       if (typeof userId !== 'string') return;
       const id = userId.trim();
       if (id === '') return;
-      const now = mondayOf(new Date());
-      const cohort = on.rememberFirst(id, now);
-      const week = Math.floor((Date.parse(now) - Date.parse(cohort)) / (7 * DAY_MS));
-      on.bump(`${cohort}\n${String(week).padStart(2, '0')}`, id);
-      trimCohorts();
+      sendEvent(deps.client, label, { 'uc.actor': id });
     } catch {
       /* never throws */
     }
   }
 
-  return { seen, report: on.report, stop: on.stop };
+  return { seen };
 }
 
-export function createBreakdown(name: string, deps: CounterDeps): Declared<Breakdown> {
+export function createBreakdown(name: string, deps: FeedDeps): Breakdown {
   const label = typeof name === 'string' ? name.trim() : String(name);
   const problem = nameProblem(name);
   if (problem !== null) {
@@ -176,34 +110,24 @@ export function createBreakdown(name: string, deps: CounterDeps): Declared<Break
     return NOOP_BREAKDOWN;
   }
 
-  const counters = declare('breakdown', label, deps, (value, count, ts) => {
-    deps.client.enqueue(
-      { ts, metric: 'breakdown', value: count, labels: { dimension: label, value, 'uc.reporter': REPORTER } },
-      'metric',
-    );
-  });
-  if (!counters) return NOOP_BREAKDOWN;
-  const on = counters;
-
   function feed(v: string, who?: Who | null): void {
     try {
       if (typeof v !== 'string') return;
       const value = v.trim();
       if (value === '' || value.length > 80) return;
-      // A bucket always has seen >= 1, so a zero reading means the value is new. Past the
-      // cap a new value is ignored: a dimension fed a request id would grow without limit.
-      if (on.seen(value) === 0 && on.entries().length >= MAX_VALUES) {
-        warnOnce(
-          `cap:${label}`,
-          `upcontrol: breakdown "${label}" keeps its first ${MAX_VALUES} values; a new one is ignored`,
-        );
+      // No who: an event, and the server counts events. A who that cannot be named sends
+      // nothing rather than quietly degrading a people count into an event count.
+      if (who === null || who === undefined) {
+        sendEvent(deps.client, label, { value });
         return;
       }
-      on.bump(value, who ?? null);
+      const id = actor(who);
+      if (id === null) return;
+      sendEvent(deps.client, label, { 'uc.actor': id, value });
     } catch {
       /* never throws */
     }
   }
 
-  return { value: feed, report: on.report, stop: on.stop };
+  return { value: feed };
 }

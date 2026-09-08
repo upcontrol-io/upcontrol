@@ -1,14 +1,11 @@
-import test, { after } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createBreakdown, createExperiment, createRetention } from '../dist/esm/analytics.js';
-import { createFunnel } from '../dist/esm/funnel.js';
-import { REPORTER, type CounterDeps } from '../dist/esm/counters.js';
+import type { FeedDeps } from '../dist/esm/counters.js';
 
-// The three feeds that joined the funnel on the shared counter machinery: counts that only
-// grow, a person counted once per bucket, and nothing on the wire that identifies anyone.
+// The three feeds beside the funnel: every call one event, the person as `uc.actor`, and
+// the counting the server's — the SDK sends, it does not dedup, and nothing raw about
+// anyone reaches the wire.
 
 type Line = Record<string, unknown>;
 
@@ -24,278 +21,158 @@ function fake() {
   };
 }
 
-const dirs: string[] = [];
-
-function tmp(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'uc-analytics-'));
-  dirs.push(dir);
-  return dir;
+function deps(client: FeedDeps['client']): FeedDeps {
+  return { client };
 }
 
-// Every test awaits stop(), so no save is in flight when the dirs go.
-after(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-});
-
-// everyMs is effectively never: each test calls report() itself, so nothing races a timer.
-function deps(dir: string, client: CounterDeps['client']): CounterDeps {
-  return { client, env: { UPCONTROL_STATE_DIR: dir }, everyMs: 1e9 };
+function stderr() {
+  const lines: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return {
+    lines,
+    restore() {
+      process.stderr.write = original;
+    },
+  };
 }
 
-/** The readings of one metric, as {bucket: value}, from the newest report in `lines`. */
-function readings(lines: Line[], metric: string, key: (labels: Record<string, string>) => string) {
-  const out: Record<string, number> = {};
-  for (const line of lines) {
-    if (line.metric !== metric) continue;
-    out[key(line.labels as Record<string, string>)] = line.value as number;
-  }
-  return out;
-}
-
-test('an experiment reports one reading per variant per stat, control first, and counts a person once', async () => {
-  const f = fake();
-  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(tmp(), f.client));
+test('an experiment sends one event per expose and per convert, named by the test', () => {
+  const { lines, client } = fake();
+  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(client));
 
   cta.expose('control', 'user-1');
-  cta.expose('control', 'user-1'); // the same person twice is one exposure
-  cta.expose('B', 'user-2');
+  cta.expose('control', 'user-1'); // two exposures are two events: the server dedups
   cta.convert('B', 'user-2');
-  cta.report();
 
-  const at = readings(f.lines, 'experiment', (l) => `${l.variant}|${l.stat}`);
-  assert.equal(at['control|exposed'], 1);
-  assert.equal(at['control|converted'], 0);
-  assert.equal(at['B|exposed'], 1);
-  assert.equal(at['B|converted'], 1);
-
-  // `i` is the declaration index, zero-padded: the board orders the card's rows by it and
-  // control is the first variant declared. A raw 1 and 10 would sort wrong as text.
-  const byVariant = new Map<string, string>();
-  for (const line of f.lines) {
-    const l = line.labels as Record<string, string>;
-    if (line.metric === 'experiment') byVariant.set(l.variant, l.i);
-  }
-  assert.equal(byVariant.get('control'), '01');
-  assert.equal(byVariant.get('B'), '02');
-
-  // Every reading rides level 'metric', so a server-sent keep rate by log level cannot
-  // sample a count away.
-  assert.ok(f.lines.filter((l) => l.metric === 'experiment').every((l) => l.level === 'metric'));
-
-  await (cta as unknown as { stop(): Promise<void> }).stop();
+  assert.deepEqual(
+    lines.map((l) => [l.msg, l['uc.actor'], l['uc.variant'], l['uc.stat']]),
+    [
+      ['checkout CTA', 'user-1', 'control', 'exposed'],
+      ['checkout CTA', 'user-1', 'control', 'exposed'],
+      ['checkout CTA', 'user-2', 'B', 'converted'],
+    ],
+  );
+  assert.ok(lines.every((l) => l.level === 'info' && l['uc.event'] === true));
 });
 
-test('an experiment ignores a variant it does not have, and says so once', async () => {
-  const f = fake();
-  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(tmp(), f.client));
+test('an experiment ignores a variant it does not have, and says so once', () => {
+  const { lines, client } = fake();
+  const err = stderr();
+  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(client));
   cta.expose('C', 'user-1');
-  cta.report();
+  err.restore();
 
-  const at = readings(f.lines, 'experiment', (l) => `${l.variant}|${l.stat}`);
-  assert.equal(at['C|exposed'], undefined);
-  assert.deepEqual(Object.keys(at).sort(), ['B|converted', 'B|exposed', 'control|converted', 'control|exposed']);
-
-  await (cta as unknown as { stop(): Promise<void> }).stop();
+  assert.equal(lines.length, 0);
+  assert.equal(err.lines.filter((l) => l.includes('has no variant "C"')).length, 1);
 });
 
-test('retention puts a first-seen id in week 00 of its cohort and does not count it twice', async () => {
-  const f = fake();
-  const signups = createRetention('signups', deps(tmp(), f.client));
+test('retention sends one event per seen, the user id as uc.actor', () => {
+  const { lines, client } = fake();
+  const signups = createRetention('signups', deps(client));
 
   signups.seen('user-1');
-  signups.seen('user-1');
+  signups.seen('user-1'); // the id never leaves the process as anything but uc.actor, and no local dedup
   signups.seen('user-2');
-  signups.report();
 
-  const at = readings(f.lines, 'retention', (l) => `${l.cohort}|${l.week}`);
-  const buckets = Object.keys(at);
-  assert.equal(buckets.length, 1, 'two people first seen this week share one cohort-week');
-  assert.match(buckets[0], /^\d{4}-\d{2}-\d{2}\|00$/);
-  assert.equal(at[buckets[0]], 2);
-
-  // The id never leaves the process: the wire carries counts, a cohort date and the
-  // process's reporter stamp, nothing else.
-  const line = f.lines.find((l) => l.metric === 'retention') as Line;
-  assert.deepEqual(Object.keys(line.labels as object).sort(), ['cohort', 'retention', 'uc.reporter', 'week']);
-  assert.ok(!JSON.stringify(f.lines).includes('user-1'));
-
-  await (signups as unknown as { stop(): Promise<void> }).stop();
+  assert.deepEqual(
+    lines.map((l) => [l.msg, l['uc.actor']]),
+    [
+      ['signups', 'user-1'],
+      ['signups', 'user-1'],
+      ['signups', 'user-2'],
+    ],
+  );
 });
 
-test('retention ignores an empty id rather than counting an anonymous person', async () => {
-  const f = fake();
-  const signups = createRetention('signups', deps(tmp(), f.client));
+test('retention ignores an unusable id rather than naming an anonymous person', () => {
+  const { lines, client } = fake();
+  const signups = createRetention('signups', deps(client));
   signups.seen('');
   signups.seen('   ');
-  signups.report();
-
-  assert.equal(f.lines.filter((l) => l.metric === 'retention').length, 0);
-  await (signups as unknown as { stop(): Promise<void> }).stop();
+  signups.seen(42 as never);
+  assert.equal(lines.length, 0);
 });
 
-test('a breakdown counts events, not people', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
+test('a breakdown without a who counts events: no uc.actor on the line', () => {
+  const { lines, client } = fake();
+  const pages = createBreakdown('page', deps(client));
 
   pages.value('/pricing');
   pages.value('/pricing');
   pages.value('/app');
-  pages.report();
 
-  const at = readings(f.lines, 'breakdown', (l) => l.value);
-  assert.equal(at['/pricing'], 2, 'the same value twice is two events');
-  assert.equal(at['/app'], 1);
-  assert.ok(f.lines.filter((l) => l.metric === 'breakdown').every((l) => (l.labels as Record<string, string>).dimension === 'page'));
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
+  assert.deepEqual(
+    lines.map((l) => [l.msg, l.value]),
+    [
+      ['page', '/pricing'],
+      ['page', '/pricing'],
+      ['page', '/app'],
+    ],
+  );
+  assert.ok(lines.every((l) => !('uc.actor' in l)), 'an event with no actor is an event count, not a people count');
 });
 
-test('a breakdown passed a who counts a person once, however many events they carry', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
+test('a breakdown with a who carries uc.actor — the server dedups people, the SDK sends every event', () => {
+  const { lines, client } = fake();
+  const pages = createBreakdown('page', deps(client));
 
   pages.value('/pricing', 'user-1');
-  pages.value('/pricing', 'user-1'); // the same person twice is one
-  pages.value('/pricing', 'user-1');
-  pages.report();
-
-  const at = readings(f.lines, 'breakdown', (l) => l.value);
-  assert.equal(at['/pricing'], 1, 'three events, one person');
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
-});
-
-test('a breakdown passed a who counts two people as 2', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
-
   pages.value('/pricing', 'user-1');
   pages.value('/pricing', 'user-2');
-  pages.report();
 
-  const at = readings(f.lines, 'breakdown', (l) => l.value);
-  assert.equal(at['/pricing'], 2, 'two distinct people');
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
-});
-
-// The reader folds a counter by subtracting each reading from the one before it and counts
-// the very first as nothing. A value that appears mid-flight would therefore be invisible for
-// good unless its rise from zero is stated.
-test('a value seen for the first time reports a zero before its own count', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
-
-  pages.value('/pricing');
-  pages.value('/pricing');
-  pages.report();
-
-  const mine = f.lines.filter((l) => l.metric === 'breakdown');
-  assert.equal(mine.length, 2, 'the zero and the count');
-  assert.equal(mine[0].value, 0);
-  assert.equal(mine[1].value, 2);
-  assert.ok(
-    Date.parse(mine[0].ts as string) < Date.parse(mine[1].ts as string),
-    'the zero is stamped before the count, so the fold orders them',
+  assert.deepEqual(
+    lines.map((l) => l['uc.actor']),
+    ['user-1', 'user-1', 'user-2'],
   );
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
+  assert.ok(lines.every((l) => l.value === '/pricing'));
 });
 
-// The dangerous half: a zero emitted after a running total is a DROP, and the fold reads a
-// drop as a reset worth its whole value — so a restored bucket re-seeding would double it.
-test('a bucket restored from the state file never re-emits its zero', async () => {
-  const dir = tmp();
-  // What a previous process left behind: one dimension value, one person already counted.
-  // A restart must continue that count, never re-announce a zero underneath it.
-  writeFileSync(
-    join(dir, 'funnels.json'),
-    JSON.stringify({
-      v: 2,
-      salt: 'a'.repeat(32),
-      counters: { 'breakdown\npage': { '/pricing': { seen: 1, ids: ['deadbeefdeadbeef'] } } },
-    }),
-  );
+test('a breakdown passed a request fingerprints the person: no address on the wire', () => {
+  const { lines, client } = fake();
+  const pages = createBreakdown('page', deps(client));
+  const req = { headers: { 'x-forwarded-for': '203.0.113.5', 'user-agent': 'Mozilla/5.0 A' } };
 
-  const f = fake();
-  const pages = createBreakdown('page', deps(dir, f.client));
-  pages.value('/pricing', 'someone-else');
-  pages.report();
+  pages.value('/pricing', req);
 
-  // Two readings, because declaring reports at once: the restored 1, then the 2 it became.
-  // Neither is a zero, which is the whole point — a zero under a running total is a drop, and
-  // the fold reads a drop as a reset worth its whole value.
-  const mine = f.lines.filter((l) => l.metric === 'breakdown');
-  assert.deepEqual(mine.map((l) => l.value), [1, 2], 'the stored count continues');
-  assert.ok(!mine.some((l) => l.value === 0), 'no zero is announced under a count already reported');
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
+  assert.equal(lines.length, 1);
+  assert.match(String(lines[0]['uc.actor']), /^[0-9a-f]{16}$/, 'a request becomes a fingerprint, not an address');
+  const wire = JSON.stringify(lines);
+  assert.ok(!wire.includes('203.0.113.5'), 'no raw address on the wire');
+  assert.ok(!wire.includes('Mozilla'), 'no user-agent on the wire either');
 });
 
-test('a breakdown stops at its distinct-value ceiling instead of growing without limit', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
+test('a breakdown value that is empty or over 80 characters sends nothing', () => {
+  const { lines, client } = fake();
+  const pages = createBreakdown('page', deps(client));
 
-  for (let i = 0; i < 260; i++) pages.value(`/p/${i}`);
-  pages.value('/p/0'); // an existing value still counts past the ceiling
-  pages.report();
+  pages.value('');
+  pages.value('   ');
+  pages.value('x'.repeat(81));
+  pages.value('  /ok  ');
 
-  const at = readings(f.lines, 'breakdown', (l) => l.value);
-  assert.equal(Object.keys(at).length, 200);
-  assert.equal(at['/p/0'], 2);
-  assert.equal(at['/p/259'], undefined);
-
-  await (pages as unknown as { stop(): Promise<void> }).stop();
+  assert.deepEqual(lines.map((l) => l.value), ['/ok'], 'the value is trimmed; junk is dropped, not sent');
 });
 
-test('readings carry one reporter id per process, shared by every feed', async () => {
-  const f = fake();
-  const pages = createBreakdown('page', deps(tmp(), f.client));
-  const cta = createExperiment('checkout CTA', ['control', 'B'], deps(tmp(), f.client));
-  pages.value('/pricing');
-  cta.expose('control', 'user-1');
-  pages.report();
-  cta.report();
+test('a bad declaration is a warned no-op and never throws', () => {
+  const { lines, client } = fake();
+  const err = stderr();
 
-  // The stamp names the process, not the feed: the server folds each reporter's counters
-  // apart, so two instances of one app must not share a series.
-  const reporters = (metric: string) =>
-    new Set(f.lines.filter((l) => l.metric === metric).map((l) => (l.labels as Record<string, string>)['uc.reporter']));
-  assert.deepEqual(reporters('breakdown'), new Set([REPORTER]));
-  assert.deepEqual(reporters('experiment'), new Set([REPORTER]));
+  const noName = createExperiment('', ['a', 'b'], deps(client));
+  noName.expose('a', 'u1');
+  const longName = createRetention('r'.repeat(61), deps(client));
+  longName.seen('u1');
+  const oneArm = createExperiment('one arm', ['only'], deps(client));
+  oneArm.expose('only', 'u1');
+  const dupArm = createExperiment('dup arm', ['a', 'a'], deps(client));
+  dupArm.expose('a', 'u1');
+  const longBreakdown = createBreakdown('b'.repeat(61), deps(client));
+  longBreakdown.value('/x');
+  err.restore();
 
-  await (pages as unknown as { stop(): Promise<void> }).stop();
-  await (cta as unknown as { stop(): Promise<void> }).stop();
-});
-
-test('a 0.3.0 funnel state file is read forward, so nobody is counted twice after the upgrade', async () => {
-  const dir = tmp();
-  const file = join(dir, 'funnels.json');
-  // What 0.3.0 wrote: one funnel, one step, one person already counted.
-  writeFileSync(
-    file,
-    JSON.stringify({
-      v: 1,
-      salt: 'a'.repeat(32),
-      funnels: { 'visit to paid': { visit: { seen: 1, ids: ['deadbeefdeadbeef'] } } },
-    }),
-  );
-
-  const f = fake();
-  const funnel = createFunnel('visit to paid', ['visit', 'paid'], deps(dir, f.client) as never);
-  // A second person at the same step: the stored one is already counted, so this must land
-  // on 2 rather than restarting at 1. It also marks the state dirty, so stop() saves.
-  funnel.step('visit', 'user-2');
-  funnel.report();
-
-  const at = readings(f.lines, 'funnel', (l) => l.step);
-  assert.equal(at.visit, 2, 'the stored count survived the upgrade and the new person added to it');
-  assert.equal(at.paid, 0);
-
-  await (funnel as unknown as { stop(): Promise<void> }).stop();
-
-  // Written forward in the new shape, salt kept, so the ids still hash the same way.
-  const written = JSON.parse(readFileSync(file, 'utf8')) as { v: number; salt: string };
-  assert.equal(written.v, 2);
-  assert.equal(written.salt, 'a'.repeat(32));
+  assert.equal(lines.length, 0);
+  assert.equal(err.lines.filter((l) => l.includes('is ignored')).length, 5);
 });

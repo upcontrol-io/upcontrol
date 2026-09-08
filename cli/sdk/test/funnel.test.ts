@@ -1,15 +1,12 @@
-import test, { after } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createFunnel, type FunnelDeps } from '../dist/esm/funnel.js';
 import { Client } from '../dist/esm/client.js';
-import { REPORTER } from '../dist/esm/counters.js';
 import { startServer } from './server.ts';
 
-// The funnel feed: counters that only grow, one person counted once per step, nothing that
-// identifies a person on the wire or on disk.
+// The funnel feed: every step one event named by the step, the person as `uc.actor`, and
+// nothing raw about them on the wire. The server counts DISTINCT people from these events —
+// the SDK does not dedup, and the same person stepping twice is two events by design.
 
 type Line = Record<string, unknown>;
 
@@ -25,21 +22,8 @@ function fake() {
   };
 }
 
-const dirs: string[] = [];
-
-function tmp(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'uc-funnel-'));
-  dirs.push(dir);
-  return dir;
-}
-
-// Every test awaits stop(), so no save is in flight when the dirs go.
-after(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-});
-
-function deps(dir: string, extra: Partial<FunnelDeps> = {}): FunnelDeps {
-  return { client: fake().client, env: { UPCONTROL_STATE_DIR: dir }, everyMs: 1e9, ...extra };
+function deps(client: FunnelDeps['client']): FunnelDeps {
+  return { client };
 }
 
 function stderr() {
@@ -57,29 +41,57 @@ function stderr() {
   };
 }
 
-const labels = (line: Line) => line.labels as Record<string, string>;
-const last = (lines: Line[], step: string) => [...lines].reverse().find((l) => labels(l).step === step);
-
-test('a funnel reports every step as a counter the moment it is declared', async () => {
-  const steps = ['visit', 'signup', 'checkout', 'paid'];
+test('a step sends one event named by the step, carrying uc.actor and uc.funnel', () => {
   const { lines, client } = fake();
-  const f = createFunnel('declared', steps, deps(tmp(), { client }));
+  const f = createFunnel('signup', ['visit', 'paid'], deps(client));
 
-  assert.equal(lines.length, 4);
-  lines.forEach((line, i) => {
-    assert.equal(line.metric, 'funnel');
-    assert.equal(line.value, 0);
-    assert.equal(line.level, 'metric');
-    // Zero-padded, so twelve steps sort as strings the way they were declared.
-    assert.deepEqual(line.labels, { funnel: 'declared', step: steps[i], i: String(i + 1).padStart(2, '0'), 'uc.reporter': REPORTER });
-    assert.ok(!Number.isNaN(Date.parse(String(line.ts))), 'ts parses as a date');
-  });
-  await f.stop();
+  f.step('visit', 'user-1');
+
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].msg, 'visit');
+  assert.equal(lines[0].level, 'info');
+  assert.equal(lines[0]['uc.actor'], 'user-1');
+  assert.equal(lines[0]['uc.funnel'], 'signup');
+  assert.equal(lines[0]['uc.event'], true, 'a step IS a track() event');
+  assert.ok(!Number.isNaN(Date.parse(String(lines[0].ts))), 'ts parses as a date');
 });
 
-test('a person counts once per step, a crawler never, every request shape works, and no address is not counted', async () => {
+test('the same person stepping twice sends two events — the server dedups, not the SDK', () => {
   const { lines, client } = fake();
-  const f = createFunnel('one person', ['visit', 'signup'], deps(tmp(), { client }));
+  const f = createFunnel('signup', ['visit', 'paid'], deps(client));
+
+  f.step('visit', 'user-1');
+  f.step('visit', 'user-1');
+  f.step('paid', 'user-1');
+
+  assert.deepEqual(
+    lines.map((l) => [l.msg, l['uc.actor']]),
+    [
+      ['visit', 'user-1'],
+      ['visit', 'user-1'],
+      ['paid', 'user-1'],
+    ],
+  );
+});
+
+test('a request and a string id produce the same attribute shape, and no address is on the wire', () => {
+  const { lines, client } = fake();
+  const f = createFunnel('anon', ['visit', 'paid'], deps(client));
+
+  const req = { headers: { 'x-forwarded-for': '203.0.113.5, 10.0.0.1', 'user-agent': 'Mozilla/5.0 A' } };
+  f.step('visit', req);
+  f.step('paid', 'user-42');
+
+  assert.deepEqual(Object.keys(lines[0]).sort(), Object.keys(lines[1]).sort());
+  assert.match(String(lines[0]['uc.actor']), /^[0-9a-f]{16}$/, 'a request becomes a fingerprint, not an address');
+  const wire = JSON.stringify(lines);
+  assert.ok(!wire.includes('203.0.113.5'), 'no raw address on the wire');
+  assert.ok(!wire.includes('Mozilla'), 'no user-agent on the wire either');
+});
+
+test('every request shape resolves, one person through two shapes is one actor, and a crawler or a missing address is not counted', () => {
+  const { lines, client } = fake();
+  const f = createFunnel('shapes', ['visit', 'paid'], deps(client));
 
   const reqA = { headers: { 'x-forwarded-for': '203.0.113.5', 'user-agent': 'Mozilla/5.0 A' } };
   const reqA2 = {
@@ -96,123 +108,54 @@ test('a person counts once per step, a crawler never, every request shape works,
 
   const err = stderr();
   for (const who of [reqA, reqA, reqA2, reqB, reqC, bot, noAddress, noAddress]) f.step('visit', who);
-  f.step('signup', 'user-42');
-  f.step('signup', 'user-42');
-  f.step('signup', ' ');
-  f.report();
-  await f.stop();
   err.restore();
 
-  assert.equal(last(lines, 'visit')?.value, 3);
-  assert.equal(last(lines, 'signup')?.value, 1);
+  assert.equal(lines.length, 5, 'three for one person through two shapes, then B and C');
+  assert.equal(lines[0]['uc.actor'], lines[1]['uc.actor']);
+  assert.equal(lines[0]['uc.actor'], lines[2]['uc.actor'], 'the proxy list first hop and the bare header name one person');
+  assert.notEqual(lines[3]['uc.actor'], lines[0]['uc.actor'], 'another address is another person');
+  assert.notEqual(lines[4]['uc.actor'], lines[0]['uc.actor'], "the framework's own address wins over the proxy header");
   assert.equal(err.lines.filter((l) => l.includes('no address')).length, 1, 'warned once, counted never');
+  assert.ok(!JSON.stringify(lines).includes('198.51.100'), 'no raw address on the wire');
 });
 
-test('the people are kept as salted hashes, and a restart keeps the counts', async () => {
-  const reqA = { headers: { 'x-forwarded-for': '203.0.113.5', 'user-agent': 'Mozilla/5.0 A' } };
-  const reqB = { headers: { 'user-agent': 'Mozilla/5.0 B' }, socket: { remoteAddress: '198.51.100.7' } };
-
-  const dirA = tmp();
-  const a = fake();
-  const fa = createFunnel('restart', ['visit', 'signup'], deps(dirA, { client: a.client }));
-  fa.step('visit', reqA);
-  fa.step('visit', reqB);
-  fa.step('signup', 'user-42');
-  fa.report();
-  await fa.stop();
-
-  const fileA = join(dirA, 'funnels.json');
-  assert.ok(existsSync(fileA), 'the state file is written');
-  const text = readFileSync(fileA, 'utf8');
-  for (const secret of ['Mozilla', '203.0.113.5', '198.51.100.7', 'user-42']) {
-    assert.ok(!text.includes(secret), `the state file must not carry ${secret}`);
-  }
-  assert.ok(text.includes('"salt"'), 'the salt is stored with the counts');
-
-  const dirB = tmp();
-  copyFileSync(fileA, join(dirB, 'funnels.json'));
-  const b = fake();
-  const fb = createFunnel('restart', ['visit', 'signup'], deps(dirB, { client: b.client }));
-  assert.equal(b.lines[0].value, 2, 'the counts survive the restart');
-  fb.step('visit', reqA);
-  fb.report();
-  assert.equal(last(b.lines, 'visit')?.value, 2, 'the id and the salt survived the round trip');
-  await fb.stop();
-});
-
-test('the cap evicts the oldest and the counter never goes down', async () => {
-  const { lines, client } = fake();
-  const err = stderr();
-  const f = createFunnel('capped', ['visit', 'signup'], deps(tmp(), { client, maxIds: 2 }));
-  for (const id of ['u1', 'u2', 'u3']) f.step('visit', id);
-  f.report();
-  f.step('visit', 'u1');
-  f.report();
-  await f.stop();
-  err.restore();
-
-  // Two lines per report, the visit line first: declaration, then the two reports.
-  assert.equal(lines[2].value, 3);
-  assert.equal(lines[4].value, 4, 'an evicted visitor who returns counts again, the counter never shrinks');
-  assert.equal(err.lines.filter((l) => l.includes('keeps the last 2 people')).length, 1);
-});
-
-test('a bad declaration is a warned no-op, and step() never throws', async () => {
-  const dir = tmp();
+test('a bad declaration is a warned no-op, and step() never throws', () => {
   const { lines, client } = fake();
   const err = stderr();
 
-  const bad = createFunnel('too short', ['only'], deps(dir, { client }));
+  const bad = createFunnel('too short', ['only'], deps(client));
   bad.step('only', 'u1');
-  bad.report();
 
-  const good = createFunnel('never throws', ['visit', 'signup'], deps(dir, { client }));
+  const good = createFunnel('never throws', ['visit', 'paid'], deps(client));
   good.step('nope', 'u1');
   good.step('nope', 'u2');
   good.step('visit', null as never);
   good.step('visit', 42 as never);
   good.step('visit', {} as never);
-  good.report();
-  await good.stop();
+  good.step('visit', ' ');
   err.restore();
 
+  assert.equal(lines.length, 0, 'nothing to send: an ignored funnel, an unknown step, no person to name');
   assert.equal(err.lines.filter((l) => l.includes('is ignored')).length, 1);
   assert.equal(err.lines.filter((l) => l.includes('has no step "nope"')).length, 1);
-  assert.equal(lines.length, 4, 'the ignored funnel sends nothing: two steps, declared and reported once');
-  assert.equal(last(lines, 'visit')?.value, 0);
 });
 
-test('the same name in one process is one funnel', async () => {
-  const dir = tmp();
-  const { client } = fake();
-  const one = createFunnel('single', ['visit', 'signup'], deps(dir, { client }));
-  const two = createFunnel('single', ['visit', 'signup'], deps(dir, { client }));
-  assert.equal(one, two);
-  const three = createFunnel('single', ['visit', 'paid'], deps(dir, { client }));
-  assert.equal(three, one, 'the first declaration wins, whatever the second says');
-  await one.stop();
-});
-
-test('on the wire the funnel is metric readings that sampling never drops', async () => {
+test('on the wire a step is an event line like any track()', async () => {
   const srv = await startServer((req, res, body) => {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ accepted: body.split('\n').length, sampling: { level: 'info', keep: 0 } }));
+    res.end(JSON.stringify({ accepted: body.split('\n').length }));
   });
   const client = new Client({ UPCONTROL_API_KEY: 'uc_live_test', UPCONTROL_ENDPOINT: srv.url });
-  const f = createFunnel('wire', ['visit', 'signup', 'checkout', 'paid'], deps(tmp(), { client }));
+  const f = createFunnel('wire', ['visit', 'paid'], { client });
 
-  f.report();
+  f.step('visit', 'user-1');
   await client.flush();
-  f.report();
-  await client.flush();
-  await f.stop();
   await srv.close();
 
   assert.equal(srv.bodies[0].headers['x-upcontrol-key'], 'uc_live_test');
-  const second = srv.bodies[1].body.split('\n').map((l) => JSON.parse(l));
-  assert.equal(second.length, 4);
-  assert.ok(
-    second.every((l) => l.metric === 'funnel'),
-    'a metric reading is never sampled out',
-  );
+  const lines = srv.bodies[0].body.split('\n').map((l) => JSON.parse(l) as Line);
+  const step = lines.find((l) => l.msg === 'visit');
+  assert.equal(step?.['uc.actor'], 'user-1');
+  assert.equal(step?.['uc.funnel'], 'wire');
+  assert.equal(step?.['uc.event'], true);
 });

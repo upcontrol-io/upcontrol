@@ -61,6 +61,11 @@ var seriesRanges = map[string]seriesRange{
 // metric it draws, and forty is more than a screen can hold.
 const maxSeriesQueries = 40
 
+// maxPeopleSteps bounds a funnel's step list: its answer is one row per step,
+// so the list's width is the answer's width — the same cap the grouped reads
+// put on rows.
+const maxPeopleSteps = 200
+
 // rangeDays is how deep a range reaches, rounded up to whole days, the unit
 // the plan sells. Every sub-day range is 1: the axis is depth, and a 1h chart
 // asks no more of the store than a 24h one.
@@ -145,6 +150,10 @@ type seriesQuery struct {
 	Name   string            `json:"name"`
 	Where  map[string]string `json:"where"`
 	Group  []string          `json:"group"`
+	// Steps and Cohort serve the people source alone: a funnel's step names
+	// and the retention grid's unit.
+	Steps  []string `json:"steps"`
+	Cohort string   `json:"cohort"`
 }
 
 type seriesRequest struct {
@@ -172,24 +181,62 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		seen[q.ID] = true
 		switch q.Source {
-		case "logs", "check", "event", "metric":
+		case "logs", "check", "event", "metric", "people":
 		default:
 			return "unknown source " + q.Source + " in " + q.ID
 		}
 		if _, ok := seriesRanges[q.Range]; !ok {
 			return "unknown range " + q.Range + " in " + q.ID
 		}
+		if q.Source != "people" && (len(q.Steps) > 0 || q.Cohort != "") {
+			return "steps and cohort are only for the people source in " + q.ID
+		}
+		if q.Cohort != "" && q.Cohort != "week" {
+			return "unknown cohort " + q.Cohort + " in " + q.ID
+		}
 		if len(q.Group) > 0 {
-			if q.Source != "metric" {
-				return "group is only for the metric source in " + q.ID
+			if q.Source != "metric" && q.Source != "people" {
+				return "group is only for the metric and people sources in " + q.ID
 			}
 			if len(q.Group) > 2 {
 				return "group takes one or two label keys in " + q.ID
 			}
+			// A people group can carry event names (an experiment's two), which
+			// the SDK lets run to 60; a metric group key is a label key at 40.
+			keyMax := 40
+			if q.Source == "people" {
+				keyMax = 60
+			}
 			for _, k := range q.Group {
-				if k == "" || len(k) > 40 {
+				if k == "" || len(k) > keyMax {
 					return "bad group key in " + q.ID
 				}
+			}
+		}
+		if q.Source == "people" {
+			// The shape decides the read; a query with none of them names
+			// nothing answerable.
+			switch {
+			case len(q.Steps) > 0:
+				if len(q.Steps) > maxPeopleSteps {
+					return fmt.Sprintf("at most %d steps per query, got %d in %s", maxPeopleSteps, len(q.Steps), q.ID)
+				}
+				for _, st := range q.Steps {
+					if st == "" || len(st) > 40 {
+						return "bad step name in " + q.ID
+					}
+				}
+			case q.Cohort == "week":
+				// Retention: the range is the whole question.
+			case len(q.Group) == 1 || len(q.Group) == 2:
+				// Breakdown (one key, an event name in `name`) or an experiment
+				// (two keys, the exposed and converted event names, with `name`
+				// the label key that carries the arm).
+				if q.Name == "" {
+					return "a people group query needs a name in " + q.ID
+				}
+			default:
+				return "a people query needs steps, a cohort, or a group in " + q.ID
 			}
 		}
 	}
@@ -470,6 +517,9 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 // nothing measured.
 func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenantID, projectID int64, q seriesQuery, now time.Time, memo *oldestMemo) (map[string]any, error) {
 	from, to, r, _ := seriesWindow(q.Range, now)
+	if q.Source == "people" {
+		return h.peopleSeries(ctx, tenantID, projectID, q, from, to, r)
+	}
 	if len(q.Group) > 0 {
 		return h.groupedSeries(ctx, tenantID, projectID, q, from, to, r)
 	}
@@ -504,9 +554,7 @@ func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenant
 }
 
 // groupedSeries answers a grouped counter read: one sum per label
-// combination, ordered by value. There is no time axis to invent and no
-// single number for the whole range, so points is empty and the totals are
-// nil — a series of nulls would claim an axis the fold does not have.
+// combination, ordered by value.
 func (h *writeAPI) groupedSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
 	rows := []any{}
 	if h.pgs != nil {
@@ -514,10 +562,26 @@ func (h *writeAPI) groupedSeries(ctx context.Context, tenantID, projectID int64,
 		if err != nil {
 			return nil, err
 		}
-		for _, s := range sums {
-			rows = append(rows, map[string]any{"labels": s.Labels, "value": s.Sum})
-		}
+		rows = labelRows(sums)
 	}
+	return groupedAnswer(q, from, to, r, rows), nil
+}
+
+// labelRows is the one row shape every grouped answer speaks — the counter
+// folds' and the people reads' alike: a label map and its value, in the order
+// the read returned them.
+func labelRows(sums []pgstore.LabelSum) []any {
+	rows := []any{}
+	for _, s := range sums {
+		rows = append(rows, map[string]any{"labels": s.Labels, "value": s.Sum})
+	}
+	return rows
+}
+
+// groupedAnswer is a grouped read's envelope: no time axis to invent and no
+// single number for the whole range, so points is empty and the totals are
+// nil — a series of nulls would claim an axis the fold does not have.
+func groupedAnswer(q seriesQuery, from, to time.Time, r seriesRange, rows []any) map[string]any {
 	return map[string]any{
 		"id":       q.ID,
 		"from":     from.Format(time.RFC3339),
@@ -527,7 +591,38 @@ func (h *writeAPI) groupedSeries(ctx context.Context, tenantID, projectID int64,
 		"rows":     rows,
 		"total":    nil,
 		"previous": nil,
-	}, nil
+	}
+}
+
+// peopleSeries answers the people source's four reads, every one a GROUP BY
+// over events with a person behind them. The shape picks the read: steps name
+// a funnel's events; cohort "week" the retention grid; a group of one narrows
+// one event name to one label's values (breakdown); a group of two names an
+// experiment's exposed and converted events, with `name` the label key that
+// carries the arm.
+func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
+	rows := []any{}
+	if h.pgs != nil {
+		var (
+			sums []pgstore.LabelSum
+			err  error
+		)
+		switch {
+		case len(q.Steps) > 0:
+			sums, err = h.pgs.FunnelSteps(ctx, tenantID, projectID, q.Steps, from, to)
+		case q.Cohort == "week":
+			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, from, to)
+		case len(q.Group) == 1:
+			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], from, to)
+		default: // two group keys: validateSeries refused every other shape
+			sums, err = h.pgs.ExperimentArms(ctx, tenantID, projectID, q.Name, q.Group[0], q.Group[1], from, to)
+		}
+		if err != nil {
+			return nil, err
+		}
+		rows = labelRows(sums)
+	}
+	return groupedAnswer(q, from, to, r, rows), nil
 }
 
 // nullPoints is what a series with nothing behind it draws: a gauge with no
