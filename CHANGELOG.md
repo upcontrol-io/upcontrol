@@ -6,6 +6,34 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-09-09
+
+### Added
+- **The four analytics feeds are readable from any language.** `events` gained an `actor`
+  column, lifted at the ingest from a reserved `uc.actor` attribute, and `POST /v1/series`
+  gained `source: people`, which counts DISTINCT actors over the events a project already
+  sends. A funnel, a retention grid, an A/B test and a dimension therefore need nothing but an
+  event with an actor on it — no client library, nothing computed on the sender's side. Go,
+  Rust, Python, PHP and a static page are now first-class; the npm SDK is a convenience rather
+  than the only door.
+- **A funnel is defined by the card that draws it**, as a list of event names (`SeriesQuery.steps`),
+  so there is nothing to keep in sync between the code that emits events and the board that
+  reads them. `cohort: week` reads the retention grid the same way.
+- **Public API keys** (`kind`, `origins`; prefix `uc_pub_`) — the credential a browser may hold.
+  It writes named events only, is accepted solely from an origin its owner listed (byte-exact,
+  no wildcards), and is rate limited per key and address. A public key with no origin is refused
+  at mint: that is the unscoped key it exists to replace. Until now `api_key` had no scope at
+  all, which is why no single-page app could ever use this product.
+- **CORS on the ingest.** There was none anywhere in the backend, so a browser could not have
+  posted even with a correct key. `OPTIONS /i` answers the preflight.
+
+### Changed
+- The `metric`-source counter reads stay exactly as they were, so boards saved before this
+  release keep drawing. They are the compatibility path, not the future one.
+- `@upcontrol/sdk` 1.0.0 moves with this: the API does not change by a character, but the
+  counting is the server's now, and the on-disk state, the cumulative counter, `uc.reporter`
+  and the reset-detection fold are gone from the client.
+
 ## [0.24.0] — 2026-09-08
 
 ### Fixed
