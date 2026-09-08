@@ -84,8 +84,59 @@ export async function fetchInstallStatus(endpoint: string, key: string): Promise
   }
 }
 
-// One answer, body already consumed: a live Response can be dropped unread,
-// which leaks an undici handle and aborts the process during teardown.
+// The board's error body names exactly what is wrong with a layout
+// (`bad_layout` and a sentence); the status alone would cost a round trip.
+function boardMessage(text: string): string | undefined {
+  return parseJSON<{ error?: { message?: string } }>(text)?.error?.message;
+}
+
+/** One shape for all three board doors: they differ by one field each, not by kind.
+ *  `status` separates 200 stored from 202 proposed; `text` is the read's body and
+ *  `total` the widget count after an append. */
+interface BoardResult {
+  ok: boolean;
+  status?: number;
+  text?: string;
+  total?: number;
+  message?: string;
+  error?: string;
+}
+
+// Every board call is the same shape: the key header, the server's own sentence
+// carried back on a refusal, and an unreachable endpoint answered rather than thrown.
+async function boardCall(url: string, key: string, init?: RequestInit): Promise<BoardResult> {
+  const headers: Record<string, string> = { 'X-Upcontrol-Key': key };
+  if (init?.body) headers['Content-Type'] = 'application/json';
+  try {
+    const res = await request(url, { ...init, headers });
+    if (!res.ok) return { ok: false, status: res.status, message: boardMessage(res.text) };
+    return { ok: true, status: res.status, text: res.text };
+  } catch {
+    return { ok: false, error: 'unreachable' };
+  }
+}
+
+export function readBoard(endpoint: string, key: string): Promise<BoardResult> {
+  return boardCall(endpoint + '/v1/dashboard', key);
+}
+
+export function applyBoard(endpoint: string, key: string, layout: unknown): Promise<BoardResult> {
+  return boardCall(endpoint + '/v1/dashboard', key, {
+    method: 'PUT',
+    body: JSON.stringify(layout),
+  });
+}
+
+export async function appendBoard(endpoint: string, key: string, widgets: unknown[]): Promise<BoardResult> {
+  const r = await boardCall(endpoint + '/v1/dashboard/widgets', key, {
+    method: 'POST',
+    body: JSON.stringify({ widgets }),
+  });
+  if (!r.ok) return r;
+  const body = parseJSON<{ widgets?: unknown[] }>(r.text ?? '');
+  if (!body?.widgets) return { ok: false, status: r.status, error: 'malformed' };
+  return { ...r, total: body.widgets.length };
+}
 interface HttpAnswer {
   ok: boolean;
   status: number;

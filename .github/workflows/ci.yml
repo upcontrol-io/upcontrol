@@ -200,6 +200,14 @@ jobs:
       - name: Test
         working-directory: cli/${{ matrix.pkg }}
         run: npm test
+      # CLAUDE.md names typecheck as the checker for both packages, and nothing
+      # ran it: `installer` had been red since a test started importing from
+      # `dist/`, where `declaration: false` means no .d.ts is ever emitted
+      # (found 2026-09-08). It runs AFTER the tests because the sdk's suite
+      # imports its own built `dist/esm`, which `pretest` is what produces.
+      - name: Typecheck
+        working-directory: cli/${{ matrix.pkg }}
+        run: npm run typecheck
 
   infra:
     runs-on: ubuntu-latest

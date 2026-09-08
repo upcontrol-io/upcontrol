@@ -1953,7 +1953,7 @@ export interface paths {
         };
         /**
          * The stored board of the session's current project.
-         * @description One layout per project, whatever the board last saved. A project that never saved one answers an empty layout, never a 404: the front reads a 404 as a core without this endpoint and keeps the layout in the browser.
+         * @description One layout per project, whatever the board last saved. A project that never saved one answers an empty layout, never a 404: the front reads a 404 as a core without this endpoint and keeps the layout in the browser. With an ingest key the answer is the board document and nothing else: the key reads the board, never the catalog.
          */
         get: {
             parameters: {
@@ -1977,10 +1977,10 @@ export interface paths {
             };
         };
         /**
-         * Replace the board of the session's current project, or lay down a first one with a key.
+         * Replace the board of the session's current project; with a key, replace the key's own or propose onto a curated one.
          * @description With a session: the whole layout, overwritten whole; last write wins. Only the envelope is validated (the version, the ids, the kinds, the grid), because a widget's refs are the front's own to interpret. A notify member may read the board and may not write it.
          *
-         *     With an ingest key instead (`X-Upcontrol-Key` or a bearer), this is the agent's one door into the board and it opens once: the key may store a layout for a project that has none, and a project that already has a row answers 409 `board_exists`. That is deliberately narrow — the key lives in `.env` on every server the customer deploys, so one that could replace a curated board would be a wipe waiting to leak. It grants no read of any kind, here or anywhere: the agent knows what it declared, so it needs no catalog to build the first board from.
+         *     With an ingest key instead (`X-Upcontrol-Key` or a bearer), the rule is provenance, not existence: the key may freely replace a board the key itself wrote, and a board a human curated — one saved from a browser — is never overwritten by a credential that lives in `.env` on every server the customer deploys. Writing over a curated board is not a refusal: the offered layout is kept as a proposal (202) that one click in the app applies or drops.
          */
         put: {
             parameters: {
@@ -2004,6 +2004,15 @@ export interface paths {
                         "application/json": components["schemas"]["DashboardLayout"];
                     };
                 };
+                /** @description Key-authenticated only: the board is curated, so the layout was kept as a proposal instead of stored. */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardWriteResult"];
+                    };
+                };
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 /** @description notify_role */
@@ -2020,19 +2029,131 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description `board_exists`. Key-authenticated only: this project already has a board, and a key may lay down the first one alone. */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
             };
         };
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboard/widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append a block of widgets below the board, with an ingest key.
+         * @description The offered widgets keep their `x`, `w` and `h` and land at their `y` plus the board's current bottom, so the block arrives whole below everything already stored and can never collide with it; an id the board already holds is re-minted rather than refused, because ids are opaque and a collision must not cost a round trip. Append needs no confirmation, even on a curated board: it removes nothing, an unwanted card is one click away, and appending keeps the board curated. The merged document is validated and size-checked as one board.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardWidgets"];
+                };
+            };
+            responses: {
+                /** @description The merged layout as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboard/proposal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The layout an ingest key offered for this project's curated board.
+         * @description One pending proposal, exactly as the key sent it. A notify member may read it, like every other GET. 404 `no_proposal` when there is none.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The proposed layout. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description no_proposal */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Drop the pending proposal without applying it.
+         * @description The board itself is untouched. A write, so it needs the login role — the same gate every other mutation rides.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The proposal is gone. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -3381,6 +3502,15 @@ export interface components {
              */
             version: 1 | 2;
             widgets: components["schemas"]["DashboardWidget"][];
+        };
+        /** @description A block of widgets for the key's append door: the same shape the layout carries, landed whole below the board. */
+        DashboardWidgets: {
+            widgets: components["schemas"]["DashboardWidget"][];
+        };
+        /** @description What a key-authenticated board write did: stored it, or kept it as a proposal because a human curates this board. */
+        DashboardWriteResult: {
+            /** @enum {string} */
+            status: "stored" | "proposed";
         };
         /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */
         DashboardCatalog: {

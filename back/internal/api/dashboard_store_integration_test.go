@@ -89,7 +89,7 @@ func TestDashboardRoundTrip(t *testing.T) {
 
 	// Last write wins, and it replaces rather than merges: the first board's
 	// widget may not survive a PUT that does not mention it.
-	if code, got := putBoard(t, h, tenantID, `{"version":1,"widgets":[]}`); code != http.StatusOK {
+	if code, got := putBoard(t, h, tenantID, `{"version":2,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("the second PUT = %d %s", code, got)
 	}
 	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, string(emptyLayout)) {
@@ -201,7 +201,7 @@ func TestDashboardFollowsTheProject(t *testing.T) {
 	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || body != string(emptyLayout) {
 		t.Fatalf("a stranded row reads as no board; B reads %d %s", code, body)
 	}
-	if code, body := putBoard(t, hB, tenantB, `{"version":1,"widgets":[]}`); code != http.StatusOK {
+	if code, body := putBoard(t, hB, tenantB, `{"version":2,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("B's save over a stranded row = %d %s", code, body)
 	}
 	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || !sameBoard(t, body, string(emptyLayout)) {
@@ -236,7 +236,7 @@ func TestFirstBoardThroughAnIngestKey(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPut, "/v1/dashboard", bytes.NewBufferString(body))
 		r.Header.Set("X-Upcontrol-Key", key)
-		h.putFirstDashboard(w, r)
+		h.putAgentDashboard(w, r)
 		return w.Code, strings.TrimSpace(w.Body.String())
 	}
 
@@ -246,10 +246,10 @@ func TestFirstBoardThroughAnIngestKey(t *testing.T) {
 	if code, body := withKey(full, oneWidgetBoard); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
 		t.Fatalf("the first board is the one write this key is for; got %d %s", code, body)
 	}
-	if code, body := withKey(full, `{"version":1,"widgets":[]}`); code != http.StatusConflict {
-		t.Fatalf("a project that already has a board refuses the key; got %d %s", code, body)
+	if code, body := withKey(full, `{"version":1,"widgets":[]}`); code != http.StatusOK {
+		t.Fatalf("the key freely replaces the board the key itself wrote; got %d %s", code, body)
 	}
-	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
-		t.Fatalf("the refused write must not have touched the board; got %d %s", code, got)
+	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, `{"version":1,"widgets":[]}`) {
+		t.Fatalf("the second key write replaces the first; got %d %s", code, got)
 	}
 }

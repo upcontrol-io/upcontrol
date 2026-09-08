@@ -210,6 +210,24 @@ func (e DashboardWidgetRange) Valid() bool {
 	}
 }
 
+// Defines values for DashboardWriteResultStatus.
+const (
+	Proposed DashboardWriteResultStatus = "proposed"
+	Stored   DashboardWriteResultStatus = "stored"
+)
+
+// Valid indicates whether the value is a known member of the DashboardWriteResultStatus enum.
+func (e DashboardWriteResultStatus) Valid() bool {
+	switch e {
+	case Proposed:
+		return true
+	case Stored:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DeliveryState.
 const (
 	DeliveryStateDead    DeliveryState = "dead"
@@ -966,6 +984,19 @@ type DashboardWidgetKind string
 
 // DashboardWidgetRange Present only for kinds with a time axis.
 type DashboardWidgetRange string
+
+// DashboardWidgets A block of widgets for the key's append door: the same shape the layout carries, landed whole below the board.
+type DashboardWidgets struct {
+	Widgets []DashboardWidget `json:"widgets"`
+}
+
+// DashboardWriteResult What a key-authenticated board write did: stored it, or kept it as a proposal because a human curates this board.
+type DashboardWriteResult struct {
+	Status DashboardWriteResultStatus `json:"status"`
+}
+
+// DashboardWriteResultStatus defines model for DashboardWriteResult.Status.
+type DashboardWriteResultStatus string
 
 // DeliveryState The delivery queue's own vocabulary. `pending` covers leased/retrying too — to the reader the outcome is simply not known yet.
 type DeliveryState string
@@ -1964,6 +1995,9 @@ type PostV1ClaimJSONRequestBody PostV1ClaimJSONBody
 
 // PutV1DashboardJSONRequestBody defines body for PutV1Dashboard for application/json ContentType.
 type PutV1DashboardJSONRequestBody = DashboardLayout
+
+// PostV1DashboardWidgetsJSONRequestBody defines body for PostV1DashboardWidgets for application/json ContentType.
+type PostV1DashboardWidgetsJSONRequestBody = DashboardWidgets
 
 // PostV1EventJSONRequestBody defines body for PostV1Event for application/json ContentType.
 type PostV1EventJSONRequestBody PostV1EventJSONBody

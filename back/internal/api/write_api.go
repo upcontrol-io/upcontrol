@@ -64,8 +64,8 @@ type writeAPI struct {
 	// Sends the watch door's login code by e-mail. nil means no mailer: prod
 	// stores the code unsent; a fresh link still signs the visitor in.
 	mailer auth.Mailer
-	// Resolves an ingest key for the one key-authenticated write there is,
-	// PUT /v1/dashboard on a project with no board. Same pool, no extra wiring.
+	// Resolves an ingest key for the key-authenticated board doors (replace,
+	// append, the board read). Same pool, no extra wiring.
 	keys *pg.KeyResolver
 }
 
@@ -97,12 +97,24 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The agent's one key-authenticated write: a first board for a project that has
-	// none (see putFirstDashboard). Taken only when a key is actually presented, so a
-	// browser session, which sends no such header, never reaches it.
-	if r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut && presentedKey(r) != "" {
-		h.putFirstDashboard(w, r)
-		return
+	// The agent's three key-authenticated doors: replace-or-propose and the
+	// board read on /v1/dashboard, append on /v1/dashboard/widgets. Taken only
+	// when a key is actually presented, so a browser session, which sends no
+	// such header, never reaches any of them. The catalog is deliberately not
+	// among them: it reports what actually arrived, and the agent builds from
+	// what it declared.
+	if presentedKey(r) != "" {
+		switch {
+		case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
+			h.putAgentDashboard(w, r)
+			return
+		case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
+			h.getAgentDashboard(w, r)
+			return
+		case r.URL.Path == "/v1/dashboard/widgets" && r.Method == http.MethodPost:
+			h.appendDashboardWidgets(w, r)
+			return
+		}
 	}
 
 	// Everything else needs a session.
@@ -191,11 +203,17 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/series" && r.Method == http.MethodPost:
 		h.postSeries(w, r, tenantID)
 	// The board itself: one stored layout per project, read by any member
-	// and replaced whole by a login member (the gate above).
+	// and replaced whole by a login member (the gate above). The proposal
+	// doors: a notify member may READ what the key offered; dropping it is a
+	// write and rides the gate.
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
 		h.getDashboard(w, r, tenantID)
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
 		h.putDashboard(w, r, tenantID)
+	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodGet:
+		h.getDashboardProposal(w, r, tenantID)
+	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodDelete:
+		h.clearDashboardProposal(w, r, tenantID)
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)

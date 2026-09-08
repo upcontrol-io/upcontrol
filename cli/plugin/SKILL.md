@@ -1,6 +1,6 @@
 ---
 name: upcontrol
-description: Wire monitoring and logging into this app with upcontrol - uptime checks, log window, incident alerts. Use when the user asks to send logs to upcontrol, add logging/observability/monitoring, add a funnel (visit to paid), an A/B test, a retention cohort or a breakdown, track user behavior or churn, watch payments, cron jobs or errors, or to set up, verify or debug an upcontrol integration.
+description: Wire monitoring and logging into this app with upcontrol - uptime checks, log window, incident alerts. Use when the user asks to send logs to upcontrol, add logging/observability/monitoring, add a funnel (visit to paid), an A/B test, a retention cohort or a breakdown, build or reorganize a dashboard, track user behavior or churn, watch payments, cron jobs or errors, or to set up, verify or debug an upcontrol integration.
 ---
 
 # upcontrol
@@ -35,6 +35,7 @@ The user states a goal in plain language; you translate it to a topic:
 | "tell me when my app is down"      | `uptime`   | no code - point them at the app       |
 | "my cron / queue died silently"    | `jobs`     | job_* events + heartbeat              |
 | "catch errors / exceptions"        | `logs`     | SDK auto-captures; add request_failed points |
+| "build/reorganize my dashboard"    | `dashboard` | compose a layout, apply it with `npx upcontrol board` |
 
 If the user has no specific goal, propose what you FOUND in their repo, not a
 generic list: Stripe in dependencies -> propose payments; a queue -> jobs; a
@@ -61,6 +62,11 @@ mailer -> email events. Suggestions come from the repository, not a template.
 7. Do not declare success when the diff is applied. The install is finished when
    `npx upcontrol verify` reports data arriving - run it, and if it fails,
    follow its taxonomy (`npx upcontrol skills verify`).
+8. Never replace an existing board unless the user asked for that rebuild in
+   this conversation: the arrangement is the user's own work, and `--apply`
+   overwrites it whole. Adding cards is not replacing - `npx upcontrol board
+   --add` is the tool for it. For a rebuild, show what the board holds now and
+   what you propose before you apply anything.
 
 ## Standard flow
 
@@ -71,6 +77,10 @@ mailer -> email events. Suggestions come from the repository, not a template.
 3. Show the diff, report the counter, let the user apply it.
 4. Ask the user to run the app (or wait for traffic).
 5. `npx upcontrol verify` - report its verdict verbatim.
+6. Once verify reports data arriving, offer the board: ask whether to build or
+   extend the dashboard for what was just instrumented, and name the cards you
+   would put on it (topic `dashboard`). This is the moment you know exactly
+   what the board should hold - the offer belongs here and nowhere earlier.
 
 ## Scope
 

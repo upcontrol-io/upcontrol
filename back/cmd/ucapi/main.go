@@ -239,6 +239,10 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/recipients", wa)
 	mux.Handle("PATCH /v1/recipients/{id}", wa)
 	mux.Handle("DELETE /v1/recipients/{id}", wa)
+	// A sub-path is its OWN pattern: "POST /v1/recipients/{id}" does not match
+	// /v1/recipients/{id}/resend, so without this line the handler's resend arm
+	// was unreachable and the button 404'd (found 2026-09-08).
+	mux.Handle("POST /v1/recipients/{id}/resend", wa)
 	// Telegram invite links (one-time inv_<token>, plan-gated). Session-authed;
 	// notify-role members get 403: inviting people is a settings act.
 	tginv := api.NewTelegram(pgPool, sm, tgUsername)
@@ -255,6 +259,13 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/series", wa)
 	mux.Handle("GET /v1/dashboard", wa)
 	mux.Handle("PUT /v1/dashboard", wa)
+	// The agent's additive door and the session's two proposal doors. Every one
+	// of these is served by the same handler; the mux is what makes them exist,
+	// and a test driving wa.ServeHTTP directly cannot tell a missing route from
+	// a present one.
+	mux.Handle("POST /v1/dashboard/widgets", wa)
+	mux.Handle("GET /v1/dashboard/proposal", wa)
+	mux.Handle("DELETE /v1/dashboard/proposal", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)
