@@ -3,6 +3,14 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-08 — @upcontrol/sdk 0.6.0
+
+- `breakdown()`'s `value(v, who?)` takes an optional second argument. Additive: a call
+  without `who` counts events carrying the value, exactly as it always has, so existing
+  code changes nothing. A call passing `who` counts DISTINCT PEOPLE carrying the value —
+  a person once per value, deduped by the same salted hash the funnel, A/B test and
+  retention feeds dedup by.
+
 ## 2026-09-07 — upcontrol 0.1.8
 
 - `SDK_PIN` moves to `0.5.0`, so a fresh install gets the multi-instance fix below rather

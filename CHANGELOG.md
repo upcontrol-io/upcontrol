@@ -6,6 +6,16 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-09-08
+
+### Changed
+- **A breakdown can count distinct people, not only events** (`@upcontrol/sdk` 0.6.0).
+  `value(v, who?)` takes the same `who` a funnel step takes, and dedups through the same
+  salted-hash id set the funnel, the A/B test and retention have always used — `breakdown()`
+  was the one feed on that machine passing `null`, so a dimension could only ever rank
+  volume. Additive: a call without `who` counts events exactly as before, so no existing
+  instrumentation changes meaning, and the 200-distinct-value ceiling applies in both modes.
+
 ## [0.22.0] — 2026-09-08
 
 ### Added

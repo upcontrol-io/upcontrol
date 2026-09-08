@@ -86,15 +86,18 @@ cta.convert('B', req);
 const signups = retention('signups');
 signups.seen(user.id);
 
-// Counts events, not people. At most 200 distinct values.
+// Counts events; pass a who to count distinct people instead.
+// At most 200 distinct values.
 const pages = breakdown('page');
 pages.value('/pricing');
+pages.value('/pricing', user.id);
 ```
 
 `expose` and `convert` take the same `who` a funnel step takes, a request or a
 string id. `seen()` takes a string id only, and keeps the last 12 weekly
-cohorts. A breakdown does no deduplication, so never feed it something
-unbounded like a request id or a URL with a query string.
+cohorts. A breakdown does not deduplicate unless you pass it a
+`who`. Never feed it something unbounded like a request id
+or a URL with a query string.
 
 Install and instrumentation are normally driven by your coding agent via
 `npx upcontrol init` - see the [upcontrol package](https://www.npmjs.com/package/upcontrol).

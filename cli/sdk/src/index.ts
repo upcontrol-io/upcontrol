@@ -84,8 +84,9 @@ export function retention(name: string): Retention {
 }
 
 /** breakdown declares a dimension by name. `value(v)` counts events carrying the value —
- *  events, not people, no dedup — keeping its first 200 distinct values. Never throws,
- *  never blocks. */
+ *  events, not people, no dedup; `value(v, who)` counts DISTINCT PEOPLE carrying it, a
+ *  person once per value. It keeps its first 200 distinct values. Never throws, never
+ *  blocks. */
 export function breakdown(name: string): Breakdown {
   try {
     return createBreakdown(name, { client, env: process.env });

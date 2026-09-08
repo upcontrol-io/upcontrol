@@ -150,6 +150,35 @@ test('a breakdown counts events, not people', async () => {
   await (pages as unknown as { stop(): Promise<void> }).stop();
 });
 
+test('a breakdown passed a who counts a person once, however many events they carry', async () => {
+  const f = fake();
+  const pages = createBreakdown('page', deps(tmp(), f.client));
+
+  pages.value('/pricing', 'user-1');
+  pages.value('/pricing', 'user-1'); // the same person twice is one
+  pages.value('/pricing', 'user-1');
+  pages.report();
+
+  const at = readings(f.lines, 'breakdown', (l) => l.value);
+  assert.equal(at['/pricing'], 1, 'three events, one person');
+
+  await (pages as unknown as { stop(): Promise<void> }).stop();
+});
+
+test('a breakdown passed a who counts two people as 2', async () => {
+  const f = fake();
+  const pages = createBreakdown('page', deps(tmp(), f.client));
+
+  pages.value('/pricing', 'user-1');
+  pages.value('/pricing', 'user-2');
+  pages.report();
+
+  const at = readings(f.lines, 'breakdown', (l) => l.value);
+  assert.equal(at['/pricing'], 2, 'two distinct people');
+
+  await (pages as unknown as { stop(): Promise<void> }).stop();
+});
+
 test('a breakdown stops at its distinct-value ceiling instead of growing without limit', async () => {
   const f = fake();
   const pages = createBreakdown('page', deps(tmp(), f.client));

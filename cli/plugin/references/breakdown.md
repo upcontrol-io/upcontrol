@@ -1,8 +1,9 @@
 # "Add a breakdown" - a dimension ranked by how often each value happens
 
 A breakdown is a dimension the user names: how often each value of it occurs.
-It counts events, not people - it is a ranking of volume, not a count of
-users. upcontrol receives each value's count and nothing else.
+By default it counts events, not people - it is a ranking of volume, not a
+count of users. Passing a `who` to value() counts distinct people instead.
+upcontrol receives each value's count and nothing else.
 
 The request usually arrives as a sentence copied from the board's form:
 
@@ -28,7 +29,7 @@ export const pageViews = breakdown('page');
 
 One line at the moment the event happens - for page views, the request
 handler; for another dimension, wherever the value is known. `value()` takes
-the value and nothing else: no request, no user id - events are not people.
+the value, and an optional `who` to count distinct people instead of events.
 
 ```ts
 pageViews.value('/pricing');
@@ -48,8 +49,9 @@ pageViews.value(path);
 
 - One line. No wrappers, no control-flow changes, no `await` - `value()`
   never throws and never blocks.
-- Events, not people: ten views by one person are ten. The board ranks
-  volume; it does not count distinct people.
+- Events, not people, unless the call passes a `who`: ten views by one
+  person are ten, and with a `who` they are one. The board ranks volume
+  either way.
 - Bounded values only: a normalised path, a country code, a plan name. Never
   a request id, an email, a full URL with a query string - the value names
   itself on the board, so keep personal data out of it.

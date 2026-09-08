@@ -17,8 +17,9 @@ export interface Retention {
 }
 
 export interface Breakdown {
-  /** value counts one event carrying the value. There is no `who`: events, not people. */
-  value(v: string): void;
+  /** value counts one event carrying the value; with `who` it counts the person once instead —
+   *  distinct people carrying the value, not events. */
+  value(v: string, who?: Who | null): void;
 }
 
 type Declared<T> = T & { report(): void; stop(): Promise<void> };
@@ -184,7 +185,7 @@ export function createBreakdown(name: string, deps: CounterDeps): Declared<Break
   if (!counters) return NOOP_BREAKDOWN;
   const on = counters;
 
-  function feed(v: string): void {
+  function feed(v: string, who?: Who | null): void {
     try {
       if (typeof v !== 'string') return;
       const value = v.trim();
@@ -198,7 +199,7 @@ export function createBreakdown(name: string, deps: CounterDeps): Declared<Break
         );
         return;
       }
-      on.bump(value, null);
+      on.bump(value, who ?? null);
     } catch {
       /* never throws */
     }
