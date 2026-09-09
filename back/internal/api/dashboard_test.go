@@ -3,6 +3,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -422,5 +425,41 @@ func TestEmptyLayoutIsTheDocumentedEmptyBoard(t *testing.T) {
 	}
 	if reason := validateLayout(doc); reason != "" {
 		t.Fatalf("the empty board must be a layout this server would store; got %q", reason)
+	}
+}
+
+// A board is STORED as DashboardMetricRef and the write decodes it strictly, so a field a card
+// can carry but the schema does not list is a 400 on a document the server itself just served.
+// That is not hypothetical: the people source shipped with the reads and not with this schema,
+// and every board holding a funnel, a retention grid, a breakdown or an A/B test was refused by
+// its own Save — in the app and through a key alike — until 0.26.1. The round trip is asserted,
+// not just the decode: a field the struct drops on the way out is stored and never served.
+func TestReadLayout_KeepsEveryRefACardCanCarry(t *testing.T) {
+	for _, one := range []struct{ name, ref, token string }{
+		{"a funnel's journey", `{"source":"people","steps":["visit","signup"]}`, `"steps":["visit","signup"]`},
+		{"a retention grid", `{"source":"people","cohort":"week"}`, `"cohort":"week"`},
+		{"a breakdown's field", `{"source":"people","name":"page","field":"value"}`, `"field":"value"`},
+		{"an A/B test's event", `{"source":"people","name":"checkout"}`, `"source":"people"`},
+		{"a narrowed log pick", `{"source":"logs","where":{"service":"api"},"label":"api errors"}`, `"label":"api errors"`},
+		{"a counted feed from before", `{"source":"dimension","name":"page"}`, `"source":"dimension"`},
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"version":2,"widgets":[{"id":"w1","kind":"funnel","title":"T","metrics":[%s],"x":0,"y":0,"w":6,"h":12}]}`,
+				one.ref)
+			r := httptest.NewRequest(http.MethodPut, "/v1/dashboard", strings.NewReader(body))
+			w := httptest.NewRecorder()
+			doc, ok := readLayout(w, r)
+			if !ok {
+				t.Fatalf("%s must be storable; got %d %s", one.name, w.Code, w.Body.String())
+			}
+			out, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(out), one.token) {
+				t.Fatalf("%s must survive the round trip; %s is missing from %s", one.name, one.token, out)
+			}
+		})
 	}
 }

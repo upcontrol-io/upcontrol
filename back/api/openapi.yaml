@@ -709,16 +709,33 @@ components:
     # --- dashboard ----------------------------------------------------------
     DashboardMetricRef:
       type: object
-      description: "What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it."
+      description: >
+        What a widget draws: a source and the filter that narrows it. The front
+        interprets it; the server keeps it. This schema is what a board is
+        STORED as, so every field a card can carry has to be listed here — the
+        write decodes strictly, and a field missing from this list is a 400 on
+        a board the server itself just served. `funnel`, `experiment`,
+        `retention` and `dimension` are the counter feeds boards saved before
+        the `people` source still carry.
       required: [source]
       properties:
         source:
           type: string
-          enum: [logs, check, event, metric, service, funnel, experiment, retention, dimension]
+          enum: [logs, check, event, metric, people, service, funnel, experiment, retention, dimension]
         name: { type: string }
         where:
           type: object
           additionalProperties: { type: string }
+        steps:
+          type: array
+          description: "`people` only: a funnel's step event names, in journey order. The card is the journey's one definition."
+          items: { type: string }
+        cohort:
+          type: string
+          description: "`people` only: `week` reads the retention grid."
+        field:
+          type: string
+          description: "`people` only: the event field a breakdown ranks the values of."
         label: { type: string }
     DashboardWidget:
       type: object

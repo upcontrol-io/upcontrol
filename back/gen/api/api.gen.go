@@ -120,6 +120,7 @@ const (
 	DashboardMetricRefSourceFunnel     DashboardMetricRefSource = "funnel"
 	DashboardMetricRefSourceLogs       DashboardMetricRefSource = "logs"
 	DashboardMetricRefSourceMetric     DashboardMetricRefSource = "metric"
+	DashboardMetricRefSourcePeople     DashboardMetricRefSource = "people"
 	DashboardMetricRefSourceRetention  DashboardMetricRefSource = "retention"
 	DashboardMetricRefSourceService    DashboardMetricRefSource = "service"
 )
@@ -140,6 +141,8 @@ func (e DashboardMetricRefSource) Valid() bool {
 	case DashboardMetricRefSourceLogs:
 		return true
 	case DashboardMetricRefSourceMetric:
+		return true
+	case DashboardMetricRefSourcePeople:
 		return true
 	case DashboardMetricRefSourceRetention:
 		return true
@@ -970,12 +973,20 @@ type DashboardLayout struct {
 // DashboardLayoutVersion The unit `h` is counted in. Version 2 halved the row so a card can be tuned in finer steps, which doubled every height: a version 1 board is read by doubling each `h`, and is rewritten as 2. Both are stored as given; the server never converts one into the other, because `h` is a drawing decision and the front is what draws.
 type DashboardLayoutVersion int
 
-// DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it.
+// DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry.
 type DashboardMetricRef struct {
+	// Cohort `people` only: `week` reads the retention grid.
+	Cohort *string `json:"cohort,omitempty"`
+
+	// Field `people` only: the event field a breakdown ranks the values of.
+	Field  *string                  `json:"field,omitempty"`
 	Label  *string                  `json:"label,omitempty"`
 	Name   *string                  `json:"name,omitempty"`
 	Source DashboardMetricRefSource `json:"source"`
-	Where  *map[string]string       `json:"where,omitempty"`
+
+	// Steps `people` only: a funnel's step event names, in journey order. The card is the journey's one definition.
+	Steps *[]string          `json:"steps,omitempty"`
+	Where *map[string]string `json:"where,omitempty"`
 }
 
 // DashboardMetricRefSource defines model for DashboardMetricRef.Source.

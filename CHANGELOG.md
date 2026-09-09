@@ -6,6 +6,21 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.26.1] — 2026-09-09
+
+### Fixed
+- **A board holding any analytics card could not be saved at all** — in the app or through an
+  ingest key. `DashboardMetricRef` is the schema a board is STORED as and the write decodes it
+  strictly, but it never learned the `people` source: no `steps`, no `cohort`, no `field`, and
+  `people` missing from its enum. So `PUT /v1/dashboard` answered `400 unknown_field` to a
+  document the server itself had just served, and `validateLayout` would have refused the
+  source behind it. Proved against production by reading one project's stored board and sending
+  it back unchanged. Live since 0.22.0, when the agent's board doors made both writes strict —
+  a funnel card has been unsavable for as long as funnels have been built from events.
+  `TestReadLayout_KeepsEveryRefACardCanCarry` asserts the round trip, one case per shape, and
+  the live suite now saves one of every analytics card against a real server: the fixture
+  backend accepts any body, so nothing in `npm run test` could ever have caught this.
+
 ## [0.26.0] — 2026-09-09
 
 ### Fixed
