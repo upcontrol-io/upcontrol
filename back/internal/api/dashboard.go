@@ -158,6 +158,12 @@ type seriesQuery struct {
 	// and the retention grid's unit.
 	Steps  []string `json:"steps"`
 	Cohort string   `json:"cohort"`
+	// Count is what a one-key people fold counts: "" and "people" are distinct
+	// actors, "events" is rows. A dimension nobody is behind — a delivery
+	// outcome, an HTTP status — has no actors at all, and every people read
+	// filters them out, so without this such a card reads 0 and says nothing
+	// about why.
+	Count string `json:"count"`
 }
 
 type seriesRequest struct {
@@ -241,6 +247,18 @@ func validateSeries(qs []seriesQuery) string {
 			default:
 				return "a people query needs steps, a cohort, or a group in " + q.ID
 			}
+		}
+		// A fold of one label may count rows instead of actors; nothing else may.
+		// A funnel, a retention grid and an A/B test ARE people by definition, and
+		// a conversion rate over rows is not a rate.
+		switch q.Count {
+		case "", "people":
+		case "events":
+			if q.Source != "people" || len(q.Group) != 1 {
+				return "count is for a people query folding one label key in " + q.ID
+			}
+		default:
+			return "unknown count " + q.Count + " in " + q.ID
 		}
 	}
 	return ""
@@ -578,7 +596,7 @@ func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, 
 		case q.Cohort == "week":
 			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, from, to)
 		case len(q.Group) == 1:
-			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], from, to)
+			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], q.Count == "events", from, to)
 		default: // two group keys: validateSeries refused every other shape
 			sums, err = h.pgs.ExperimentArms(ctx, tenantID, projectID, q.Name, q.Group[0], q.Group[1], from, to)
 		}

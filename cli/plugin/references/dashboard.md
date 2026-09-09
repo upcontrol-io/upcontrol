@@ -75,7 +75,7 @@ card in particular reads its service from the ref's `name`, not from a
 ## What a widget draws - the ref
 
 ```json
-{ "source": "...", "name": "...", "steps": ["..."], "cohort": "...", "field": "...", "where": { "...": "..." } }
+{ "source": "...", "name": "...", "steps": ["..."], "cohort": "...", "field": "...", "count": "...", "where": { "...": "..." } }
 ```
 
 `source` is one of `logs check event metric service people`. An optional
@@ -90,7 +90,7 @@ catalog no longer lists it; it changes nothing about what is drawn. What
 | `event` | the event name you passed to `track()` | none |
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
-| `people` | the event name, on a breakdown or an A/B test | none; `steps`, `cohort` and `field` pick the reading |
+| `people` | the event name, on a breakdown or an A/B test | none; `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
 
 A `people` ref is the definition itself - the card is built from event names,
 with nothing declared elsewhere to keep in sync. It counts distinct people: an
@@ -101,7 +101,7 @@ reading:
 |---|---|
 | `funnel` | `{ "source": "people", "steps": ["visit", "signup", "payment.succeeded"] }` - the step event names, in journey order, 2 to 12 |
 | `retention` | `{ "source": "people", "cohort": "week" }` - the whole project; there is nothing to name |
-| `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it |
+| `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
 | `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows |
 
 The board counts three levels, folding every other one into `info`; a `level`

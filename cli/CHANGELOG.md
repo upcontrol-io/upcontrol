@@ -3,6 +3,17 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-09 — upcontrol 0.2.2
+
+- **A breakdown card has an axis now, and the doc says which to pick.** `dashboard.md` gains
+  `count` on the ref: people by default, `"count": "events"` for a dimension nobody is behind —
+  a delivery outcome, an email status, an HTTP status. Without it such a card counts distinct
+  people over rows that have none and reads 0, silently. `breakdown.md` stops telling the agent
+  the board counts people either way: pass the `who` when a person IS behind the value, and
+  build the card with `events` when one is not.
+- Needs core 0.27.0 or newer for the axis; the doc is harmless against an older server, which
+  refuses the field rather than misreading it.
+
 ## 2026-09-09 — upcontrol 0.2.1
 
 - **The board topic stopped contradicting the wire topic.** `dashboard.md` told the agent that

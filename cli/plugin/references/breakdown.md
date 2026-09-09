@@ -49,8 +49,10 @@ pageViews.value(path);
 - One line. No wrappers, no control-flow changes, no `await` - `value()`
   never throws and never blocks.
 - Events, not people, unless the call passes a `who`: ten views by one
-  person are ten, and with a `who` they are one. The board's card counts
-  people either way - pass the `who` or it has no one to count.
+  person are ten, and with a `who` they are one. Pass the `who` whenever there
+  IS a person behind the value. When there is not - a delivery outcome, an
+  email status, an HTTP status - leave it off and build the card with
+  `"count": "events"`, which counts rows instead of people.
 - Bounded values only: a normalised path, a country code, a plan name. Never
   a request id, an email, a full URL with a query string - the value names
   itself on the board, so keep personal data out of it.

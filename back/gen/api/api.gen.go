@@ -111,6 +111,24 @@ func (e DashboardLayoutVersion) Valid() bool {
 	}
 }
 
+// Defines values for DashboardMetricRefCount.
+const (
+	DashboardMetricRefCountEvents DashboardMetricRefCount = "events"
+	DashboardMetricRefCountPeople DashboardMetricRefCount = "people"
+)
+
+// Valid indicates whether the value is a known member of the DashboardMetricRefCount enum.
+func (e DashboardMetricRefCount) Valid() bool {
+	switch e {
+	case DashboardMetricRefCountEvents:
+		return true
+	case DashboardMetricRefCountPeople:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DashboardMetricRefSource.
 const (
 	DashboardMetricRefSourceCheck      DashboardMetricRefSource = "check"
@@ -591,6 +609,24 @@ func (e SeriesQueryCohort) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryCount.
+const (
+	SeriesQueryCountEvents SeriesQueryCount = "events"
+	SeriesQueryCountPeople SeriesQueryCount = "people"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryCount enum.
+func (e SeriesQueryCount) Valid() bool {
+	switch e {
+	case SeriesQueryCountEvents:
+		return true
+	case SeriesQueryCountPeople:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SeriesQueryRange.
 const (
 	SeriesQueryRangeN12h  SeriesQueryRange = "12h"
@@ -978,6 +1014,9 @@ type DashboardMetricRef struct {
 	// Cohort `people` only: `week` reads the retention grid.
 	Cohort *string `json:"cohort,omitempty"`
 
+	// Count `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
+	Count *DashboardMetricRefCount `json:"count,omitempty"`
+
 	// Field `people` only: the event field a breakdown ranks the values of.
 	Field  *string                  `json:"field,omitempty"`
 	Label  *string                  `json:"label,omitempty"`
@@ -988,6 +1027,9 @@ type DashboardMetricRef struct {
 	Steps *[]string          `json:"steps,omitempty"`
 	Where *map[string]string `json:"where,omitempty"`
 }
+
+// DashboardMetricRefCount `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
+type DashboardMetricRefCount string
 
 // DashboardMetricRefSource defines model for DashboardMetricRef.Source.
 type DashboardMetricRefSource string
@@ -1558,6 +1600,9 @@ type SeriesQuery struct {
 	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
 	Cohort *SeriesQueryCohort `json:"cohort,omitempty"`
 
+	// Count What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ''`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
+	Count *SeriesQueryCount `json:"count,omitempty"`
+
 	// Group Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold.
 	Group *[]string `json:"group,omitempty"`
 
@@ -1578,6 +1623,9 @@ type SeriesQuery struct {
 
 // SeriesQueryCohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
 type SeriesQueryCohort string
+
+// SeriesQueryCount What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ”`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
+type SeriesQueryCount string
 
 // SeriesQueryRange defines model for SeriesQuery.Range.
 type SeriesQueryRange string

@@ -736,6 +736,10 @@ components:
         field:
           type: string
           description: "`people` only: the event field a breakdown ranks the values of."
+        count:
+          type: string
+          enum: [people, events]
+          description: "`people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning."
         label: { type: string }
     DashboardWidget:
       type: object
@@ -902,6 +906,17 @@ components:
           type: string
           enum: [week]
           description: "`people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself."
+        count:
+          type: string
+          enum: [people, events]
+          description: >
+            What a one-key `people` fold counts, `people` by default. `events`
+            counts rows instead of distinct actors, and is the honest reading of
+            a dimension nobody is behind: a delivery outcome, an HTTP status, a
+            queue name. Without it such a card reads 0 and says nothing about
+            why, because every people read filters `actor <> ''`. It is refused
+            on a funnel, a retention grid and an A/B test: those ARE people by
+            definition, and a conversion rate over rows is not a rate.
     SeriesRequest:
       type: object
       description: "Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer."

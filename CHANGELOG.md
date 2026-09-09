@@ -6,6 +6,23 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-09-09
+
+### Added
+- **A breakdown can count events, not only people** (`SeriesQuery.count`, `DashboardMetricRef.count`).
+  A dimension nobody is behind — a delivery outcome, an email status, an HTTP status, a queue
+  name — has no actors at all, and every people read filters `actor <> ''`. So such a card read
+  0 and said nothing about why: the one silent-empty failure left in the analytics kinds, and
+  the reason four cards on our own board had been dark since the feeds moved to events.
+  `count: events` counts rows instead, **and drops the actor filter with the aggregate** —
+  counting events among rows that happen to have a person answers a third question nobody
+  asked. Absent means people, so every board saved before this keeps its meaning.
+  **Nothing switches the axis by itself.** The form asks, the ref carries the answer, and the
+  card prints `· events` in its caption because only the unusual unit needs saying: a card that
+  changed meaning the day its first actor arrived would be worse than an empty one. It is
+  refused on a funnel, a retention grid and an A/B test — those ARE people by definition, and a
+  conversion rate over rows is not a rate.
+
 ## [0.26.1] — 2026-09-09
 
 ### Fixed

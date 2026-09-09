@@ -61,17 +61,29 @@ func (s *Store) FunnelSteps(ctx context.Context, tenantID, projectID int64, step
 	return out, nil
 }
 
-// BreakdownValues counts the distinct people per value of one label over one
-// event name, most people first, capped like every grouped read. Rows the
-// label is absent from are dropped, matching CounterGroups: a row with no
-// value answers no value.
-func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, name, labelKey string, from, to time.Time) ([]LabelSum, error) {
+// BreakdownValues ranks the values of one label over one event name, most
+// first, capped like every grouped read. Rows the label is absent from are
+// dropped, matching CounterGroups: a row with no value answers no value.
+//
+// It is the one read here with an axis: `countEvents` counts ROWS instead of
+// distinct actors, because a dimension nobody is behind — a delivery outcome,
+// an HTTP status, a queue name — has no actors at all, and every people read
+// filters them out. Without this such a card reads 0 and says nothing about
+// why. The actor filter goes with the aggregate rather than staying: counting
+// events among rows that happen to have a person would answer a third
+// question nobody asked.
+func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, name, labelKey string, countEvents bool, from, to time.Time) ([]LabelSum, error) {
+	fold, actors := peopleCount, "AND actor <> ''"
+	if countEvents {
+		fold, actors = "count(*) AS events", ""
+	}
+	// ORDER BY the ordinal, because the aggregate's name changes with what it counts.
 	rows, err := s.pool.Query(ctx, `
-		SELECT labels->>$3 AS g, `+peopleCount+`
+		SELECT labels->>$3 AS g, `+fold+`
 		  FROM events
 		 WHERE tenant_id = $1 AND project_id = $2 AND name = $4
-		   AND actor <> '' AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6
-		 GROUP BY g ORDER BY people DESC LIMIT $7`,
+		   `+actors+` AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6
+		 GROUP BY g ORDER BY 2 DESC LIMIT $7`,
 		tenantID, projectID, labelKey, name, from, to, maxGroupRows)
 	if err != nil {
 		return nil, err

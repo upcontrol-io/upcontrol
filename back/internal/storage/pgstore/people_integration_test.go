@@ -81,7 +81,7 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 	seedEvent(t, pool, at.Add(2*time.Second), "purchase", "linus", map[string]string{"plan": "free"})
 	seedEvent(t, pool, at.Add(3*time.Second), "purchase", "", map[string]string{"plan": "pro"})
 	seedEvent(t, pool, at.Add(4*time.Second), "purchase", "ada", nil)
-	values, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", from, to)
+	values, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", false, from, to)
 	if err != nil {
 		t.Fatalf("breakdown values: %v", err)
 	}
@@ -89,6 +89,20 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 		values[0].Labels["plan"] != "pro" || values[0].Sum != 2 ||
 		values[1].Labels["plan"] != "free" || values[1].Sum != 1 {
 		t.Fatalf("pro=2 people then free=1; got %+v", values)
+	}
+
+	// The same fold counting rows. The pro row nobody is behind is the whole
+	// point: it is invisible to the people count above and must be counted
+	// here, or a dimension with no actors at all — a delivery outcome, an HTTP
+	// status — reads 0 and says nothing about why.
+	rowsPerPlan, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", true, from, to)
+	if err != nil {
+		t.Fatalf("breakdown events: %v", err)
+	}
+	if len(rowsPerPlan) != 2 ||
+		rowsPerPlan[0].Labels["plan"] != "pro" || rowsPerPlan[0].Sum != 3 ||
+		rowsPerPlan[1].Labels["plan"] != "free" || rowsPerPlan[1].Sum != 1 {
+		t.Fatalf("pro=3 events (the actorless one counts) then free=1; got %+v", rowsPerPlan)
 	}
 }
 
