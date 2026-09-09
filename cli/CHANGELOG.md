@@ -3,6 +3,24 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-09 — upcontrol 0.2.1
+
+- **The board topic stopped contradicting the wire topic.** `dashboard.md` told the agent that
+  a funnel, an A/B test, a retention or a breakdown card takes a ref whose `source` is
+  `funnel` / `experiment` / `retention` / `dimension` and whose `name` is "the name you declared
+  it as in the SDK call", while `wire.md` said two pages later that there is no declaration
+  step. The doc was wrong: those sources are refused, and a board built from it drew nothing at
+  all, silently — the file's own warning says that column is load-bearing and unvalidated.
+  Every analytics card now reads `source: "people"`, and the shape of the ref picks the reading:
+  `steps` a funnel, `cohort` a retention grid, `name` + `field` a breakdown, `name` alone an
+  A/B test whose arms ride `uc.variant` and `uc.stat`. Two worked examples added.
+- `funnel.md`, `experiment.md`, `retention.md` and `breakdown.md` keep their SDK recipes — a
+  helper's name becomes the event name on the wire — but stop claiming the board picks what was
+  declared. An A/B card orders its arms by people and names `control` as the baseline; a
+  breakdown counts PEOPLE, so a `value()` with no `who` has nobody to count.
+- Needs core 0.26.1 or newer: before it, a board carrying any of these refs was refused by its
+  own save.
+
 ## 2026-09-09 — upcontrol 0.2.0
 
 - **A new topic, `wire`: how to send from a stack that is not Node.** The SDK is a JavaScript
