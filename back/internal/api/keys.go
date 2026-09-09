@@ -8,12 +8,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -235,7 +237,11 @@ func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectI
 
 	secret := randomHex() // 32 hex chars; first 12 = prefix, rest = secret
 	prefix := secret[:12]
-	fullKey := "uc_live_" + secret
+	// Rotation mints a SECRET key and retires only secret keys, so the scheme is
+	// that kind's — derived, never a literal, because a hand-written prefix in one
+	// place and a derived one in another is how a key gets minted under one scheme
+	// and looked up under the other.
+	fullKey := keyScheme(keyKindSecret) + secret
 	hash := sha256.Sum256([]byte(fullKey))
 
 	row, err := h.pool.Queries().RotateAPIKey(ctx, sqlc.RotateAPIKeyParams{
@@ -244,6 +250,15 @@ func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectI
 		Prefix:     prefix,
 		SecretHash: hash[:],
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The query retires secret keys and issues one from what it retired, so no
+		// active secret key means nothing to rotate. Reachable now that a project may
+		// hold only a public one — and rotating that is a different act on a different
+		// clock (it means redeploying a website), so it is said rather than guessed at.
+		writeAPIErrMsg(w, http.StatusConflict, "nothing_to_rotate",
+			"This project has no active secret key to rotate. Issue one first; a public key is rotated by replacing it, since it lives in a deployed bundle.")
+		return
+	}
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "rotate_failed")
 		return
@@ -251,8 +266,8 @@ func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectI
 
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"id":        "key_" + strconv.FormatInt(row.ID, 10),
-		"prefix":    "uc_live_" + prefix, // what GET /v1/keys will list from now on
-		"value":     fullKey,             // shown exactly once
+		"prefix":    keyScheme(keyKindSecret) + prefix, // what GET /v1/keys will list from now on
+		"value":     fullKey,                           // shown exactly once
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
 	})
 }

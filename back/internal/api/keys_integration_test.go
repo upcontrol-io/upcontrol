@@ -35,10 +35,12 @@ func callKeys(t *testing.T, h *keys, method, path, body string) (int, string) {
 }
 
 type keyCard struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	State     string  `json:"state"`
-	RevokedAt *string `json:"revokedAt"`
+	Kind      string   `json:"kind"`
+	Origins   []string `json:"origins"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	State     string   `json:"state"`
+	RevokedAt *string  `json:"revokedAt"`
 }
 
 type keysAnswer struct {
@@ -226,5 +228,84 @@ func TestTheSixthLiveKeyIsA409NeverAWall(t *testing.T) {
 	}
 	if code, body := callKeys(t, h, http.MethodPost, "/v1/keys", ""); code != http.StatusCreated {
 		t.Fatalf("a revoked key frees a slot; got %d %s", code, body)
+	}
+}
+
+// Rotation is the everything-now lever for SECRET keys. A public key must survive
+// it: it lives in a deployed browser bundle, its replacement would be a uc_live_
+// key that cannot go there, and the only symptom of getting this wrong is a
+// website that goes quiet 24 hours later.
+func TestRotationRetiresTheSecretKeysAndSparesThePublicOne(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	mintCreationKey(t, pool, tenantID, boardOf(t, pool, tenantID))
+	h := keysAPI(t, pool, tenantID)
+
+	code, body := callKeys(t, h, http.MethodPost, "/v1/keys",
+		`{"name":"site","kind":"public","origins":["https://example.com"]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("mint a public key = %d %s", code, body)
+	}
+	var minted struct {
+		ID     string `json:"id"`
+		Prefix string `json:"prefix"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(body), &minted); err != nil {
+		t.Fatalf("issue must answer the key: %v (%s)", err, body)
+	}
+	if !strings.HasPrefix(minted.Prefix, "uc_pub_") || minted.Kind != "public" {
+		t.Fatalf("a public key is listed under its own scheme; got %s / %s", minted.Prefix, minted.Kind)
+	}
+
+	if code, body := callKeys(t, h, http.MethodPost, "/v1/keys/rotate", ""); code != http.StatusOK {
+		t.Fatalf("rotate = %d %s", code, body)
+	}
+
+	a, _ := readKeys(t, h)
+	pub := findKey(t, a, minted.ID)
+	if pub.State != "active" {
+		t.Fatalf("the public key must still be active after a rotation; got %q", pub.State)
+	}
+	// One new secret key, and exactly one: `old` returns a row per retired key, so
+	// an INSERT..SELECT over it would mint one replacement per old key.
+	fresh := 0
+	for _, k := range a.Keys {
+		if k.State == "active" && k.ID != minted.ID {
+			fresh++
+		}
+	}
+	if fresh != 1 {
+		t.Fatalf("rotation issues exactly one new secret key; got %d active others in %v", fresh, a.Keys)
+	}
+}
+
+// A project holding only a public key has nothing to rotate, and says so rather
+// than answering 500 from an empty INSERT..SELECT.
+func TestRotationWithNoSecretKeyIsRefusedInWords(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := keysAPI(t, pool, tenantID)
+
+	if code, body := callKeys(t, h, http.MethodPost, "/v1/keys",
+		`{"kind":"public","origins":["https://example.com"]}`); code != http.StatusCreated {
+		t.Fatalf("mint a public key = %d %s", code, body)
+	}
+	code, body := callKeys(t, h, http.MethodPost, "/v1/keys/rotate", "")
+	if code != http.StatusConflict || !strings.Contains(body, "nothing_to_rotate") {
+		t.Fatalf("rotating with no secret key = 409 nothing_to_rotate; got %d %s", code, body)
+	}
+}
+
+// A public key must list the origins it may be sent from: with none it is exactly
+// the unscoped key it exists to replace, so it is refused at the door.
+func TestAPublicKeyWithoutOriginsIsRefused(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := keysAPI(t, pool, tenantID)
+
+	code, body := callKeys(t, h, http.MethodPost, "/v1/keys", `{"kind":"public","origins":[]}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "origins_required") {
+		t.Fatalf("a public key with no origins = 400 origins_required; got %d %s", code, body)
 	}
 }

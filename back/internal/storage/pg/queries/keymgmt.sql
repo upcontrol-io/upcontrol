@@ -9,17 +9,33 @@ VALUES (sqlc.arg(tenant_id), sqlc.arg(project_id), sqlc.arg(prefix), sqlc.arg(se
 RETURNING id, prefix, name, state, created_at, kind, origins;
 
 -- name: RotateAPIKey :one
--- Atomic: set the project's old key to rotating, insert the new one, return it.
+-- Atomic: retire the project's active SECRET keys and issue one new one.
 -- Scoped to one project: a workspace's other projects keep their keys.
+--
+-- Rotation is the everything-now lever, so retiring every secret key at once is
+-- the intent, not a bug. Two things are not:
+--
+--   kind = 'secret' — a public key must survive this. It lives in a browser
+--   bundle, its replacement would be a uc_live_ key that cannot go there, and
+--   the only symptom would be a website that goes quiet 24 hours later.
+--   Rotating a public key means redeploying a site: a different act, on a
+--   different clock, and it gets its own door rather than a side effect here.
+--
+--   LIMIT 1 — `old` returns one row per retired key, and INSERT..SELECT would
+--   have minted one new key per old one. With the key SET (2026-09-07) that is
+--   no longer hypothetical: two keys in, two out, and :one hands back whichever
+--   the planner returned first.
 WITH old AS (
     UPDATE api_key
        SET state = 'rotating', rotating_until = now() + INTERVAL '24 hours'
      WHERE api_key.tenant_id = sqlc.arg(tenant_id)
-       AND api_key.project_id = sqlc.arg(project_id) AND api_key.state = 'active'
+       AND api_key.project_id = sqlc.arg(project_id)
+       AND api_key.state = 'active' AND api_key.kind = 'secret'
     RETURNING project_id
 )
-INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state)
-SELECT sqlc.arg(tenant_id), old.project_id, sqlc.arg(prefix), sqlc.arg(secret_hash), 'active' FROM old
+INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state, kind)
+SELECT sqlc.arg(tenant_id), old.project_id, sqlc.arg(prefix), sqlc.arg(secret_hash), 'active', 'secret'
+  FROM old LIMIT 1
 RETURNING id, prefix, created_at;
 
 -- name: ListAPIKeysForProject :many
