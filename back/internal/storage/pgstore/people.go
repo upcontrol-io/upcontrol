@@ -140,32 +140,35 @@ func (s *Store) RetentionCohorts(ctx context.Context, tenantID, projectID int64,
 	return out, rows.Err()
 }
 
-// ExperimentArms counts the distinct people per variant for each of an
-// experiment's two event names, the exposed one and the converted one. The
-// two names ride one array parameter; a variant is the value of one label
-// key, and a row without it is dropped — an event that names no arm answers
-// no arm.
-func (s *Store) ExperimentArms(ctx context.Context, tenantID, projectID int64, variantKey, exposedName, convertedName string, from, to time.Time) ([]LabelSum, error) {
+// ExperimentArms counts the distinct people per arm per stat over ONE event
+// name: the wire writes an A/B test as a single name whose rows carry the arm
+// in one label key and exposed/converted in another, so the read folds that
+// name by the two keys the caller names. A row missing either key is dropped
+// — an event naming no arm answers no arm, and one naming no stat answers no
+// stat.
+func (s *Store) ExperimentArms(ctx context.Context, tenantID, projectID int64,
+	name, variantKey, statKey string, from, to time.Time) ([]LabelSum, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, labels->>$3 AS variant, `+peopleCount+`
+		SELECT labels->>$3 AS variant, labels->>$4 AS stat, `+peopleCount+`
 		  FROM events
-		 WHERE tenant_id = $1 AND project_id = $2 AND name = ANY($4)
-		   AND actor <> '' AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6
-		 GROUP BY name, variant ORDER BY people DESC LIMIT $7`,
-		tenantID, projectID, variantKey, []string{exposedName, convertedName}, from, to, maxGroupRows)
+		 WHERE tenant_id = $1 AND project_id = $2 AND name = $5
+		   AND actor <> '' AND labels->>$3 IS NOT NULL AND labels->>$4 IS NOT NULL
+		   AND ts >= $6 AND ts < $7
+		 GROUP BY variant, stat ORDER BY people DESC LIMIT $8`,
+		tenantID, projectID, variantKey, statKey, name, from, to, maxGroupRows)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []LabelSum{}
 	for rows.Next() {
-		var name, variant string
+		var variant, stat string
 		var people int64
-		if err := rows.Scan(&name, &variant, &people); err != nil {
+		if err := rows.Scan(&variant, &stat, &people); err != nil {
 			return nil, err
 		}
 		out = append(out, LabelSum{
-			Labels: map[string]string{"event": name, variantKey: variant},
+			Labels: map[string]string{variantKey: variant, statKey: stat},
 			Sum:    float64(people),
 		})
 	}

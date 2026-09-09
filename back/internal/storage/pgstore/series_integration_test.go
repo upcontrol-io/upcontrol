@@ -3,7 +3,7 @@
 // Integration test for the board's reads against a real Postgres with 001
 // applied: the catalog of what a project sends and the bucketed series a
 // widget draws. The logs half goes through ring.QueryBuilder, which is the
-// only path to that table. Three tests, so three containers rather than one
+// only path to that table. Four tests, so four containers rather than one
 // per assertion group.
 // Run: go test -tags=integration ./internal/storage/pgstore/...
 package pgstore
@@ -238,6 +238,38 @@ func TestCheckAndEventSeries(t *testing.T) {
 	}
 }
 
+// The field list is the picker's "what can I break this event down by", so
+// the wire's own namespace must never reach it and each event's keys arrive
+// most-used first.
+func TestCatalogEventFields(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Add(-5 * time.Minute)
+
+	events := []EventRow{
+		{Name: "purchase", TS: at, Labels: map[string]string{"plan": "pro", "region": "eu", "uc.variant": "A"}},
+		{Name: "purchase", TS: at.Add(time.Second), Labels: map[string]string{"plan": "free"}},
+		{Name: "signup", TS: at.Add(2 * time.Second), Labels: map[string]string{"source": "ads"}},
+	}
+	for i := range events {
+		events[i].TenantID, events[i].ProjectID = seriesTenant, catalogProject
+	}
+	if err := s.InsertEvents(ctx, events); err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	fields, err := s.CatalogEventFields(ctx, seriesTenant, catalogProject, at.Add(-time.Hour), 20000, 10)
+	if err != nil {
+		t.Fatalf("catalog event fields: %v", err)
+	}
+	if got := fields["purchase"]; len(got) != 2 || got[0] != "plan" || got[1] != "region" {
+		t.Fatalf("purchase carries plan then region, most-used first, and never uc.variant; got %v", got)
+	}
+	if got := fields["signup"]; len(got) != 1 || got[0] != "source" {
+		t.Fatalf("signup carries source alone; got %v", got)
+	}
+}
+
 func TestMetricCatalogAndFunnelFold(t *testing.T) {
 	s, _ := openStore(t)
 	ctx := context.Background()
@@ -271,19 +303,6 @@ func TestMetricCatalogAndFunnelFold(t *testing.T) {
 	}
 	if len(metrics[0].Labels) != 1 || metrics[0].Labels[0] != "route" {
 		t.Fatalf("the label keys are what a widget can narrow by; got %v", metrics[0].Labels)
-	}
-
-	funnels, err := s.CatalogCounters(ctx, seriesTenant, catalogProject, "funnel", "funnel", "step", from.Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("catalog funnels: %v", err)
-	}
-	if len(funnels) != 1 || funnels[0].Name != "visit to paid" {
-		t.Fatalf("one funnel was written; got %+v", funnels)
-	}
-	for i, step := range []string{"visit", "signup", "paid"} {
-		if funnels[0].Members[i] != step {
-			t.Fatalf("steps must follow the `i` label; got %v", funnels[0].Members)
-		}
 	}
 
 	step := map[string]string{"funnel": "visit to paid", "step": "paid"}

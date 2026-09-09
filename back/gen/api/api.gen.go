@@ -857,29 +857,13 @@ type CatalogCheck struct {
 	Type string `json:"type"`
 }
 
-// CatalogDimension One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series.
-type CatalogDimension struct {
-	Name   string `json:"name"`
-	Values int    `json:"values"`
-}
-
-// CatalogEvent defines model for CatalogEvent.
+// CatalogEvent One event name the project sent, and the field keys its recent rows carried. The fields are what a breakdown folds by: an event is picked, then one of its own fields, so nobody has to remember what they named it. Reserved `uc.`-prefixed keys are left out — they are the wire's, not a dimension.
 type CatalogEvent struct {
+	// Fields Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth.
+	Fields []string  `json:"fields"`
 	LastTs time.Time `json:"lastTs"`
 	Name   string    `json:"name"`
 	Times  int       `json:"times"`
-}
-
-// CatalogExperiment One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list.
-type CatalogExperiment struct {
-	Name     string   `json:"name"`
-	Variants []string `json:"variants"`
-}
-
-// CatalogFunnel A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`).
-type CatalogFunnel struct {
-	Name  string   `json:"name"`
-	Steps []string `json:"steps"`
 }
 
 // CatalogGroup One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service.
@@ -901,12 +885,6 @@ type CatalogMetric struct {
 	Labels   []string `json:"labels"`
 	Name     string   `json:"name"`
 	Readings int      `json:"readings"`
-}
-
-// CatalogRetention One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series.
-type CatalogRetention struct {
-	Cohorts int    `json:"cohorts"`
-	Name    string `json:"name"`
 }
 
 // ChannelKind defines model for ChannelKind.
@@ -974,16 +952,12 @@ type ConnectableSource struct {
 
 // DashboardCatalog What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure.
 type DashboardCatalog struct {
-	Attrs       []CatalogAttr       `json:"attrs"`
-	Checks      []CatalogCheck      `json:"checks"`
-	Dimensions  []CatalogDimension  `json:"dimensions"`
-	Events      []CatalogEvent      `json:"events"`
-	Experiments []CatalogExperiment `json:"experiments"`
-	Funnels     []CatalogFunnel     `json:"funnels"`
-	Groups      []CatalogGroup      `json:"groups"`
-	Metrics     []CatalogMetric     `json:"metrics"`
-	Retentions  []CatalogRetention  `json:"retentions"`
-	Services    []LogService        `json:"services"`
+	Attrs    []CatalogAttr   `json:"attrs"`
+	Checks   []CatalogCheck  `json:"checks"`
+	Events   []CatalogEvent  `json:"events"`
+	Groups   []CatalogGroup  `json:"groups"`
+	Metrics  []CatalogMetric `json:"metrics"`
+	Services []LogService    `json:"services"`
 }
 
 // DashboardLayout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
@@ -1573,7 +1547,7 @@ type SeriesQuery struct {
 	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
 	Cohort *SeriesQueryCohort `json:"cohort,omitempty"`
 
-	// Group Label keys to fold by. For `metric` it folds a counter's labels; for `people` it names the label whose values a breakdown ranks (one key), or the variant label of an A/B test (two). With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold.
+	// Group Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold.
 	Group *[]string `json:"group,omitempty"`
 
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.

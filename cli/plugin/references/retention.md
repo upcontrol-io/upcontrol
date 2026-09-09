@@ -11,8 +11,9 @@ The request usually arrives as a sentence copied from the board's form:
 > week they first appeared.
 
 Read one thing out of it: the name (the user's own words, 1 to 60
-characters). Do not tidy it into something else - the board shows what was
-declared. A declaration outside those limits is ignored whole, with one line
+characters). Do not tidy it into something else - the name becomes the event
+name on the wire; the board's card reads the whole project and names nothing.
+A declaration outside those limits is ignored whole, with one line
 on stderr, so keep to them.
 
 ## seen() takes the stable user id - the one rule

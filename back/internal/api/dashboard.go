@@ -37,6 +37,10 @@ const (
 	// The attribute pass expands every line into one row per attribute, so it
 	// reads the newest lines rather than the whole week.
 	catalogAttrScan = 20000
+	// The event field pass expands every event into one row per label key, so
+	// it reads the newest rows rather than the whole week.
+	catalogEventScan      = 20000
+	catalogFieldsPerEvent = 10
 )
 
 // seriesRange is one entry of the range enum: how wide a bucket is and how
@@ -201,8 +205,8 @@ func validateSeries(qs []seriesQuery) string {
 			if len(q.Group) > 2 {
 				return "group takes one or two label keys in " + q.ID
 			}
-			// A people group can carry event names (an experiment's two), which
-			// the SDK lets run to 60; a metric group key is a label key at 40.
+			// A group key is a label key in both sources; the SDK lets a
+			// people one run to 60, a metric one to 40.
 			keyMax := 40
 			if q.Source == "people" {
 				keyMax = 60
@@ -229,9 +233,8 @@ func validateSeries(qs []seriesQuery) string {
 			case q.Cohort == "week":
 				// Retention: the range is the whole question.
 			case len(q.Group) == 1 || len(q.Group) == 2:
-				// Breakdown (one key, an event name in `name`) or an experiment
-				// (two keys, the exposed and converted event names, with `name`
-				// the label key that carries the arm).
+				// Breakdown (one key) or an A/B test (two keys, the arm and
+				// the stat label keys); `name` is the event name in both.
 				if q.Name == "" {
 					return "a people group query needs a name in " + q.ID
 				}
@@ -280,10 +283,6 @@ func (h *writeAPI) getDashboardCatalog(w http.ResponseWriter, r *http.Request, t
 		{"checks", func() ([]map[string]any, error) { return h.catalogChecks(ctx, projectID) }},
 		{"events", func() ([]map[string]any, error) { return h.catalogEvents(ctx, tenantID, projectID, since) }},
 		{"metrics", func() ([]map[string]any, error) { return h.catalogMetrics(ctx, tenantID, projectID, since) }},
-		{"funnels", func() ([]map[string]any, error) { return h.catalogFunnels(ctx, tenantID, projectID, since) }},
-		{"experiments", func() ([]map[string]any, error) { return h.catalogExperiments(ctx, tenantID, projectID, since) }},
-		{"retentions", func() ([]map[string]any, error) { return h.catalogRetentions(ctx, tenantID, projectID, since) }},
-		{"dimensions", func() ([]map[string]any, error) { return h.catalogDimensions(ctx, tenantID, projectID, since) }},
 	} {
 		rows, err := part.read()
 		if err != nil {
@@ -398,11 +397,22 @@ func (h *writeAPI) catalogEvents(ctx context.Context, tenantID, projectID int64,
 	if err != nil {
 		return nil, err
 	}
+	fields, err := h.pgs.CatalogEventFields(ctx, tenantID, projectID, since, catalogEventScan, catalogFieldsPerEvent)
+	if err != nil {
+		return nil, err
+	}
 	for _, e := range rows {
+		// An event that carried no field gets an empty list, never null: an
+		// empty list is a real answer.
+		keys := fields[e.Name]
+		if keys == nil {
+			keys = []string{}
+		}
 		out = append(out, map[string]any{
 			"name":   e.Name,
 			"times":  e.Times,
 			"lastTs": e.LastTS.UTC().Format(time.RFC3339),
+			"fields": keys,
 		})
 	}
 	return out, nil
@@ -425,51 +435,6 @@ func (h *writeAPI) catalogMetrics(ctx context.Context, tenantID, projectID int64
 		out = append(out, map[string]any{"name": m.Name, "readings": m.Readings, "labels": labels})
 	}
 	return out, nil
-}
-
-// counterCatalog reads one reported kind through CatalogCounters into the
-// catalog's row shape. A nil member list is normalised to empty, so it
-// reaches JSON as [] and not null — an empty list is a real answer.
-func (h *writeAPI) counterCatalog(ctx context.Context, tenantID, projectID int64, name, keyLabel, memberLabel string, since time.Time, shape func(pgstore.CatalogCounter) map[string]any) ([]map[string]any, error) {
-	out := []map[string]any{}
-	if h.pgs == nil {
-		return out, nil
-	}
-	counters, err := h.pgs.CatalogCounters(ctx, tenantID, projectID, name, keyLabel, memberLabel, since)
-	if err != nil {
-		return nil, err
-	}
-	for _, c := range counters {
-		if c.Members == nil {
-			c.Members = []string{}
-		}
-		out = append(out, shape(c))
-	}
-	return out, nil
-}
-
-func (h *writeAPI) catalogFunnels(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
-	return h.counterCatalog(ctx, tenantID, projectID, "funnel", "funnel", "step", since, func(c pgstore.CatalogCounter) map[string]any {
-		return map[string]any{"name": c.Name, "steps": c.Members}
-	})
-}
-
-func (h *writeAPI) catalogExperiments(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
-	return h.counterCatalog(ctx, tenantID, projectID, "experiment", "experiment", "variant", since, func(c pgstore.CatalogCounter) map[string]any {
-		return map[string]any{"name": c.Name, "variants": c.Members}
-	})
-}
-
-func (h *writeAPI) catalogRetentions(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
-	return h.counterCatalog(ctx, tenantID, projectID, "retention", "retention", "cohort", since, func(c pgstore.CatalogCounter) map[string]any {
-		return map[string]any{"name": c.Name, "cohorts": len(c.Members)}
-	})
-}
-
-func (h *writeAPI) catalogDimensions(ctx context.Context, tenantID, projectID int64, since time.Time) ([]map[string]any, error) {
-	return h.counterCatalog(ctx, tenantID, projectID, "breakdown", "dimension", "value", since, func(c pgstore.CatalogCounter) map[string]any {
-		return map[string]any{"name": c.Name, "values": len(c.Members)}
-	})
 }
 
 func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID int64) {
@@ -597,9 +562,9 @@ func groupedAnswer(q seriesQuery, from, to time.Time, r seriesRange, rows []any)
 // peopleSeries answers the people source's four reads, every one a GROUP BY
 // over events with a person behind them. The shape picks the read: steps name
 // a funnel's events; cohort "week" the retention grid; a group of one narrows
-// one event name to one label's values (breakdown); a group of two names an
-// experiment's exposed and converted events, with `name` the label key that
-// carries the arm.
+// one event name to one label's values (breakdown); a group of two folds one
+// event name by its arm and stat label keys (an A/B test). In both grouped
+// shapes `name` is the event name.
 func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
 	rows := []any{}
 	if h.pgs != nil {

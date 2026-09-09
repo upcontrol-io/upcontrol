@@ -60,10 +60,10 @@ smallest the board accepts, and a kind that is not ranged must carry no
 | `status` | uptime bars for the checks you pick | 6 | 12 | 3 / 6 | no | one or more | `check` |
 | `network` | probe timings for one check | 6 | 12 | 3 / 6 | no | exactly one | `check` |
 | `calendar` | daily volume of one metric | 6 | 10 | 2 / 8 | no | exactly one | `logs`, `check`, `event` or `metric` |
-| `funnel` | a journey step by step | 6 | 12 | 3 / 8 | yes | exactly one | `funnel` |
-| `experiment` | control against its variants | 6 | 8 | 3 / 6 | yes | exactly one | `experiment` |
-| `retention` | weekly cohorts | 6 | 12 | 4 / 8 | no | exactly one | `retention` |
-| `breakdown` | the top of one dimension | 4 | 12 | 3 / 6 | yes | exactly one | `dimension` |
+| `funnel` | a journey step by step | 6 | 12 | 3 / 8 | yes | exactly one | `people` |
+| `experiment` | control against its variants | 6 | 8 | 3 / 6 | yes | exactly one | `people` |
+| `retention` | weekly cohorts | 6 | 12 | 4 / 8 | no | exactly one | `people` |
+| `breakdown` | the top of one dimension | 4 | 12 | 3 / 6 | yes | exactly one | `people` |
 
 The last column is load-bearing and the validator does not check it: a card
 whose ref carries the wrong source draws nothing at all, silently. A `logs`
@@ -75,11 +75,11 @@ card in particular reads its service from the ref's `name`, not from a
 ## What a widget draws - the ref
 
 ```json
-{ "source": "...", "name": "...", "where": { "...": "..." } }
+{ "source": "...", "name": "...", "steps": ["..."], "cohort": "...", "field": "...", "where": { "...": "..." } }
 ```
 
-`source` is one of `logs check event metric service funnel experiment
-retention dimension`. An optional `label` names the pick on the card when the
+`source` is one of `logs check event metric service people`. An optional
+`label` names the pick on the card when the
 catalog no longer lists it; it changes nothing about what is drawn. What
 `name` and `where` mean, per source:
 
@@ -90,7 +90,19 @@ catalog no longer lists it; it changes nothing about what is drawn. What
 | `event` | the event name you passed to `track()` | none |
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
-| `funnel` / `experiment` / `retention` / `dimension` | the name you declared it as in the SDK call | none |
+| `people` | the event name, on a breakdown or an A/B test | none; `steps`, `cohort` and `field` pick the reading |
+
+A `people` ref is the definition itself - the card is built from event names,
+with nothing declared elsewhere to keep in sync. It counts distinct people: an
+event counts only when it carries `uc.actor`. The shape of the ref picks the
+reading:
+
+| card | ref |
+|---|---|
+| `funnel` | `{ "source": "people", "steps": ["visit", "signup", "payment.succeeded"] }` - the step event names, in journey order, 2 to 12 |
+| `retention` | `{ "source": "people", "cohort": "week" }` - the whole project; there is nothing to name |
+| `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it |
+| `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows |
 
 The board counts three levels, folding every other one into `info`; a `level`
 outside the three is not a filter and the card draws every level.
@@ -122,8 +134,10 @@ Be exact, because this is the half that fails silently:
 
 ## A worked example
 
-For a project that sends the service `api` and the events `signup`,
-`checkout_started` and `checkout_completed`:
+For a project that sends the service `api`, the events `signup`,
+`checkout_started` (each row carrying `uc.variant` and `uc.stat`),
+`checkout_completed`, and the event `page`, which carries its dimension value
+on the `value` field:
 
 ```json
 {
@@ -151,12 +165,23 @@ For a project that sends the service `api` and the events `signup`,
       "id": "w_api_logs", "kind": "logs", "title": "API logs",
       "metrics": [{ "source": "service", "name": "api" }],
       "x": 3, "y": 8, "w": 6, "h": 16
+    },
+    {
+      "id": "w_cta", "kind": "experiment", "title": "Checkout CTA",
+      "metrics": [{ "source": "people", "name": "checkout_started" }],
+      "range": "24h", "x": 0, "y": 24, "w": 6, "h": 8
+    },
+    {
+      "id": "w_pages", "kind": "breakdown", "title": "Top pages",
+      "metrics": [{ "source": "people", "name": "page", "field": "value" }],
+      "range": "24h", "x": 6, "y": 24, "w": 4, "h": 12
     }
   ]
 }
 ```
 
-Two cards fill the first rows side by side (6 + 6 = 12 columns), then the stat
-and the log tail fill the next ones without overlap. To land these under what
+Two cards fill the first row side by side (6 + 6 = 12 columns), the stat and
+the log tail the next (the log tail is `h: 16`, so the row under it starts at
+`y: 24`), and the two `people` cards fill that one. To land these under what
 the board already holds is `npx upcontrol board --add ./board.json`; to make
 them the whole board is `--apply`.

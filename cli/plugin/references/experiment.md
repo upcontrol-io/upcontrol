@@ -13,7 +13,8 @@ The request usually arrives as a sentence copied from the board's form:
 Read two things out of it, in this order: the name (the user's own words, 1 to
 60 characters) and the arms (2 to 8, each 1 to 40 characters, control first,
 again the user's own words). Do not tidy either into something else - the
-board shows what was declared. A declaration outside those limits is ignored
+name becomes the event name on the wire, and the arms ride it as `uc.variant`.
+A declaration outside those limits is ignored
 whole, with one line on stderr, so keep to them.
 
 ## Step 1 - declare the test once
@@ -82,7 +83,8 @@ checkoutCta.convert(arm, userId);  // the payment success branch, the arm they s
 - One line per call. No wrappers, no control-flow changes, no `await` -
   `expose()` and `convert()` never throw and never block.
 - The request or the user id, never an email, never a session token.
-- Control is first in the declaration; the board draws the arms in that order.
+- Control is first in the declaration. The board's card orders the arms by
+  people, putting a variant literally named `control` first.
 - The server counts a person once per arm per stat, so a reload does not
   inflate the rate and a second conversion does not move it. Keep the calls at
   the moment anyway, out of per-item loops.

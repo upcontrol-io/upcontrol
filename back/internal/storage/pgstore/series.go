@@ -25,13 +25,6 @@ type CatalogMetric struct {
 	Labels   []string
 }
 
-// CatalogCounter is one reported counter and its members — a funnel's steps,
-// a test's variants — in the order the latest readings declared them.
-type CatalogCounter struct {
-	Name    string
-	Members []string
-}
-
 // Bucket is one counted bucket of a series, indexed from the range's start.
 type Bucket struct {
 	Index int64
@@ -111,14 +104,51 @@ func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, si
 	return out, rows.Err()
 }
 
+// CatalogEventFields lists, per event name, the label keys that name's recent
+// rows carried, most-used first, capped per event. Like AttrPairs, it reads
+// the newest `scan` rows rather than the whole window: the LATERAL expansion
+// multiplies rows by the field count, and the picker only needs the shape of
+// recent traffic. The `uc.` prefix is the wire's own namespace (`uc.variant`,
+// `uc.stat`), never a dimension somebody would rank people by, so those keys
+// are dropped.
+func (s *Store) CatalogEventFields(ctx context.Context, tenantID, projectID int64,
+	since time.Time, scan, perEvent int) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT name, key FROM (
+			SELECT name, key, count(*) AS times,
+			       row_number() OVER (PARTITION BY name ORDER BY count(*) DESC) AS rn
+			  FROM (SELECT name, labels FROM events
+			         WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND labels IS NOT NULL
+			         ORDER BY ts DESC LIMIT $4) recent
+			    CROSS JOIN LATERAL jsonb_each_text(labels) AS pair(key, value)
+			   WHERE key NOT LIKE 'uc.%'
+			   GROUP BY name, key
+		) f WHERE rn <= $5 ORDER BY name, times DESC`,
+		tenantID, projectID, since, scan, perEvent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var name, key string
+		if err := rows.Scan(&name, &key); err != nil {
+			return nil, err
+		}
+		out[name] = append(out[name], key)
+	}
+	return out, rows.Err()
+}
+
 // reservedCounters are the reported kinds the Metrics picker must not offer
-// as gauges: each is a counter with a shape of its own, and drawing its
-// running total would label it a reading. CatalogCounters reads them. One
-// list, so every predicate that excludes them cannot drift.
+// as gauges: a counter's running total is not a reading. Nothing reports them
+// any more — the feeds moved onto events — but rows written before that move
+// are still aging out of the window. One list, so every predicate that
+// excludes them cannot drift.
 var reservedCounters = []string{"funnel", "experiment", "retention", "breakdown"}
 
-// CatalogMetrics lists the metric names except the reserved counters, which
-// are shapes of their own (CatalogCounters reads those). The label keys come
+// CatalogMetrics lists the metric names except the reserved counters, whose
+// running totals are not readings. The label keys come
 // from a second pass: expanding them in the counting query would multiply the
 // reading count by the number of keys.
 func (s *Store) CatalogMetrics(ctx context.Context, tenantID, projectID int64, since time.Time) ([]CatalogMetric, error) {
@@ -143,52 +173,6 @@ func (s *Store) CatalogMetrics(ctx context.Context, tenantID, projectID int64, s
 			return nil, err
 		}
 		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-// maxCatalogMembers caps one counter's member list in the catalog. A
-// breakdown dimension can have thousands of values, and the catalog only
-// needs enough to count and to name.
-const maxCatalogMembers = 200
-
-// CatalogCounters groups one reported counter kind into its names and their
-// members. The order is the `i` label of the newest reading of each member; a
-// member whose `i` is not a number sorts last rather than failing the read.
-// The two label names ride as parameters like every other value.
-func (s *Store) CatalogCounters(ctx context.Context, tenantID, projectID int64,
-	name, keyLabel, memberLabel string, since time.Time) ([]CatalogCounter, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT key, member FROM (
-			SELECT labels->>$4 AS key, labels->>$5 AS member,
-			       (array_agg(labels->>'i' ORDER BY ts DESC))[1] AS i
-			  FROM metrics
-			 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND name = $6
-			   AND labels->>$4 IS NOT NULL AND labels->>$5 IS NOT NULL
-			 GROUP BY 1, 2
-		) f
-		 ORDER BY key, (CASE WHEN i ~ '^-?[0-9]+$' THEN i::int END) NULLS LAST, member`,
-		tenantID, projectID, since, keyLabel, memberLabel, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []CatalogCounter{}
-	at := map[string]int{}
-	for rows.Next() {
-		var key, member string
-		if err := rows.Scan(&key, &member); err != nil {
-			return nil, err
-		}
-		i, ok := at[key]
-		if !ok {
-			i = len(out)
-			at[key] = i
-			out = append(out, CatalogCounter{Name: key, Members: []string{}})
-		}
-		if len(out[i].Members) < maxCatalogMembers {
-			out[i].Members = append(out[i].Members, member)
-		}
 	}
 	return out, rows.Err()
 }

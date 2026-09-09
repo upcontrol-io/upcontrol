@@ -10,9 +10,10 @@ The request usually arrives as a sentence copied from the board's form:
 > Add an UpControl breakdown "page" counting how often each page is viewed.
 
 Read one thing out of it: the name of the dimension (the user's own words, 1
-to 60 characters). Do not tidy it into something else - the board shows what
-was declared. A declaration outside those limits is ignored whole, with one
-line on stderr, so keep to them.
+to 60 characters). Do not tidy it into something else - the name becomes the
+event name on the wire, and the card folds that event by one of its own
+fields - `value`, as the SDK sends it. A declaration outside those limits is
+ignored whole, with one line on stderr, so keep to them.
 
 ## Step 1 - declare it once
 
@@ -48,8 +49,8 @@ pageViews.value(path);
 - One line. No wrappers, no control-flow changes, no `await` - `value()`
   never throws and never blocks.
 - Events, not people, unless the call passes a `who`: ten views by one
-  person are ten, and with a `who` they are one. The board ranks volume
-  either way.
+  person are ten, and with a `who` they are one. The board's card counts
+  people either way - pass the `who` or it has no one to count.
 - Bounded values only: a normalised path, a country code, a plan name. Never
   a request id, an email, a full URL with a query string - the value names
   itself on the board, so keep personal data out of it.

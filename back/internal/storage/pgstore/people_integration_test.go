@@ -144,25 +144,30 @@ func TestPeopleRetentionAndExperiment(t *testing.T) {
 		t.Fatalf("ada's return is offset 1 of her first week, not a cohort of its own; got %+v", cohorts[1])
 	}
 
-	// One A/B test over the same window: two arms exposed, one arm converted.
-	// Seeded after the retention assertions on purpose — every event is also
-	// an actor's possible first event, so these would move the grid above.
-	seedEvent(t, pool, from.Add(24*time.Hour), "checkout.seen", "ada", map[string]string{"variant": "A"})
-	seedEvent(t, pool, from.Add(25*time.Hour), "checkout.seen", "grace", map[string]string{"variant": "B"})
-	seedEvent(t, pool, from.Add(26*time.Hour), "checkout.paid", "ada", map[string]string{"variant": "A"})
-	// A conversion that names no arm: it arms no arm, so it answers none.
-	seedEvent(t, pool, from.Add(27*time.Hour), "checkout.paid", "linus", nil)
+	// One A/B test is ONE event name whose rows carry the arm and the stat in
+	// the wire's own two label keys. Two arms exposed — ada twice, which is
+	// two events and one person — one arm converted, and a row missing either
+	// key answers nothing. Seeded after the retention assertions on purpose:
+	// every event is also an actor's possible first event, so these would move
+	// the grid above.
+	seedEvent(t, pool, from.Add(24*time.Hour), "checkout_test", "ada", map[string]string{"uc.variant": "A", "uc.stat": "exposed"})
+	seedEvent(t, pool, from.Add(25*time.Hour), "checkout_test", "ada", map[string]string{"uc.variant": "A", "uc.stat": "exposed"})
+	seedEvent(t, pool, from.Add(26*time.Hour), "checkout_test", "grace", map[string]string{"uc.variant": "B", "uc.stat": "exposed"})
+	seedEvent(t, pool, from.Add(27*time.Hour), "checkout_test", "ada", map[string]string{"uc.variant": "A", "uc.stat": "converted"})
+	// One row missing its arm and one missing its stat: they answer neither.
+	seedEvent(t, pool, from.Add(28*time.Hour), "checkout_test", "linus", map[string]string{"uc.stat": "exposed"})
+	seedEvent(t, pool, from.Add(29*time.Hour), "checkout_test", "linus", map[string]string{"uc.variant": "B"})
 
-	arms, err := s.ExperimentArms(ctx, peopleTenant, peopleProject, "variant", "checkout.seen", "checkout.paid", from, to)
+	arms, err := s.ExperimentArms(ctx, peopleTenant, peopleProject, "checkout_test", "uc.variant", "uc.stat", from, to)
 	if err != nil {
 		t.Fatalf("experiment arms: %v", err)
 	}
 	people := map[string]float64{}
 	for _, row := range arms {
-		people[row.Labels["event"]+"/"+row.Labels["variant"]] = row.Sum
+		people[row.Labels["uc.variant"]+"/"+row.Labels["uc.stat"]] = row.Sum
 	}
 	if len(people) != 3 ||
-		people["checkout.seen/A"] != 1 || people["checkout.seen/B"] != 1 || people["checkout.paid/A"] != 1 {
-		t.Fatalf("A exposed 1, B exposed 1, A converted 1, the armless conversion nothing; got %v", people)
+		people["A/exposed"] != 1 || people["B/exposed"] != 1 || people["A/converted"] != 1 {
+		t.Fatalf("A exposed 1 (ada twice is one person), B exposed 1, A converted 1, the keyless rows nothing; got %v", people)
 	}
 }

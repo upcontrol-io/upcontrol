@@ -11,8 +11,9 @@ The request usually arrives as a sentence copied from the board's form:
 
 Read two things out of it, in this order: the name (the user's own words, 1 to
 60 characters) and the steps (2 to 12, each 1 to 40 characters, in journey
-order, again the user's own words). Do not tidy either into something else - the
-board shows what was declared. A declaration outside those limits is ignored
+order, again the user's own words). Do not tidy either into something else -
+each step name becomes an event name on the wire, and the board's card is
+built from event names. A declaration outside those limits is ignored
 whole, with one line on stderr, so keep to them.
 
 ## Step 1 - declare the funnel once

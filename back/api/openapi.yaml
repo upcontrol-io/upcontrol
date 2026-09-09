@@ -776,8 +776,7 @@ components:
     DashboardCatalog:
       type: object
       description: "What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure."
-      required:
-        [services, groups, attrs, checks, events, metrics, funnels, experiments, retentions, dimensions]
+      required: [services, groups, attrs, checks, events, metrics]
       properties:
         services:
           type: array
@@ -797,18 +796,6 @@ components:
         metrics:
           type: array
           items: { $ref: "#/components/schemas/CatalogMetric" }
-        funnels:
-          type: array
-          items: { $ref: "#/components/schemas/CatalogFunnel" }
-        experiments:
-          type: array
-          items: { $ref: "#/components/schemas/CatalogExperiment" }
-        retentions:
-          type: array
-          items: { $ref: "#/components/schemas/CatalogRetention" }
-        dimensions:
-          type: array
-          items: { $ref: "#/components/schemas/CatalogDimension" }
     CatalogGroup:
       type: object
       description: "One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service."
@@ -843,11 +830,16 @@ components:
         type: { type: string }
     CatalogEvent:
       type: object
-      required: [name, times, lastTs]
+      description: "One event name the project sent, and the field keys its recent rows carried. The fields are what a breakdown folds by: an event is picked, then one of its own fields, so nobody has to remember what they named it. Reserved `uc.`-prefixed keys are left out — they are the wire's, not a dimension."
+      required: [name, times, lastTs, fields]
       properties:
         name: { type: string }
         times: { type: integer }
         lastTs: { type: string, format: date-time }
+        fields:
+          type: array
+          description: "Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth."
+          items: { type: string }
     CatalogMetric:
       type: object
       required: [name, readings, labels]
@@ -858,38 +850,6 @@ components:
           type: array
           description: "The label keys seen on this metric's readings — what a widget can narrow it by."
           items: { type: string }
-    CatalogFunnel:
-      type: object
-      description: "A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`)."
-      required: [name, steps]
-      properties:
-        name: { type: string }
-        steps:
-          type: array
-          items: { type: string }
-    CatalogExperiment:
-      type: object
-      description: "One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list."
-      required: [name, variants]
-      properties:
-        name: { type: string }
-        variants:
-          type: array
-          items: { type: string }
-    CatalogRetention:
-      type: object
-      description: "One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series."
-      required: [name, cohorts]
-      properties:
-        name: { type: string }
-        cohorts: { type: integer }
-    CatalogDimension:
-      type: object
-      description: "One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series."
-      required: [name, values]
-      properties:
-        name: { type: string }
-        values: { type: integer }
     SeriesQuery:
       type: object
       description: "One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws."
@@ -915,7 +875,7 @@ components:
           type: array
           maxItems: 2
           items: { type: string }
-          description: "Label keys to fold by. For `metric` it folds a counter's labels; for `people` it names the label whose values a breakdown ranks (one key), or the variant label of an A/B test (two). With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold."
+          description: "Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold."
         steps:
           type: array
           maxItems: 12

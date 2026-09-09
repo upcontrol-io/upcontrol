@@ -6,6 +6,36 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-09-09
+
+### Fixed
+- **The retention, breakdown and A/B pickers were empty for every sender, in every language.**
+  `GET /v1/dashboard/catalog` built `funnels`, `experiments`, `retentions` and `dimensions` from
+  the counter metrics the SDK stopped writing in 1.0.0, when the feeds moved onto events. So the
+  three pickers offered nothing, and the form's answer to an empty list was a prompt that
+  instruments an SDK feed, which emits events, which never filled the list. All four cards now
+  read the `people` source over events: a funnel is its step event names, a retention grid is the
+  whole project, a breakdown is one event folded by one of its own fields, and an A/B test is one
+  event folded by `uc.variant` and `uc.stat`. The four dead catalog lists are gone.
+- **The A/B read never matched what the wire writes.** `ExperimentArms` took the arm label key as
+  `name` and TWO event names as its group, while the wire (and the SDK) write one event name
+  carrying `uc.variant` and `uc.stat`. It now folds one event name by two label keys, and its
+  rows come back labelled by exactly the keys the query asked for, as every other grouped read
+  already did.
+- **A breakdown could only ever fold by `value`.** The field is the card's now, so an event
+  carrying `country` or `plan` ranks by that, which is what `npx upcontrol skills wire` has been
+  promising senders outside Node.
+
+### Added
+- `CatalogEvent.fields`: the label keys an event's recent rows carried, most-used first, so a
+  breakdown is picked rather than typed. Reserved `uc.`-prefixed keys are left out — that
+  namespace is the wire's, not a dimension anybody ranks people by.
+
+### Changed
+- `npx upcontrol skills dashboard` teaches `people` refs and no longer tells the agent to name a
+  feed "as you declared it in the SDK call". A board built from the old doc drew nothing at all,
+  silently: that column is load-bearing and the validator does not check it.
+
 ## [0.25.1] — 2026-09-09
 
 ### Fixed
