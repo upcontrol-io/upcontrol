@@ -6,6 +6,20 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.25.1] — 2026-09-09
+
+### Fixed
+- **Rotation no longer retires the public key it cannot replace.** `POST /v1/keys/rotate` filtered
+  on `state = active` alone, so a project holding a browser key would have had it retired
+  alongside the secret ones and replaced by a `uc_live_` key that cannot ship in a bundle — the
+  site working for 24 hours and then going quiet, with nothing connecting the silence to the
+  button. Rotation is the everything-now lever for SECRET keys; a public key is replaced
+  instead, because that means redeploying a site.
+- **Rotation issued one new key per retired key.** `old` returns a row each and `INSERT..SELECT`
+  ran over all of them, so two active keys became two replacements. Latent since the key set
+  shipped; `LIMIT 1` closes it. A project with no active secret key now answers 409
+  `nothing_to_rotate` rather than 500 from an empty insert.
+
 ## [0.25.0] — 2026-09-09
 
 ### Added
