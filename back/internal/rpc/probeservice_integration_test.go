@@ -3,7 +3,7 @@
 // ProbeService.SubmitResults against a real Postgres, on a database of its
 // own: shared-target checks rows, the incident fan-out by subscription set,
 // results without target_id dropped and counted, could-not-measure, and the
-// refusal backoff that follows it. Run with -tags=integration,
+// refusal backoff that follows it, plus Lease's pace. Run with -tags=integration,
 // UC_TEST_POSTGRES set.
 package rpc
 
@@ -211,6 +211,30 @@ func TestSubmitResultsFanOutBySubscriptionSet(t *testing.T) {
 	// The ok stamped first_ok_at.
 	if n := w.queryInt(t, `SELECT count(*) FROM probe_target WHERE id = $1 AND first_ok_at IS NOT NULL`, target); n != 1 {
 		t.Fatal("first_ok_at was not stamped by the ok result")
+	}
+}
+
+// The server sets the pace from the batch itself: a full batch comes back in
+// 2 s, a partial one waits 30 s, an empty queue 5 s.
+func TestLeasePacesFromQueueDepth(t *testing.T) {
+	w := newSvcWorld(t)
+	for _, u := range []string{"https://a.example", "https://b.example", "https://c.example"} {
+		w.seedSubscriber(t, w.seedTarget(t, u), u)
+	}
+	for _, want := range []struct {
+		checks int
+		pace   uint32
+	}{{2, 2000}, {1, 30000}, {0, 5000}} {
+		req := connect.NewRequest(&probev1.LeaseRequest{NodeId: "node-1", Region: "default", Capacity: 2})
+		req.Header().Set("Authorization", "Bearer "+nodeToken)
+		resp, err := w.svc.Lease(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Lease: %v", err)
+		}
+		if got := len(resp.Msg.Checks); got != want.checks || resp.Msg.NextLeaseAfterMs != want.pace {
+			t.Fatalf("lease = %d checks at %d ms, want %d at %d",
+				got, resp.Msg.NextLeaseAfterMs, want.checks, want.pace)
+		}
 	}
 }
 

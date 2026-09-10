@@ -122,9 +122,15 @@ func (s *ProbeService) Lease(
 		})
 	}
 
+	// A full batch is the queue's own depth signal, no extra query: the node
+	// comes back in 2 s; a partial batch drained the queue and waits 30 s.
+	pace := uint32(30000)
+	if len(due) == int(capacity) {
+		pace = 2000
+	}
 	return connect.NewResponse(&probev1.LeaseResponse{
 		Checks:           checks,
-		NextLeaseAfterMs: 30000,
+		NextLeaseAfterMs: pace,
 	}), nil
 }
 
