@@ -11,6 +11,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,7 +75,8 @@ func (h *seedDoor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	slug, err := h.seed(ctx, host)
 	if err != nil {
-		if code, ok := err.(refusalError); ok {
+		var code refusalError
+		if errors.As(err, &code) {
 			writeAPIErr(w, http.StatusTooManyRequests, string(code))
 			return
 		}

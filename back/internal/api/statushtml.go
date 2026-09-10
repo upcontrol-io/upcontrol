@@ -151,7 +151,7 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 		h.stats.removed(w)
 		return
 	}
-	resp, meta := h.wa.publicStatusData(ctx, tenantID, projectID, claimed)
+	resp, meta := h.wa.publicStatusData(ctx, projectID, claimed)
 
 	// The robots meta mirrors the JSON door's indexable exactly: a stamp
 	// plus the switch off means index; an unstamped host page is qualified
@@ -338,7 +338,7 @@ func (h *statusPages) sitemap(w http.ResponseWriter, r *http.Request) {
 func (h *statusPages) ogImage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/public/status/"), "/og.png")
-	tenantID, projectID, claimed, removedAt, ok := h.pageLookup(ctx, slug)
+	_, projectID, claimed, removedAt, ok := h.pageLookup(ctx, slug)
 	if !ok {
 		writeAPIErr(w, http.StatusNotFound, "no_such_page")
 		return
@@ -347,7 +347,7 @@ func (h *statusPages) ogImage(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusGone, "page_removed")
 		return
 	}
-	resp, meta := h.wa.publicStatusData(ctx, tenantID, projectID, claimed)
+	resp, meta := h.wa.publicStatusData(ctx, projectID, claimed)
 
 	page := ogrender.Page{Host: meta.host}
 	if state, ok := resp["state"].(map[string]any); ok {

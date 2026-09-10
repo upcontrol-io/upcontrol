@@ -1093,7 +1093,7 @@ func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	s, _ := h.sess.FromRequest(ctx, r)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
 	cfg, domain, verified, page := h.statusConfig(ctx, projectID)
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified, page))
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, projectID, cfg, domain, verified, page))
 }
 
 // PUT /v1/status-page: persist the settings. Components are not stored: they
@@ -1162,8 +1162,10 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT id, domain FROM project WHERE id = $1`, projectID).Scan(&projectID, &projectDomain)
 	// First save of a page that never existed: name it after the domain, not
-	// the id. An existing slug is never rewritten.
-	if cfg.Slug == "prj-"+strconv.FormatInt(projectID, 10) {
+	// the id. An existing slug is never rewritten, a stored "prj-N" included
+	// (a page first saved before its project had a domain): the row decides,
+	// the string cannot tell it from the unsaved default.
+	if page.ID == 0 {
 		if claimed := h.claimSlug(ctx, projectDomain, projectID); claimed != "" {
 			cfg.Slug = claimed
 		}
@@ -1176,7 +1178,9 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	// index_opt_in is written to the COLUMN as well as the config blob: the
 	// index gate reads the column (indexCandidates), so a switch that only
-	// lived in the blob was dead for every page it exists for.
+	// lived in the blob was dead for every page it exists for. Switching it
+	// off takes the stamp off too: a page that is no longer opted in drops
+	// out of the gate's candidates, so hysteresis would never unlist it.
 	if _, err := h.pool.Raw().Exec(ctx,
 		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config, index_opt_in)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1186,7 +1190,8 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		   domain_verified_at = CASE WHEN EXCLUDED.domain = status_page.domain
 		                             THEN status_page.domain_verified_at END,
 		   config = EXCLUDED.config,
-		   index_opt_in = EXCLUDED.index_opt_in`,
+		   index_opt_in = EXCLUDED.index_opt_in,
+		   indexed_at = CASE WHEN EXCLUDED.index_opt_in THEN status_page.indexed_at END`,
 		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw, cfg.IndexOptIn); err != nil {
 		// The slug conflict is arbitrated above, so a unique violation here is
 		// the domain: another page already rides that host.
@@ -1205,7 +1210,7 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		verified = h.verifyStatusDomain(ctx, projectID, domain)
 	}
 	_, _, _, page = h.statusConfig(ctx, projectID)
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified, page))
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, projectID, cfg, domain, verified, page))
 }
 
 // statusPageConfig is the owner's decisions about the page. Everything else on
@@ -1295,14 +1300,14 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 
 // statusPageResponse is the one shape both /v1/status-page handlers answer
 // with: the stored decisions plus the measured components and network.
-func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, domain string, verified bool, page statusPageRow) map[string]any {
+func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg statusPageConfig, domain string, verified bool, page statusPageRow) map[string]any {
 	resp := map[string]any{
 		"slug":           cfg.Slug,
 		"title":          cfg.Title,
 		"domain":         domain,
 		"domainVerified": verified,
-		"components":     h.statusComponents(ctx, tenantID, projectID, cfg, false, page),
-		"network":        h.statusNetwork(ctx, tenantID, projectID),
+		"components":     h.statusComponents(ctx, projectID, cfg, false, page),
+		"network":        h.statusNetwork(ctx, projectID),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
 		// The index door's owner-facing facts (plan part 4): the switch, the
@@ -1511,8 +1516,9 @@ func barPlanFor(oldest time.Time, intervalSec int32, now time.Time) (window, buc
 // the project's monitors already subscribes to it - no double draw (plan
 // part 2). Uptime and bucket math EXCLUDE unmeasured rows (the shared
 // pgstore.MeasurableSQL predicate); such rows draw as nodata bars and never
-// count against uptime.
-func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow) []map[string]any {
+// count against uptime. The project is the only scope, as in statusConfig:
+// the caller has already resolved it to one the reader may see.
+func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow) []map[string]any {
 	type compRow struct {
 		id          int64 // monitor id; 0 for the root pseudo component
 		key         string
@@ -1726,7 +1732,7 @@ func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 // (owner decision, 2026-08-27) — do not add a TLS tile back thinking it was
 // dropped by accident. tls_ms is still measured and still stored; it is only
 // not published here.
-func (h *writeAPI) statusNetwork(ctx context.Context, tenantID, projectID int64) []map[string]any {
+func (h *writeAPI) statusNetwork(ctx context.Context, projectID int64) []map[string]any {
 	if h.pgs == nil {
 		return []map[string]any{}
 	}
@@ -3119,7 +3125,8 @@ type refusalError string
 func (e refusalError) Error() string { return string(e) }
 
 func watchRefuse(w http.ResponseWriter, err error) {
-	if code, ok := err.(refusalError); ok {
+	var code refusalError
+	if errors.As(err, &code) {
 		writeAPIErr(w, http.StatusTooManyRequests, string(code))
 		return
 	}
@@ -3385,7 +3392,7 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			writeAPIErr(w, http.StatusGone, "page_removed")
 			return
 		}
-		h.renderPublicStatus(w, r, tenantID, projectID, claimed)
+		h.renderPublicStatus(w, r, projectID, claimed)
 		return
 	}
 	slug := pathLast(r.URL.Path)
@@ -3400,7 +3407,7 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 			writeAPIErr(w, http.StatusGone, "page_removed")
 			return
 		}
-		h.renderPublicStatus(w, r, tenantID, projectID, claimed)
+		h.renderPublicStatus(w, r, projectID, claimed)
 		return
 	}
 	// Slug miss: the alias fold — a request for the www-shaped slug of a host
@@ -3428,16 +3435,16 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusGone, "page_removed")
 		return
 	}
-	h.renderPublicStatus(w, r, tenantID, projectID, claimed)
+	h.renderPublicStatus(w, r, projectID, claimed)
 }
 
 // renderPublicStatus is the tail both doors share once the page's project is
 // found: the shared assembly, then the one request-shaped fact no other
 // surface can compute. A slug in the path and a Host header differ only in
 // how the project is looked up.
-func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, claimed bool) {
+func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, projectID int64, claimed bool) {
 	ctx := r.Context()
-	resp, meta := h.publicStatusData(ctx, tenantID, projectID, claimed)
+	resp, meta := h.publicStatusData(ctx, projectID, claimed)
 	// The viewer's own page says so: mine is present and true only when a
 	// session resolves AND that person reaches THIS project - a member of a
 	// sibling project is a visitor here. Absent = not the viewer's page
@@ -3478,7 +3485,7 @@ type statusPageMeta struct {
 // config, components, incidents, the state sentence, the index facts and
 // the liveness stamp. Part 4 lifted it out of renderPublicStatus unchanged;
 // the JSON door's bytes stay what they were.
-func (h *writeAPI) publicStatusData(ctx context.Context, tenantID, projectID int64, claimed bool) (map[string]any, statusPageMeta) {
+func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claimed bool) (map[string]any, statusPageMeta) {
 	// The page's OWN project decides what is rendered: a signed-in viewer's
 	// session must not bend somebody else's page toward their current project.
 	cfg, storedDomain, _, page := h.statusConfig(ctx, projectID)
@@ -3495,7 +3502,7 @@ func (h *writeAPI) publicStatusData(ctx context.Context, tenantID, projectID int
 	}
 	resp := map[string]any{
 		"title":      cfg.Title,
-		"components": h.statusComponents(ctx, tenantID, projectID, cfg, true, page),
+		"components": h.statusComponents(ctx, projectID, cfg, true, page),
 		"incidents":  []map[string]any{},
 		"network":    []map[string]any{},
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
@@ -3533,7 +3540,7 @@ func (h *writeAPI) publicStatusData(ctx context.Context, tenantID, projectID int
 	// The owner's switch decides whether the section is published at all; what it
 	// then shows is measured, never sample data.
 	if cfg.ShowNetwork {
-		resp["network"] = h.statusNetwork(ctx, tenantID, projectID)
+		resp["network"] = h.statusNetwork(ctx, projectID)
 	}
 	incidents := []map[string]any{}
 	if rows, rerr := h.pool.Raw().Query(ctx,

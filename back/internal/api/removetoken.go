@@ -9,9 +9,10 @@ import (
 	"net/http"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
+
 	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/dnstokens"
-	"golang.org/x/net/publicsuffix"
 )
 
 // removeTXTRecord is the DNS record name the removal flow publishes and the

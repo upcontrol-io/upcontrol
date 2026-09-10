@@ -110,22 +110,22 @@ func Render(p Page) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer titleFace.Close()
+	defer func() { _ = titleFace.Close() }()
 	bodyFace, err := face(regular, 34)
 	if err != nil {
 		return nil, err
 	}
-	defer bodyFace.Close()
+	defer func() { _ = bodyFace.Close() }()
 	smallFace, err := face(regular, 28)
 	if err != nil {
 		return nil, err
 	}
-	defer smallFace.Close()
+	defer func() { _ = smallFace.Close() }()
 	labelFace, err := face(regular, 24)
 	if err != nil {
 		return nil, err
 	}
-	defer labelFace.Close()
+	defer func() { _ = labelFace.Close() }()
 
 	img := image.NewRGBA(image.Rect(0, 0, W, H))
 	draw.Draw(img, img.Bounds(), &image.Uniform{colBG}, image.Point{}, draw.Src)
@@ -152,7 +152,7 @@ func Render(p Page) ([]byte, error) {
 		drawText(img, labelFace, colText, margin, y, c.Name)
 		x := margin
 		for i := 0; i < 24; i++ {
-			var col color.RGBA = colNoData
+			col := colNoData
 			if i < len(c.Bars) {
 				switch c.Bars[i] {
 				case "ok", "check":

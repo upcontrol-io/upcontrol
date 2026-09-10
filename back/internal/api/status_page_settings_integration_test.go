@@ -34,17 +34,13 @@ func newSettingsWorld(t *testing.T) (*pg.Pool, http.Handler, http.Cookie) {
 // watch; the settings tests drive their own mux).
 func muxOf(h http.Handler) http.Handler { return h }
 
-func putStatus(t *testing.T, h http.Handler, cookie http.Cookie, body string) (int, map[string]any) {
+func putStatus(t *testing.T, h http.Handler, cookie http.Cookie, body string) int {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPut, "/v1/status-page", strings.NewReader(body))
 	r.AddCookie(&cookie)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	var resp map[string]any
-	if w.Code == http.StatusOK {
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	}
-	return w.Code, resp
+	return w.Code
 }
 
 // indexOptIn persists through PUT - into the COLUMN the gate reads, not
@@ -61,7 +57,7 @@ func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 	mux.Handle("PUT /v1/status-page", wa)
 	mux.Handle("GET /v1/status-page", wa)
 
-	if code, _ := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":true}`); code != http.StatusOK {
+	if code := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":true}`); code != http.StatusOK {
 		t.Fatalf("PUT with indexOptIn = %d, want 200", code)
 	}
 	var projectID int64
@@ -147,12 +143,28 @@ func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 		t.Fatal("a verified page reports no hostVerifiedAt")
 	}
 	// Turning the switch OFF writes the column too: the gate must see the
-	// owner's NO, not a stale blob.
-	if code, _ := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":false}`); code != http.StatusOK {
+	// owner's NO, not a stale blob. And an already indexed page leaves at
+	// once: the gate stops reading a page that is no longer opted in, so its
+	// stamp would otherwise keep the robots meta and the sitemap saying yes.
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE status_page SET indexed_at = now() WHERE project_id = $1`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if code := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":false}`); code != http.StatusOK {
 		t.Fatalf("PUT indexOptIn off = %d, want 200", code)
 	}
 	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND NOT index_opt_in`, projectID); n != 1 {
 		t.Fatal("PUT {indexOptIn:false} did not clear the column the gate reads")
+	}
+	// The page was first saved while the project had no domain, so it is
+	// stored as prj-N; the project has gained one since. That address is
+	// the page's for good: a later save updates it and never mints a
+	// second page under the domain's slug.
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1`, projectID); n != 1 {
+		t.Fatalf("the project holds %d status pages after a re-save, want 1", n)
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND indexed_at IS NOT NULL`, projectID); n != 0 {
+		t.Fatal("PUT {indexOptIn:false} left the page's index stamp: it stays in the sitemap and says index, follow")
 	}
 }
 
@@ -226,7 +238,7 @@ func TestDeleteProjectRefusesARemovedPageAndReleasesACleanOne(t *testing.T) {
 
 	put := func(cookie http.Cookie, title string) {
 		t.Helper()
-		if code, _ := putStatus(t, mux, cookie, `{"title":"`+title+`"}`); code != http.StatusOK {
+		if code := putStatus(t, mux, cookie, `{"title":"`+title+`"}`); code != http.StatusOK {
 			t.Fatalf("PUT %s = %d, want 200", title, code)
 		}
 	}

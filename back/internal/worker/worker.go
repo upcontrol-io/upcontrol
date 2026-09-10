@@ -497,7 +497,7 @@ func (g *indexGate) tick(ctx context.Context, pool *pg.Pool, log *slog.Logger) {
 		// for 7 consecutive days, or whose host went NXDOMAIN, leaves the
 		// index with a hold only the operator clears.
 		if p.IndexedAt != nil {
-			g.hysteresis(ctx, pool, log, p, wildcardHit)
+			g.hysteresis(ctx, pool, log, p)
 		}
 		if p.IndexedAt != nil || p.ReindexHold {
 			continue
@@ -580,7 +580,7 @@ func (g *indexGate) indexMax() int {
 // 7 consecutive days (no day in the last 7 met the bar), or NXDOMAIN. Both
 // set reindex_hold - re-entry needs the operator to clear it, and then the
 // ramp again, so the robots meta cannot flap.
-func (g *indexGate) hysteresis(ctx context.Context, pool *pg.Pool, log *slog.Logger, p gatePage, wildcardHit func(string) bool) {
+func (g *indexGate) hysteresis(ctx context.Context, pool *pg.Pool, log *slog.Logger, p gatePage) {
 	if p.Domain == "" {
 		return
 	}

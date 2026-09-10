@@ -76,7 +76,7 @@ var quietLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{L
 // seedGatePage builds one host page with a root target and 72 h of history
 // at the asked cadence and quality. failRate is the share of measured rows
 // that failed; unmeasured is the share of could-not-measure rows.
-func seedGatePage(t *testing.T, pool *pg.Pool, suffix string, failRate, unmeasured float64, firstOK bool) (pageID, targetID int64, host string) {
+func seedGatePage(t *testing.T, pool *pg.Pool, suffix string, failRate, unmeasured float64) (pageID, targetID int64, host string) {
 	t.Helper()
 	ctx := context.Background()
 	host = fmt.Sprintf("%s-%d.example.com", suffix, time.Now().UnixNano()%100000)
@@ -86,8 +86,7 @@ func seedGatePage(t *testing.T, pool *pg.Pool, suffix string, failRate, unmeasur
 		t.Fatalf("tenant %s: %v", host, err)
 	}
 	// pageID is the tenant id here; the page comes below.
-	var tenantID int64
-	tenantID = pageID
+	tenantID := pageID
 	var projectID int64
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
@@ -96,8 +95,8 @@ func seedGatePage(t *testing.T, pool *pg.Pool, suffix string, failRate, unmeasur
 	}
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO probe_target (key, kind, url, first_ok_at)
-		 VALUES ($1, 'website', $2, CASE WHEN $3 THEN now() - interval '3 days' ELSE NULL END) RETURNING id`,
-		"website\x1fhttps://"+host+"\x1f", "https://"+host, firstOK).Scan(&targetID); err != nil {
+		 VALUES ($1, 'website', $2, now() - interval '3 days') RETURNING id`,
+		"website\x1fhttps://"+host+"\x1f", "https://"+host).Scan(&targetID); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.Raw().QueryRow(ctx,
@@ -197,7 +196,7 @@ func isRandomLabelProbe(host string) bool {
 	}
 	for j := 0; j < 8; j++ {
 		c := host[j]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
@@ -205,11 +204,14 @@ func isRandomLabelProbe(host string) bool {
 }
 
 // A page with clean 72 h continuity qualifies and is stamped; a
-// 60%-failure page does not.
+// 60%-failure page does not, and neither does a page the probe could not
+// measure 11% of the time: every measured row is ok and the newest ok is 55
+// minutes old, so the 90%-measured bar is the only one it misses.
 func TestGateStampsOnlyContinuousPages(t *testing.T) {
 	pool := newGateWorld(t)
-	goodID, _, goodHost := seedGatePage(t, pool, "watch", 0, 0, true)
-	badID, _, _ := seedGatePage(t, pool, "watch", 0.6, 0, true)
+	goodID, _, goodHost := seedGatePage(t, pool, "watch", 0, 0)
+	badID, _, _ := seedGatePage(t, pool, "watch", 0.6, 0)
+	blindID, _, _ := seedGatePage(t, pool, "watch", 0, 0.11)
 	withResolvers(t, nil, nil)
 
 	g := newIndexGate(config.StatusPageKnobs{IndexRampPerDay: 25, IndexMaxPages: 300})
@@ -225,6 +227,10 @@ func TestGateStampsOnlyContinuousPages(t *testing.T) {
 	if stamped != 0 {
 		t.Fatalf("a 60%% failure page was stamped: continuity was not consulted")
 	}
+	_ = pool.Raw().QueryRow(ctx, `SELECT count(*) FROM status_page WHERE id = $1 AND indexed_at IS NOT NULL`, blindID).Scan(&stamped)
+	if stamped != 0 {
+		t.Fatal("a page measured on 89% of its expected checks was stamped: the 90%-measured bar was not consulted")
+	}
 }
 
 // A wildcard-DNS host does not qualify even with clean continuity; a
@@ -233,7 +239,7 @@ func TestGateStampsOnlyContinuousPages(t *testing.T) {
 func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 	pool := newGateWorld(t)
 	ctx := context.Background()
-	wildID, _, wildHost := seedGatePage(t, pool, "watch", 0, 0, true)
+	wildID, _, wildHost := seedGatePage(t, pool, "watch", 0, 0)
 	// Wildcard: every name under the host resolves, the random-label probe
 	// included.
 	withResolvers(t, func(host string) ([]string, error) {
@@ -255,7 +261,7 @@ func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 	// the claim itself removed the continuity-only arm, however clean the
 	// continuity is (the old is_host_page arm indexed a stranger's claim on
 	// continuity alone - exactly what decision 16 forbids).
-	claimID, _, claimHost := seedGatePage(t, pool, "watch", 0, 0, true)
+	claimID, _, claimHost := seedGatePage(t, pool, "watch", 0, 0)
 	var tenantID int64
 	_ = pool.Raw().QueryRow(ctx, `SELECT tenant_id FROM status_page WHERE id = $1`, claimID).Scan(&tenantID)
 	if _, err := pool.Raw().Exec(ctx,
@@ -279,7 +285,7 @@ func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 		`UPDATE status_page SET host_verified_at = now() WHERE id = $1`, claimID); err != nil {
 		t.Fatal(err)
 	}
-	nonHostID, _, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	nonHostID, _, _ := seedGatePage(t, pool, "watch", 0, 0)
 	_ = pool.Raw().QueryRow(ctx, `SELECT tenant_id FROM status_page WHERE id = $1`, nonHostID).Scan(&tenantID)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE tenant SET claim_token_hash = NULL WHERE id = $1`, tenantID); err != nil {
@@ -305,8 +311,8 @@ func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 func TestSeedPagesNeedInteraction(t *testing.T) {
 	pool := newGateWorld(t)
 	ctx := context.Background()
-	untouchedID, _, _ := seedGatePage(t, pool, "seed-cold", 0, 0, true)
-	visitedID, _, _ := seedGatePage(t, pool, "seed-warm", 0, 0, true)
+	untouchedID, _, _ := seedGatePage(t, pool, "seed-cold", 0, 0)
+	visitedID, _, _ := seedGatePage(t, pool, "seed-warm", 0, 0)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET last_seen_at = now() WHERE id = $1`, visitedID); err != nil {
 		t.Fatal(err)
@@ -335,7 +341,7 @@ func TestGateRampAndHolds(t *testing.T) {
 	// Three qualifying pages, ramp of 2: two stamped today, one left.
 	ids := make([]int64, 0, 3)
 	for i := 0; i < 3; i++ {
-		id, _, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+		id, _, _ := seedGatePage(t, pool, "watch", 0, 0)
 		ids = append(ids, id)
 	}
 	withResolvers(t, nil, nil)
@@ -357,7 +363,7 @@ func TestGateRampAndHolds(t *testing.T) {
 
 	// The instance ceiling: with the cap equal to the stamped count, no new
 	// page enters even on a fresh day.
-	id4, _, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	id4, _, _ := seedGatePage(t, pool, "watch", 0, 0)
 	g2 := newIndexGate(config.StatusPageKnobs{IndexRampPerDay: 25, IndexMaxPages: 2})
 	g2.tick(context.Background(), pool, quietLogger)
 	var stamped4 int
@@ -390,13 +396,13 @@ func TestGateRampAndHolds(t *testing.T) {
 func TestGateHysteresisTakesBrokenPagesOut(t *testing.T) {
 	pool := newGateWorld(t)
 	ctx := context.Background()
-	healthyID, _, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	healthyID, _, _ := seedGatePage(t, pool, "watch", 0, 0)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET indexed_at = now() WHERE id = $1`, healthyID); err != nil {
 		t.Fatal(err)
 	}
 	// A broken page: indexed, but its history is 7 days of failure.
-	brokenID, brokenTarget, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	brokenID, brokenTarget, _ := seedGatePage(t, pool, "watch", 0, 0)
 	if _, err := pool.Raw().Exec(ctx, `DELETE FROM checks WHERE target_id = $1`, brokenTarget); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +419,7 @@ func TestGateHysteresisTakesBrokenPagesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An NXDOMAIN host: indexed and continuous, but the host is gone.
-	goneID, _, goneHost := seedGatePage(t, pool, "watch", 0, 0, true)
+	goneID, _, goneHost := seedGatePage(t, pool, "watch", 0, 0)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET indexed_at = now() WHERE id = $1`, goneID); err != nil {
 		t.Fatal(err)
@@ -450,12 +456,12 @@ func TestGateHysteresisTakesBrokenPagesOut(t *testing.T) {
 func TestDNSTokensVerifyAndRemove(t *testing.T) {
 	pool := newGateWorld(t)
 	ctx := context.Background()
-	verifyID, _, verifyHost := seedGatePage(t, pool, "watch", 0, 0, true)
+	verifyID, _, verifyHost := seedGatePage(t, pool, "watch", 0, 0)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET verification_token = 'tok-verify-1' WHERE id = $1`, verifyID); err != nil {
 		t.Fatal(err)
 	}
-	removeID, removeTarget, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	removeID, removeTarget, _ := seedGatePage(t, pool, "watch", 0, 0)
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET removal_token = 'tok-remove-1' WHERE id = $1`, removeID); err != nil {
 		t.Fatal(err)
