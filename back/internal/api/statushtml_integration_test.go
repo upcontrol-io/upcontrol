@@ -186,13 +186,17 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 	if strings.Contains(html, "—") {
 		t.Fatal("the HTML door's copy contains an em-dash")
 	}
+	// Owner decision (0.28.1): no page carries the disclaimer, the crawler's copy included.
+	if strings.Contains(html, "Not affiliated") || strings.Contains(html, "Created automatically") {
+		t.Fatal("the HTML door still carries the removed disclaimer")
+	}
 	// The measured-answer section repeats the sentence under its own heading.
 	if !strings.Contains(html, "<h3>Is "+host+" answering right now?</h3>") {
 		t.Fatal("the measured-answer heading is missing")
 	}
 	// The footer's fixed sentences and doors.
 	for _, want := range []string{
-		"Measured from one location outside " + host + " by UpControl. Not affiliated with " + host + ". Created automatically.",
+		"Measured from one location outside " + host + " by UpControl.",
 		`href="/status/` + slug + `#claim"`,
 		`href="/status/policy"`,
 		`href="/bot"`,

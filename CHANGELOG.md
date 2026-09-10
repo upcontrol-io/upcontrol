@@ -6,6 +6,14 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.28.1] — 2026-09-10
+
+### Changed
+- **The crawler's status page drops the disclaimer.** The footer of `GET /status/{slug}` keeps
+  "Measured from one location outside {host} by UpControl." and no longer says "Not affiliated
+  with {host}. Created automatically." The state sentence, the doors and the robots meta are
+  unchanged.
+
 ## [0.28.0] — 2026-09-10
 
 ### Added

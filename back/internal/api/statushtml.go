@@ -2,8 +2,9 @@
 // HTML door GET /status/{slug}, the directory GET /status, the sitemap
 // GET /sitemap-status.xml and the OG image GET /public/status/{slug}/og.png.
 // Everything here renders from the SAME shared assembly as the JSON door
-// (writeAPI.publicStatusData), so the sentence a crawler reads is the
-// sentence the React page reads; the parity is pinned by test.
+// (writeAPI.publicStatusData), so the sentence a crawler reads is the one
+// the JSON door serves; the parity is pinned by test. The React page reads
+// the same response but prints the components, not the sentence.
 
 package api
 
@@ -470,7 +471,7 @@ footer nav a { margin-right: 14px; }
 {{- end}}
 </main>
 <footer>
-<p>Measured from one location outside {{.Host}} by UpControl. Not affiliated with {{.Host}}. Created automatically.</p>
+<p>Measured from one location outside {{.Host}} by UpControl.</p>
 <nav>
 <a href="{{.ClaimHref}}">Site owner? Claim this page.</a>
 <a href="/status/policy">Want it removed? See the policy.</a>
