@@ -681,10 +681,10 @@ func (b *bot) handleStatus(ctx context.Context, msg *tgMessage) {
 		return
 	}
 	rows, err := b.pool.Raw().Query(ctx,
-		`SELECT mf.status, count(*), array_agg(m.name ORDER BY m.name) FILTER (WHERE mf.status <> 'ok')
-		   FROM monitor m LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+		`SELECT tf.status, count(*), array_agg(m.name ORDER BY m.name) FILTER (WHERE tf.status <> 'ok')
+		   FROM monitor m LEFT JOIN target_facts tf ON tf.target_id = m.target_id
 		  WHERE m.tenant_id = $1 AND m.project_id = ANY($2) AND m.paused = false
-		  GROUP BY mf.status`, m.tenantID, m.projectIDs)
+		  GROUP BY tf.status`, m.tenantID, m.projectIDs)
 	if err != nil {
 		b.send(msg.Chat.ID, "Could not read the checks right now.")
 		return

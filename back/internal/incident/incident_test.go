@@ -12,6 +12,7 @@ import (
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 func TestFingerprint_StableAndDistinct(t *testing.T) {
@@ -182,14 +183,17 @@ func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
 	}
 	var monitorID int64
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://shop.example.com', 300)
-		 RETURNING id`, tenantID, projectID).Scan(&monitorID); err != nil {
+		`WITH pt AS (
+		   INSERT INTO probe_target (key, kind, url) VALUES ($3, 'website', 'https://shop.example.com') ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id)
+		 INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 SELECT gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://shop.example.com', 300, pt.id FROM pt
+		 RETURNING id`,
+		tenantID, projectID, targetkey.Website("https://shop.example.com", "")).Scan(&monitorID); err != nil {
 		t.Fatalf("monitor: %v", err)
 	}
 
 	l := New(pool, nil)
-	incidentID, created, err := l.Open(ctx, monitorID, "Checkout is down")
+	incidentID, created, err := l.Open(ctx, monitorID, "Checkout is down", 0)
 	if err != nil || !created {
 		t.Fatalf("open incident: created=%v err=%v", created, err)
 	}
@@ -245,13 +249,16 @@ func TestOpen_NotifiesOnlyTheIncidentsProject(t *testing.T) {
 
 	var monitorID int64
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://mine.example', 300)
-		 RETURNING id`, tenantID, mineProject).Scan(&monitorID); err != nil {
+		`WITH pt AS (
+		   INSERT INTO probe_target (key, kind, url) VALUES ($3, 'website', 'https://mine.example') ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id)
+		 INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 SELECT gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://mine.example', 300, pt.id FROM pt
+		 RETURNING id`,
+		tenantID, mineProject, targetkey.Website("https://mine.example", "")).Scan(&monitorID); err != nil {
 		t.Fatalf("monitor: %v", err)
 	}
 
-	incidentID, created, err := New(pool, nil).Open(ctx, monitorID, "mine.example is down")
+	incidentID, created, err := New(pool, nil).Open(ctx, monitorID, "mine.example is down", 0)
 	if err != nil || !created {
 		t.Fatalf("open incident: created=%v err=%v", created, err)
 	}

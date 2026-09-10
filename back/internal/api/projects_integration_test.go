@@ -25,6 +25,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // projectsFixture: a signed-in Free tenant with one project, and a mux
@@ -500,8 +501,15 @@ func TestDeleteProjectReleasesOnlyTheCurrentOne(t *testing.T) {
 		t.Fatalf("seed status_page: %v", err)
 	}
 	if _, err := f.pool.Raw().Exec(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Watch', $3, 300)`,
+		`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+		 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url`,
+		targetkey.Website("https://doomed.example.com", ""), "https://doomed.example.com"); err != nil {
+		t.Fatalf("seed probe_target: %v", err)
+	}
+	if _, err := f.pool.Raw().Exec(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 SELECT gen_random_uuid(), $1, $2, 'website', 'Watch', $3, 300, pt.id
+		  FROM probe_target pt WHERE pt.url = $3`,
 		f.tenantID, doomed, "https://doomed.example.com"); err != nil {
 		t.Fatalf("seed monitor: %v", err)
 	}

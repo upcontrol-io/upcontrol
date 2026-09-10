@@ -380,14 +380,20 @@ func (h *readAPI) availability(ctx context.Context, tenantID, projectID int64) (
 	if stats, err := h.pgs.MetricSummary(ctx, tenantID, projectID); err == nil {
 		metrics = metricTiles(stats)
 	}
+	// Since migration 009 the checks table is keyed by target: the project's
+	// monitors resolve to their targets in the subquery. Unmeasured rows
+	// ("could not measure" - the predicate the fleet's queries share) are
+	// counted out of both columns, so a bucket holding only unmeasured
+	// readings draws nodata, exactly like an empty one: an unreadable host is
+	// not a down one, and uptime is a share of MEASURED probes only.
 	rows, err := h.pgs.Raw().Query(ctx, `
 		SELECT to_timestamp(floor(extract(epoch from ts) / 14400) * 14400) AS bucket,
 		       count(*) FILTER (WHERE ok) AS ok_count,
-		       count(*) AS total_count
+		       count(*) FILTER (WHERE `+pgstore.MeasurableSQL+`) AS total_count
 		  FROM checks
-		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
-		   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)
-		 GROUP BY bucket ORDER BY bucket`, tenantID, projectID)
+		 WHERE ts >= now() - INTERVAL '7 days'
+		   AND target_id IN (SELECT target_id FROM monitor WHERE project_id = $1)
+		 GROUP BY bucket ORDER BY bucket`, projectID)
 	if err != nil {
 		return metrics, nil, nil
 	}

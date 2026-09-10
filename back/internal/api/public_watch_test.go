@@ -100,7 +100,10 @@ func TestSlugFromHostReadsAsTheSiteName(t *testing.T) {
 
 func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
 	// The output is empty (caller falls back to the project id) or a plain
-	// lowercase segment; an IDN like "münchen.example" is no exception.
+	// lowercase segment; an IDN like "münchen.example" is no exception. A
+	// long host is cut at 40 and salted with 6 hex of its hash (plan part 2):
+	// 40 + 1 + 6 = 47 is the ceiling, and the salt makes two long hosts
+	// sharing a prefix still yield different slugs.
 	for _, in := range []string{"", "...", "-", "—", "münchen.example", "a..b", "-lead-", strings.Repeat("x", 80) + ".com"} {
 		got := slugFromHost(in)
 		if got == "" {
@@ -109,13 +112,44 @@ func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
 		if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") || strings.Contains(got, "--") {
 			t.Errorf("slugFromHost(%q) = %q: bad dashes", in, got)
 		}
-		if len(got) > 40 {
-			t.Errorf("slugFromHost(%q) = %q: %d chars, want <= 40", in, got, len(got))
+		if len(got) > 47 {
+			t.Errorf("slugFromHost(%q) = %q: %d chars, want <= 47", in, got, len(got))
 		}
 		for _, r := range got {
 			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 				t.Errorf("slugFromHost(%q) = %q: %q is not URL-safe", in, got, r)
 			}
+		}
+	}
+	// The same long host always yields the same slug: the salt is a hash of
+	// the host, not a roll of the dice.
+	long := strings.Repeat("x", 80) + ".com"
+	if slugFromHost(long) != slugFromHost("https://"+long+"/pricing") {
+		t.Errorf("the same long host yielded two different slugs")
+	}
+}
+
+func TestCanonicalHostStripsSchemeWWWAndCase(t *testing.T) {
+	// The watch door keys everything on this host: one spelling per site, so
+	// www.example.com and example.com are one page, one probe (plan part 2).
+	cases := []struct{ in, want string }{
+		{"example.com", "example.com"},
+		{"WWW.Example.COM", "example.com"},
+		{"https://www.example.com", "example.com"},
+		{"http://www.example.com/pricing?a=1", "example.com"},
+		{"www.www.example.com", "www.example.com"}, // ONE leading www. only
+		{"example.com:8443", "example.com"},
+		{"  shop.example.co.uk  ", "shop.example.co.uk"},
+	}
+	for _, c := range cases {
+		got, err := canonicalHost(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("canonicalHost(%q) = %q (err %v), want %q", c.in, got, err, c.want)
+		}
+	}
+	for _, in := range []string{"", "   ", "https://", "/pricing"} {
+		if got, err := canonicalHost(in); err == nil || got != "" {
+			t.Errorf("canonicalHost(%q) = %q (err %v), want the empty refusal", in, got, err)
 		}
 	}
 }

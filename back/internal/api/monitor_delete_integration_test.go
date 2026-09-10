@@ -19,6 +19,8 @@ import (
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // orphanFixture: one account with a login member, a website monitor, and an
@@ -70,16 +72,25 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 		t.Fatalf("project: %v", err)
 	}
 	// replace() renders the uuid the way the API returns it: lowercase hex, no
-	// dashes — the shape parseUUID on the other side of the route expects.
+	// dashes — the shape parseUUID on the other side of the route expects. The
+	// monitor rides a probe_target like every post-009 check.
 	var pubID string
+	var targetID int64
 	if err := pool.Raw().QueryRow(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Checkout', $3, 300)
+		`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+		 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id`,
+		targetkey.Website(fmt.Sprintf("https://down-%d.example.com", uniq%100000), ""),
+		fmt.Sprintf("https://down-%d.example.com", uniq%100000)).Scan(&targetID); err != nil {
+		t.Fatalf("probe_target: %v", err)
+	}
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Checkout', $3, 300, $4)
 		 RETURNING id, replace(public_id::text, '-', '')`,
-		tenantID, projectID, fmt.Sprintf("https://down-%d.example.com", uniq%100000)).Scan(&monitorID, &pubID); err != nil {
+		tenantID, projectID, fmt.Sprintf("https://down-%d.example.com", uniq%100000), targetID).Scan(&monitorID, &pubID); err != nil {
 		t.Fatalf("monitor: %v", err)
 	}
-	incidentID, created, err := incident.New(pool, nil).Open(ctx, monitorID, title)
+	incidentID, created, err := incident.New(pool, nil).Open(ctx, monitorID, title, 0)
 	if err != nil || !created {
 		t.Fatalf("open incident: created=%v err=%v", created, err)
 	}
@@ -90,7 +101,7 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("DELETE /v1/monitors/{id}", NewMonitors(pool, sm, ""))
+	mux.Handle("DELETE /v1/monitors/{id}", NewMonitors(pool, pgstore.New(pool.Raw()), sm, ""))
 	return &orphanFixture{
 		pool: pool, projectID: projectID, monitorPubID: pubID,
 		incidentID: incidentID, incidentTitle: title,
