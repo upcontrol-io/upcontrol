@@ -249,7 +249,9 @@ func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int6
 // TrimHistory drops rollup rows past the tenant's plan depth and answers how
 // many went. One statement, joined through the entitlement table so a limit
 // moves without a redeploy; a NULL history_days trims nothing, which is what
-// makes Self-hosted unlimited.
+// makes Self-hosted unlimited. A frozen project's rows are a snapshot and
+// never trim (docs/plans/trial-and-freeze.md): the freeze promise is "as it
+// stopped", and an upgrade restores exactly that.
 func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM series_1h s
@@ -257,6 +259,7 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 		 WHERE pr.id = s.project_id AND pr.tenant_id = s.tenant_id
 		   AND t.id = pr.tenant_id AND p.plan = t.plan
 		   AND p.history_days IS NOT NULL
+		   AND pr.frozen_at IS NULL
 		   AND s.hour < date_trunc('hour', now()) - make_interval(days => p.history_days)`)
 	if err != nil {
 		return 0, err

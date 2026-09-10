@@ -8,13 +8,17 @@ SELECT count(*) FROM project WHERE tenant_id = $1;
 
 -- name: ListProjectsByTenant :many
 -- The Projects page: every project in the tenant, oldest first.
-SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id;
+SELECT id, public_id, domain, created_at, (frozen_at IS NOT NULL)::bool AS frozen
+  FROM project WHERE tenant_id = $1 ORDER BY id;
 
 -- name: ListProjectsForPerson :many
 -- Every project this person can reach: their own workspace's first, then the
 -- ones they were invited to, oldest first within each. owner_email names whose
--- workspace a guest row lives in.
+-- workspace a guest row lives in. frozen marks the freeze sweeper's snapshots
+-- (docs/plans/trial-and-freeze.md): the row stays visible to members — a
+-- project a guest holds vanishing from their list reads as deleted data.
 SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
+       (p.frozen_at IS NOT NULL)::bool AS frozen,
        COALESCE(t.owner_person_id = sqlc.arg(person_id), false)::bool AS owned,
        (CASE WHEN t.owner_person_id = sqlc.arg(person_id) THEN 'login' ELSE m.role END)::text AS role,
        o.email AS owner_email

@@ -145,12 +145,17 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	// it closed incidents are merely hidden by the read clamp (ListIncidents-
 	// ByTenant.since_days), so an upgrade restores them at once. The ceiling
 	// comes from plan_entitlement, never a constant: the table decides.
-	// Cascades take slices, updates and queue rows with the incident.
+	// Cascades take slices, updates and queue rows with the incident. A frozen
+	// project's incidents are a snapshot and never purge (docs/plans/trial-and-
+	// freeze.md): the freeze promise is "as it stopped", and an upgrade restores
+	// exactly that.
 	go runWithLock(ctx, pool, d, "incident-purge", time.Hour, func(ctx context.Context) {
 		if _, err := pool.Raw().Exec(ctx,
 			`DELETE FROM incident
 			  WHERE resolved_at IS NOT NULL
-			    AND detected_at < now() - make_interval(days => (SELECT max(incident_days)::int FROM plan_entitlement))`); err != nil {
+			    AND detected_at < now() - make_interval(days => (SELECT max(incident_days)::int FROM plan_entitlement))
+			    AND NOT EXISTS (SELECT 1 FROM project p
+			                    WHERE p.id = incident.project_id AND p.frozen_at IS NOT NULL)`); err != nil {
 			d.Logger.Warn("incident purge tick error", "err", err)
 		}
 	})
@@ -168,6 +173,22 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		}
 	})
 	jobs += "+history-trim"
+
+	// Plan-capacity sweepers (docs/plans/trial-and-freeze.md): a plan buys live
+	// projects and live HTTP checks. Hourly like history-trim, statements in
+	// pgstore so the integration tests run the very code these jobs run.
+	go runWithLock(ctx, pool, d, "project-freeze", time.Hour, func(ctx context.Context) {
+		if _, err := pgs.FreezeSweep(ctx); err != nil {
+			d.Logger.Warn("project freeze tick error", "err", err)
+		}
+	})
+	jobs += "+project-freeze"
+	go runWithLock(ctx, pool, d, "monitor-budget", time.Hour, func(ctx context.Context) {
+		if _, err := pgs.MonitorBudgetSweep(ctx); err != nil {
+			d.Logger.Warn("monitor budget tick error", "err", err)
+		}
+	})
+	jobs += "+monitor-budget"
 
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
 	// "Error logs" / "Repeating error logs" settings.

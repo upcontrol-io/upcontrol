@@ -304,7 +304,7 @@ func (h *readAPI) overview(w http.ResponseWriter, r *http.Request, tenantID, pro
 		// customer copies it from.
 		monitors = append(monitors, monitorRowToAPI(row.Kind, row.Name, row.Target,
 			ptrStrSafe(row.Keyword), row.IntervalSec, ptrStrSafe(row.Status),
-			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID, ""))
+			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID, "", row.Paused, row.PausedBy))
 	}
 	// Sources and ladder both derive from what the tenant has actually connected
 	// (same signals as /v1/sources), never from a fixed list.

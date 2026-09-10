@@ -189,6 +189,7 @@ func (h *writeAPI) listProjects(w http.ResponseWriter, r *http.Request, s sqlc.S
 			"createdAt": row.CreatedAt,
 			"owned":     row.Owned,
 			"role":      row.Role,
+			"frozen":    row.Frozen,
 		}
 		// Zero is silence: a workspace with no owner row names nobody.
 		if row.OwnerEmail != nil && *row.OwnerEmail != "" {
@@ -351,6 +352,16 @@ func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, s sqlc.
 	for _, row := range rows {
 		if uuidStr(row.PublicID) != req.ID {
 			continue
+		}
+		// A frozen project is a snapshot (docs/plans/trial-and-freeze.md): the
+		// switch is the one door into it, so the door is where the wall lives.
+		// Same answer for owner and guest — the front words the difference.
+		if row.Frozen {
+			count, _ := h.pool.Queries().CountProjectsByTenant(ctx, row.TenantID)
+			writeUpgradeRequired(w,
+				"This project is frozen. Reactivate it by upgrading your plan.",
+				upgradePlanForProjects(ctx, h.pool, count))
+			return
 		}
 		if err := h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
 			ID: s.ID, TenantID: row.TenantID, ProjectID: &row.ID,

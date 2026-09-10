@@ -166,11 +166,18 @@ components:
     # equality check against me.project.id — no second source of that fact here.
     ProjectListItem:
       type: object
-      required: [id, domain, createdAt, owned, role]
+      required: [id, domain, createdAt, owned, role, frozen]
       properties:
         id: { type: string, example: "6f9619ff8b86d97111d1c1e4bba1f0b2" }
         domain: { type: string, example: "example.com" }
         createdAt: { type: string, format: date-time }
+        frozen:
+          type: boolean
+          description: >-
+            The freeze sweeper's snapshot (docs/plans/trial-and-freeze.md): a
+            plan buys live projects, the rest stop running but keep everything
+            and come back on upgrade. The row stays in the list for members —
+            a project vanishing from a guest's list reads as deleted data.
         owned:
           type: boolean
           description: Whether the caller owns the workspace this project lives in.
@@ -186,9 +193,21 @@ components:
       enum: [ok, check, down, nodata]
     Monitor:
       type: object
-      required: [id, type, name, target, status, interval]
+      required: [id, type, name, target, status, interval, paused]
       properties:
         id: { type: string, example: "mon_1" }
+        paused:
+          type: boolean
+          description: >-
+            Whether the check runs. The budget sweeper pauses past the plan's
+            http_checks (docs/plans/trial-and-freeze.md) exactly like an owner's
+            own pause does; pausedBy says whose pause it is.
+        pausedBy:
+          type: string
+          description: >-
+            Present only on the budget sweeper's pause ('plan'): the row's card
+            words it as the plan's wall with a resume-through-upgrade door.
+            Absent means the owner paused it themselves.
         type:
           type: string
           enum: [Website, Heartbeat]
@@ -1797,6 +1816,7 @@ paths:
                 { schema: { $ref: "#/components/schemas/Monitor" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [monitors]
@@ -1811,6 +1831,7 @@ paths:
       responses:
         "204": { description: Deleted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/sources:
@@ -2050,6 +2071,14 @@ paths:
         "204": { description: Switched (a single-user session has no row to write). }
         "400": { description: "`missing_project_id` — the body carried no id, or would not parse." }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: >-
+            `plan_limit_exceeded` — the project is a frozen snapshot; the
+            switch is the one door into it, so the wall lives here. Same
+            answer for owner and guest.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: Not one of this tenant's projects (`unknown_project`).
           content:

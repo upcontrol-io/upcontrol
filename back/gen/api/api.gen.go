@@ -1329,6 +1329,12 @@ type Monitor struct {
 	Keyword *string `json:"keyword,omitempty"`
 	Name    string  `json:"name"`
 
+	// Paused Whether the check runs. The budget sweeper pauses past the plan's http_checks (docs/plans/trial-and-freeze.md) exactly like an owner's own pause does; pausedBy says whose pause it is.
+	Paused bool `json:"paused"`
+
+	// PausedBy Present only on the budget sweeper's pause ('plan'): the row's card words it as the plan's wall with a resume-through-upgrade door. Absent means the owner paused it themselves.
+	PausedBy *string `json:"pausedBy,omitempty"`
+
 	// PingUrl Heartbeat only. The URL the job calls on every run (GET or POST); absent for a website check.
 	PingUrl *string      `json:"pingUrl,omitempty"`
 	Status  HealthStatus `json:"status"`
@@ -1498,6 +1504,9 @@ type ProjectListItem struct {
 
 	// Domain Example: example.com
 	Domain string `json:"domain"`
+
+	// Frozen The freeze sweeper's snapshot (docs/plans/trial-and-freeze.md): a plan buys live projects, the rest stop running but keep everything and come back on upgrade. The row stays in the list for members — a project vanishing from a guest's list reads as deleted data.
+	Frozen bool `json:"frozen"`
 
 	// Id Example: 6f9619ff8b86d97111d1c1e4bba1f0b2
 	Id string `json:"id"`

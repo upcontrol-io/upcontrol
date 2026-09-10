@@ -49,10 +49,12 @@ func (q *Queries) ListErrorAlertState(ctx context.Context, arg ListErrorAlertSta
 
 const listErrorSubscribedChannels = `-- name: ListErrorSubscribedChannels :many
 
-SELECT id, tenant_id, project_id, notify FROM alert_channel
- WHERE (notify->>'errorLogs')::boolean IS TRUE
-    OR (notify->>'repeatingErrorLogs')::boolean IS TRUE
- ORDER BY tenant_id, project_id
+SELECT c.id, c.tenant_id, c.project_id, c.notify FROM alert_channel c
+ WHERE ((c.notify->>'errorLogs')::boolean IS TRUE
+    OR (c.notify->>'repeatingErrorLogs')::boolean IS TRUE)
+   AND NOT EXISTS (SELECT 1 FROM project p
+                    WHERE p.id = c.project_id AND p.frozen_at IS NOT NULL)
+ ORDER BY c.tenant_id, c.project_id
 `
 
 type ListErrorSubscribedChannelsRow struct {
@@ -68,6 +70,8 @@ type ListErrorSubscribedChannelsRow struct {
 // every 60-second tick.
 // Channels that asked to hear about error logs at all. The scanner groups the
 // rows by project and reads each channel's window out of `notify` itself.
+// Frozen projects keep ingesting (their data must stay continuous through a
+// freeze) but never page: a snapshot alerts nobody.
 func (q *Queries) ListErrorSubscribedChannels(ctx context.Context) ([]ListErrorSubscribedChannelsRow, error) {
 	rows, err := q.db.Query(ctx, listErrorSubscribedChannels)
 	if err != nil {

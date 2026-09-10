@@ -83,7 +83,7 @@ func (h *monitors) list(w http.ResponseWriter, r *http.Request, projectID int64)
 		out = append(out, monitorRowToAPI(row.Kind, row.Name, row.Target,
 			ptrStrSafe(row.Keyword), row.IntervalSec, ptrStrSafe(row.Status),
 			row.SslExpiresAt, row.DomainExpiresAt, row.PublicID,
-			h.pingURL(row.Kind, row.PingToken)))
+			h.pingURL(row.Kind, row.PingToken), row.Paused, row.PausedBy))
 	}
 	writeAPIJSON(w, http.StatusOK, out)
 }
@@ -251,7 +251,7 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		row.Kind, row.Name, row.Target, kw, row.IntervalSec,
 		"nodata", // new monitor has no checks yet
 		pgtype.Timestamptz{}, pgtype.Timestamptz{}, row.PublicID,
-		h.pingURL(row.Kind, row.PingToken)))
+		h.pingURL(row.Kind, row.PingToken), false, nil))
 }
 
 // nameProjectIfUnnamed sets project.domain from a website check's target, only
@@ -316,6 +316,11 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	}
 	pubID := parseUUID(id)
 	ctx := r.Context()
+	// A frozen project's monitors are a snapshot: no edits, no pause toggles —
+	// nothing changes what an upgrade will restore (docs/plans/trial-and-freeze.md).
+	if h.frozenMonitor(w, ctx, tenantID, pubID) {
+		return
+	}
 	// The BEFORE state decides the pulls below: unpausing or lowering the
 	// interval starts a check sooner, and unpausing onto a down target opens
 	// the incident in the same transaction as the PATCH.
@@ -406,12 +411,17 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	writeAPIJSON(w, http.StatusOK, monitorRowToAPI(
 		full.Kind, full.Name, full.Target, kw, full.IntervalSec,
 		ptrStrSafe(full.Status), full.SslExpiresAt, full.DomainExpiresAt, full.PublicID,
-		h.pingURL(full.Kind, full.PingToken)))
+		h.pingURL(full.Kind, full.PingToken), full.Paused, full.PausedBy))
 }
 
 func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
 	ctx := r.Context()
 	pubID := parseUUID(id)
+	// Snapshot rule, same as PATCH: deleting from a frozen project would change
+	// what an upgrade restores.
+	if h.frozenMonitor(w, ctx, tenantID, pubID) {
+		return
+	}
 	// Close an open incident while the monitor id still resolves: monitor_id is
 	// ON DELETE SET NULL, and after the DELETE nothing can find the row.
 	if mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
@@ -534,9 +544,12 @@ func (h *monitors) pingURL(kind string, token *string) string {
 
 // monitorRowToAPI builds the front-facing Monitor shape: interval as display
 // string, expiry dates omitted when no facts exist yet.
+// pausedBy: 'plan' marks the budget sweeper's pause (docs/plans/trial-and-
+// freeze.md) — the row's card words it as the plan's wall, not the owner's
+// choice; NULL is the owner's own pause.
 func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 	status string, sslExp, domainExp pgtype.Timestamptz,
-	pubID pgtype.UUID, pingURL string) map[string]any {
+	pubID pgtype.UUID, pingURL string, paused bool, pausedBy *string) map[string]any {
 
 	m := map[string]any{
 		"id":       uuidStr(pubID),
@@ -545,6 +558,10 @@ func monitorRowToAPI(kind, name, target, keyword string, intervalSec int32,
 		"target":   target,
 		"status":   monitorStatusLabel(status),
 		"interval": intervalLabel(intervalSec),
+		"paused":   paused,
+	}
+	if pausedBy != nil {
+		m["pausedBy"] = *pausedBy
 	}
 	if keyword != "" {
 		m["keyword"] = keyword
@@ -677,6 +694,24 @@ func validateMonitorCreate(kind, target string) string {
 // `upgrade.reason` — and, when a cheaper plan lifts this wall, `upgrade.plan`,
 // which the client routes into its upgrade prompt. No plan field at the top
 // of the ladder: the front shows the message instead of the modal.
+// frozenMonitor answers whether the named monitor lives in a frozen project
+// and, when it does, writes the 402 itself.
+func (h *monitors) frozenMonitor(w http.ResponseWriter, ctx context.Context, tenantID int64, pubID pgtype.UUID) bool {
+	var frozen bool
+	_ = h.pool.Raw().QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM monitor m JOIN project p ON p.id = m.project_id
+		  WHERE m.public_id = $1 AND m.tenant_id = $2 AND p.frozen_at IS NOT NULL)`,
+		pubID, tenantID).Scan(&frozen)
+	if !frozen {
+		return false
+	}
+	count, _ := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)
+	writeUpgradeRequired(w,
+		"This project is frozen. Reactivate it by upgrading your plan.",
+		upgradePlanForProjects(ctx, h.pool, count))
+	return true
+}
+
 func writeUpgradeRequired(w http.ResponseWriter, reason, plan string) {
 	upgrade := map[string]string{"reason": reason}
 	if plan != "" {

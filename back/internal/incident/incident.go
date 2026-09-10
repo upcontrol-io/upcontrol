@@ -201,8 +201,44 @@ func (l *Lifecycle) notifyChannels(ctx context.Context, q *sqlc.Queries, tenantI
 		plan, _ = q.GetTenantPlan(ctx, tenantID)
 	}
 
+	// The telegram_recipients axis at DELIVERY time (docs/plans/trial-and-
+	// freeze.md): adding a recipient is 402-gated, but a downgrade (or a trial's
+	// end) leaves more connected than the plan carries, and a seat beyond the
+	// limit must not page. One seat per distinct linked person, one per
+	// group/channel destination (recipient_person_id NULL) — the channel-set
+	// shadow of countTelegramRecipients. Rows arrive created_at-first, so the
+	// oldest connections stay audible.
+	// ponytail: channel-set approximation of the workspace-wide person count;
+	// move to that count per enqueue if a discrepancy is ever observed.
+	tgMax := -1
+	tgSeats := 0
+	tgSeen := make(map[int64]bool)
 	sent := 0
 	for _, ch := range chans {
+		if ch.Kind == "telegram" {
+			if tgMax < 0 { // loaded once, on the first telegram channel
+				tgMax = 0
+				if plan, err := q.GetTenantPlan(ctx, tenantID); err == nil {
+					if ent, err := q.GetPlanEntitlement(ctx, plan); err == nil {
+						tgMax = int(ent.TelegramRecipients)
+					}
+				}
+			}
+			// A person's seat keys on their id (one seat however many
+			// channels), a group/channel destination on its own channel id —
+			// negative so the two key spaces never collide.
+			seat := -ch.ID
+			if ch.RecipientPersonID != nil {
+				seat = *ch.RecipientPersonID
+			}
+			if _, seen := tgSeen[seat]; !seen {
+				if tgSeats >= tgMax {
+					continue // beyond the plan's seats: mute, oldest first kept
+				}
+				tgSeen[seat] = true
+				tgSeats++
+			}
+		}
 		settings := notifysettings.Resolve(ch.Notify)
 		if !n.wants(settings) {
 			continue

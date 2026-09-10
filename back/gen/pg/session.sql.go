@@ -420,11 +420,12 @@ const reachableProjectInTenant = `-- name: ReachableProjectInTenant :one
 SELECT COALESCE(
   (SELECT x.id FROM project x
     WHERE x.id = $1 AND x.tenant_id = $2
+      AND x.frozen_at IS NULL
       AND (EXISTS (SELECT 1 FROM tenant t WHERE t.id = x.tenant_id AND t.owner_person_id = $3)
            OR EXISTS (SELECT 1 FROM project_member m
                        WHERE m.project_id = x.id AND m.person_id = $3 AND m.status = 'active'))),
   (SELECT min(x.id) FROM project x
-    WHERE x.tenant_id = $2
+    WHERE x.tenant_id = $2 AND x.frozen_at IS NULL
       AND (EXISTS (SELECT 1 FROM tenant t WHERE t.id = x.tenant_id AND t.owner_person_id = $3)
            OR EXISTS (SELECT 1 FROM project_member m
                        WHERE m.project_id = x.id AND m.person_id = $3 AND m.status = 'active'))),
@@ -439,6 +440,11 @@ type ReachableProjectInTenantParams struct {
 
 // The session's current-project resolver: the session's own pick while it is
 // still reachable, else the lowest reachable project in that workspace, else 0.
+// A FROZEN project is never a landing place (docs/plans/trial-and-free.md):
+// neither the pick nor the fallback resolves onto one, so every
+// currentProjectID consumer serves a live project — or 0, which renders empty
+// and lets the front draw its lock list. Entering a frozen project goes
+// through POST /v1/project/switch, which answers 402 instead.
 func (q *Queries) ReachableProjectInTenant(ctx context.Context, arg ReachableProjectInTenantParams) (int64, error) {
 	row := q.db.QueryRow(ctx, reachableProjectInTenant, arg.Pick, arg.TenantID, arg.PersonID)
 	var column_1 int64

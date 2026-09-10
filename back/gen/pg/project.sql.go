@@ -44,7 +44,8 @@ func (q *Queries) IsTenantOwner(ctx context.Context, arg IsTenantOwnerParams) (b
 }
 
 const listProjectsByTenant = `-- name: ListProjectsByTenant :many
-SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id
+SELECT id, public_id, domain, created_at, (frozen_at IS NOT NULL)::bool AS frozen
+  FROM project WHERE tenant_id = $1 ORDER BY id
 `
 
 type ListProjectsByTenantRow struct {
@@ -52,6 +53,7 @@ type ListProjectsByTenantRow struct {
 	PublicID  pgtype.UUID
 	Domain    string
 	CreatedAt pgtype.Timestamptz
+	Frozen    bool
 }
 
 // The Projects page: every project in the tenant, oldest first.
@@ -69,6 +71,7 @@ func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]L
 			&i.PublicID,
 			&i.Domain,
 			&i.CreatedAt,
+			&i.Frozen,
 		); err != nil {
 			return nil, err
 		}
@@ -82,6 +85,7 @@ func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]L
 
 const listProjectsForPerson = `-- name: ListProjectsForPerson :many
 SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
+       (p.frozen_at IS NOT NULL)::bool AS frozen,
        COALESCE(t.owner_person_id = $1, false)::bool AS owned,
        (CASE WHEN t.owner_person_id = $1 THEN 'login' ELSE m.role END)::text AS role,
        o.email AS owner_email
@@ -99,6 +103,7 @@ type ListProjectsForPersonRow struct {
 	Domain     string
 	CreatedAt  pgtype.Timestamptz
 	TenantID   int64
+	Frozen     bool
 	Owned      bool
 	Role       string
 	OwnerEmail *string
@@ -106,7 +111,9 @@ type ListProjectsForPersonRow struct {
 
 // Every project this person can reach: their own workspace's first, then the
 // ones they were invited to, oldest first within each. owner_email names whose
-// workspace a guest row lives in.
+// workspace a guest row lives in. frozen marks the freeze sweeper's snapshots
+// (docs/plans/trial-and-freeze.md): the row stays visible to members — a
+// project a guest holds vanishing from their list reads as deleted data.
 func (q *Queries) ListProjectsForPerson(ctx context.Context, personID *int64) ([]ListProjectsForPersonRow, error) {
 	rows, err := q.db.Query(ctx, listProjectsForPerson, personID)
 	if err != nil {
@@ -122,6 +129,7 @@ func (q *Queries) ListProjectsForPerson(ctx context.Context, personID *int64) ([
 			&i.Domain,
 			&i.CreatedAt,
 			&i.TenantID,
+			&i.Frozen,
 			&i.Owned,
 			&i.Role,
 			&i.OwnerEmail,

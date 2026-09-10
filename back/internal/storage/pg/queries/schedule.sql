@@ -34,8 +34,11 @@ SELECT t.id, t.kind, t.url, t.keyword,
   JOIN target_schedule ts ON ts.target_id = t.id
   LEFT JOIN target_facts tf ON tf.target_id = t.id
   LEFT JOIN LATERAL (
+    -- A frozen project's subscription keeps nothing due (docs/plans/trial-and-
+    -- freeze.md): the snapshot spends no probe money, same as a paused monitor.
     SELECT min(m.interval_sec)::int AS eff
       FROM monitor m
+      JOIN project pr ON pr.id = m.project_id AND pr.frozen_at IS NULL
      WHERE m.target_id = t.id AND NOT m.paused
   ) f ON true
   LEFT JOIN LATERAL (
@@ -51,6 +54,7 @@ SELECT t.id, t.kind, t.url, t.keyword,
     SELECT count(*)::int AS n
       FROM monitor m
       JOIN tenant tn ON tn.id = m.tenant_id
+      JOIN project pr ON pr.id = m.project_id AND pr.frozen_at IS NULL
      WHERE m.target_id = t.id AND NOT m.paused AND tn.plan <> 'Free'
   ) p ON true
  WHERE ts.next_due_at <= now()
@@ -152,6 +156,7 @@ SELECT m.id, m.target_id, m.tenant_id, m.name, m.interval_sec,
        COALESCE(tf.consecutive_failures, 0)::int AS consecutive_failures
   FROM monitor m
   JOIN target_schedule ts ON ts.target_id = m.target_id
+  JOIN project pr ON pr.id = m.project_id AND pr.frozen_at IS NULL
   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
  WHERE m.kind = 'heartbeat' AND m.paused = false AND ts.next_due_at <= now()
  ORDER BY ts.next_due_at

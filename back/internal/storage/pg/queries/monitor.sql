@@ -1,6 +1,6 @@
 -- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
-       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
+       m.interval_sec, m.availability_target, m.paused, m.paused_by, m.ping_token, m.created_at,
        tf.status, tf.ssl_expires_at, tf.domain_expires_at, tf.last_check_at
   FROM monitor m
   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
@@ -9,7 +9,7 @@ SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
 
 -- name: ListMonitorsByProject :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
-       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
+       m.interval_sec, m.availability_target, m.paused, m.paused_by, m.ping_token, m.created_at,
        tf.status, tf.ssl_expires_at, tf.domain_expires_at, tf.last_check_at
   FROM monitor m
   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
@@ -25,7 +25,7 @@ RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, 
 
 -- name: GetMonitorByPublicID :one
 SELECT m.id, m.public_id, m.tenant_id, m.project_id, m.kind, m.name, m.target,
-       m.keyword, m.interval_sec, m.paused, m.ping_token, m.created_at,
+       m.keyword, m.interval_sec, m.paused, m.paused_by, m.ping_token, m.created_at,
        tf.status, tf.ssl_expires_at, tf.domain_expires_at
   FROM monitor m
   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
@@ -45,9 +45,12 @@ UPDATE monitor SET
   target      = COALESCE(sqlc.narg(target), target),
   keyword     = COALESCE(sqlc.narg(keyword), keyword),
   interval_sec = COALESCE(sqlc.narg(interval_sec), interval_sec),
-  paused      = COALESCE(sqlc.narg(paused), paused)
+  paused      = COALESCE(sqlc.narg(paused), paused),
+  -- An explicit pause/unpause from the owner clears the sweeper's marker: the
+  -- owner overrides the plan, and the next sweep re-marks if the budget says so.
+  paused_by   = CASE WHEN sqlc.narg(paused) IS NULL THEN paused_by ELSE NULL END
  WHERE public_id = sqlc.arg(public_id) AND tenant_id = sqlc.arg(tenant_id)
-RETURNING id, public_id, kind, name, target, keyword, interval_sec, paused, created_at;
+RETURNING id, public_id, kind, name, target, keyword, interval_sec, paused, paused_by, created_at;
 
 -- name: DeleteMonitor :exec
 DELETE FROM monitor WHERE public_id = $1 AND tenant_id = $2;
