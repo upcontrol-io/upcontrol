@@ -40,20 +40,42 @@ type ApiKey struct {
 	Origins       []string
 }
 
+type BlockedHost struct {
+	Domain    string
+	Reason    *string
+	CreatedAt pgtype.Timestamptz
+}
+
 type Check struct {
-	TenantID   *int64
-	MonitorID  *int64
-	Ts         pgtype.Timestamptz
-	Region     *string
-	Ok         *bool
-	StatusCode *int32
-	ErrorClass *string
-	DnsMs      *int32
-	ConnectMs  *int32
-	TlsMs      *int32
-	TtfbMs     *int32
-	TotalMs    *int32
-	BodyHash   *int64
+	Ts          pgtype.Timestamptz
+	Region      *string
+	Ok          *bool
+	StatusCode  *int32
+	ErrorClass  *string
+	DnsMs       *int32
+	ConnectMs   *int32
+	TlsMs       *int32
+	TtfbMs      *int32
+	TotalMs     *int32
+	BodyHash    *int64
+	TargetID    int64
+	IntervalSec *int32
+}
+
+type ChecksDefault struct {
+	Ts          pgtype.Timestamptz
+	Region      *string
+	Ok          *bool
+	StatusCode  *int32
+	ErrorClass  *string
+	DnsMs       *int32
+	ConnectMs   *int32
+	TlsMs       *int32
+	TtfbMs      *int32
+	TotalMs     *int32
+	BodyHash    *int64
+	TargetID    int64
+	IntervalSec *int32
 }
 
 type Dashboard struct {
@@ -110,25 +132,26 @@ type Event struct {
 }
 
 type Incident struct {
-	ID            int64
-	PublicID      pgtype.UUID
-	TenantID      int64
-	ProjectID     int64
-	MonitorID     *int64
-	Detector      string
-	Fingerprint   int64
-	Title         string
-	Status        string
-	DetectedAt    pgtype.Timestamptz
-	NotifiedAt    pgtype.Timestamptz
-	AckedAt       pgtype.Timestamptz
-	AckedBy       *int64
-	ResolvedAt    pgtype.Timestamptz
-	CloseReason   *string
-	AffectedCount int32
-	DeployID      *int64
-	SlicePhase    int16
-	SliceDoneAt   pgtype.Timestamptz
+	ID                   int64
+	PublicID             pgtype.UUID
+	TenantID             int64
+	ProjectID            int64
+	MonitorID            *int64
+	Detector             string
+	Fingerprint          int64
+	Title                string
+	Status               string
+	DetectedAt           pgtype.Timestamptz
+	NotifiedAt           pgtype.Timestamptz
+	AckedAt              pgtype.Timestamptz
+	AckedBy              *int64
+	ResolvedAt           pgtype.Timestamptz
+	CloseReason          *string
+	AffectedCount        int32
+	DeployID             *int64
+	SlicePhase           int16
+	SliceDoneAt          pgtype.Timestamptz
+	EffectiveIntervalSec *int32
 }
 
 type IncidentSlice struct {
@@ -235,23 +258,7 @@ type Monitor struct {
 	PingToken          *string
 	GraceSec           *int32
 	CreatedAt          pgtype.Timestamptz
-}
-
-type MonitorFact struct {
-	MonitorID           int64
-	Status              string
-	SslExpiresAt        pgtype.Timestamptz
-	DomainExpiresAt     pgtype.Timestamptz
-	LastCheckAt         pgtype.Timestamptz
-	ConsecutiveFailures int32
-}
-
-type MonitorSchedule struct {
-	MonitorID  int64
-	Region     string
-	NextDueAt  pgtype.Timestamptz
-	LeasedBy   *string
-	LeaseUntil pgtype.Timestamptz
+	TargetID           int64
 }
 
 type Person struct {
@@ -285,6 +292,16 @@ type ProbeNode struct {
 	Region     string
 	LastSeenAt pgtype.Timestamptz
 	BlindSince pgtype.Timestamptz
+}
+
+type ProbeTarget struct {
+	ID        int64
+	Key       string
+	Kind      string
+	Url       string
+	Keyword   *string
+	FirstOkAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
 }
 
 type Project struct {
@@ -355,15 +372,50 @@ type SourceConnection struct {
 }
 
 type StatusPage struct {
-	ID               int64
-	TenantID         int64
-	ProjectID        int64
-	Slug             string
-	Domain           *string
-	DomainVerifiedAt pgtype.Timestamptz
-	Title            string
-	Components       []byte
-	Config           []byte
+	ID                int64
+	TenantID          int64
+	ProjectID         int64
+	Slug              string
+	Domain            *string
+	DomainVerifiedAt  pgtype.Timestamptz
+	Title             string
+	Components        []byte
+	Config            []byte
+	RootTargetID      *int64
+	IsHostPage        bool
+	RemovedAt         pgtype.Timestamptz
+	IndexedAt         pgtype.Timestamptz
+	ReindexHold       bool
+	HostVerifiedAt    pgtype.Timestamptz
+	LastSeenAt        pgtype.Timestamptz
+	MintedSource      *string
+	MintedIpHash      *string
+	MintedVisitorHash *string
+	MintedUa          *string
+	IndexOptIn        bool
+	CreatedAt         pgtype.Timestamptz
+	VerificationToken *string
+	RemovalToken      *string
+}
+
+type TargetFact struct {
+	TargetID              int64
+	Status                string
+	SslExpiresAt          pgtype.Timestamptz
+	DomainExpiresAt       pgtype.Timestamptz
+	LastCheckAt           pgtype.Timestamptz
+	ConsecutiveFailures   int32
+	ConsecutiveUnmeasured int32
+	ConsecutiveRefusals   int32
+	BackoffUntil          pgtype.Timestamptz
+}
+
+type TargetSchedule struct {
+	TargetID   int64
+	Region     string
+	NextDueAt  pgtype.Timestamptz
+	LeasedBy   *string
+	LeaseUntil pgtype.Timestamptz
 }
 
 type TelegramInvite struct {

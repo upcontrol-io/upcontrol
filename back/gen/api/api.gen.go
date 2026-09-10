@@ -558,6 +558,30 @@ func (e ProbeStageLabel) Valid() bool {
 	}
 }
 
+// Defines values for PublicStatusResponseStateKind.
+const (
+	PublicStatusResponseStateKindCouldNotMeasure PublicStatusResponseStateKind = "could_not_measure"
+	PublicStatusResponseStateKindDown            PublicStatusResponseStateKind = "down"
+	PublicStatusResponseStateKindNodata          PublicStatusResponseStateKind = "nodata"
+	PublicStatusResponseStateKindOk              PublicStatusResponseStateKind = "ok"
+)
+
+// Valid indicates whether the value is a known member of the PublicStatusResponseStateKind enum.
+func (e PublicStatusResponseStateKind) Valid() bool {
+	switch e {
+	case PublicStatusResponseStateKindCouldNotMeasure:
+		return true
+	case PublicStatusResponseStateKindDown:
+		return true
+	case PublicStatusResponseStateKindNodata:
+		return true
+	case PublicStatusResponseStateKindOk:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RecipientStatus.
 const (
 	RecipientStatusActive  RecipientStatus = "active"
@@ -1332,13 +1356,11 @@ type MonitorCreateInterval string
 // MonitorCreateType defines model for MonitorCreate.Type.
 type MonitorCreateType string
 
-// MonitorPatch defines model for MonitorPatch.
+// MonitorPatch Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them.
 type MonitorPatch struct {
 	Interval *MonitorPatchInterval `json:"interval,omitempty"`
-	Keyword  *string               `json:"keyword,omitempty"`
 	Name     *string               `json:"name,omitempty"`
 	Paused   *bool                 `json:"paused,omitempty"`
-	Target   *string               `json:"target,omitempty"`
 }
 
 // MonitorPatchInterval defines model for MonitorPatch.Interval.
@@ -1523,8 +1545,14 @@ type PublicStatusResponse struct {
 	Components []PublicComponent `json:"components"`
 
 	// HasCustomDomain Present and true only for the OWNER (same rule as `mine`), when this page already has a custom domain stored, verified or not. It exists so the owner's own view of the page on our link can stop offering an address they have already bought. A boolean rather than the domain itself: nothing on a public page needs to print that address, and a field that carries it invites a caller to.
-	HasCustomDomain *bool            `json:"hasCustomDomain,omitempty"`
-	Incidents       []PublicIncident `json:"incidents"`
+	HasCustomDomain *bool `json:"hasCustomDomain,omitempty"`
+
+	// HostPage Whether this is the host's first page (the bare slug). Suffixed pages carry false.
+	HostPage  *bool            `json:"hostPage,omitempty"`
+	Incidents []PublicIncident `json:"incidents"`
+
+	// Indexable Whether search engines may list this page: the index gate's stamp AND the kill switch off. Mirrors the HTML door's robots meta.
+	Indexable *bool `json:"indexable,omitempty"`
 
 	// Mine Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page.
 	Mine *bool `json:"mine,omitempty"`
@@ -1533,10 +1561,24 @@ type PublicStatusResponse struct {
 	Network *[]NetworkTile `json:"network,omitempty"`
 
 	// PoweredBy Whether the credit line is published. Only a self-hosted instance can answer false: on the hosted service a plan buys the page's address, never the branding, so this is always true there.
-	PoweredBy *bool     `json:"poweredBy,omitempty"`
-	Title     *string   `json:"title,omitempty"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	PoweredBy *bool `json:"poweredBy,omitempty"`
+
+	// State Host pages only: the measured verdict of the page's root target, worded from the probe's point of view. Absent on non-host pages and on pages with no facts row yet.
+	State *struct {
+		// AsOf The clock time of the newest check, "15:04 UTC".
+		AsOf     *string                       `json:"asOf,omitempty"`
+		Kind     PublicStatusResponseStateKind `json:"kind"`
+		Sentence string                        `json:"sentence"`
+	} `json:"state,omitempty"`
+	Title *string `json:"title,omitempty"`
+
+	// UnverifiedClaim True when the page is claimed but the host was never proven by DNS TXT: the page stays out of the index and keeps its not-affiliated line.
+	UnverifiedClaim *bool     `json:"unverifiedClaim,omitempty"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
+
+// PublicStatusResponseStateKind defines model for PublicStatusResponse.State.Kind.
+type PublicStatusResponseStateKind string
 
 // Recipient defines model for Recipient.
 type Recipient struct {
@@ -1697,9 +1739,21 @@ type StatusPageResponse struct {
 	Domain *string `json:"domain,omitempty"`
 
 	// DomainVerified Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify.
-	DomainVerified *bool          `json:"domainVerified,omitempty"`
-	Network        *[]NetworkTile `json:"network,omitempty"`
-	ShowNetwork    bool           `json:"showNetwork"`
+	DomainVerified *bool `json:"domainVerified,omitempty"`
+
+	// HostVerifiedAt When the DNS TXT proof of control of the host landed. Null until verified.
+	HostVerifiedAt *time.Time `json:"hostVerifiedAt,omitempty"`
+
+	// IndexOptIn "List in search engines": one half of a claimed page's index qualification; the DNS TXT proof (hostVerifiedAt) is the other.
+	IndexOptIn *bool          `json:"indexOptIn,omitempty"`
+	Network    *[]NetworkTile `json:"network,omitempty"`
+
+	// RemovalToken Echo of the removal token when one was already issued through the page's own door. Never minted here.
+	RemovalToken *string `json:"removalToken,omitempty"`
+
+	// RootPageUrl The host's public page address on our link, when this project rides one (host pages and their suffixed siblings).
+	RootPageUrl *string `json:"rootPageUrl,omitempty"`
+	ShowNetwork bool    `json:"showNetwork"`
 
 	// ShowPoweredBy Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding.
 	ShowPoweredBy bool `json:"showPoweredBy"`
@@ -1707,13 +1761,19 @@ type StatusPageResponse struct {
 	// Slug The public URL segment. Assigned by us, never taken from the body.
 	Slug  string `json:"slug"`
 	Title string `json:"title"`
+
+	// VerificationToken The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null.
+	VerificationToken *string `json:"verificationToken,omitempty"`
 }
 
 // StatusPageUpdate defines model for StatusPageUpdate.
 type StatusPageUpdate struct {
 	// Domain The host to serve the page on. Normalized server-side (scheme, path and port dropped); must be a subdomain — at least three labels — and not our own host. Empty clears it. Changing it re-locks verification; 402 when the plan carries no custom domains, 409 when another page already rides that host.
-	Domain      *string `json:"domain,omitempty"`
-	ShowNetwork *bool   `json:"showNetwork,omitempty"`
+	Domain *string `json:"domain,omitempty"`
+
+	// IndexOptIn "List in search engines". Stored with the settings; honoured only on a claimed, host-verified page.
+	IndexOptIn  *bool `json:"indexOptIn,omitempty"`
+	ShowNetwork *bool `json:"showNetwork,omitempty"`
 
 	// ShowPoweredBy Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding.
 	ShowPoweredBy *bool `json:"showPoweredBy,omitempty"`

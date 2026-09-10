@@ -289,9 +289,23 @@ func (s *Store) EventBuckets(ctx context.Context, tenantID, projectID int64, nam
 	return out, rows.Err()
 }
 
+// MeasurableSQL is the unmeasured-exclusion predicate every uptime or
+// bucket query over checks carries (the canonical statement and its partial
+// index checks_measurable_idx live in queries/schedule.sql): a "could not
+// measure" reading (HTTP 401, 403, 429 - a bot filter, an auth wall, a
+// rate limit) is stored with ok = false but never counts against uptime.
+// Such rows still DRAW (as nodata bars); only the counting excludes them.
+// Exported here because the api and worker read paths share it.
+const MeasurableSQL = `NOT (error_class = 'status' AND status_code IN (401, 403, 429))`
+
 // CheckBuckets reads a monitor's probes into buckets. The monitor id is
-// resolved inside the tenant by the caller; the checks table carries no
-// project, so the tenant is the whole scope there.
+// resolved inside the tenant by the caller. Since migration 009 the checks
+// table is keyed by target: the monitor's target is resolved inside the
+// query, and could-not-measure readings (HTTP 401/403/429 stored as
+// error_class 'status') are excluded from every count, because uptime is a
+// share of MEASURED probes only. The exclusion predicate is the one
+// documented in queries/schedule.sql (partial index checks_measurable_idx);
+// Group 2's read paths carry it too.
 func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, from, to time.Time, stepSeconds int) ([]CheckBucket, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+bucketExpr(3, stepSeconds)+` AS bucket,
@@ -306,8 +320,10 @@ func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, fro
 		       count(*) FILTER (WHERE ok AND connect_ms > 0)::bigint,
 		       count(*) FILTER (WHERE ok AND tls_ms > 0)::bigint,
 		       count(*) FILTER (WHERE ok AND ttfb_ms > 0)::bigint
-		  FROM checks
-		 WHERE tenant_id = $1 AND monitor_id = $2 AND ts >= $4 AND ts < $5
+		  FROM checks c
+		  JOIN monitor m ON m.id = $2 AND m.tenant_id = $1 AND m.target_id = c.target_id
+		 WHERE c.ts >= $4 AND c.ts < $5
+		   AND `+MeasurableSQL+`
 		 GROUP BY bucket ORDER BY bucket`,
 		tenantID, monitorID, float64(from.Unix()), from, to)
 	if err != nil {

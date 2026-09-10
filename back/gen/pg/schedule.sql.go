@@ -11,116 +11,268 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const clearLeaseAndSchedule = `-- name: ClearLeaseAndSchedule :exec
-UPDATE monitor_schedule
-   SET leased_by = NULL, lease_until = NULL, next_due_at = now() + make_interval(secs => $1::double precision)
- WHERE monitor_id = $2
+const activeSubscriberMonitors = `-- name: ActiveSubscriberMonitors :many
+SELECT id FROM monitor WHERE target_id = $1 AND NOT paused
 `
 
-type ClearLeaseAndScheduleParams struct {
-	Column1   float64
-	MonitorID int64
-}
-
-// After results are submitted: clear the lease and set the next due time to
-// now + interval. This is what keeps the monitor checking at its cadence.
-func (q *Queries) ClearLeaseAndSchedule(ctx context.Context, arg ClearLeaseAndScheduleParams) error {
-	_, err := q.db.Exec(ctx, clearLeaseAndSchedule, arg.Column1, arg.MonitorID)
-	return err
-}
-
-const clearLeasesForNode = `-- name: ClearLeasesForNode :execrows
-UPDATE monitor_schedule SET leased_by = NULL, lease_until = NULL WHERE leased_by = $1
-`
-
-// When a probe goes blind, release its leases so other probes can pick them up.
-func (q *Queries) ClearLeasesForNode(ctx context.Context, leasedBy *string) (int64, error) {
-	result, err := q.db.Exec(ctx, clearLeasesForNode, leasedBy)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const ensureMonitorSchedule = `-- name: EnsureMonitorSchedule :exec
-INSERT INTO monitor_schedule (monitor_id, region, next_due_at)
-VALUES ($1, $2, now())
-ON CONFLICT (monitor_id) DO NOTHING
-`
-
-type EnsureMonitorScheduleParams struct {
-	MonitorID int64
-	Region    string
-}
-
-// Called when a monitor is created: seed the schedule row so the scheduler picks
-// it up on the next Lease.
-func (q *Queries) EnsureMonitorSchedule(ctx context.Context, arg EnsureMonitorScheduleParams) error {
-	_, err := q.db.Exec(ctx, ensureMonitorSchedule, arg.MonitorID, arg.Region)
-	return err
-}
-
-const getMonitorFacts = `-- name: GetMonitorFacts :one
-SELECT status, consecutive_failures
-  FROM monitor_facts WHERE monitor_id = $1
-`
-
-type GetMonitorFactsRow struct {
-	Status              string
-	ConsecutiveFailures int32
-}
-
-func (q *Queries) GetMonitorFacts(ctx context.Context, monitorID int64) (GetMonitorFactsRow, error) {
-	row := q.db.QueryRow(ctx, getMonitorFacts, monitorID)
-	var i GetMonitorFactsRow
-	err := row.Scan(&i.Status, &i.ConsecutiveFailures)
-	return i, err
-}
-
-const leaseDueMonitors = `-- name: LeaseDueMonitors :many
-SELECT ms.monitor_id, m.public_id, m.kind, m.target, m.keyword,
-       m.interval_sec, m.availability_target
-  FROM monitor_schedule ms
-  JOIN monitor m ON m.id = ms.monitor_id
- WHERE ms.next_due_at <= now()
-   AND ms.leased_by IS NULL
-   AND m.paused = false
-   AND m.kind <> 'heartbeat'
- ORDER BY ms.next_due_at
- LIMIT $1
-`
-
-type LeaseDueMonitorsRow struct {
-	MonitorID          int64
-	PublicID           pgtype.UUID
-	Kind               string
-	Target             string
-	Keyword            *string
-	IntervalSec        int32
-	AvailabilityTarget pgtype.Numeric
-}
-
-// Find monitors due for a check that are not currently leased. The caller
-// (Lease handler) then atomically leases the returned IDs via SetLease.
-// Heartbeats are excluded: they have no target, the ping route records their
-// passes and the worker's miss sweep their failures.
-func (q *Queries) LeaseDueMonitors(ctx context.Context, limit int32) ([]LeaseDueMonitorsRow, error) {
-	rows, err := q.db.Query(ctx, leaseDueMonitors, limit)
+// Unpaused subscriptions on a target: while a target is down, every one of
+// them holds an open incident (idempotent Open), so a subscriber who joins
+// an outage gets its incident and alert within one check.
+func (q *Queries) ActiveSubscriberMonitors(ctx context.Context, targetID int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, activeSubscriberMonitors, targetID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []LeaseDueMonitorsRow
+	var items []int64
 	for rows.Next() {
-		var i LeaseDueMonitorsRow
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const allSubscriberMonitors = `-- name: AllSubscriberMonitors :many
+SELECT id FROM monitor WHERE target_id = $1
+`
+
+// Every subscription, paused or not: recovery closes them all.
+func (q *Queries) AllSubscriberMonitors(ctx context.Context, targetID int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, allSubscriberMonitors, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const clearLeaseAndScheduleTarget = `-- name: ClearLeaseAndScheduleTarget :exec
+UPDATE target_schedule
+   SET leased_by = NULL, lease_until = NULL,
+       next_due_at = now() + make_interval(secs => $1::double precision)
+ WHERE target_id = $2
+`
+
+type ClearLeaseAndScheduleTargetParams struct {
+	Column1  float64
+	TargetID int64
+}
+
+// After results are submitted: release the lease and set the next due time
+// to now + $1 seconds (the target's effective interval, recomputed by
+// EffectiveIntervalForTarget before this runs).
+func (q *Queries) ClearLeaseAndScheduleTarget(ctx context.Context, arg ClearLeaseAndScheduleTargetParams) error {
+	_, err := q.db.Exec(ctx, clearLeaseAndScheduleTarget, arg.Column1, arg.TargetID)
+	return err
+}
+
+const clearLeasesForNode = `-- name: ClearLeasesForNode :exec
+UPDATE target_schedule SET leased_by = NULL, lease_until = NULL WHERE leased_by = $1
+`
+
+// When a probe goes blind, release its leases so other probes pick them up.
+func (q *Queries) ClearLeasesForNode(ctx context.Context, leasedBy *string) error {
+	_, err := q.db.Exec(ctx, clearLeasesForNode, leasedBy)
+	return err
+}
+
+const effectiveIntervalForTarget = `-- name: EffectiveIntervalForTarget :one
+SELECT _uc_effective_interval(t) AS interval_sec
+  FROM probe_target t
+ WHERE t.id = $1
+`
+
+// The lease query's cadence for one target, recomputed at submit time: the
+// checks row and the incident's effective_interval_sec record the cadence
+// the row was actually taken at. The derivation itself lives in
+// _uc_effective_interval (migration 009), the one ladder both queries call.
+func (q *Queries) EffectiveIntervalForTarget(ctx context.Context, id int64) (int32, error) {
+	row := q.db.QueryRow(ctx, effectiveIntervalForTarget, id)
+	var interval_sec int32
+	err := row.Scan(&interval_sec)
+	return interval_sec, err
+}
+
+const ensureTargetSchedule = `-- name: EnsureTargetSchedule :exec
+INSERT INTO target_schedule (target_id, region, next_due_at)
+VALUES ($1, $2, now())
+ON CONFLICT (target_id) DO NOTHING
+`
+
+type EnsureTargetScheduleParams struct {
+	TargetID int64
+	Region   string
+}
+
+// Seed the schedule row when a target is created so the next Lease picks it
+// up (target-keyed).
+func (q *Queries) EnsureTargetSchedule(ctx context.Context, arg EnsureTargetScheduleParams) error {
+	_, err := q.db.Exec(ctx, ensureTargetSchedule, arg.TargetID, arg.Region)
+	return err
+}
+
+const getOrCreateProbeTarget = `-- name: GetOrCreateProbeTarget :one
+INSERT INTO probe_target (key, kind, url, keyword)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url
+RETURNING id
+`
+
+type GetOrCreateProbeTargetParams struct {
+	Key     string
+	Kind    string
+	Url     string
+	Keyword *string
+}
+
+// The one door every subscribe goes through: two simultaneous Start watching
+// on one host cannot race. DO UPDATE (a url no-op rewrite) so RETURNING
+// yields the id on the conflict path too.
+func (q *Queries) GetOrCreateProbeTarget(ctx context.Context, arg GetOrCreateProbeTargetParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getOrCreateProbeTarget,
+		arg.Key,
+		arg.Kind,
+		arg.Url,
+		arg.Keyword,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getTargetFacts = `-- name: GetTargetFacts :one
+SELECT status, consecutive_failures, consecutive_unmeasured,
+       consecutive_refusals, backoff_until
+  FROM target_facts WHERE target_id = $1
+`
+
+type GetTargetFactsRow struct {
+	Status                string
+	ConsecutiveFailures   int32
+	ConsecutiveUnmeasured int32
+	ConsecutiveRefusals   int32
+	BackoffUntil          pgtype.Timestamptz
+}
+
+// The detector state and the backoff counters, one row per target.
+func (q *Queries) GetTargetFacts(ctx context.Context, targetID int64) (GetTargetFactsRow, error) {
+	row := q.db.QueryRow(ctx, getTargetFacts, targetID)
+	var i GetTargetFactsRow
+	err := row.Scan(
+		&i.Status,
+		&i.ConsecutiveFailures,
+		&i.ConsecutiveUnmeasured,
+		&i.ConsecutiveRefusals,
+		&i.BackoffUntil,
+	)
+	return i, err
+}
+
+const leaseDueTargets = `-- name: LeaseDueTargets :many
+
+SELECT t.id, t.kind, t.url, t.keyword,
+       _uc_effective_interval(t) AS interval_sec,
+       (p.n > 0) AS paying,
+       ts.leased_by AS prev_leased_by
+  FROM probe_target t
+  JOIN target_schedule ts ON ts.target_id = t.id
+  LEFT JOIN target_facts tf ON tf.target_id = t.id
+  LEFT JOIN LATERAL (
+    SELECT min(m.interval_sec)::int AS eff
+      FROM monitor m
+     WHERE m.target_id = t.id AND NOT m.paused
+  ) f ON true
+  LEFT JOIN LATERAL (
+    SELECT count(*)::int AS n,
+           max(pgp.indexed_at) AS indexed_at,
+           max(pgp.last_seen_at) AS last_seen_at,
+           bool_or(tn.claim_token_hash IS NULL) AS any_claimed
+      FROM status_page pgp
+      JOIN tenant tn ON tn.id = pgp.tenant_id
+     WHERE pgp.root_target_id = t.id AND pgp.removed_at IS NULL
+  ) sp ON true
+  LEFT JOIN LATERAL (
+    SELECT count(*)::int AS n
+      FROM monitor m
+      JOIN tenant tn ON tn.id = m.tenant_id
+     WHERE m.target_id = t.id AND NOT m.paused AND tn.plan <> 'Free'
+  ) p ON true
+ WHERE ts.next_due_at <= now()
+   AND (ts.leased_by IS NULL OR ts.lease_until < now())
+   AND t.kind <> 'heartbeat'
+   AND (f.eff IS NOT NULL OR sp.n > 0)
+   AND (tf.backoff_until IS NULL OR tf.backoff_until < now())
+ ORDER BY paying DESC, ts.next_due_at
+ LIMIT $1
+`
+
+type LeaseDueTargetsRow struct {
+	ID           int64
+	Kind         string
+	Url          string
+	Keyword      *string
+	IntervalSec  int32
+	Paying       bool
+	PrevLeasedBy *string
+}
+
+// The shared-probe pipeline (migration 009, plan part 1): the fleet leases
+// probe_targets, not monitors. monitor rows are subscriptions; liveness and
+// cadence are DERIVED here, never cached on the target.
+//
+// UNMEASURED ROWS (never counted against uptime): a checks row stored with
+// error_class = 'status' AND status_code IN (401, 403, 429) is a
+// "could not measure" reading (bot filter / auth wall / rate limit). It is
+// stored with ok = false, but every uptime or bucket query over checks MUST
+// carry this exact predicate (partial index checks_measurable_idx matches
+// it): WHERE NOT (error_class = 'status' AND status_code IN (401, 403, 429)).
+// Group 2's statusComponents / CheckBuckets read paths copy this fragment.
+// Targets due for a check, not leased, not heartbeats, not in refusal
+// backoff. A target is due only when it has at least one unpaused subscriber
+// (f.eff) or a live host page referencing it (sp.n). interval_sec is the
+// derived cadence _uc_effective_interval computes (migration 009): the
+// subscribers' tightest interval when any exist (a host page never loosens
+// below 900), else the host-page ladder: 300 s for the target's first 24
+// hours, 900 s after, and 3600 s only when every referencing page is
+// unclaimed, unindexed and untouched for 30 days.
+// prev_leased_by is the stale holder the admission predicate just evicted
+// (NULL when the slot was free): the caller logs it, silence is the one
+// defect this product may not have. Paying subscribers' targets lease first
+// so a free page never delays a customer's minute check.
+func (q *Queries) LeaseDueTargets(ctx context.Context, limit int32) ([]LeaseDueTargetsRow, error) {
+	rows, err := q.db.Query(ctx, leaseDueTargets, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LeaseDueTargetsRow
+	for rows.Next() {
+		var i LeaseDueTargetsRow
 		if err := rows.Scan(
-			&i.MonitorID,
-			&i.PublicID,
+			&i.ID,
 			&i.Kind,
-			&i.Target,
+			&i.Url,
 			&i.Keyword,
 			&i.IntervalSec,
-			&i.AvailabilityTarget,
+			&i.Paying,
+			&i.PrevLeasedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -133,19 +285,20 @@ func (q *Queries) LeaseDueMonitors(ctx context.Context, limit int32) ([]LeaseDue
 }
 
 const listMissedHeartbeats = `-- name: ListMissedHeartbeats :many
-SELECT m.id, m.tenant_id, m.name, m.interval_sec,
-       COALESCE(mf.status, 'nodata')::text AS status,
-       COALESCE(mf.consecutive_failures, 0)::int AS consecutive_failures
-  FROM monitor_schedule ms
-  JOIN monitor m ON m.id = ms.monitor_id
-  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
- WHERE m.kind = 'heartbeat' AND m.paused = false AND ms.next_due_at <= now()
- ORDER BY ms.next_due_at
+SELECT m.id, m.target_id, m.tenant_id, m.name, m.interval_sec,
+       COALESCE(tf.status, 'nodata')::text AS status,
+       COALESCE(tf.consecutive_failures, 0)::int AS consecutive_failures
+  FROM monitor m
+  JOIN target_schedule ts ON ts.target_id = m.target_id
+  LEFT JOIN target_facts tf ON tf.target_id = m.target_id
+ WHERE m.kind = 'heartbeat' AND m.paused = false AND ts.next_due_at <= now()
+ ORDER BY ts.next_due_at
  LIMIT 500
 `
 
 type ListMissedHeartbeatsRow struct {
 	ID                  int64
+	TargetID            int64
 	TenantID            int64
 	Name                string
 	IntervalSec         int32
@@ -154,7 +307,9 @@ type ListMissedHeartbeatsRow struct {
 }
 
 // Heartbeats whose window closed. next_due_at is "missed after": a ping sets
-// it to now + interval + grace, a recorded miss to now + interval.
+// it to now + interval + grace, a recorded miss to now + interval. The
+// heartbeat's private target carries the schedule and detector state now;
+// the monitor row stays the identity for incidents and alerts.
 func (q *Queries) ListMissedHeartbeats(ctx context.Context) ([]ListMissedHeartbeatsRow, error) {
 	rows, err := q.db.Query(ctx, listMissedHeartbeats)
 	if err != nil {
@@ -166,6 +321,7 @@ func (q *Queries) ListMissedHeartbeats(ctx context.Context) ([]ListMissedHeartbe
 		var i ListMissedHeartbeatsRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.TargetID,
 			&i.TenantID,
 			&i.Name,
 			&i.IntervalSec,
@@ -191,11 +347,26 @@ func (q *Queries) MarkProbeBlind(ctx context.Context, id string) error {
 	return err
 }
 
+const pullTargetDue = `-- name: PullTargetDue :exec
+UPDATE target_schedule
+   SET next_due_at = LEAST(next_due_at, now())
+ WHERE target_id = $1
+`
+
+// A subscription starts now: any action that lowers a target's effective
+// interval pulls its next check to the earliest slot, so a new subscriber's
+// first check runs at the next lease, not one interval later.
+func (q *Queries) PullTargetDue(ctx context.Context, targetID int64) error {
+	_, err := q.db.Exec(ctx, pullTargetDue, targetID)
+	return err
+}
+
 const setHeartbeatDue = `-- name: SetHeartbeatDue :exec
-UPDATE monitor_schedule
+UPDATE target_schedule ts
    SET next_due_at = now() + make_interval(secs => $1::double precision),
        leased_by = NULL, lease_until = NULL
- WHERE monitor_id = $2
+  FROM monitor m
+ WHERE m.id = $2 AND ts.target_id = m.target_id
 `
 
 type SetHeartbeatDueParams struct {
@@ -204,73 +375,76 @@ type SetHeartbeatDueParams struct {
 }
 
 // Push the miss deadline out by secs; also clears a lease left from before
-// heartbeats stopped being handed to the probe.
+// heartbeats stopped being handed to the probe. Monitor-keyed: the API's
+// create path calls it before the monitor has ever been leased.
 func (q *Queries) SetHeartbeatDue(ctx context.Context, arg SetHeartbeatDueParams) error {
 	_, err := q.db.Exec(ctx, setHeartbeatDue, arg.Secs, arg.MonitorID)
 	return err
 }
 
-const setLease = `-- name: SetLease :execrows
-UPDATE monitor_schedule
-   SET leased_by = $1, lease_until = $2
- WHERE monitor_id = ANY($3::bigint[])
-   AND leased_by IS NULL
+const setIncidentEffectiveInterval = `-- name: SetIncidentEffectiveInterval :exec
+UPDATE incident SET effective_interval_sec = $2::int WHERE id = $1
+`
+
+type SetIncidentEffectiveIntervalParams struct {
+	ID                   int64
+	EffectiveIntervalSec int32
+}
+
+// Stamp the effective interval at opening on a freshly created incident
+// (review decision 14: the interval fold is recorded, not undone).
+func (q *Queries) SetIncidentEffectiveInterval(ctx context.Context, arg SetIncidentEffectiveIntervalParams) error {
+	_, err := q.db.Exec(ctx, setIncidentEffectiveInterval, arg.ID, arg.EffectiveIntervalSec)
+	return err
+}
+
+const setLease = `-- name: SetLease :exec
+UPDATE target_schedule
+   SET leased_by = $1, lease_until = now() + interval '5 minutes'
+ WHERE target_id = ANY($2::bigint[])
+   AND (leased_by IS NULL OR lease_until < now())
 `
 
 type SetLeaseParams struct {
-	LeasedBy   *string
-	LeaseUntil pgtype.Timestamptz
-	Column3    []int64
+	LeasedBy *string
+	Column2  []int64
 }
 
-// Atomically lease a batch of monitors to one probe node. Returns the number of
-// rows actually leased (some may have been grabbed by another node between the
-// SELECT and this UPDATE — that's fine, they'll be in the next lease).
-func (q *Queries) SetLease(ctx context.Context, arg SetLeaseParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setLease, arg.LeasedBy, arg.LeaseUntil, arg.Column3)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+// Atomically lease the batch to one probe node. The admission predicate is
+// the lease query's: a slot whose lease expired is taken back here.
+func (q *Queries) SetLease(ctx context.Context, arg SetLeaseParams) error {
+	_, err := q.db.Exec(ctx, setLease, arg.LeasedBy, arg.Column2)
+	return err
 }
 
-const updateMonitorFactsExpiry = `-- name: UpdateMonitorFactsExpiry :exec
-UPDATE monitor_facts
-   SET ssl_expires_at = COALESCE($2, ssl_expires_at),
-       domain_expires_at = COALESCE($3, domain_expires_at)
- WHERE monitor_id = $1
+const setTargetFirstOk = `-- name: SetTargetFirstOk :exec
+UPDATE probe_target SET first_ok_at = now()
+ WHERE id = $1 AND first_ok_at IS NULL
 `
 
-type UpdateMonitorFactsExpiryParams struct {
-	MonitorID       int64
+// The first successful measurement stamps first_ok_at once; the reaper's
+// host-page exemption and the index gate read it.
+func (q *Queries) SetTargetFirstOk(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, setTargetFirstOk, id)
+	return err
+}
+
+const updateTargetFactsExpiry = `-- name: UpdateTargetFactsExpiry :exec
+UPDATE target_facts
+   SET ssl_expires_at = COALESCE($2, ssl_expires_at),
+       domain_expires_at = COALESCE($3, domain_expires_at)
+ WHERE target_id = $1
+`
+
+type UpdateTargetFactsExpiryParams struct {
+	TargetID        int64
 	SslExpiresAt    pgtype.Timestamptz
 	DomainExpiresAt pgtype.Timestamptz
 }
 
-// Update SSL/domain expiry (collected opportunistically during a website check).
-func (q *Queries) UpdateMonitorFactsExpiry(ctx context.Context, arg UpdateMonitorFactsExpiryParams) error {
-	_, err := q.db.Exec(ctx, updateMonitorFactsExpiry, arg.MonitorID, arg.SslExpiresAt, arg.DomainExpiresAt)
-	return err
-}
-
-const upsertMonitorFacts = `-- name: UpsertMonitorFacts :exec
-INSERT INTO monitor_facts (monitor_id, status, consecutive_failures, last_check_at)
-VALUES ($1, $2, $3, now())
-ON CONFLICT (monitor_id) DO UPDATE
-   SET status = EXCLUDED.status,
-       consecutive_failures = EXCLUDED.consecutive_failures,
-       last_check_at = now()
-`
-
-type UpsertMonitorFactsParams struct {
-	MonitorID           int64
-	Status              string
-	ConsecutiveFailures int32
-}
-
-// Insert or update the monitor's facts after a check result is processed.
-func (q *Queries) UpsertMonitorFacts(ctx context.Context, arg UpsertMonitorFactsParams) error {
-	_, err := q.db.Exec(ctx, upsertMonitorFacts, arg.MonitorID, arg.Status, arg.ConsecutiveFailures)
+// SSL/domain expiry (collected opportunistically during a website check).
+func (q *Queries) UpdateTargetFactsExpiry(ctx context.Context, arg UpdateTargetFactsExpiryParams) error {
+	_, err := q.db.Exec(ctx, updateTargetFactsExpiry, arg.TargetID, arg.SslExpiresAt, arg.DomainExpiresAt)
 	return err
 }
 
@@ -288,5 +462,44 @@ type UpsertProbeNodeParams struct {
 // Register or update the probe node's last-seen timestamp.
 func (q *Queries) UpsertProbeNode(ctx context.Context, arg UpsertProbeNodeParams) error {
 	_, err := q.db.Exec(ctx, upsertProbeNode, arg.ID, arg.Region)
+	return err
+}
+
+const upsertTargetFacts = `-- name: UpsertTargetFacts :exec
+INSERT INTO target_facts (target_id, status, consecutive_failures,
+                          consecutive_unmeasured, consecutive_refusals,
+                          backoff_until, last_check_at)
+VALUES ($1, $2, $3, $4, $5, $6, now())
+ON CONFLICT (target_id) DO UPDATE
+   SET status = EXCLUDED.status,
+       consecutive_failures = EXCLUDED.consecutive_failures,
+       consecutive_unmeasured = EXCLUDED.consecutive_unmeasured,
+       consecutive_refusals = EXCLUDED.consecutive_refusals,
+       backoff_until = EXCLUDED.backoff_until,
+       last_check_at = now()
+`
+
+type UpsertTargetFactsParams struct {
+	TargetID              int64
+	Status                string
+	ConsecutiveFailures   int32
+	ConsecutiveUnmeasured int32
+	ConsecutiveRefusals   int32
+	BackoffUntil          pgtype.Timestamptz
+}
+
+// Persist the detector state after a result. consecutive_refusals and
+// backoff_until are the refusal backoff (part 2): raised on unmeasured
+// results, reset to 0/NULL on any measurable one. The caller computes the
+// doubling in Go; this only stores it.
+func (q *Queries) UpsertTargetFacts(ctx context.Context, arg UpsertTargetFactsParams) error {
+	_, err := q.db.Exec(ctx, upsertTargetFacts,
+		arg.TargetID,
+		arg.Status,
+		arg.ConsecutiveFailures,
+		arg.ConsecutiveUnmeasured,
+		arg.ConsecutiveRefusals,
+		arg.BackoffUntil,
+	)
 	return err
 }

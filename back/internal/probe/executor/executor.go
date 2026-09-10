@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,10 @@ type Result struct {
 	// Header is the response's headers, nil when no response arrived; carried so
 	// HSTS/Cache-Control need no second request for a page we already have.
 	Header http.Header
+	// RetryAfterSec is the response's Retry-After header in seconds when the
+	// host served the integer form; 0 means absent (or the HTTP-date form,
+	// which this deliberately does not parse).
+	RetryAfterSec int32
 	// Body is the response body, present only when CheckSpec.CollectBody asked
 	// for it (link discovery reads the homepage we already fetched).
 	Body []byte
@@ -170,6 +175,14 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 	}
 	if resp.TLS != nil {
 		result.TLSVersion = tlsVersionName(resp.TLS.Version)
+	}
+	// Retry-After in its integer-seconds form (the HTTP-date form is ignored:
+	// a refusal backoff may be conservative, never clever). A host that asks
+	// for a pause gets at least that long.
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && secs > 0 {
+			result.RetryAfterSec = int32(secs)
+		}
 	}
 
 	// Status assertion: 2xx/3xx is OK; anything else is a status error.

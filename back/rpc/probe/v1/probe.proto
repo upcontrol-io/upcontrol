@@ -52,7 +52,7 @@ message LeaseRequest {
 
 message CheckSpec {
   string check_id = 1; // unique within this lease
-  uint64 monitor_id = 2;
+  uint64 monitor_id = 2 [deprecated = true]; // unfilled after the shared-probe migration
   CheckKind kind = 3;
   string url = 4;
   string method = 5; // GET by default
@@ -61,6 +61,7 @@ message CheckSpec {
   uint32 max_redirects = 8;
   uint32 max_body_bytes = 9; // 65536; keyword monitors 262144
   bool collect_expiry = 10; // SSL and domain opportunistically
+  uint64 target_id = 11; // the shared probe_target the fleet fetches
 }
 
 message LeaseResponse {
@@ -71,7 +72,7 @@ message LeaseResponse {
 
 message CheckResult {
   string check_id = 1;
-  uint64 monitor_id = 2;
+  uint64 monitor_id = 2 [deprecated = true]; // unfilled after the shared-probe migration
   google.protobuf.Timestamp started_at = 3;
   bool ok = 4;
   uint32 status_code = 5;
@@ -86,6 +87,8 @@ message CheckResult {
   uint32 redirect_count = 14;
   google.protobuf.Timestamp ssl_expires_at = 15;
   google.protobuf.Timestamp domain_expires_at = 16;
+  uint64 target_id = 17; // required: results without it are dropped and counted
+  int32 retry_after_sec = 18; // Retry-After header (seconds form), 0 = absent
 }
 
 message SubmitResultsRequest {

@@ -238,22 +238,22 @@ func TestInsertChecksAndWebEventsRoundTrip(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	if err := s.InsertChecks(ctx, []CheckRow{{
-		TenantID: 1, MonitorID: 5, TS: now, Region: "eu", OK: true, StatusCode: 200,
+		TargetID: 7, IntervalSec: 300, TS: now, Region: "eu", OK: true, StatusCode: 200,
 		ErrorClass: "", DNSMs: 1, ConnectMs: 2, TLSMs: 3, TTFBMs: 4, TotalMs: 10,
 		BodyHash: 0xdeadbeef,
 	}}); err != nil {
 		t.Fatalf("InsertChecks: %v", err)
 	}
 	var ok bool
-	var statusCode, totalMs int
+	var statusCode, totalMs, intervalSec int
 	var bodyHash int64
 	if err := pool.QueryRow(ctx,
-		"SELECT ok, status_code, total_ms, body_hash FROM checks WHERE tenant_id=1 AND monitor_id=5").
-		Scan(&ok, &statusCode, &totalMs, &bodyHash); err != nil {
+		"SELECT ok, status_code, total_ms, body_hash, interval_sec FROM checks WHERE target_id=7").
+		Scan(&ok, &statusCode, &totalMs, &bodyHash, &intervalSec); err != nil {
 		t.Fatalf("select checks: %v", err)
 	}
-	if !ok || statusCode != 200 || totalMs != 10 || bodyHash != 0xdeadbeef {
-		t.Errorf("checks got ok=%v status=%d total=%d hash=%d", ok, statusCode, totalMs, bodyHash)
+	if !ok || statusCode != 200 || totalMs != 10 || bodyHash != 0xdeadbeef || intervalSec != 300 {
+		t.Errorf("checks got ok=%v status=%d total=%d hash=%d interval=%d", ok, statusCode, totalMs, bodyHash, intervalSec)
 	}
 
 	ip := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}

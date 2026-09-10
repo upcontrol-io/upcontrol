@@ -1,6 +1,7 @@
-// Day partitions of the logs table: created ahead of the clock, dropped once
-// they fall behind the floor. These partitions ARE the retention model — the
-// floor is the widest plan window plus a day, so no plan loses days it sold.
+// Day partitions of the logs and checks tables: created ahead of the clock,
+// dropped once they fall behind the floor. These partitions ARE the retention
+// model — the floor is the widest plan window plus a day, so no plan loses
+// days it sold.
 
 package pgstore
 
@@ -12,10 +13,12 @@ import (
 	"time"
 )
 
-// A logs partition is named after the UTC day it holds: logs_20260830.
+// A logs partition is named after the UTC day it holds: logs_20260830. A
+// checks partition follows the same shape: checks_20260830.
 const (
-	partitionPrefix = "logs_"
-	partitionLayout = "20060102"
+	partitionPrefix      = "logs_"
+	checkPartitionPrefix = "checks_"
+	partitionLayout      = "20060102"
 )
 
 // RollLogPartitions covers every UTC day from `keep` ago to `ahead` days out,
@@ -89,6 +92,92 @@ func (s *Store) logPartitions(ctx context.Context) ([]string, error) {
 		out = append(out, name)
 	}
 	return out, rows.Err()
+}
+
+// RollCheckPartitions is the checks sibling of RollLogPartitions: same
+// daily-partition model, same create-ahead/drop-behind semantics, copied
+// rather than generalized (the plan says copy). The retention horizon is the
+// caller's: logs keep the widest plan window plus a day, checks keep
+// max(history_days)+1 day, and a NULL history_days anywhere means keep
+// everything, the semantics TrimHistory already implements. A partition
+// whose name it cannot read (checks_default included) is left alone: the
+// default partition is the safety net when this roller lags, and an
+// operator-made name is data nobody agreed to lose.
+func (s *Store) RollCheckPartitions(ctx context.Context, now time.Time, ahead int, keep time.Duration) (created, dropped []string, err error) {
+	existing, err := s.checkPartitions(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	utc := now.UTC()
+	floor := utc.Add(-keep)
+	last := midnightUTC(utc).AddDate(0, 0, ahead)
+	for day := midnightUTC(floor); !day.After(last); day = day.AddDate(0, 0, 1) {
+		name := checkPartitionPrefix + day.Format(partitionLayout)
+		if slices.Contains(existing, name) {
+			continue
+		}
+		// Name and bounds are formatted from a date, never from caller input,
+		// so this DDL cannot carry anything but a day.
+		if _, err := s.pool.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS %s PARTITION OF checks FOR VALUES FROM ('%s') TO ('%s')",
+			name, day.Format(time.RFC3339), day.AddDate(0, 0, 1).Format(time.RFC3339),
+		)); err != nil {
+			return created, dropped, fmt.Errorf("create %s: %w", name, err)
+		}
+		created = append(created, name)
+	}
+
+	// The floor's own day ends after the floor, so nothing created above is
+	// dropped here.
+	for _, name := range existing {
+		day, ok := checkPartitionDay(name)
+		if !ok || !day.AddDate(0, 0, 1).Before(floor) {
+			continue
+		}
+		if _, err := s.pool.Exec(ctx, "DROP TABLE "+name); err != nil {
+			return created, dropped, fmt.Errorf("drop %s: %w", name, err)
+		}
+		dropped = append(dropped, name)
+	}
+	return created, dropped, nil
+}
+
+// checkPartitions lists the current partitions of checks by name, sorted,
+// and closes the read before the caller runs any DDL of its own.
+func (s *Store) checkPartitions(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT c.relname FROM pg_inherits i
+		   JOIN pg_class c ON c.oid = i.inhrelid
+		  WHERE i.inhparent = 'checks'::regclass
+		  ORDER BY c.relname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// checkPartitionDay reads the UTC day out of a checks_YYYYMMDD name. Anything
+// else, including checks_default, reports false and is never dropped.
+func checkPartitionDay(name string) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(name, checkPartitionPrefix)
+	if !ok {
+		return time.Time{}, false
+	}
+	day, err := time.ParseInLocation(partitionLayout, rest, time.UTC)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return day, true
 }
 
 func midnightUTC(t time.Time) time.Time {

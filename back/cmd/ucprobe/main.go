@@ -81,18 +81,27 @@ func runProbeLoop(apiAddr, nodeID, region, token string, log *slog.Logger) {
 
 		results := make([]*probev1.CheckResult, 0, len(checks))
 		for _, spec := range checks {
+			// Budget guard: when less than one check timeout remains of the 70 s
+			// batch context, stop fetching and submit what was collected. A
+			// check started without the time to finish is a check whose result
+			// dies with the context, and a lost batch froze its targets before
+			// lease recovery existed.
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 10*time.Second {
+				break
+			}
 			r := exec.Execute(ctx, executor.CheckSpec{
 				URL: spec.Url, Method: spec.Method, Keyword: spec.Keyword,
 				TimeoutMs: spec.TimeoutMs, MaxRedirects: spec.MaxRedirects,
 				MaxBodyBytes: spec.MaxBodyBytes, CollectExpiry: spec.CollectExpiry,
 			})
 			rc := &probev1.CheckResult{
-				CheckId: spec.CheckId, MonitorId: spec.MonitorId,
+				CheckId: spec.CheckId, TargetId: spec.TargetId,
 				Ok: r.OK, StatusCode: uint32(r.StatusCode),
 				ErrorClass:  mapErrClass(r.ErrorClass),
 				ErrorDetail: r.ErrorDetail,
 				DnsMs:       r.DNSMs, ConnectMs: r.ConnectMs, TlsMs: r.TLSMs,
 				TtfbMs: r.TTFBMs, TotalMs: r.TotalMs, BodyHash: r.BodyHash,
+				RetryAfterSec: r.RetryAfterSec,
 			}
 			if !r.SSLExpiresAt.IsZero() {
 				rc.SslExpiresAt = timestamppb.New(r.SSLExpiresAt)
@@ -100,11 +109,19 @@ func runProbeLoop(apiAddr, nodeID, region, token string, log *slog.Logger) {
 			results = append(results, rc)
 		}
 
-		_, err = client.SubmitResults(ctx, connect.NewRequest(&probev1.SubmitResultsRequest{
-			NodeId: nodeID, Region: region, Results: results,
-		}))
-		if err != nil {
-			log.Warn("submit error", "err", err, "results", len(results))
+		// Submit on its own context, detached from the lease/execute context:
+		// the collected results must reach the server even when the batch
+		// budget is spent. 20 s is longer than any single check and short
+		// enough that the next lease is not delayed by a stuck submit.
+		if len(results) > 0 {
+			submitCtx, submitCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			_, err = client.SubmitResults(submitCtx, connect.NewRequest(&probev1.SubmitResultsRequest{
+				NodeId: nodeID, Region: region, Results: results,
+			}))
+			submitCancel()
+			if err != nil {
+				log.Warn("submit error", "err", err, "results", len(results))
+			}
 		}
 
 		cancel()

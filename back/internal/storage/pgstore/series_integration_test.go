@@ -165,19 +165,37 @@ func TestCatalogAndSeriesOverLogs(t *testing.T) {
 }
 
 func TestCheckAndEventSeries(t *testing.T) {
-	s, _ := openStore(t)
+	s, pool := openStore(t)
 	ctx := context.Background()
 	from := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute)
 
+	// The shared-probe shape: tenant 91's monitor 5 subscribes to a target
+	// (id 910) whose checks rows are what the buckets read.
+	for _, stmt := range []string{
+		`INSERT INTO tenant (id, public_id, name) VALUES (91, gen_random_uuid(), 'series')`,
+		`INSERT INTO project (id, public_id, tenant_id, domain) VALUES (93, gen_random_uuid(), 91, 'series.example')`,
+		`INSERT INTO probe_target (id, key, kind, url) VALUES (910, 'website' || chr(31) || 'https://series.example' || chr(31), 'website', 'https://series.example')`,
+		`INSERT INTO monitor (id, public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 VALUES (5, gen_random_uuid(), 91, 93, 'website', 'Series', 'https://series.example', 300, 910)`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt[:40], err)
+		}
+	}
+
 	probes := []CheckRow{
-		{TS: from.Add(10 * time.Second), OK: true, TotalMs: 100},
-		{TS: from.Add(20 * time.Second), OK: true, TotalMs: 300},
+		{TargetID: 910, IntervalSec: 300, TS: from.Add(10 * time.Second), OK: true, TotalMs: 100},
+		{TargetID: 910, IntervalSec: 300, TS: from.Add(20 * time.Second), OK: true, TotalMs: 300},
 		// The third minute fails: uptime is a share, so a failed probe is not
 		// a missing one.
-		{TS: from.Add(140 * time.Second), OK: false, TotalMs: 900},
+		{TargetID: 910, IntervalSec: 300, TS: from.Add(140 * time.Second), OK: false, TotalMs: 900},
+		// A could-not-measure reading (403 behind a bot filter): stored with
+		// ok=false, but NEVER part of the uptime share.
+		{TargetID: 910, IntervalSec: 300, TS: from.Add(150 * time.Second), OK: false,
+			StatusCode: 403, ErrorClass: "status"},
 	}
 	for i := range probes {
-		probes[i].TenantID, probes[i].MonitorID, probes[i].Region = seriesTenant, 5, "ams"
+		probes[i].Region = "ams"
 	}
 	if err := s.InsertChecks(ctx, probes); err != nil {
 		t.Fatalf("insert checks: %v", err)
@@ -203,7 +221,7 @@ func TestCheckAndEventSeries(t *testing.T) {
 		t.Fatalf("a minute without a probe must not appear; got %v", byIndex)
 	}
 	if third := byIndex[2]; third.OK != 0 || third.Total != 1 {
-		t.Fatalf("a failed probe still counts towards the share; got %+v", third)
+		t.Fatalf("a failed probe still counts towards the share, an unmeasured one must not; got %+v", third)
 	}
 	// An unknown monitor is an empty series, never an error: the widget names
 	// a check that used to exist and the chart says so.
