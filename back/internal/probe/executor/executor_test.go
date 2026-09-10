@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecuteOK(t *testing.T) {
@@ -207,6 +208,24 @@ func TestExecuteSendsAUserAgent(t *testing.T) {
 	}
 	if !strings.Contains(got, "http") {
 		t.Errorf("User-Agent %q carries no URL to identify us by", got)
+	}
+}
+
+// A host that accepts the connection and then hangs is a timeout, not a
+// connection failure: the error the executor sees reads "context deadline
+// exceeded", with no "timeout" in its text.
+func TestExecuteHangIsTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	r := (&Executor{}).Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 200})
+	if r.ErrorClass != "timeout" {
+		t.Errorf("ErrorClass = %q (%s), want timeout", r.ErrorClass, r.ErrorDetail)
 	}
 }
 

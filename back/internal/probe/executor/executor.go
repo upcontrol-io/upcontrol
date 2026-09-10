@@ -110,6 +110,7 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 
 	// Build the transport with a guarded dialer.
 	transport := e.buildTransport(timeout)
+	defer transport.CloseIdleConnections()
 
 	// Set up the timing recorder.
 	tr := newTimingRecorder(start)
@@ -363,7 +364,12 @@ func errorResult(err error, start time.Time) Result {
 	}
 }
 
-func isTimeout(err error) bool { return err != nil && strings.Contains(err.Error(), "timeout") }
+// isTimeout keeps the text match for timeouts the chain hides: a resolver
+// timeout arrives as "dns: %w" inside a url.Error, whose Timeout() does not
+// look past that wrap.
+func isTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || (err != nil && strings.Contains(err.Error(), "timeout"))
+}
 func isBlocked(err error) bool {
 	return errors.Is(err, guard.ErrBlockedTarget)
 }
