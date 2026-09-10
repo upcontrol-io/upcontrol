@@ -195,7 +195,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// the endpoint stays a 501. A Settings token arrives on the next restart.
 	mux.Handle("POST /v1/auth/telegram", auth.NewTelegramMiniApp(pgPool, sm, tgToken(ctx), devMode))
 
-	mon := api.NewMonitors(pgPool, sm, d.Config.PublicOrigin)
+	mon := api.NewMonitors(pgPool, pgs, sm, d.Config.PublicOrigin)
 	mux.Handle("GET /v1/monitors", mon)
 	mux.Handle("POST /v1/monitors", mon)
 	mux.Handle("PATCH /v1/monitors/{id}", mon)
@@ -280,8 +280,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/project/switch", wa)
 
 	// Installer endpoints: anonymous mint is public (throttled); claim needs
-	// a session; status authenticates by the project API key.
-	inst := api.NewInstall(pgPool, pgs, sm, d.Config.PublicOrigin, d.Config.SelfHosted)
+	// a session; status authenticates by the project API key. The recorder
+	// rides along for the claim path's page_claimed event (plan part 5).
+	inst := api.NewInstall(pgPool, pgs, sm, d.Config.PublicOrigin, d.Config.SelfHosted).WithRecorder(recorder)
 	mux.Handle("POST /v1/projects/anonymous", inst)
 	mux.Handle("POST /v1/claim", inst)
 	mux.Handle("GET /v1/install/status", inst)
@@ -297,10 +298,31 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// how a status page answers on the customer's own domain. A separate pattern
 	// because "/public/status/{slug}" does not match a path with nothing after it.
 	mux.Handle("GET /public/status", wa)
-	// Caddy's on-demand TLS ask, for the same custom domains. The production
-	// Caddyfile proxies no /internal/ path, so this door answers only inside the
-	// compose network: it decides whether a certificate may be issued at all.
+	// Caddy's on-demand TLS ask, for the same custom domains. Nothing under
+	// /internal/ is edge-exposed except the seed door below, so this door
+	// answers only inside the compose network: it decides whether a
+	// certificate may be issued at all.
 	mux.Handle("GET /internal/domain-allowed", wa)
+	// The operator's seed door (plan part 2): the one /internal/ path the
+	// production Caddyfile proxies at the edge, gated by the node token -
+	// the same trust model as the already-proxied probe RPC. Counts against
+	// the instance mint ceiling only; a host with any live page gets that
+	// page's slug back.
+	mux.Handle("POST /internal/seed-host", api.NewSeedDoor(wa, d.Config.NodeToken))
+	// The crawler surfaces (plan part 4): the HTML door, the directory, the
+	// policy pages, the sitemap, and the page's OG image. All render from
+	// the same assembly as the JSON door above.
+	statusHTML := api.NewStatusPages(wa)
+	mux.Handle("GET /status/{slug}", statusHTML)
+	mux.Handle("GET /status", statusHTML)
+	mux.Handle("GET /sitemap-status.xml", statusHTML)
+	mux.Handle("GET /public/status/{slug}/og.png", statusHTML)
+	static := api.NewStaticPages()
+	mux.Handle("GET /bot", static)
+	mux.Handle("GET /status/policy", static)
+	// The public removal-token door: issues the DNS TXT token the worker's
+	// dns-tokens job verifies. Rate-limited per IP, idempotent per page.
+	mux.Handle("POST /public/status/{slug}/remove-token", api.NewRemoveTokenDoor(wa))
 	// The heartbeat ping door: anonymous, the token in the path is the whole
 	// credential, so an unknown one answers 404 and never a hint.
 	hb := heartbeat.New(pgPool, pgs, lc)
