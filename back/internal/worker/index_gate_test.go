@@ -228,7 +228,8 @@ func TestGateStampsOnlyContinuousPages(t *testing.T) {
 }
 
 // A wildcard-DNS host does not qualify even with clean continuity; a
-// claimed page without host_verified_at is not even a candidate.
+// claimed page - ANY page, a host page included - is not even a candidate
+// until the DNS proof has landed (review decision 16).
 func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 	pool := newGateWorld(t)
 	ctx := context.Background()
@@ -250,9 +251,11 @@ func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 		t.Fatal("a wildcard-DNS host was stamped")
 	}
 
-	// A claimed, opted-in page without the TXT proof is not a candidate at
-	// all: the stamp never lands however clean its continuity is.
-	claimID, targetID, claimHost := seedGatePage(t, pool, "watch", 0, 0, true)
+	// A claimed HOST page without the TXT proof is not a candidate at all:
+	// the claim itself removed the continuity-only arm, however clean the
+	// continuity is (the old is_host_page arm indexed a stranger's claim on
+	// continuity alone - exactly what decision 16 forbids).
+	claimID, _, claimHost := seedGatePage(t, pool, "watch", 0, 0, true)
 	var tenantID int64
 	_ = pool.Raw().QueryRow(ctx, `SELECT tenant_id FROM status_page WHERE id = $1`, claimID).Scan(&tenantID)
 	if _, err := pool.Raw().Exec(ctx,
@@ -260,14 +263,40 @@ func TestGateRefusesWildcardDNSAndUnverifiedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET index_opt_in = true, is_host_page = false WHERE id = $1`, claimID); err != nil {
+		`UPDATE status_page SET index_opt_in = true WHERE id = $1`, claimID); err != nil {
 		t.Fatal(err)
 	}
-	_ = targetID
 	g.tick(context.Background(), pool, quietLogger)
 	_ = pool.Raw().QueryRow(ctx, `SELECT count(*) FROM status_page WHERE id = $1 AND indexed_at IS NOT NULL`, claimID).Scan(&stamped)
 	if stamped != 0 {
-		t.Fatalf("a claimed page without host_verified_at was stamped (%s)", claimHost)
+		t.Fatalf("a claimed host page without host_verified_at was stamped (%s)", claimHost)
+	}
+
+	// The proof restores it: the same claimed host page, opted in and
+	// DNS-verified, is a candidate again - and so is a claimed NON-host page
+	// with both (the second arm is for any page).
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE status_page SET host_verified_at = now() WHERE id = $1`, claimID); err != nil {
+		t.Fatal(err)
+	}
+	nonHostID, _, _ := seedGatePage(t, pool, "watch", 0, 0, true)
+	_ = pool.Raw().QueryRow(ctx, `SELECT tenant_id FROM status_page WHERE id = $1`, nonHostID).Scan(&tenantID)
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE tenant SET claim_token_hash = NULL WHERE id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE status_page SET index_opt_in = true, host_verified_at = now(), is_host_page = false WHERE id = $1`, nonHostID); err != nil {
+		t.Fatal(err)
+	}
+	g.tick(context.Background(), pool, quietLogger)
+	_ = pool.Raw().QueryRow(ctx, `SELECT count(*) FROM status_page WHERE id = $1 AND indexed_at IS NOT NULL`, claimID).Scan(&stamped)
+	if stamped != 1 {
+		t.Fatal("a claimed, verified, opted-in host page was not stamped")
+	}
+	_ = pool.Raw().QueryRow(ctx, `SELECT count(*) FROM status_page WHERE id = $1 AND indexed_at IS NOT NULL`, nonHostID).Scan(&stamped)
+	if stamped != 1 {
+		t.Fatal("a claimed, verified, opted-in non-host page was not stamped")
 	}
 }
 

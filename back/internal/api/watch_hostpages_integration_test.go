@@ -72,7 +72,7 @@ func newHostWorld(t *testing.T) (*pg.Pool, http.Handler, *session.Manager) {
 	}
 	t.Cleanup(pool.Close)
 	sm := session.New(pool, session.DefaultTTL, nil)
-	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -344,7 +344,7 @@ func TestRemovedHostIsRefusedAndItsPageIsGone(t *testing.T) {
 func TestMintCeilingsRefuseAndCreateNothing(t *testing.T) {
 	pool, _, _ := newHostWorld(t)
 	const ip = "198.51.100.77"
-	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false, "")
 	wa.statusKnobs.MintPerIPPerDay = 2
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
@@ -441,7 +441,7 @@ func TestIndexDisabledHidesTheStampButKeepsIt(t *testing.T) {
 	}
 
 	// The kill switch: the stamp stays, the flag flips.
-	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false, "")
 	wa.statusKnobs.IndexDisabled = true
 	r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
 	pw := httptest.NewRecorder()
@@ -560,5 +560,34 @@ func TestHostPageStateSentences(t *testing.T) {
 	}
 	if state["sentence"] != fmt.Sprintf("%s refuses automated checks from our location; we cannot measure it.", host) {
 		t.Fatalf("could_not_measure sentence = %q", state["sentence"])
+	}
+}
+
+// A host on a shared platform suffix is unmintable at the anonymous doors
+// (the plan's list: vercel.app, github.io, netlify.app): foo.vercel.app is a
+// registrable domain (vercel.app is on the public suffix list), so the
+// eTLD+1 gate cannot see it. The platform's OWN domain is an ordinary
+// registrable host and mints as before - the refusal is about platform
+// subdomains, not the brand.
+func TestPlatformSuffixHostsAreUnmintable(t *testing.T) {
+	pool, route, _ := newHostWorld(t)
+	ctx := context.Background()
+	for _, host := range []string{"foo.vercel.app", "deep.pages.github.io", "site.netlify.app", "vercel.app"} {
+		if refused, code := blockedHostRefused(ctx, pool, host); !refused || code != "unmintable_host" {
+			t.Fatalf("blockedHostRefused(%s) = %v/%s, want refused unmintable_host", host, refused, code)
+		}
+	}
+	for _, host := range []string{"vercel.com", "vercel.app.example.com"} {
+		if refused, code := blockedHostRefused(ctx, pool, host); refused || code != "" {
+			t.Fatalf("blockedHostRefused(%s) = %v/%s, want allowed", host, refused, code)
+		}
+	}
+	// The door answers 400 before any probe runs.
+	w := watch(t, route, "foo.vercel.app", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("watch on foo.vercel.app = %d (%s), want 400", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unmintable_host") {
+		t.Fatalf("refusal body = %s, want unmintable_host", w.Body.String())
 	}
 }

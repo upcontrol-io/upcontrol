@@ -358,6 +358,18 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		writeAPIErr(w, http.StatusNotFound, "not_claimable")
 		return
 	}
+	// Decision 16: the index is for pages nobody claimed or whose claimer
+	// proved control of the host. A claim changes the page's voice, so a
+	// stamp earned while the page was nobody's comes OFF now; verification
+	// plus the opt-in switch re-enter it through the ramp like anyone else.
+	if _, err := tx.Exec(ctx,
+		`UPDATE status_page SET indexed_at = NULL
+		   WHERE tenant_id = $1
+		     AND NOT (host_verified_at IS NOT NULL AND index_opt_in)`,
+		anonTenantID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	// Serialize the claimer's tenant for the rest of this transaction: the
 	// gate below counts projects, and two claims landing together would each
 	// count the other's row as absent and both pass. The anon tenant's burn

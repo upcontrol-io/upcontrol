@@ -73,7 +73,7 @@ func newWatchFixture(t *testing.T) *watchFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	f.ownerCookie = &http.Cookie{Name: session.CookieName, Value: token}
-	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -370,7 +370,7 @@ func TestStatusPageIsPerProject(t *testing.T) {
 	}
 	one, two := seed(1), seed(2)
 
-	wa := NewWriteAPI(f.pool, nil, f.sess, false, nil, nil, false)
+	wa := NewWriteAPI(f.pool, nil, f.sess, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/status-page", wa)
 	mux.Handle("GET /public/status/{slug}", wa)

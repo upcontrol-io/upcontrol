@@ -49,6 +49,11 @@ func NewProbeService(pool *pg.Pool, pgs *pgstore.Store, lc *incident.Lifecycle, 
 // else's measurement), but counted, never silently lost.
 var resultsDroppedNoTarget atomic.Uint64
 
+// resultsDroppedTargetRead counts CheckResults dropped because the target's
+// facts could not be read (a target deleted mid-batch, a DB error): logged
+// per occurrence, and counted so the loss stays visible in ops.
+var resultsDroppedTargetRead atomic.Uint64
+
 // Lease lets a probe take a batch of work.
 func (s *ProbeService) Lease(
 	ctx context.Context,
@@ -148,7 +153,10 @@ func (s *ProbeService) SubmitResults(
 
 		facts, err := s.pool.Queries().GetTargetFacts(ctx, targetID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			continue // target deleted or DB error
+			// No silent loss: the result is dropped, so the drop is named.
+			resultsDroppedTargetRead.Add(1)
+			slog.Warn("result dropped: target facts unreadable", "target", targetID, "err", err)
+			continue
 		}
 		// A missing facts row (the very first check) is normal: the zero value
 		// is a clean initial state; UpsertTargetFacts below creates the row.
@@ -234,9 +242,11 @@ func (s *ProbeService) SubmitResults(
 					for _, monitorID := range subs {
 						title := monitorTitle(ctx, s.pool, monitorID, res)
 						// Open writes effective_interval_sec itself (the cadence this
-						// row was taken at, review decision 14).
-						_, _, oerr := s.incidents.Open(ctx, monitorID, title, interval)
-						_ = oerr
+						// row was taken at, review decision 14). A failed open is a
+						// lost alert, never a silent one: logged with both ids.
+						if _, _, oerr := s.incidents.Open(ctx, monitorID, title, interval); oerr != nil {
+							slog.Warn("incident open failed", "target", targetID, "monitor", monitorID, "err", oerr)
+						}
 					}
 				}
 			}

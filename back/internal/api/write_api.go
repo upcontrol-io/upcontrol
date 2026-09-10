@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -35,6 +36,7 @@ import (
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/discover"
+	"go.upcontrol.io/back/internal/dnstokens"
 	"go.upcontrol.io/back/internal/platform/config"
 	"go.upcontrol.io/back/internal/probe/executor"
 	"go.upcontrol.io/back/internal/ring/query"
@@ -79,6 +81,10 @@ type writeAPI struct {
 	// where they are used, so a struct built by hand in a test never refuses
 	// every mint.
 	statusKnobs config.StatusPageKnobs
+	// mintSecret keys the mint audit's IP hash (HMAC-SHA256) when the
+	// deployment sets UC_SECRET_KEY_HEX. nil keeps the plain sha256
+	// self-hosts without a secret have always stored.
+	mintSecret []byte
 }
 
 // checkCacheTTL is short enough that a reader who just fixed their site sees the
@@ -90,8 +96,20 @@ type cachedCheck struct {
 	at   time.Time
 }
 
-func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
-	return &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted, keys: pg.NewKeyResolver(p, nil), statusKnobs: config.LoadStatusPageKnobs(nil)}
+// NewWriteAPI wires the write API. secretHex is the deployment's
+// UC_SECRET_KEY_HEX, "" when none is set: it keys the mint audit's IP hash
+// and is OPTIONAL - without it the audit keeps the plain sha256, so a
+// self-host with no secret works exactly as before.
+func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool, secretHex string) *writeAPI {
+	h := &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted, keys: pg.NewKeyResolver(p, nil), statusKnobs: config.LoadStatusPageKnobs(nil)}
+	// A bad hex never reaches here in a real boot (config.Load fails first);
+	// falling back to the unkeyed hash keeps a hand-built handler honest.
+	if secretHex != "" {
+		if k, err := config.SecretKeyFromHex(secretHex); err == nil {
+			h.mintSecret = k[:]
+		}
+	}
+	return h
 }
 
 func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -862,6 +880,10 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	defer func() { _ = tx.Rollback(ctx) }()
 	if projectID != 0 {
 		if err := releaseProject(ctx, tx, projectID); err != nil {
+			if errors.Is(err, errPageRemoved) {
+				writeAPIErr(w, http.StatusConflict, "page_removed")
+				return
+			}
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -884,6 +906,11 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	writeAPIJSON(w, http.StatusOK, map[string]any{"accountDeleted": last})
 }
 
+// errPageRemoved is releaseProject's refusal for a project whose page was
+// taken down: deleteProject maps it to 409 page_removed, and the deferred
+// rollback leaves the project exactly as it was.
+var errPageRemoved = errors.New("a status page of this project was removed")
+
 // releaseProject hands a project to a fresh UNCLAIMED tenant instead of
 // deleting it: **removing a project does not remove its status page — the page
 // simply becomes ownerless** (user decision, 2026-08-27). It keeps its slug and
@@ -900,10 +927,26 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 // Deleting the key is also what lets the reaper collect the page later: its
 // exclusion spares an anonymous tenant that has BOTH ingested and still holds a
 // key, which is the `uc init` install in use and not this.
+//
+// A project one of whose pages was REMOVED is refused (errPageRemoved): a
+// removed page stays removed, and release is a live page's second life.
 func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 	var domain string
 	if err := tx.QueryRow(ctx, `SELECT domain FROM project WHERE id = $1`, projectID).Scan(&domain); err != nil {
 		return err
+	}
+	// A removed page stays removed (plan part 2): release hands the page to a
+	// fresh ownerless tenant, which is a live page's second life - a page the
+	// owner took down must not come back as ownerless-and-alive. Refuse; the
+	// caller maps errPageRemoved to 409 and the transaction rolls back.
+	var removed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM status_page WHERE project_id = $1 AND removed_at IS NOT NULL)`,
+		projectID).Scan(&removed); err != nil {
+		return err
+	}
+	if removed {
+		return errPageRemoved
 	}
 	claimHash := sha256.Sum256([]byte(randomHex()))
 	var orphanTenant int64
@@ -1131,16 +1174,20 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	if domain != "" {
 		domainVal = domain
 	}
+	// index_opt_in is written to the COLUMN as well as the config blob: the
+	// index gate reads the column (indexCandidates), so a switch that only
+	// lived in the blob was dead for every page it exists for.
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config, index_opt_in)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (slug) DO UPDATE SET
 		   title = EXCLUDED.title,
 		   domain = EXCLUDED.domain,
 		   domain_verified_at = CASE WHEN EXCLUDED.domain = status_page.domain
 		                             THEN status_page.domain_verified_at END,
-		   config = EXCLUDED.config`,
-		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw); err != nil {
+		   config = EXCLUDED.config,
+		   index_opt_in = EXCLUDED.index_opt_in`,
+		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw, cfg.IndexOptIn); err != nil {
 		// The slug conflict is arbitrated above, so a unique violation here is
 		// the domain: another page already rides that host.
 		var pgErr *pgconn.PgError
@@ -1281,6 +1328,18 @@ func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID, projectID i
 				`UPDATE status_page SET verification_token = $2 WHERE id = $1 AND verification_token IS NULL`,
 				page.ID, token); err == nil {
 				resp["verificationToken"] = token
+			}
+		}
+		// The record the owner publishes, composed server-side with the same
+		// eTLD+1 reduction the worker's dns-tokens job resolves (it reduces the
+		// PROJECT's domain, not the page's custom one): the front renders this
+		// string instead of rebuilding the rule. Omitted when the domain is not
+		// registrable - there is no record to publish.
+		var projectDomain string
+		if err := h.pool.Raw().QueryRow(ctx,
+			`SELECT domain FROM project WHERE id = $1`, projectID).Scan(&projectDomain); err == nil && projectDomain != "" {
+			if registrable, rerr := publicsuffix.EffectiveTLDPlusOne(projectDomain); rerr == nil {
+				resp["verificationRecord"] = dnstokens.VerifyRecord + registrable
 			}
 		}
 	}
@@ -2531,7 +2590,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// Mint audit and ceilings (plan part 2): counted from status_page rows
 	// before anything is created - a refusal creates nothing - and counted
 	// again inside the mint transaction where the count is authoritative.
-	audit := mintAuditFromRequest(r)
+	audit := h.mintAuditFromRequest(r)
 	if code := h.mintCeilingRefused(ctx, h.pool.Raw(), audit); code != "" {
 		writeAPIErr(w, http.StatusTooManyRequests, code)
 		return
@@ -2671,13 +2730,32 @@ func canonicalHost(raw string) (string, error) {
 
 var errNoHost = errors.New("no host in input")
 
+// mintPlatformSuffixes are the shared hosting platforms the anonymous mint
+// doors refuse outright - exactly the plan's list. foo.vercel.app is a
+// registrable domain (vercel.app is on the public suffix list), so the
+// eTLD+1 gate below cannot see it, yet a page squatting a platform subdomain
+// is not the subdomain owner's to publish. Growing the list is a one-line
+// change here.
+var mintPlatformSuffixes = map[string]bool{
+	"vercel.app":  true,
+	"github.io":   true,
+	"netlify.app": true,
+}
+
 // blockedHostRefused is the anonymous mint door's host gate: the eTLD+1 is
-// looked up in blocked_host (self-serve removals land there), and a host
-// publicsuffix cannot reduce - an IP literal, a bare public suffix - is
-// unmintable: there is no registrable domain to name a page after. Only
-// this door consults the table: publicCheck never does, and a signed-in
-// owner creating a check via /v1/monitors never passes through here.
+// looked up in blocked_host (self-serve removals land there), a host on a
+// shared platform suffix is refused (a tenant of the platform, not an owner
+// of a domain), and a host publicsuffix cannot reduce - an IP literal, a
+// bare public suffix - is unmintable: there is no registrable domain to
+// name a page after. Only this door consults the table: publicCheck never
+// does, and a signed-in owner creating a check via /v1/monitors never
+// passes through here.
 func blockedHostRefused(ctx context.Context, pool *pg.Pool, host string) (refused bool, code string) {
+	for suffix := range mintPlatformSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true, "unmintable_host"
+		}
+	}
 	domain, err := publicsuffix.EffectiveTLDPlusOne(host)
 	if err != nil {
 		return true, "unmintable_host"
@@ -2701,10 +2779,15 @@ type mintAudit struct {
 }
 
 // mintAuditFromRequest hashes the request's scope: the client IP always, the
-// analytics visitor cookie when one exists, the User-Agent truncated.
-func mintAuditFromRequest(r *http.Request) mintAudit {
-	ip := sha256.Sum256([]byte(analytics.ClientIP(r)))
-	audit := mintAudit{ipHash: hex.EncodeToString(ip[:]), ua: r.UserAgent()}
+// analytics visitor cookie when one exists, the User-Agent truncated. The IP
+// hash is HMAC-SHA256 under the deployment's secret key when one is
+// configured: a bare sha256(IP) is reconstructable from any traffic dump
+// (enumerate the address space, match the hashes), a keyed one is not. With
+// no key it stays the plain sha256 existing audit rows carry - the ceiling
+// counts per spelling, so flipping the key on (or off) only resets the
+// per-IP day window, never the audit itself.
+func (h *writeAPI) mintAuditFromRequest(r *http.Request) mintAudit {
+	audit := mintAudit{ipHash: h.mintIPHash(analytics.ClientIP(r)), ua: r.UserAgent()}
 	if len(audit.ua) > 256 {
 		audit.ua = audit.ua[:256]
 	}
@@ -2714,6 +2797,19 @@ func mintAuditFromRequest(r *http.Request) mintAudit {
 		audit.visitorHash = &s
 	}
 	return audit
+}
+
+// mintIPHash is the audit's IP identity: HMAC-SHA256 under the deployment's
+// key when one is configured, plain sha256 otherwise (self-hosts without a
+// secret keep working; see mintAuditFromRequest for why the key exists).
+func (h *writeAPI) mintIPHash(ip string) string {
+	if h.mintSecret != nil {
+		m := hmac.New(sha256.New, h.mintSecret)
+		m.Write([]byte(ip))
+		return hex.EncodeToString(m.Sum(nil))
+	}
+	s := sha256.Sum256([]byte(ip))
+	return hex.EncodeToString(s[:])
 }
 
 // knobsOrDefaults guards the ceilings against a zero-valued knob struct (a

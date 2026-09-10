@@ -68,7 +68,7 @@ func newSharedWorld(t *testing.T, seats int) (*pg.Pool, http.Handler, []http.Coo
 	t.Cleanup(pool.Close)
 	sm := session.New(pool, session.DefaultTTL, nil)
 	mon := NewMonitors(pool, pgstore.New(pool.Raw()), sm, "")
-	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/monitors", mon)
 	mux.Handle("PATCH /v1/monitors/{id}", mon)
@@ -484,5 +484,36 @@ func TestHeartbeatCreateMintsAPrivateTarget(t *testing.T) {
 	if !due.After(time.Now().Add(5 * time.Minute)) {
 		t.Fatalf("heartbeat first window = %v, want ~2x interval out", due)
 	}
+	// The target's url is the tokenless stable label ("heartbeat:<public
+	// id>"), never the ping URL: nothing fetches it, and the URL's token is a
+	// secret with no reader here.
+	if n := oneInt(t, pool,
+		`SELECT count(*) FROM probe_target pt JOIN monitor m ON m.target_id = pt.id
+		  WHERE pt.kind = 'heartbeat' AND pt.url = 'heartbeat:' || m.public_id::text`); n != 1 {
+		t.Fatal("the heartbeat target does not carry the stable heartbeat:<public id> label")
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM probe_target WHERE url LIKE '%/public/ping/%'`); n != 0 {
+		t.Fatal("a heartbeat target carries a ping URL with its token")
+	}
 	_ = availability.StatusDown
+}
+
+// blocked_host binds only the anonymous mint doors: a signed-in owner
+// creating a check on a domain whose eTLD+1 sits in blocked_host must
+// succeed - the table guards the landing, never /v1/monitors.
+func TestOwnerCreatesACheckOnABlockedHost(t *testing.T) {
+	pool, route, cookies := newSharedWorld(t, 1)
+	ctx := context.Background()
+	// The eTLD+1 of the target the seat will watch, the exact spelling the
+	// removal job writes into the table.
+	family := fmt.Sprintf("blocked-%d.example.com", time.Now().UnixNano()%100000)
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO blocked_host (domain, reason) VALUES ($1, 'self-serve TXT removal')`, family); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := createMonitor(t, route, cookies[0],
+		`{"type":"website","name":"Mine","target":"https://deep.`+family+`/checkout","interval":"5m"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create on a blocked host = %d (%s), want 201", w.Code, w.Body.String())
+	}
 }

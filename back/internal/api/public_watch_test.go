@@ -1,6 +1,9 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -180,5 +183,35 @@ func TestSameHostTargetsAcceptsASubdomain(t *testing.T) {
 	})
 	if len(got) != 1 || got[0] != "https://api.mine.com/v1" {
 		t.Errorf("targets = %v, want the subdomain and nothing else", got)
+	}
+}
+
+// The mint audit's IP identity: HMAC-SHA256 under the deployment's secret
+// key when one is configured (a bare sha256(IP) is reconstructable from a
+// traffic dump by enumerating the address space), plain sha256 without one
+// so self-hosts keep the spelling their existing audit rows carry.
+func TestMintIPHashIsKeyedWhenASecretIsConfigured(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef") // 32 bytes, AES-256 size
+	plain := &writeAPI{}
+	keyed := &writeAPI{mintSecret: key}
+
+	h := keyed.mintIPHash("203.0.113.7")
+	if h != keyed.mintIPHash("203.0.113.7") {
+		t.Fatal("the keyed hash is not deterministic for one IP")
+	}
+	if h == plain.mintIPHash("203.0.113.7") {
+		t.Fatal("the keyed hash equals the unkeyed sha256 spelling")
+	}
+	if keyed.mintIPHash("203.0.113.8") == h {
+		t.Fatal("two addresses collided on one keyed hash")
+	}
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("203.0.113.7"))
+	if h != hex.EncodeToString(m.Sum(nil)) {
+		t.Fatal("the keyed hash is not HMAC-SHA256 under the configured key")
+	}
+	s := sha256.Sum256([]byte("203.0.113.7"))
+	if plain.mintIPHash("203.0.113.7") != hex.EncodeToString(s[:]) {
+		t.Fatal("without a key the hash must stay the plain sha256")
 	}
 }

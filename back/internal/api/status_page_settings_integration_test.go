@@ -1,15 +1,17 @@
 //go:build integration
 
-// The owner's status-page settings after part 4: indexOptIn persists, the
-// verification token is issued on read and stays stable until verified, the
-// answer carries rootPageUrl - and releaseProject never clears removed_at
-// and the page keeps its root_target_id. Needs Postgres: -tags=integration,
-// UC_TEST_POSTGRES.
+// The owner's status-page settings after part 4: indexOptIn persists into
+// the column the gate reads, the verification token is issued on read and
+// stays stable until verified, verificationRecord is composed server-side,
+// the answer carries rootPageUrl - and a removed page refuses release
+// (releaseProject) and the project delete (409 page_removed). Needs
+// Postgres: -tags=integration, UC_TEST_POSTGRES.
 package api
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -45,20 +47,29 @@ func putStatus(t *testing.T, h http.Handler, cookie http.Cookie, body string) (i
 	return w.Code, resp
 }
 
-// indexOptIn persists through PUT and returns on both reads; the
-// verification token is issued on read while unverified, stays STABLE across
-// reads, and the answer carries rootPageUrl.
+// indexOptIn persists through PUT - into the COLUMN the gate reads, not
+// just the config blob - and returns on both reads; the verification token
+// is issued on read while unverified, stays STABLE across reads, the answer
+// carries rootPageUrl, and verificationRecord is composed server-side from
+// the PROJECT's domain with the same eTLD+1 the worker resolves.
 func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 	pool, _, cookie := newSettingsWorld(t)
 	ctx := context.Background()
 	sm := session.New(pool, session.DefaultTTL, nil)
-	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("PUT /v1/status-page", wa)
 	mux.Handle("GET /v1/status-page", wa)
 
 	if code, _ := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":true}`); code != http.StatusOK {
 		t.Fatalf("PUT with indexOptIn = %d, want 200", code)
+	}
+	var projectID int64
+	_ = pool.Raw().QueryRow(ctx, `SELECT id FROM project LIMIT 1`).Scan(&projectID)
+	// The switch is real where the gate reads it: the COLUMN, never only the
+	// config blob (indexCandidates reads status_page.index_opt_in).
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND index_opt_in`, projectID); n != 1 {
+		t.Fatal("PUT {indexOptIn:true} did not write the status_page.index_opt_in column the gate reads")
 	}
 	r := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
 	r.AddCookie(&cookie)
@@ -81,42 +92,76 @@ func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 	if resp["rootPageUrl"] == nil {
 		t.Fatal("the answer carries no rootPageUrl")
 	}
+	// verificationRecord is composed server-side from the PROJECT's domain
+	// (the host the worker's dns-tokens job reduces), with the www label
+	// folded away by the same eTLD+1 helper.
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE project SET domain = 'www.example.com' WHERE id = $1`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	read := func() map[string]any {
+		rr := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
+		rr.AddCookie(&cookie)
+		ww := httptest.NewRecorder()
+		mux.ServeHTTP(ww, rr)
+		var body map[string]any
+		if err := json.Unmarshal(ww.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	if got := read()["verificationRecord"]; got != "_upcontrol-verify.example.com" {
+		t.Fatalf("verificationRecord = %v, want _upcontrol-verify.example.com", got)
+	}
+	// A project domain the eTLD+1 helper cannot reduce omits the field:
+	// there is no record to publish.
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE project SET domain = 'localhost' WHERE id = $1`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if got := read()["verificationRecord"]; got != nil {
+		t.Fatalf("verificationRecord on an unregistrable domain = %v, want omitted", got)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE project SET domain = 'www.example.com' WHERE id = $1`, projectID); err != nil {
+		t.Fatal(err)
+	}
 	// The token is idempotent until verified: the same token on re-read.
-	r2 := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
-	r2.AddCookie(&cookie)
-	w2 := httptest.NewRecorder()
-	mux.ServeHTTP(w2, r2)
-	var resp2 map[string]any
-	_ = json.Unmarshal(w2.Body.Bytes(), &resp2)
+	resp2 := read()
 	if resp2["verificationToken"] != token {
 		t.Fatalf("verificationToken changed on re-read: %v, want the same %q", resp2["verificationToken"], token)
 	}
-	// Verified clears the token and reports the stamp.
-	var projectID int64
-	_ = pool.Raw().QueryRow(ctx, `SELECT id FROM project LIMIT 1`).Scan(&projectID)
+	// Verified clears the token, stops the record and reports the stamp.
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET host_verified_at = now(), verification_token = NULL WHERE project_id = $1`, projectID); err != nil {
 		t.Fatal(err)
 	}
-	r3 := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
-	r3.AddCookie(&cookie)
-	w3 := httptest.NewRecorder()
-	mux.ServeHTTP(w3, r3)
-	var resp3 map[string]any
-	_ = json.Unmarshal(w3.Body.Bytes(), &resp3)
+	resp3 := read()
 	if resp3["verificationToken"] != nil {
 		t.Fatalf("a verified page still offers a token: %v", resp3["verificationToken"])
+	}
+	if resp3["verificationRecord"] != nil {
+		t.Fatalf("a verified page still offers the record: %v", resp3["verificationRecord"])
 	}
 	if resp3["hostVerifiedAt"] == nil {
 		t.Fatal("a verified page reports no hostVerifiedAt")
 	}
+	// Turning the switch OFF writes the column too: the gate must see the
+	// owner's NO, not a stale blob.
+	if code, _ := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":false}`); code != http.StatusOK {
+		t.Fatalf("PUT indexOptIn off = %d, want 200", code)
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND NOT index_opt_in`, projectID); n != 1 {
+		t.Fatal("PUT {indexOptIn:false} did not clear the column the gate reads")
+	}
 }
 
-// releaseProject (DELETE /v1/project on the last project) keeps the page's
-// root_target_id and never clears removed_at: the page outlives the project
-// and a removed page stays removed.
-func TestReleaseKeepsTheRootReferenceAndNeverUnremoves(t *testing.T) {
-	pool, route, cookie := newSettingsWorld(t)
+// A removed page stays removed (plan part 2): releaseProject REFUSES it
+// (errPageRemoved) and leaves the page exactly as it was - root reference
+// kept, removed_at kept. The live-page half of release (root kept, page
+// alive) is TestReleasedHostPageKeepsMeasuringAndSurvivesTheReaper below.
+func TestReleaseRefusesARemovedPage(t *testing.T) {
+	pool, route, _ := newSettingsWorld(t)
 	ctx := context.Background()
 	uniq := time.Now().UnixNano() % 100000
 	host := fmt.Sprintf("release-%d.example.com", uniq)
@@ -126,17 +171,10 @@ func TestReleaseKeepsTheRootReferenceAndNeverUnremoves(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("watch = %d (%s)", w.Code, w.Body.String())
 	}
-	_ = cookie
 	slug := watchBody(t, w)["slug"].(string)
-	// The project is the caller's (the watch fixture's single seat is signed
-	// out, so this was the anonymous mint: adopt it by claiming).
-	var tenantID, projectID int64
+	var projectID int64
 	if err := pool.Raw().QueryRow(ctx,
-		`SELECT tenant_id, id FROM project WHERE domain = $1`, host).Scan(&tenantID, &projectID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE tenant SET claim_token_hash = NULL WHERE id = $1`, tenantID); err != nil {
+		`SELECT id FROM project WHERE domain = $1`, host).Scan(&projectID); err != nil {
 		t.Fatal(err)
 	}
 	var root int64
@@ -145,22 +183,21 @@ func TestReleaseKeepsTheRootReferenceAndNeverUnremoves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Removal first: a removed page must survive release still removed.
+	// Removal first: a removed page must not come back as ownerless-and-live.
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE status_page SET removed_at = now() WHERE slug = $1`, slug); err != nil {
 		t.Fatal(err)
 	}
-	// Release the project the way the API does.
+	// Release the project the way the API does: refused, nothing moved.
 	tx, err := pool.Raw().Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := releaseProject(ctx, tx, projectID); err != nil {
-		t.Fatalf("releaseProject: %v", err)
+	if err := releaseProject(ctx, tx, projectID); !errors.Is(err, errPageRemoved) {
+		tx.Rollback(ctx)
+		t.Fatalf("releaseProject on a removed page = %v, want errPageRemoved", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
+	_ = tx.Rollback(ctx)
 	var rootAfter *int64
 	var removedAfter *time.Time
 	if err := pool.Raw().QueryRow(ctx,
@@ -168,10 +205,81 @@ func TestReleaseKeepsTheRootReferenceAndNeverUnremoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rootAfter == nil || *rootAfter != root {
-		t.Fatalf("release dropped the page's root_target_id: %v, want %d", rootAfter, root)
+		t.Fatalf("the refused release dropped the page's root_target_id: %v, want %d", rootAfter, root)
 	}
 	if removedAfter == nil {
-		t.Fatal("release cleared removed_at: a removed page came back to life")
+		t.Fatal("the refused release un-removed the page")
+	}
+}
+
+// DELETE /v1/project maps the refusal to 409 page_removed and the project
+// survives; a clean page releases exactly as today (200, the project now
+// ownerless, the page alive).
+func TestDeleteProjectRefusesARemovedPageAndReleasesACleanOne(t *testing.T) {
+	pool, _, cookies := newSharedWorld(t, 2)
+	ctx := context.Background()
+	sm := session.New(pool, session.DefaultTTL, nil)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
+	mux := http.NewServeMux()
+	mux.Handle("DELETE /v1/project", wa)
+	mux.Handle("PUT /v1/status-page", wa)
+
+	put := func(cookie http.Cookie, title string) {
+		t.Helper()
+		if code, _ := putStatus(t, mux, cookie, `{"title":"`+title+`"}`); code != http.StatusOK {
+			t.Fatalf("PUT %s = %d, want 200", title, code)
+		}
+	}
+	deleteProject := func(cookie http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodDelete, "/v1/project", nil)
+		r.AddCookie(&cookie)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+
+	// Seat 0: a removed page refuses the delete, and the project survives.
+	put(cookies[0], "Removed")
+	var project0 int64
+	_ = pool.Raw().QueryRow(ctx, `SELECT id FROM project ORDER BY id LIMIT 1`).Scan(&project0)
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE status_page SET removed_at = now() WHERE project_id = $1`, project0); err != nil {
+		t.Fatal(err)
+	}
+	w := deleteProject(cookies[0])
+	if w.Code != http.StatusConflict {
+		t.Fatalf("DELETE with a removed page = %d (%s), want 409", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "page_removed") {
+		t.Fatalf("refusal body = %s, want page_removed", w.Body.String())
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM project WHERE id = $1`, project0); n != 1 {
+		t.Fatal("the refused delete removed the project anyway")
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND removed_at IS NOT NULL`, project0); n != 1 {
+		t.Fatal("the refused delete lost the page's removed_at")
+	}
+
+	// Seat 1: a clean page releases as today - 200, account closed (the
+	// last project), the project itself now ownerless, its page alive.
+	put(cookies[1], "Clean")
+	var project1 int64
+	_ = pool.Raw().QueryRow(ctx, `SELECT id FROM project WHERE id <> $1 ORDER BY id LIMIT 1`, project0).Scan(&project1)
+	w2 := deleteProject(cookies[1])
+	if w2.Code != http.StatusOK {
+		t.Fatalf("DELETE on a clean page = %d (%s), want 200", w2.Code, w2.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(w2.Body.Bytes(), &body)
+	if body["accountDeleted"] != true {
+		t.Fatalf("accountDeleted = %v, want true (the seat's only project)", body["accountDeleted"])
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM project WHERE id = $1`, project1); n != 1 {
+		t.Fatal("the clean release deleted the project itself")
+	}
+	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND removed_at IS NULL`, project1); n != 1 {
+		t.Fatal("the clean release did not leave a live ownerless page")
 	}
 }
 

@@ -175,8 +175,14 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		if kind == "heartbeat" {
 			// Private target, never shared: the key is the monitor's public id
 			// (dashed lowercase, the same text migration 009 builds).
-			tkey = targetkey.Heartbeat(uuid.UUID(pubID.Bytes).String())
-			turl = h.pingURL("heartbeat", pingToken)
+			pub := uuid.UUID(pubID.Bytes).String()
+			tkey = targetkey.Heartbeat(pub)
+			// url is a tokenless stable label, never the ping URL: the fleet
+			// never fetches heartbeat targets (the lease filters the kind) and
+			// the ping door joins through monitor.ping_token, so a tokened URL
+			// here would be a secret copy nobody reads. 009's backfill stores
+			// the same label.
+			turl = "heartbeat:" + pub
 		}
 		targetID, terr := q.GetOrCreateProbeTarget(r.Context(), sqlc.GetOrCreateProbeTargetParams{
 			Key: tkey, Kind: tkind, Url: turl, Keyword: keyword,
@@ -382,7 +388,7 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	if unpausedOntoDown != 0 {
 		incident.New(h.pool, h.pgs).FreezeOpenIncident(ctx, unpausedOntoDown)
 	}
-	// status/ssl/domain expiry live in monitor_facts, so PatchMonitor's
+	// status/ssl/domain expiry live in target_facts, so PatchMonitor's
 	// RETURNING cannot reach them: re-read, the same query `list` uses.
 	full, err := h.pool.Queries().GetMonitorByPublicID(r.Context(), sqlc.GetMonitorByPublicIDParams{
 		PublicID: pubID, TenantID: tenantID,

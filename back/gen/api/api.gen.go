@@ -1762,6 +1762,9 @@ type StatusPageResponse struct {
 	Slug  string `json:"slug"`
 	Title string `json:"title"`
 
+	// VerificationRecord The full DNS record NAME the worker resolves for verification (_upcontrol-verify.<registrable domain>), composed server-side: a project on a deeper subdomain must publish on the registrable domain, and the front cannot compute one without the public suffix list. Null on hosts the suffix list cannot fold.
+	VerificationRecord *string `json:"verificationRecord,omitempty"`
+
 	// VerificationToken The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null.
 	VerificationToken *string `json:"verificationToken,omitempty"`
 }

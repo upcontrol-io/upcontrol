@@ -23,6 +23,7 @@ import (
 	"go.upcontrol.io/back/internal/deliver"
 	"go.upcontrol.io/back/internal/detect"
 	"go.upcontrol.io/back/internal/detect/errorlog"
+	"go.upcontrol.io/back/internal/dnstokens"
 	"go.upcontrol.io/back/internal/heartbeat"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/notify/mailer"
@@ -362,9 +363,11 @@ type indexGate struct {
 
 func newIndexGate(cfg config.StatusPageKnobs) *indexGate { return &indexGate{cfg: cfg} }
 
-// indexCandidates is the one candidate set: pages with removed_at NULL that
-// are host pages, or claimed pages opted in AND DNS-verified (review
-// decision 16). A root target is required - continuity is measured on it.
+// indexCandidates is the one candidate set: pages with removed_at NULL.
+// An UNCLAIMED host page qualifies on continuity alone (nobody exists to
+// ask for proof); a CLAIMED page - ANY page, host page included - only when
+// opted in AND DNS-verified (review decision 16). A root target is required
+// - continuity is measured on it.
 func indexCandidates(ctx context.Context, pool *pg.Pool) ([]gatePage, error) {
 	// ORDER BY created_at: the oldest page first for the ramp (the mint's
 	// own timestamp, backfilled from the tenant for pre-009 pages).
@@ -376,7 +379,7 @@ func indexCandidates(ctx context.Context, pool *pg.Pool) ([]gatePage, error) {
 		  JOIN project p ON p.id = sp.project_id
 		  JOIN tenant t ON t.id = sp.tenant_id
 		 WHERE sp.removed_at IS NULL AND sp.root_target_id IS NOT NULL
-		   AND (sp.is_host_page
+		   AND ((sp.is_host_page AND t.claim_token_hash IS NOT NULL)
 		        OR (t.claim_token_hash IS NULL AND sp.index_opt_in AND sp.host_verified_at IS NOT NULL))
 		 ORDER BY sp.created_at`)
 	if err != nil {
@@ -694,8 +697,9 @@ var lookupTXT = func(ctx context.Context, name string) ([]string, error) {
 // TXT record up, and apply the arm's action on the pages whose record
 // carries the token. tokenCol and pendingCol are the two columns that tell
 // the arms apart (verification_token/host_verified_at vs
-// removal_token/removed_at); prefix is the DNS record label.
-func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, prefix string,
+// removal_token/removed_at); record is the full record label (dot included,
+// from internal/dnstokens - the one home of both names).
+func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, record string,
 	apply func(ctx context.Context, page int64, domain string) error) error {
 	rows, err := pool.Raw().Query(ctx, fmt.Sprintf(
 		`SELECT sp.id, sp.%s, p.domain
@@ -727,7 +731,7 @@ func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, p
 		if err != nil {
 			continue // an unregibrable host can prove nothing by DNS
 		}
-		txts, err := lookupTXT(ctx, prefix+"."+domain)
+		txts, err := lookupTXT(ctx, record+domain)
 		if err != nil {
 			continue
 		}
@@ -752,7 +756,7 @@ func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, p
 // proof has landed: _upcontrol-verify.<eTLD+1> containing the issued token.
 // The token is cleared on success, so the door stops offering one.
 func verifyHostTokens(ctx context.Context, pool *pg.Pool, log *slog.Logger) error {
-	return sweepTokenPages(ctx, pool, "verification_token", "host_verified_at", "_upcontrol-verify",
+	return sweepTokenPages(ctx, pool, "verification_token", "host_verified_at", dnstokens.VerifyRecord,
 		func(ctx context.Context, page int64, domain string) error {
 			if _, err := pool.Raw().Exec(ctx,
 				`UPDATE status_page SET host_verified_at = now(), verification_token = NULL
@@ -773,7 +777,7 @@ func verifyHostTokens(ctx context.Context, pool *pg.Pool, log *slog.Logger) erro
 // the host is never minted again. One transaction: a half-removal is the one
 // state worse than a live page.
 func removeByToken(ctx context.Context, pool *pg.Pool, log *slog.Logger) error {
-	return sweepTokenPages(ctx, pool, "removal_token", "removed_at", "_upcontrol-remove",
+	return sweepTokenPages(ctx, pool, "removal_token", "removed_at", dnstokens.RemoveRecord,
 		func(ctx context.Context, page int64, domain string) error {
 			tx, err := pool.Raw().Begin(ctx)
 			if err != nil {

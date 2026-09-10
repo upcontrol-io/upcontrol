@@ -65,7 +65,7 @@ func newSurfacesWorld(t *testing.T) (*pg.Pool, http.Handler, *writeAPI) {
 	}
 	t.Cleanup(pool.Close)
 	sm := session.New(pool, session.DefaultTTL, nil)
-	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
 	sh := NewStatusPages(wa)
 	mux := http.NewServeMux()
 	mux.Handle("GET /status/{slug}", sh)

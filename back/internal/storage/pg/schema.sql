@@ -740,11 +740,14 @@ SELECT DISTINCT ON (k) k, 'website', u, kw, NULL, now()
          WHERE m.kind <> 'heartbeat') s
  ORDER BY k, id;
 
--- One private heartbeat target per heartbeat monitor. url is unused for
--- heartbeats; the monitor's target is stored so a human reading the row is
--- not staring at a lie.
+-- One private heartbeat target per heartbeat monitor. url is a tokenless
+-- stable label ("heartbeat:<public id>"), never a ping URL: nothing fetches
+-- it (the fleet's lease filters kind <> heartbeat; the ping door joins via
+-- monitor.ping_token), and the monitor.target column historically held ping
+-- URLs WITH their token - a redundant secret copy nobody reads. The create
+-- path (internal/api/monitors.go) stores the same label.
 INSERT INTO probe_target (key, kind, url, keyword, first_ok_at, created_at)
-SELECT 'heartbeat' || chr(31) || m.public_id::text, 'heartbeat', m.target, NULL, NULL, now()
+SELECT 'heartbeat' || chr(31) || m.public_id::text, 'heartbeat', 'heartbeat:' || m.public_id::text, NULL, NULL, now()
   FROM monitor m
  WHERE m.kind = 'heartbeat';
 

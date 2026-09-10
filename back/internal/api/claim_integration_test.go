@@ -429,3 +429,27 @@ func TestClaimingYourOwnPageIsNotClaimable(t *testing.T) {
 		t.Fatalf("claimer projects = %d, want 1 (the echo claim must destroy nothing)", n)
 	}
 }
+
+// Decision 16's far side: a page stamped while unclaimed leaves the index at
+// claim time until its claimer proves control of the host and opts in.
+func TestClaimClearsAnUnearnedIndexStamp(t *testing.T) {
+	f := newClaimFixture(t)
+	// A stamped anonymous page (the ramp stamped it while it was nobody's).
+	_, err := f.pool.Raw().Exec(context.Background(),
+		`UPDATE status_page SET indexed_at = now() WHERE slug = $1`, f.slug)
+	if err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	code := f.claim(t, fmt.Sprintf(`{"slug": %q, "token": %q}`, f.slug, f.rawToken)).Code
+	if code != http.StatusOK {
+		t.Fatalf("claim status = %d", code)
+	}
+	var stamped *time.Time
+	if err := f.pool.Raw().QueryRow(context.Background(),
+		`SELECT indexed_at FROM status_page WHERE slug = $1`, f.slug).Scan(&stamped); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if stamped != nil {
+		t.Fatalf("indexed_at survived an unverified claim: %v", stamped)
+	}
+}

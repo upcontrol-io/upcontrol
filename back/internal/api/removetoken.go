@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"go.upcontrol.io/back/internal/analytics"
+	"go.upcontrol.io/back/internal/dnstokens"
 	"golang.org/x/net/publicsuffix"
 )
 
 // removeTXTRecord is the DNS record name the removal flow publishes and the
-// worker's dns-tokens job resolves: _upcontrol-remove.<eTLD+1>. The worker
-// carries the same literal in its removeByToken loop (internal/worker/
-// worker.go); the name lives in exactly one DNS spec, mirrored there.
-const removeTXTRecord = "_upcontrol-remove."
+// worker's dns-tokens job resolves: _upcontrol-remove.<eTLD+1>. The name
+// lives in exactly one DNS spec: internal/dnstokens carries it, the worker
+// resolves it, this door answers with it.
+const removeTXTRecord = dnstokens.RemoveRecord
 
 type removeTokenDoor struct {
 	wa *writeAPI

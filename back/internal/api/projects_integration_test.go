@@ -80,7 +80,7 @@ func newProjectsFixture(t *testing.T) *projectsFixture {
 // projectsRoutes mounts the project surface exactly as cmd/ucapi does, plus
 // the two owner-only doors and the status page the guest tests exercise.
 func projectsRoutes(pool *pg.Pool, sm *session.Manager) http.Handler {
-	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/projects", wa)
 	mux.Handle("POST /v1/projects", wa)
@@ -465,7 +465,7 @@ func TestCreateProjectSeedsNoChannelForAnAddresslessOwner(t *testing.T) {
 func TestSwitchIsANoOpForASingleUserSession(t *testing.T) {
 	f := newProjectsFixture(t)
 	sm := session.New(f.pool, session.DefaultTTL, nil).WithFixedIdentity(f.personID, f.tenantID)
-	wa := NewWriteAPI(f.pool, nil, sm, false, nil, nil, false)
+	wa := NewWriteAPI(f.pool, nil, sm, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/project/switch", wa)
 

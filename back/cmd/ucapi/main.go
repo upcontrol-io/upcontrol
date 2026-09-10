@@ -230,7 +230,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("PUT /v1/instance/smtp", instSettings)
 	mux.Handle("DELETE /v1/instance/smtp", instSettings)
 
-	wa := api.NewWriteAPI(pgPool, pgs, sm, devMode, mail, recorder, d.Config.SelfHosted)
+	wa := api.NewWriteAPI(pgPool, pgs, sm, devMode, mail, recorder, d.Config.SelfHosted, d.Config.SecretKeyHex)
 	mux.Handle("POST /v1/channels", wa)
 	// The gear's notification settings. The mux route is half the wiring:
 	// without it the PATCH answered 405 with the handler unreachable.
