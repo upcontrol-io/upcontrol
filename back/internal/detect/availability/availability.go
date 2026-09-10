@@ -1,8 +1,9 @@
 // Package availability turns check results into incident transitions: N
 // consecutive failures open, the first success after closes ("recovered").
-// A could-not-measure reading (HTTP 401/403/429, a bot filter) is a third
-// verdict: it never fails the target, never opens or closes an incident, and
-// after three in a row the state says could_not_measure instead of guessing.
+// A could-not-measure reading (HTTP 401/403/429, or a bot filter's challenge
+// at any status) is a third verdict: it never fails the target, never opens
+// or closes an incident, and after three in a row the state says
+// could_not_measure instead of guessing.
 package availability
 
 import "time"
@@ -23,6 +24,14 @@ const DefaultThreshold = 3
 // unmeasuredThreshold is the consecutive could-not-measure readings after
 // which the state admits it cannot see the target.
 const unmeasuredThreshold = 3
+
+// Unmeasured reports a could-not-measure reading: an auth wall, a rate limit
+// or a bot filter's challenge answered instead of the service. Its SQL twin is
+// pgstore.MeasurableSQL; the two change together.
+func Unmeasured(errorClass string, statusCode int) bool {
+	return errorClass == "challenge" ||
+		(errorClass == "status" && (statusCode == 401 || statusCode == 403 || statusCode == 429))
+}
 
 // State is the per-target detector state, persisted in target_facts.
 type State struct {

@@ -104,10 +104,10 @@ checked every 5 to 15 minutes, and hourly for pages nobody has looked at in
 over a month.</p>
 
 <h2>Opting out</h2>
-<p>If your site answers our checks with HTTP 403 or 429, we automatically
-slow our checks down exponentially. To have a public page removed and your
-host never monitored again, see the <a href="/status/policy">removal
-policy</a>.</p>
+<p>If your site answers our checks with HTTP 403 or 429, or a bot filter
+serves us a challenge instead of the page, we automatically slow our checks
+down exponentially. To have a public page removed and your host never
+monitored again, see the <a href="/status/policy">removal policy</a>.</p>
 
 <nav style="margin-top:32px">
 <a href="/status">Status directory</a>

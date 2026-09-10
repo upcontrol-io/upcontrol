@@ -166,6 +166,8 @@ func mapErrClass(s string) probev1.ErrorClass {
 		return probev1.ErrorClass_ERROR_CLASS_KEYWORD_MISSING
 	case "blocked_target":
 		return probev1.ErrorClass_ERROR_CLASS_BLOCKED_TARGET
+	case "challenge":
+		return probev1.ErrorClass_ERROR_CLASS_CHALLENGE
 	case "none":
 		return probev1.ErrorClass_ERROR_CLASS_NONE
 	default:

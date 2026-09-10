@@ -293,17 +293,22 @@ func (s *Store) EventBuckets(ctx context.Context, tenantID, projectID int64, nam
 // bucket query over checks carries (the canonical statement and its partial
 // index checks_measurable_idx live in queries/schedule.sql): a "could not
 // measure" reading (HTTP 401, 403, 429 - a bot filter, an auth wall, a
-// rate limit) is stored with ok = false but never counts against uptime.
-// Such rows still DRAW (as nodata bars); only the counting excludes them.
+// rate limit - or a bot filter's challenge at any status) is stored with
+// ok = false but never counts against uptime. Such rows still DRAW (as
+// nodata bars); only the counting excludes them. IS DISTINCT FROM because
+// error_class is NULL on older rows, and a plain <> would drop every one of
+// them; the second conjunct is the index's own predicate, so the planner
+// still proves checks_measurable_idx. The outer parentheses keep the fragment
+// one term wherever it is spliced, a leading NOT included.
 // Exported here because the api and worker read paths share it.
-const MeasurableSQL = `NOT (error_class = 'status' AND status_code IN (401, 403, 429))`
+const MeasurableSQL = `(error_class IS DISTINCT FROM 'challenge' AND NOT (error_class = 'status' AND status_code IN (401, 403, 429)))`
 
 // CheckBuckets reads a monitor's probes into buckets. The monitor id is
 // resolved inside the tenant by the caller. Since migration 009 the checks
 // table is keyed by target: the monitor's target is resolved inside the
 // query, and could-not-measure readings (HTTP 401/403/429 stored as
-// error_class 'status') are excluded from every count, because uptime is a
-// share of MEASURED probes only. The exclusion predicate is the one
+// error_class 'status', or class 'challenge') are excluded from every count,
+// because uptime is a share of MEASURED probes only. The exclusion predicate is the one
 // documented in queries/schedule.sql (partial index checks_measurable_idx);
 // Group 2's read paths carry it too.
 func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, from, to time.Time, stepSeconds int) ([]CheckBucket, error) {

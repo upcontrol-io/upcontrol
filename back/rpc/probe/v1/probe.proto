@@ -41,6 +41,7 @@ enum ErrorClass {
   ERROR_CLASS_KEYWORD_MISSING = 7;
   ERROR_CLASS_BLOCKED_TARGET = 8; // SSRF frontier: target forbidden
   ERROR_CLASS_TOO_MANY_REDIRECTS = 9;
+  ERROR_CLASS_CHALLENGE = 10; // a bot filter's challenge answered, not the service
 }
 
 message LeaseRequest {

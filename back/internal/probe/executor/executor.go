@@ -43,7 +43,7 @@ const UserAgent = "upcontrol/1.0 (+https://upcontrol.io/bot)"
 type Result struct {
 	OK            bool
 	StatusCode    uint16
-	ErrorClass    string // none|dns|connect|tls|timeout|status|keyword_missing|blocked_target
+	ErrorClass    string // none|dns|connect|tls|timeout|status|keyword_missing|blocked_target|challenge
 	ErrorDetail   string
 	DNSMs         uint32
 	ConnectMs     uint32
@@ -192,6 +192,14 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 		result.ErrorDetail = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 
+	// A bot filter's challenge, whatever status it came with, is not the
+	// service answering: the result is could-not-measure, never up or down.
+	if isChallenge(resp.Header) {
+		result.OK = false
+		result.ErrorClass = "challenge"
+		result.ErrorDetail = fmt.Sprintf("HTTP %d bot challenge", resp.StatusCode)
+	}
+
 	// Keyword assertion: the body must contain the keyword.
 	if spec.Keyword != "" && result.OK {
 		if !bytes.Contains(body, []byte(spec.Keyword)) {
@@ -329,6 +337,16 @@ func tlsVersionName(v uint16) string {
 	default:
 		return ""
 	}
+}
+
+// isChallenge reads the header each bot filter marks its challenge with. The
+// body is never sniffed: a Cloudflare 52x origin-error page carries no marker
+// and is a real outage.
+func isChallenge(h http.Header) bool {
+	waf := h.Get("X-Amzn-Waf-Action")
+	return strings.EqualFold(h.Get("Cf-Mitigated"), "challenge") ||
+		strings.EqualFold(waf, "challenge") || strings.EqualFold(waf, "captcha") ||
+		strings.EqualFold(h.Get("X-Vercel-Mitigated"), "challenge")
 }
 
 func hashBody(body []byte) uint64 {

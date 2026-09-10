@@ -238,12 +238,15 @@ type LeaseDueTargetsRow struct {
 // cadence are DERIVED here, never cached on the target.
 //
 // UNMEASURED ROWS (never counted against uptime): a checks row stored with
-// error_class = 'status' AND status_code IN (401, 403, 429) is a
+// error_class = 'status' AND status_code IN (401, 403, 429), or with
+// error_class = 'challenge' (a bot filter's challenge, any status), is a
 // "could not measure" reading (bot filter / auth wall / rate limit). It is
 // stored with ok = false, but every uptime or bucket query over checks MUST
-// carry this exact predicate (partial index checks_measurable_idx matches
-// it): WHERE NOT (error_class = 'status' AND status_code IN (401, 403, 429)).
-// Group 2's statusComponents / CheckBuckets read paths copy this fragment.
+// carry this exact predicate, pgstore.MeasurableSQL: WHERE error_class IS
+// DISTINCT FROM 'challenge' AND NOT (error_class = 'status' AND status_code
+// IN (401, 403, 429)). IS DISTINCT FROM keeps the rows whose error_class is
+// NULL; the second conjunct is the partial index checks_measurable_idx's own
+// predicate, so the planner can still use it.
 // Targets due for a check, not leased, not heartbeats, not in refusal
 // backoff. A target is due only when it has at least one unpaused subscriber
 // (f.eff) or a live host page referencing it (sp.n). interval_sec is the

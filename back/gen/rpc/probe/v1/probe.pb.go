@@ -81,21 +81,23 @@ const (
 	ErrorClass_ERROR_CLASS_KEYWORD_MISSING    ErrorClass = 7
 	ErrorClass_ERROR_CLASS_BLOCKED_TARGET     ErrorClass = 8 // SSRF frontier: target forbidden
 	ErrorClass_ERROR_CLASS_TOO_MANY_REDIRECTS ErrorClass = 9
+	ErrorClass_ERROR_CLASS_CHALLENGE          ErrorClass = 10 // a bot filter's challenge answered, not the service
 )
 
 // Enum value maps for ErrorClass.
 var (
 	ErrorClass_name = map[int32]string{
-		0: "ERROR_CLASS_UNSPECIFIED",
-		1: "ERROR_CLASS_NONE",
-		2: "ERROR_CLASS_DNS",
-		3: "ERROR_CLASS_CONNECT",
-		4: "ERROR_CLASS_TLS",
-		5: "ERROR_CLASS_TIMEOUT",
-		6: "ERROR_CLASS_STATUS",
-		7: "ERROR_CLASS_KEYWORD_MISSING",
-		8: "ERROR_CLASS_BLOCKED_TARGET",
-		9: "ERROR_CLASS_TOO_MANY_REDIRECTS",
+		0:  "ERROR_CLASS_UNSPECIFIED",
+		1:  "ERROR_CLASS_NONE",
+		2:  "ERROR_CLASS_DNS",
+		3:  "ERROR_CLASS_CONNECT",
+		4:  "ERROR_CLASS_TLS",
+		5:  "ERROR_CLASS_TIMEOUT",
+		6:  "ERROR_CLASS_STATUS",
+		7:  "ERROR_CLASS_KEYWORD_MISSING",
+		8:  "ERROR_CLASS_BLOCKED_TARGET",
+		9:  "ERROR_CLASS_TOO_MANY_REDIRECTS",
+		10: "ERROR_CLASS_CHALLENGE",
 	}
 	ErrorClass_value = map[string]int32{
 		"ERROR_CLASS_UNSPECIFIED":        0,
@@ -108,6 +110,7 @@ var (
 		"ERROR_CLASS_KEYWORD_MISSING":    7,
 		"ERROR_CLASS_BLOCKED_TARGET":     8,
 		"ERROR_CLASS_TOO_MANY_REDIRECTS": 9,
+		"ERROR_CLASS_CHALLENGE":          10,
 	}
 )
 
@@ -851,7 +854,7 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\x13ReportBlindResponse*?\n" +
 	"\tCheckKind\x12\x1a\n" +
 	"\x16CHECK_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
-	"\x12CHECK_KIND_WEBSITE\x10\x01*\x98\x02\n" +
+	"\x12CHECK_KIND_WEBSITE\x10\x01*\xb3\x02\n" +
 	"\n" +
 	"ErrorClass\x12\x1b\n" +
 	"\x17ERROR_CLASS_UNSPECIFIED\x10\x00\x12\x14\n" +
@@ -863,7 +866,9 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\x12ERROR_CLASS_STATUS\x10\x06\x12\x1f\n" +
 	"\x1bERROR_CLASS_KEYWORD_MISSING\x10\a\x12\x1e\n" +
 	"\x1aERROR_CLASS_BLOCKED_TARGET\x10\b\x12\"\n" +
-	"\x1eERROR_CLASS_TOO_MANY_REDIRECTS\x10\t2\xa2\x02\n" +
+	"\x1eERROR_CLASS_TOO_MANY_REDIRECTS\x10\t\x12\x19\n" +
+	"\x15ERROR_CLASS_CHALLENGE\x10\n" +
+	"2\xa2\x02\n" +
 	"\fProbeService\x12L\n" +
 	"\x05Lease\x12 .upcontrol.probe.v1.LeaseRequest\x1a!.upcontrol.probe.v1.LeaseResponse\x12d\n" +
 	"\rSubmitResults\x12(.upcontrol.probe.v1.SubmitResultsRequest\x1a).upcontrol.probe.v1.SubmitResultsResponse\x12^\n" +

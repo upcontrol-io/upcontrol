@@ -171,9 +171,9 @@ func (s *ProbeService) SubmitResults(
 		// Could-not-measure (part 3): a bot filter or auth wall answered, the
 		// probe did not see the service. Not a failure for the detector, no
 		// incident; the raw row is still stored (ok=false, status as measured)
-		// and the uptime queries exclude it by this exact predicate.
-		unmeasured := res.ErrorClass == probev1.ErrorClass_ERROR_CLASS_STATUS &&
-			(res.StatusCode == 401 || res.StatusCode == 403 || res.StatusCode == 429)
+		// and the uptime queries exclude it by this exact predicate
+		// (pgstore.MeasurableSQL).
+		unmeasured := availability.Unmeasured(errClassStr(res.ErrorClass), int(res.StatusCode))
 
 		state := availability.State{
 			Status:                facts.Status,
@@ -345,6 +345,8 @@ func errClassStr(c probev1.ErrorClass) string {
 		return "keyword_missing"
 	case probev1.ErrorClass_ERROR_CLASS_BLOCKED_TARGET:
 		return "blocked_target"
+	case probev1.ErrorClass_ERROR_CLASS_CHALLENGE:
+		return "challenge"
 	case probev1.ErrorClass_ERROR_CLASS_NONE:
 		return "none"
 	default:

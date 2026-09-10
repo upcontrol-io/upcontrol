@@ -2152,6 +2152,13 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		meta = fmt.Sprintf("%d ms · %s", res.TotalMs, res.ErrorClass)
 	}
+	// Could-not-measure is a state here too: an auth wall or a bot filter
+	// answered, so this one request says nothing about whether the service
+	// is up, and the page Start watching mints will say the same.
+	if availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
+		status = "nodata"
+		meta = fmt.Sprintf("%d ms · HTTP %d, refuses automated checks", res.TotalMs, res.StatusCode)
+	}
 	if res.ErrorClass == "blocked_target" {
 		meta = "blocked — internal address refused"
 	}
@@ -2284,7 +2291,7 @@ func networkRowsFrom(res executor.Result, status string) []map[string]any {
 	}
 	// RESPONSE is the whole request as the visitor experiences it.
 	responseNote := fmt.Sprintf("HTTP %d", res.StatusCode)
-	if !res.OK {
+	if !res.OK && !availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
 		responseNote = res.ErrorClass
 	}
 	rows = append(rows, map[string]any{
@@ -3688,6 +3695,8 @@ func errorPhrase(class *string, code *int) string {
 		return "TLS error"
 	case "keyword_missing":
 		return "expected keyword missing"
+	case "challenge":
+		return "a bot filter answered instead"
 	case "status":
 		if code != nil {
 			return fmt.Sprintf("HTTP %d", *code)

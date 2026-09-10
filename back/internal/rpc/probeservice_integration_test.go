@@ -243,7 +243,7 @@ func TestSubmitResultsUnmeasuredBacksOff(t *testing.T) {
 	if n := w.queryInt(t, `SELECT count(*) FROM checks WHERE target_id = $1 AND error_class = 'status' AND status_code = 403`, target); n != 3 {
 		t.Fatalf("unmeasured checks rows = %d, want 3", n)
 	}
-	if n := w.queryInt(t, `SELECT count(*) FROM checks WHERE target_id = $1 AND NOT (error_class = 'status' AND status_code IN (401,403,429))`, target); n != 0 {
+	if n := w.queryInt(t, `SELECT count(*) FROM checks WHERE target_id = $1 AND `+pgstore.MeasurableSQL, target); n != 0 {
 		t.Fatal("the measurable predicate should exclude every row of this batch")
 	}
 
@@ -292,5 +292,52 @@ func TestSubmitResultsUnmeasuredBacksOff(t *testing.T) {
 	})
 	if n := w.queryInt(t, `SELECT count(*) FROM target_facts WHERE target_id = $1 AND consecutive_refusals = 0 AND backoff_until IS NULL`, target); n != 1 {
 		t.Fatal("a measurable result must reset the refusal backoff")
+	}
+}
+
+// A bot filter's challenge is could-not-measure at any status (an AWS WAF
+// CAPTCHA answers 405): no incident, the honest facts status, the 403's
+// refusal backoff, and a checks row the uptime query leaves out, while an ok
+// row whose error_class is NULL still counts as measured.
+func TestSubmitResultsChallengeIsUnmeasured(t *testing.T) {
+	w := newSvcWorld(t)
+	target := w.seedTarget(t, "https://challenged.example")
+	monitor := w.seedSubscriber(t, target, "challenged")
+
+	challenged := func(n int) *probev1.CheckResult {
+		return &probev1.CheckResult{
+			CheckId: fmt.Sprintf("chk-405-%d", n), TargetId: uint64(target),
+			Ok: false, StatusCode: 405, ErrorClass: probev1.ErrorClass_ERROR_CLASS_CHALLENGE,
+		}
+	}
+	w.submit(t, challenged(1), challenged(2), challenged(3))
+
+	if n := w.queryInt(t, `SELECT count(*) FROM incident`); n != 0 {
+		t.Fatalf("challenge results opened %d incidents, want 0", n)
+	}
+	if n := w.queryInt(t, `SELECT count(*) FROM target_facts WHERE target_id = $1 AND status = 'could_not_measure' AND consecutive_unmeasured = 3 AND consecutive_failures = 0`, target); n != 1 {
+		t.Fatal("the challenge streak did not land in target_facts as could_not_measure")
+	}
+	// The 403's doubling: 300 s * 2^3 after the third refusal.
+	if n := w.queryInt(t, `SELECT count(*) FROM target_facts WHERE target_id = $1 AND consecutive_refusals = 3
+		AND backoff_until BETWEEN now() + interval '2390 seconds' AND now() + interval '2410 seconds'`, target); n != 1 {
+		t.Fatal("a challenge must back off exactly like a 403")
+	}
+	if n := w.queryInt(t, `SELECT count(*) FROM checks WHERE target_id = $1 AND NOT ok AND error_class = 'challenge' AND status_code = 405`, target); n != 3 {
+		t.Fatalf("challenge checks rows = %d, want 3 (status as measured)", n)
+	}
+
+	// An ok row stored before error_class was always written: NULL, and it
+	// must stay measured (a plain <> 'challenge' would drop it).
+	w.exec(t, `INSERT INTO checks (target_id, interval_sec, ts, region, ok, status_code, error_class)
+		VALUES ($1, 300, now(), 'default', true, 200, NULL)`, target)
+	tenant := w.queryInt(t, `SELECT tenant_id FROM monitor WHERE id = $1`, monitor)
+	from := time.Now().Add(-time.Hour)
+	buckets, err := w.svc.pgs.CheckBuckets(context.Background(), tenant, monitor, from, time.Now().Add(time.Minute), 7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].OK != 1 || buckets[0].Total != 1 {
+		t.Fatalf("uptime buckets = %+v, want one bucket of 1 ok / 1 measured (the NULL-class ok row, no challenge)", buckets)
 	}
 }

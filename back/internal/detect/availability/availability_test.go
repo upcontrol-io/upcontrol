@@ -263,3 +263,20 @@ func TestCouldNotMeasureRecoversWithoutClose(t *testing.T) {
 		t.Errorf("status = %q, want ok", s.Status)
 	}
 }
+
+func TestUnmeasured(t *testing.T) {
+	for _, c := range []struct {
+		class string
+		code  int
+		want  bool
+	}{
+		{"challenge", 405, true}, {"challenge", 202, true},
+		{"status", 401, true}, {"status", 403, true}, {"status", 429, true},
+		{"status", 500, false}, {"status", 522, false},
+		{"connect", 0, false}, {"timeout", 0, false}, {"", 200, false},
+	} {
+		if got := Unmeasured(c.class, c.code); got != c.want {
+			t.Errorf("Unmeasured(%q, %d) = %v, want %v", c.class, c.code, got, c.want)
+		}
+	}
+}
