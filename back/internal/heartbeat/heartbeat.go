@@ -1,7 +1,10 @@
 // Package heartbeat is the monitor the customer's own job pings. A ping is a
 // passing check and a window that closes without one is a failed check; both
 // go through the availability detector, so incidents, alerts and uptime read
-// a heartbeat the way they read every other monitor.
+// a heartbeat the way they read every other monitor. Since migration 009 a
+// heartbeat owns a PRIVATE probe_target (kind heartbeat, key from its public
+// id): its schedule and detector state live in target_schedule and
+// target_facts like everybody else's, never shared with any website.
 package heartbeat
 
 import (
@@ -83,13 +86,15 @@ func (s *Service) Ping(ctx context.Context, token string) (found bool, err error
 		return true, nil
 	}
 	st := availability.State{Status: availability.StatusNoData}
-	if facts, ferr := s.pool.Queries().GetMonitorFacts(ctx, row.ID); ferr == nil {
+	if facts, ferr := s.pool.Queries().GetTargetFacts(ctx, row.TargetID); ferr == nil {
 		st.Status = facts.Status
 		st.ConsecutiveFailures = int(facts.ConsecutiveFailures)
+		st.ConsecutiveUnmeasured = int(facts.ConsecutiveUnmeasured)
 	} else if !errors.Is(ferr, pgx.ErrNoRows) {
 		return true, ferr
 	}
-	if err := s.apply(ctx, row.ID, row.TenantID, row.Name, st, true, time.Now()); err != nil {
+	if err := s.apply(ctx, row.TargetID, row.ID, row.IntervalSec, row.Name, st,
+		availability.OutcomeOK, time.Now()); err != nil {
 		return true, err
 	}
 	// A ping pushes the whole window out: interval + grace.
@@ -113,7 +118,8 @@ func (s *Service) Tick(ctx context.Context) error {
 			Status:              row.Status,
 			ConsecutiveFailures: int(row.ConsecutiveFailures),
 		}
-		if err := s.apply(ctx, row.ID, row.TenantID, row.Name, st, false, now); err != nil {
+		if err := s.apply(ctx, row.TargetID, row.ID, row.IntervalSec, row.Name, st,
+			availability.OutcomeFail, now); err != nil {
 			continue
 		}
 		// One down per expected beat, not one per minute: the next miss row
@@ -128,14 +134,17 @@ func (s *Service) Tick(ctx context.Context) error {
 
 // apply is the dance every check result goes through: update the facts,
 // record the raw row, open or close the incident. It mirrors
-// rpc.ProbeService.SubmitResults per result.
-func (s *Service) apply(ctx context.Context, monitorID, tenantID int64, name string,
-	st availability.State, ok bool, now time.Time) error {
-	out := s.det.Process(&st, ok, now)
-	if err := s.pool.Queries().UpsertMonitorFacts(ctx, sqlc.UpsertMonitorFactsParams{
-		MonitorID:           monitorID,
-		Status:              st.Status,
-		ConsecutiveFailures: int32(st.ConsecutiveFailures),
+// rpc.ProbeService.SubmitResults per result, on the heartbeat's private
+// target. A heartbeat is always measurable: no unmeasured verdict, and the
+// refusal backoff columns reset to their clean state on every write.
+func (s *Service) apply(ctx context.Context, targetID, monitorID int64, intervalSec int32, name string,
+	st availability.State, outcome availability.Outcome, now time.Time) error {
+	out := s.det.Process(&st, outcome, now)
+	if err := s.pool.Queries().UpsertTargetFacts(ctx, sqlc.UpsertTargetFactsParams{
+		TargetID:              targetID,
+		Status:                st.Status,
+		ConsecutiveFailures:   int32(st.ConsecutiveFailures),
+		ConsecutiveUnmeasured: int32(st.ConsecutiveUnmeasured),
 	}); err != nil {
 		return err
 	}
@@ -143,16 +152,18 @@ func (s *Service) apply(ctx context.Context, monitorID, tenantID int64, name str
 	// millisecond readers exclude the region.
 	if s.pgs != nil {
 		errClass := ""
-		if !ok {
+		if outcome == availability.OutcomeFail {
 			errClass = "missed"
 		}
 		_ = s.pgs.InsertChecks(ctx, []pgstore.CheckRow{{
-			TenantID: uint64(tenantID), MonitorID: uint64(monitorID), TS: now,
-			Region: region, OK: ok, ErrorClass: errClass,
+			TargetID: uint64(targetID), IntervalSec: uint32(intervalSec), TS: now,
+			Region: region, OK: outcome == availability.OutcomeOK, ErrorClass: errClass,
 		}})
 	}
 	if out.Open {
-		_, _, _ = s.lc.Open(ctx, monitorID, name+" has not checked in")
+		// Every incident records the effective interval at opening (review
+		// decision 14); a heartbeat's is its own window. Open writes the column.
+		_, _, _ = s.lc.Open(ctx, monitorID, name+" has not checked in", intervalSec)
 	}
 	if out.Close {
 		_ = s.lc.Close(ctx, monitorID, incident.ReasonRecovered)

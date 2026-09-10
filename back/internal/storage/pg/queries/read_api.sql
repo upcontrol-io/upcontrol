@@ -91,9 +91,9 @@ SELECT l.at, l.source, l.outcome FROM key_usage_log l
 -- ring.QueryBuilder.Summary instead, which is why this row carries the project id.
 SELECT
   (SELECT count(*)::int FROM monitor m WHERE m.project_id = sqlc.arg(project_id)) AS monitor_count,
-  (SELECT count(*)::int FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
+  (SELECT count(*)::int FROM monitor m JOIN target_facts f ON f.target_id = m.target_id
     WHERE m.project_id = sqlc.arg(project_id) AND f.status = 'down') AS monitors_down,
-  (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN monitor_facts f ON f.monitor_id = m.id
+  (SELECT max(f.last_check_at)::timestamptz FROM monitor m JOIN target_facts f ON f.target_id = m.target_id
     WHERE m.project_id = sqlc.arg(project_id)) AS last_check_at,
   sqlc.arg(project_id)::bigint AS project_id,
   (SELECT count(*)::int FROM alert_channel c WHERE c.project_id = sqlc.arg(project_id)) AS channel_count;

@@ -22,6 +22,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // claimFixture: a signed-in Free claimer (tenant, person, login member, no
@@ -87,9 +88,18 @@ func newClaimFixture(t *testing.T) *claimFixture {
 		f.anonID, f.anonDomain).Scan(&f.anonProjID); err != nil {
 		t.Fatalf("anon project: %v", err)
 	}
+	// The monitor rides a probe_target (post-009 shape): mint it first, then
+	// subscribe the anon project to it.
 	if _, err := pool.Raw().Exec(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Checkout', $3, 300)`,
+		`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+		 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url`,
+		targetkey.Website("https://"+f.anonDomain, ""), "https://"+f.anonDomain); err != nil {
+		t.Fatalf("anon probe_target: %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 SELECT gen_random_uuid(), $1, $2, 'website', 'Checkout', $3, 300, pt.id
+		  FROM probe_target pt WHERE pt.kind = 'website' AND pt.url = $3`,
 		f.anonID, f.anonProjID, "https://"+f.anonDomain); err != nil {
 		t.Fatalf("anon monitor: %v", err)
 	}
@@ -219,8 +229,15 @@ func TestClaimAtLimitWithAUsedProjectHitsTheWall(t *testing.T) {
 		t.Fatalf("claimer project: %v", err)
 	}
 	if _, err := f.pool.Raw().Exec(ctx,
-		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Used', 'https://used.example.com', 300)`,
+		`INSERT INTO probe_target (key, kind, url)
+		 SELECT 'website' || chr(31) || 'https://used.example.com' || chr(31) || '', 'website', 'https://used.example.com'
+		 WHERE NOT EXISTS (SELECT 1 FROM probe_target WHERE kind = 'website' AND url = 'https://used.example.com')`); err != nil {
+		t.Fatalf("used probe_target: %v", err)
+	}
+	if _, err := f.pool.Raw().Exec(ctx,
+		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+		 SELECT gen_random_uuid(), $1, $2, 'website', 'Used', 'https://used.example.com', 300, pt.id
+		  FROM probe_target pt WHERE pt.kind = 'website' AND pt.url = 'https://used.example.com'`,
 		f.claimerID, used); err != nil {
 		t.Fatalf("claimer monitor: %v", err)
 	}
@@ -410,5 +427,29 @@ func TestClaimingYourOwnPageIsNotClaimable(t *testing.T) {
 	}
 	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.claimerID); n != 1 {
 		t.Fatalf("claimer projects = %d, want 1 (the echo claim must destroy nothing)", n)
+	}
+}
+
+// Decision 16's far side: a page stamped while unclaimed leaves the index at
+// claim time until its claimer proves control of the host and opts in.
+func TestClaimClearsAnUnearnedIndexStamp(t *testing.T) {
+	f := newClaimFixture(t)
+	// A stamped anonymous page (the ramp stamped it while it was nobody's).
+	_, err := f.pool.Raw().Exec(context.Background(),
+		`UPDATE status_page SET indexed_at = now() WHERE slug = $1`, f.slug)
+	if err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	code := f.claim(t, fmt.Sprintf(`{"slug": %q, "token": %q}`, f.slug, f.rawToken)).Code
+	if code != http.StatusOK {
+		t.Fatalf("claim status = %d", code)
+	}
+	var stamped *time.Time
+	if err := f.pool.Raw().QueryRow(context.Background(),
+		`SELECT indexed_at FROM status_page WHERE slug = $1`, f.slug).Scan(&stamped); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if stamped != nil {
+		t.Fatalf("indexed_at survived an unverified claim: %v", stamped)
 	}
 }

@@ -11,11 +11,13 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // openReaperDB applies migrations and returns a pool.
@@ -40,7 +42,9 @@ func openReaperDB(t *testing.T) *pg.Pool {
 // seedTenant inserts a tenant backdated by age. Unclaimed tenants carry a
 // claim token hash (the unclaimed marker); claimed ones a claimed_at instead.
 // Every tenant gets a project (the monitor FK needs one); withMonitor adds
-// one unpaused monitor under it.
+// one unpaused website monitor under it, on its own probe_target (post-009
+// shape). withHostPage adds a live host page referencing a target with
+// first_ok_at set - the reaper's eternal exemption.
 func seedTenant(t *testing.T, pool *pg.Pool, name string, unclaimed bool, age string, withMonitor bool) int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -70,13 +74,68 @@ func seedTenant(t *testing.T, pool *pg.Pool, name string, unclaimed bool, age st
 	}
 	if withMonitor {
 		if _, err := pool.Raw().Exec(ctx,
-			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-			 VALUES (gen_random_uuid(), $1, $2, 'website', 'Watch', $3, 300)`,
+			`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+			 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url`,
+			targetkey.Website(fmt.Sprintf("https://%d.example.com", uniq%100000), ""),
+			fmt.Sprintf("https://%d.example.com", uniq%100000)); err != nil {
+			t.Fatalf("seed probe_target for %s: %v", name, err)
+		}
+		if _, err := pool.Raw().Exec(ctx,
+			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+			 SELECT gen_random_uuid(), $1, $2, 'website', 'Watch', $3, 300, pt.id
+			  FROM probe_target pt WHERE pt.url = $3`,
 			id, projectID, fmt.Sprintf("https://%d.example.com", uniq%100000)); err != nil {
 			t.Fatalf("seed monitor for %s: %v", name, err)
 		}
 	}
 	return id
+}
+
+// seedHostPage gives a tenant's project a live host page on a root target
+// with first_ok_at stamped: the shape the reaper must spare forever (plan
+// part 2). suffixed mints the same target under a NON-host page instead -
+// the shape the old rule still collects.
+func seedHostPage(t *testing.T, pool *pg.Pool, tenantID, projectID int64, suffix string, suffixed bool) {
+	t.Helper()
+	ctx := context.Background()
+	host := fmt.Sprintf("eternal-%s-%d.example.com", suffix, time.Now().UnixNano()%100000)
+	var targetID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO probe_target (key, kind, url, first_ok_at)
+		 VALUES ($1, 'website', $2, now() - interval '2 days')
+		 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id`,
+		targetkey.Website("https://"+host, ""), "https://"+host).Scan(&targetID); err != nil {
+		t.Fatalf("seed eternal probe_target: %v", err)
+	}
+	base := slugFromHostForTest(host)
+	slug := base
+	if suffixed {
+		slug = base + "-100"
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, root_target_id, is_host_page)
+		 VALUES ($1, $2, $3, $3, $4, $5)`,
+		tenantID, projectID, slug, targetID, !suffixed); err != nil {
+		t.Fatalf("seed %s page: %v", slug, err)
+	}
+}
+
+// slugFromHostForTest is the api package's slug rule, duplicated minimally:
+// lowercase, non-alphanumerics to dashes, trimmed.
+func slugFromHostForTest(host string) string {
+	var b strings.Builder
+	prevDash := true
+	for _, r := range strings.ToLower(host) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		case !prevDash:
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func count(t *testing.T, pool *pg.Pool, query string, args ...any) int64 {
@@ -193,5 +252,79 @@ func TestReapUnclaimedSparesAnAnonymousInstallThatIsIngesting(t *testing.T) {
 	// the seq alone would have spared it forever.
 	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, released); n != 0 {
 		t.Fatalf("a released ownerless page survived the reaper (rows = %d, want 0)", n)
+	}
+}
+
+// The host-page exemption (plan part 2): an unclaimed tenant whose page is a
+// live HOST page on a root target that has answered once (first_ok_at) is
+// never deleted - the page is forever, and its target keeps being leased
+// through the page's reference. A SUFFIXED page on the same target gets no
+// exemption: the old 7-day rule collects it.
+func TestReapUnclaimedSparesAHostPageWithFirstOk(t *testing.T) {
+	pool := openReaperDB(t)
+	ctx := context.Background()
+
+	kept := seedTenant(t, pool, "reaper-host-8d", true, "8 days", false)
+	collected := seedTenant(t, pool, "reaper-suffixed-8d", true, "8 days", false)
+
+	var keptProject, suffixedProject int64
+	if err := pool.Raw().QueryRow(ctx,
+		`SELECT id FROM project WHERE tenant_id = $1`, kept).Scan(&keptProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Raw().QueryRow(ctx,
+		`SELECT id FROM project WHERE tenant_id = $1`, collected).Scan(&suffixedProject); err != nil {
+		t.Fatal(err)
+	}
+	seedHostPage(t, pool, kept, keptProject, "kept", false)
+	seedHostPage(t, pool, collected, suffixedProject, "collected", true)
+
+	if err := reapUnclaimed(ctx, pool); err != nil {
+		t.Fatalf("reapUnclaimed: %v", err)
+	}
+
+	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, kept); n != 1 {
+		t.Fatalf("an 8-day unclaimed tenant with a live host page (first_ok set) was reaped (rows = %d, want 1)", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id WHERE t.id = $1 AND sp.removed_at IS NULL AND sp.root_target_id IS NOT NULL`, kept); n != 1 {
+		t.Fatalf("the spared host page kept its root reference (rows = %d, want 1)", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, collected); n != 0 {
+		t.Fatalf("an 8-day unclaimed tenant with only a SUFFIXED page survived (rows = %d, want 0)", n)
+	}
+}
+
+// A host page whose target NEVER answered is not eternal: the page said
+// nothing in its week, the old rule collects it like any other demo page.
+func TestReapUnclaimedCollectsAHostPageThatNeverAnswered(t *testing.T) {
+	pool := openReaperDB(t)
+	ctx := context.Background()
+
+	never := seedTenant(t, pool, "reaper-host-never-8d", true, "8 days", false)
+	var projectID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`SELECT id FROM project WHERE tenant_id = $1`, never).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	// The page's root target has first_ok_at NULL: seeded by hand, no answer.
+	host := fmt.Sprintf("silent-%d.example.com", time.Now().UnixNano()%100000)
+	var targetID int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2) RETURNING id`,
+		targetkey.Website("https://"+host, ""), "https://"+host).Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, root_target_id, is_host_page)
+		 VALUES ($1, $2, $3, $3, $4, true)`,
+		never, projectID, slugFromHostForTest(host), targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reapUnclaimed(ctx, pool); err != nil {
+		t.Fatalf("reapUnclaimed: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, never); n != 0 {
+		t.Fatalf("an 8-day unclaimed host page that never answered survived (rows = %d, want 0)", n)
 	}
 }

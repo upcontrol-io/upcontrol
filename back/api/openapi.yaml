@@ -228,10 +228,13 @@ components:
           enum: ["1m", "5m", "30m", "1h"]
     MonitorPatch:
       type: object
+      description: >-
+        Target and keyword are immutable (400 target_immutable): a check is
+        identified by what it fetches, and a different fetch is a new check.
+        The contract stopped advertising both when the handler began
+        refusing them.
       properties:
         name: { type: string }
-        target: { type: string }
-        keyword: { type: string }
         interval:
           type: string
           enum: ["1m", "5m", "30m", "1h"]
@@ -1106,6 +1109,46 @@ components:
             only on a self-hosted instance, where the AGPL copy is the
             operator's own to brand. The hosted service always publishes it:
             a plan buys the page's address, never the branding.
+        indexOptIn:
+          type: boolean
+          description: >-
+            "List in search engines": one half of a claimed page's index
+            qualification; the DNS TXT proof (hostVerifiedAt) is the other.
+        hostVerifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the DNS TXT proof of control of the host landed. Null until
+            verified.
+        verificationToken:
+          type: string
+          nullable: true
+          description: >-
+            The TXT string to publish for host verification. Issued on read
+            while it can still be used, stable until the record lands, then
+            null.
+        verificationRecord:
+          type: string
+          nullable: true
+          description: >-
+            The full DNS record NAME the worker resolves for verification
+            (_upcontrol-verify.<registrable domain>), composed server-side:
+            a project on a deeper subdomain must publish on the registrable
+            domain, and the front cannot compute one without the public
+            suffix list. Null on hosts the suffix list cannot fold.
+        removalToken:
+          type: string
+          nullable: true
+          description: >-
+            Echo of the removal token when one was already issued through the
+            page's own door. Never minted here.
+        rootPageUrl:
+          type: string
+          nullable: true
+          description: >-
+            The host's public page address on our link, when this project
+            rides one (host pages and their suffixed siblings).
     NetworkTile:
       description: >
         One phase of the request, as a median over the last 24 h of successful
@@ -1145,6 +1188,11 @@ components:
             only on a self-hosted instance, where the AGPL copy is the
             operator's own to brand. The hosted service always publishes it:
             a plan buys the page's address, never the branding.
+        indexOptIn:
+          type: boolean
+          description: >-
+            "List in search engines". Stored with the settings; honoured only
+            on a claimed, host-verified page.
     PublicIncident:
       type: object
       required: [title, since, ongoing]
@@ -1193,6 +1241,37 @@ components:
             address they have already bought. A boolean rather than the domain
             itself: nothing on a public page needs to print that address, and a
             field that carries it invites a caller to.
+          type: boolean
+        state:
+          description: >
+            Host pages only: the measured verdict of the page's root target,
+            worded from the probe's point of view. Absent on non-host pages
+            and on pages with no facts row yet.
+          type: object
+          required: [kind, sentence]
+          properties:
+            kind:
+              type: string
+              enum: [ok, down, could_not_measure, nodata]
+            sentence: { type: string }
+            asOf:
+              type: string
+              description: The clock time of the newest check, "15:04 UTC".
+        indexable:
+          description: >
+            Whether search engines may list this page: the index gate's stamp
+            AND the kill switch off. Mirrors the HTML door's robots meta.
+          type: boolean
+        hostPage:
+          description: >
+            Whether this is the host's first page (the bare slug). Suffixed
+            pages carry false.
+          type: boolean
+        unverifiedClaim:
+          description: >
+            True when the page is claimed but the host was never proven by
+            DNS TXT: the page stays out of the index and keeps its
+            not-affiliated line.
           type: boolean
 
     # --- landing watch ------------------------------------------------------
@@ -2934,6 +3013,66 @@ paths:
                 },
             }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /public/status/{slug}/og.png:
+    get:
+      tags: [public]
+      security: []
+      summary: The page's Open Graph image, rendered from the measured data.
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: A 1200x630 PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: The page was removed.
+
+  /public/status/{slug}/remove-token:
+    post:
+      tags: [public]
+      security: []
+      summary: Issue the DNS TXT removal token for a host page.
+      description: >
+        Idempotent: returns the standing token when one was already issued.
+        The caller publishes the record named in the answer; the worker's
+        dns-tokens job performs the removal once the record resolves.
+        Rate-limited to one issue per IP per minute.
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The token and the record to publish.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, record, domain]
+                properties:
+                  token: { type: string, description: 32 hex chars. }
+                  record:
+                    type: string
+                    example: _upcontrol-remove.example.com
+                  domain:
+                    type: string
+                    description: The registrable domain (eTLD+1).
+                    example: example.com
+        "400":
+          description: not_removable (the page is not a host page).
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: The page was removed.
+        "429":
+          description: rate_limited (one issue per IP per minute).
 
   /public/ping/{token}:
     get:

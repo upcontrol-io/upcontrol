@@ -81,21 +81,23 @@ const (
 	ErrorClass_ERROR_CLASS_KEYWORD_MISSING    ErrorClass = 7
 	ErrorClass_ERROR_CLASS_BLOCKED_TARGET     ErrorClass = 8 // SSRF frontier: target forbidden
 	ErrorClass_ERROR_CLASS_TOO_MANY_REDIRECTS ErrorClass = 9
+	ErrorClass_ERROR_CLASS_CHALLENGE          ErrorClass = 10 // a bot filter's challenge answered, not the service
 )
 
 // Enum value maps for ErrorClass.
 var (
 	ErrorClass_name = map[int32]string{
-		0: "ERROR_CLASS_UNSPECIFIED",
-		1: "ERROR_CLASS_NONE",
-		2: "ERROR_CLASS_DNS",
-		3: "ERROR_CLASS_CONNECT",
-		4: "ERROR_CLASS_TLS",
-		5: "ERROR_CLASS_TIMEOUT",
-		6: "ERROR_CLASS_STATUS",
-		7: "ERROR_CLASS_KEYWORD_MISSING",
-		8: "ERROR_CLASS_BLOCKED_TARGET",
-		9: "ERROR_CLASS_TOO_MANY_REDIRECTS",
+		0:  "ERROR_CLASS_UNSPECIFIED",
+		1:  "ERROR_CLASS_NONE",
+		2:  "ERROR_CLASS_DNS",
+		3:  "ERROR_CLASS_CONNECT",
+		4:  "ERROR_CLASS_TLS",
+		5:  "ERROR_CLASS_TIMEOUT",
+		6:  "ERROR_CLASS_STATUS",
+		7:  "ERROR_CLASS_KEYWORD_MISSING",
+		8:  "ERROR_CLASS_BLOCKED_TARGET",
+		9:  "ERROR_CLASS_TOO_MANY_REDIRECTS",
+		10: "ERROR_CLASS_CHALLENGE",
 	}
 	ErrorClass_value = map[string]int32{
 		"ERROR_CLASS_UNSPECIFIED":        0,
@@ -108,6 +110,7 @@ var (
 		"ERROR_CLASS_KEYWORD_MISSING":    7,
 		"ERROR_CLASS_BLOCKED_TARGET":     8,
 		"ERROR_CLASS_TOO_MANY_REDIRECTS": 9,
+		"ERROR_CLASS_CHALLENGE":          10,
 	}
 )
 
@@ -207,17 +210,19 @@ func (x *LeaseRequest) GetVersion() string {
 }
 
 type CheckSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CheckId       string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"` // unique within this lease
-	MonitorId     uint64                 `protobuf:"varint,2,opt,name=monitor_id,json=monitorId,proto3" json:"monitor_id,omitempty"`
-	Kind          CheckKind              `protobuf:"varint,3,opt,name=kind,proto3,enum=upcontrol.probe.v1.CheckKind" json:"kind,omitempty"`
-	Url           string                 `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
-	Method        string                 `protobuf:"bytes,5,opt,name=method,proto3" json:"method,omitempty"`   // GET by default
-	Keyword       string                 `protobuf:"bytes,6,opt,name=keyword,proto3" json:"keyword,omitempty"` // empty = no assertion
-	TimeoutMs     uint32                 `protobuf:"varint,7,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
-	MaxRedirects  uint32                 `protobuf:"varint,8,opt,name=max_redirects,json=maxRedirects,proto3" json:"max_redirects,omitempty"`
-	MaxBodyBytes  uint32                 `protobuf:"varint,9,opt,name=max_body_bytes,json=maxBodyBytes,proto3" json:"max_body_bytes,omitempty"`   // 65536; keyword monitors 262144
-	CollectExpiry bool                   `protobuf:"varint,10,opt,name=collect_expiry,json=collectExpiry,proto3" json:"collect_expiry,omitempty"` // SSL and domain opportunistically
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	CheckId string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"` // unique within this lease
+	// Deprecated: Marked as deprecated in probe/v1/probe.proto.
+	MonitorId     uint64    `protobuf:"varint,2,opt,name=monitor_id,json=monitorId,proto3" json:"monitor_id,omitempty"` // unfilled after the shared-probe migration
+	Kind          CheckKind `protobuf:"varint,3,opt,name=kind,proto3,enum=upcontrol.probe.v1.CheckKind" json:"kind,omitempty"`
+	Url           string    `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
+	Method        string    `protobuf:"bytes,5,opt,name=method,proto3" json:"method,omitempty"`   // GET by default
+	Keyword       string    `protobuf:"bytes,6,opt,name=keyword,proto3" json:"keyword,omitempty"` // empty = no assertion
+	TimeoutMs     uint32    `protobuf:"varint,7,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	MaxRedirects  uint32    `protobuf:"varint,8,opt,name=max_redirects,json=maxRedirects,proto3" json:"max_redirects,omitempty"`
+	MaxBodyBytes  uint32    `protobuf:"varint,9,opt,name=max_body_bytes,json=maxBodyBytes,proto3" json:"max_body_bytes,omitempty"`   // 65536; keyword monitors 262144
+	CollectExpiry bool      `protobuf:"varint,10,opt,name=collect_expiry,json=collectExpiry,proto3" json:"collect_expiry,omitempty"` // SSL and domain opportunistically
+	TargetId      uint64    `protobuf:"varint,11,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`                // the shared probe_target the fleet fetches
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -259,6 +264,7 @@ func (x *CheckSpec) GetCheckId() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in probe/v1/probe.proto.
 func (x *CheckSpec) GetMonitorId() uint64 {
 	if x != nil {
 		return x.MonitorId
@@ -322,6 +328,13 @@ func (x *CheckSpec) GetCollectExpiry() bool {
 	return false
 }
 
+func (x *CheckSpec) GetTargetId() uint64 {
+	if x != nil {
+		return x.TargetId
+	}
+	return 0
+}
+
 type LeaseResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Checks           []*CheckSpec           `protobuf:"bytes,1,rep,name=checks,proto3" json:"checks,omitempty"`
@@ -383,9 +396,10 @@ func (x *LeaseResponse) GetNextLeaseAfterMs() uint32 {
 }
 
 type CheckResult struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	CheckId         string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
-	MonitorId       uint64                 `protobuf:"varint,2,opt,name=monitor_id,json=monitorId,proto3" json:"monitor_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	CheckId string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
+	// Deprecated: Marked as deprecated in probe/v1/probe.proto.
+	MonitorId       uint64                 `protobuf:"varint,2,opt,name=monitor_id,json=monitorId,proto3" json:"monitor_id,omitempty"` // unfilled after the shared-probe migration
 	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	Ok              bool                   `protobuf:"varint,4,opt,name=ok,proto3" json:"ok,omitempty"`
 	StatusCode      uint32                 `protobuf:"varint,5,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"`
@@ -400,6 +414,8 @@ type CheckResult struct {
 	RedirectCount   uint32                 `protobuf:"varint,14,opt,name=redirect_count,json=redirectCount,proto3" json:"redirect_count,omitempty"`
 	SslExpiresAt    *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=ssl_expires_at,json=sslExpiresAt,proto3" json:"ssl_expires_at,omitempty"`
 	DomainExpiresAt *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=domain_expires_at,json=domainExpiresAt,proto3" json:"domain_expires_at,omitempty"`
+	TargetId        uint64                 `protobuf:"varint,17,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`                  // required: results without it are dropped and counted
+	RetryAfterSec   int32                  `protobuf:"varint,18,opt,name=retry_after_sec,json=retryAfterSec,proto3" json:"retry_after_sec,omitempty"` // Retry-After header (seconds form), 0 = absent
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -441,6 +457,7 @@ func (x *CheckResult) GetCheckId() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in probe/v1/probe.proto.
 func (x *CheckResult) GetMonitorId() uint64 {
 	if x != nil {
 		return x.MonitorId
@@ -544,6 +561,20 @@ func (x *CheckResult) GetDomainExpiresAt() *timestamppb.Timestamp {
 		return x.DomainExpiresAt
 	}
 	return nil
+}
+
+func (x *CheckResult) GetTargetId() uint64 {
+	if x != nil {
+		return x.TargetId
+	}
+	return 0
+}
+
+func (x *CheckResult) GetRetryAfterSec() int32 {
+	if x != nil {
+		return x.RetryAfterSec
+	}
+	return 0
 }
 
 type SubmitResultsRequest struct {
@@ -763,11 +794,11 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1a\n" +
 	"\bcapacity\x18\x03 \x01(\rR\bcapacity\x12\x18\n" +
-	"\aversion\x18\x04 \x01(\tR\aversion\"\xcd\x02\n" +
+	"\aversion\x18\x04 \x01(\tR\aversion\"\xee\x02\n" +
 	"\tCheckSpec\x12\x19\n" +
-	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x1d\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12!\n" +
 	"\n" +
-	"monitor_id\x18\x02 \x01(\x04R\tmonitorId\x121\n" +
+	"monitor_id\x18\x02 \x01(\x04B\x02\x18\x01R\tmonitorId\x121\n" +
 	"\x04kind\x18\x03 \x01(\x0e2\x1d.upcontrol.probe.v1.CheckKindR\x04kind\x12\x10\n" +
 	"\x03url\x18\x04 \x01(\tR\x03url\x12\x16\n" +
 	"\x06method\x18\x05 \x01(\tR\x06method\x12\x18\n" +
@@ -777,16 +808,17 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\rmax_redirects\x18\b \x01(\rR\fmaxRedirects\x12$\n" +
 	"\x0emax_body_bytes\x18\t \x01(\rR\fmaxBodyBytes\x12%\n" +
 	"\x0ecollect_expiry\x18\n" +
-	" \x01(\bR\rcollectExpiry\"\xb2\x01\n" +
+	" \x01(\bR\rcollectExpiry\x12\x1b\n" +
+	"\ttarget_id\x18\v \x01(\x04R\btargetId\"\xb2\x01\n" +
 	"\rLeaseResponse\x125\n" +
 	"\x06checks\x18\x01 \x03(\v2\x1d.upcontrol.probe.v1.CheckSpecR\x06checks\x12;\n" +
 	"\vlease_until\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"leaseUntil\x12-\n" +
-	"\x13next_lease_after_ms\x18\x03 \x01(\rR\x10nextLeaseAfterMs\"\xe6\x04\n" +
+	"\x13next_lease_after_ms\x18\x03 \x01(\rR\x10nextLeaseAfterMs\"\xaf\x05\n" +
 	"\vCheckResult\x12\x19\n" +
-	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x1d\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12!\n" +
 	"\n" +
-	"monitor_id\x18\x02 \x01(\x04R\tmonitorId\x129\n" +
+	"monitor_id\x18\x02 \x01(\x04B\x02\x18\x01R\tmonitorId\x129\n" +
 	"\n" +
 	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x0e\n" +
 	"\x02ok\x18\x04 \x01(\bR\x02ok\x12\x1f\n" +
@@ -805,7 +837,9 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\tbody_hash\x18\r \x01(\x04R\bbodyHash\x12%\n" +
 	"\x0eredirect_count\x18\x0e \x01(\rR\rredirectCount\x12@\n" +
 	"\x0essl_expires_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\fsslExpiresAt\x12F\n" +
-	"\x11domain_expires_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x0fdomainExpiresAt\"\x82\x01\n" +
+	"\x11domain_expires_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x0fdomainExpiresAt\x12\x1b\n" +
+	"\ttarget_id\x18\x11 \x01(\x04R\btargetId\x12&\n" +
+	"\x0fretry_after_sec\x18\x12 \x01(\x05R\rretryAfterSec\"\x82\x01\n" +
 	"\x14SubmitResultsRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x129\n" +
@@ -820,7 +854,7 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\x13ReportBlindResponse*?\n" +
 	"\tCheckKind\x12\x1a\n" +
 	"\x16CHECK_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
-	"\x12CHECK_KIND_WEBSITE\x10\x01*\x98\x02\n" +
+	"\x12CHECK_KIND_WEBSITE\x10\x01*\xb3\x02\n" +
 	"\n" +
 	"ErrorClass\x12\x1b\n" +
 	"\x17ERROR_CLASS_UNSPECIFIED\x10\x00\x12\x14\n" +
@@ -832,7 +866,9 @@ const file_probe_v1_probe_proto_rawDesc = "" +
 	"\x12ERROR_CLASS_STATUS\x10\x06\x12\x1f\n" +
 	"\x1bERROR_CLASS_KEYWORD_MISSING\x10\a\x12\x1e\n" +
 	"\x1aERROR_CLASS_BLOCKED_TARGET\x10\b\x12\"\n" +
-	"\x1eERROR_CLASS_TOO_MANY_REDIRECTS\x10\t2\xa2\x02\n" +
+	"\x1eERROR_CLASS_TOO_MANY_REDIRECTS\x10\t\x12\x19\n" +
+	"\x15ERROR_CLASS_CHALLENGE\x10\n" +
+	"2\xa2\x02\n" +
 	"\fProbeService\x12L\n" +
 	"\x05Lease\x12 .upcontrol.probe.v1.LeaseRequest\x1a!.upcontrol.probe.v1.LeaseResponse\x12d\n" +
 	"\rSubmitResults\x12(.upcontrol.probe.v1.SubmitResultsRequest\x1a).upcontrol.probe.v1.SubmitResultsResponse\x12^\n" +

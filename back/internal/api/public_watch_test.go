@@ -1,6 +1,9 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,7 +103,10 @@ func TestSlugFromHostReadsAsTheSiteName(t *testing.T) {
 
 func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
 	// The output is empty (caller falls back to the project id) or a plain
-	// lowercase segment; an IDN like "münchen.example" is no exception.
+	// lowercase segment; an IDN like "münchen.example" is no exception. A
+	// long host is cut at 40 and salted with 6 hex of its hash (plan part 2):
+	// 40 + 1 + 6 = 47 is the ceiling, and the salt makes two long hosts
+	// sharing a prefix still yield different slugs.
 	for _, in := range []string{"", "...", "-", "—", "münchen.example", "a..b", "-lead-", strings.Repeat("x", 80) + ".com"} {
 		got := slugFromHost(in)
 		if got == "" {
@@ -109,13 +115,44 @@ func TestSlugFromHostIsAlwaysAUsableURLSegment(t *testing.T) {
 		if strings.HasPrefix(got, "-") || strings.HasSuffix(got, "-") || strings.Contains(got, "--") {
 			t.Errorf("slugFromHost(%q) = %q: bad dashes", in, got)
 		}
-		if len(got) > 40 {
-			t.Errorf("slugFromHost(%q) = %q: %d chars, want <= 40", in, got, len(got))
+		if len(got) > 47 {
+			t.Errorf("slugFromHost(%q) = %q: %d chars, want <= 47", in, got, len(got))
 		}
 		for _, r := range got {
 			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 				t.Errorf("slugFromHost(%q) = %q: %q is not URL-safe", in, got, r)
 			}
+		}
+	}
+	// The same long host always yields the same slug: the salt is a hash of
+	// the host, not a roll of the dice.
+	long := strings.Repeat("x", 80) + ".com"
+	if slugFromHost(long) != slugFromHost("https://"+long+"/pricing") {
+		t.Errorf("the same long host yielded two different slugs")
+	}
+}
+
+func TestCanonicalHostStripsSchemeWWWAndCase(t *testing.T) {
+	// The watch door keys everything on this host: one spelling per site, so
+	// www.example.com and example.com are one page, one probe (plan part 2).
+	cases := []struct{ in, want string }{
+		{"example.com", "example.com"},
+		{"WWW.Example.COM", "example.com"},
+		{"https://www.example.com", "example.com"},
+		{"http://www.example.com/pricing?a=1", "example.com"},
+		{"www.www.example.com", "www.example.com"}, // ONE leading www. only
+		{"example.com:8443", "example.com"},
+		{"  shop.example.co.uk  ", "shop.example.co.uk"},
+	}
+	for _, c := range cases {
+		got, err := canonicalHost(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("canonicalHost(%q) = %q (err %v), want %q", c.in, got, err, c.want)
+		}
+	}
+	for _, in := range []string{"", "   ", "https://", "/pricing"} {
+		if got, err := canonicalHost(in); err == nil || got != "" {
+			t.Errorf("canonicalHost(%q) = %q (err %v), want the empty refusal", in, got, err)
 		}
 	}
 }
@@ -146,5 +183,35 @@ func TestSameHostTargetsAcceptsASubdomain(t *testing.T) {
 	})
 	if len(got) != 1 || got[0] != "https://api.mine.com/v1" {
 		t.Errorf("targets = %v, want the subdomain and nothing else", got)
+	}
+}
+
+// The mint audit's IP identity: HMAC-SHA256 under the deployment's secret
+// key when one is configured (a bare sha256(IP) is reconstructable from a
+// traffic dump by enumerating the address space), plain sha256 without one
+// so self-hosts keep the spelling their existing audit rows carry.
+func TestMintIPHashIsKeyedWhenASecretIsConfigured(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef") // 32 bytes, AES-256 size
+	plain := &writeAPI{}
+	keyed := &writeAPI{mintSecret: key}
+
+	h := keyed.mintIPHash("203.0.113.7")
+	if h != keyed.mintIPHash("203.0.113.7") {
+		t.Fatal("the keyed hash is not deterministic for one IP")
+	}
+	if h == plain.mintIPHash("203.0.113.7") {
+		t.Fatal("the keyed hash equals the unkeyed sha256 spelling")
+	}
+	if keyed.mintIPHash("203.0.113.8") == h {
+		t.Fatal("two addresses collided on one keyed hash")
+	}
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("203.0.113.7"))
+	if h != hex.EncodeToString(m.Sum(nil)) {
+		t.Fatal("the keyed hash is not HMAC-SHA256 under the configured key")
+	}
+	s := sha256.Sum256([]byte("203.0.113.7"))
+	if plain.mintIPHash("203.0.113.7") != hex.EncodeToString(s[:]) {
+		t.Fatal("without a key the hash must stay the plain sha256")
 	}
 }

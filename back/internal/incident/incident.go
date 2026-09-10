@@ -46,8 +46,42 @@ func New(p *pg.Pool, pgs *pgstore.Store) *Lifecycle { return &Lifecycle{pool: p,
 
 // Open creates an incident for a monitor that crossed the availability
 // threshold; an already-open incident is returned, not duplicated.
-func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (incidentID int64, created bool, err error) {
-	q := l.pool.Queries()
+// effectiveIntervalSec is the cadence the target was checked at when the
+// incident fired (review decision 14: the interval fold is recorded, not
+// undone); 0 means unknown/legacy and writes nothing.
+func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string, effectiveIntervalSec int32) (incidentID int64, created bool, err error) {
+	return l.open(ctx, l.pool.Queries(), monitorID, title, effectiveIntervalSec, true)
+}
+
+// OpenOnTx is Open on a caller-owned transaction: the subscription and its
+// first incident land atomically, so a subscriber who joins an outage gets
+// its incident with the insert, not one check later. The frozen log slice is
+// NOT taken here: it is written through the pool, and the incident row is
+// invisible to other connections until the caller's transaction commits —
+// incident_slice's FK would refuse it. The caller freezes after commit via
+// FreezeOpenIncident.
+func (l *Lifecycle) OpenOnTx(ctx context.Context, q *sqlc.Queries, monitorID int64, title string, effectiveIntervalSec int32) (incidentID int64, created bool, err error) {
+	return l.open(ctx, q, monitorID, title, effectiveIntervalSec, false)
+}
+
+// FreezeOpenIncident takes the evidence slice of the monitor's open incident
+// — the step OpenOnTx deferred past the commit. No open incident: a no-op.
+func (l *Lifecycle) FreezeOpenIncident(ctx context.Context, monitorID int64) {
+	if l.pgs == nil {
+		return
+	}
+	existing, err := l.pool.Queries().GetOpenIncident(ctx, &monitorID)
+	if err != nil {
+		return
+	}
+	mon, err := l.pool.Queries().GetMonitorForIncident(ctx, monitorID)
+	if err != nil {
+		return
+	}
+	_ = l.freezeSlice(ctx, existing.ID, mon.TenantID, mon.ProjectID)
+}
+
+func (l *Lifecycle) open(ctx context.Context, q *sqlc.Queries, monitorID int64, title string, effectiveIntervalSec int32, freeze bool) (incidentID int64, created bool, err error) {
 
 	// Check for an already-open incident.
 	if existing, e := q.GetOpenIncident(ctx, &monitorID); e == nil {
@@ -78,6 +112,13 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 	if err != nil {
 		return 0, false, fmt.Errorf("incident: open: %w", err)
 	}
+	// The effective interval at opening, on the row (NULL for legacy callers
+	// that pass 0; the column says what cadence the outage was measured at).
+	if effectiveIntervalSec > 0 {
+		_ = q.SetIncidentEffectiveInterval(ctx, sqlc.SetIncidentEffectiveIntervalParams{
+			ID: row.ID, EffectiveIntervalSec: effectiveIntervalSec,
+		})
+	}
 
 	// Timeline entry: "opened"; the text describes the event, not the
 	// incident (the card header already carries the title). A heartbeat has
@@ -94,7 +135,10 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 
 	// Freeze the log slice while the lines are still inside the ring window;
 	// best effort (a CH hiccup must not block the incident), error returned.
-	_ = l.freezeSlice(ctx, row.ID, mon.TenantID, mon.ProjectID)
+	// Skipped on the caller-owned-transaction path (see OpenOnTx).
+	if freeze {
+		_ = l.freezeSlice(ctx, row.ID, mon.TenantID, mon.ProjectID)
+	}
 
 	// The facts the row holds, so the alert names what broke; a field the row
 	// does not carry is omitted, never sent as blank. Built once, not per channel.
@@ -118,7 +162,7 @@ func (l *Lifecycle) Open(ctx context.Context, monitorID int64, title string) (in
 		"monitor_name": mon.Name,
 	})
 
-	l.notifyChannels(ctx, mon.TenantID, mon.ProjectID, notifySpec{
+	l.notifyChannels(ctx, q, mon.TenantID, mon.ProjectID, notifySpec{
 		incidentID: row.ID,
 		payload:    payload,
 		wants:      func(s notifysettings.Settings) bool { return s.WebsiteDown },
@@ -140,9 +184,10 @@ type notifySpec struct {
 }
 
 // notifyChannels enqueues one delivery per interested channel; EnqueueDelivery
-// dedupes on idem_key, so replaying an open is a no-op.
-func (l *Lifecycle) notifyChannels(ctx context.Context, tenantID, projectID int64, n notifySpec) {
-	q := l.pool.Queries()
+// dedupes on idem_key, so replaying an open is a no-op. The Queries argument is
+// the caller's transaction when the open rides one: the delivery lands with
+// the incident or not at all.
+func (l *Lifecycle) notifyChannels(ctx context.Context, q *sqlc.Queries, tenantID, projectID int64, n notifySpec) {
 	// A project's incident reaches that project's destinations and nobody
 	// else's — a sibling project of the same workspace is not an audience.
 	chans, err := q.ListChannelsByProject(ctx, projectID)
@@ -295,7 +340,7 @@ func (l *Lifecycle) OpenDetect(ctx context.Context, p DetectOpen) (incidentID in
 	if serr != nil {
 		slice = nil
 	}
-	l.notifyChannels(ctx, p.TenantID, p.ProjectID, notifySpec{
+	l.notifyChannels(ctx, l.pool.Queries(), p.TenantID, p.ProjectID, notifySpec{
 		incidentID: row.ID,
 		payload:    detectAlertPayload(p, uuidStr(row.PublicID), slice),
 		wants: func(s notifysettings.Settings) bool {

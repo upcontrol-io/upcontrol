@@ -23,6 +23,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // watchFixture: a signed-in Free account (tenant, person, login member, no
@@ -72,7 +73,7 @@ func newWatchFixture(t *testing.T) *watchFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	f.ownerCookie = &http.Cookie{Name: session.CookieName, Value: token}
-	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false)
+	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -351,8 +352,16 @@ func TestStatusPageIsPerProject(t *testing.T) {
 			t.Fatalf("seed status_page %d: %v", n, err)
 		}
 		if _, err := f.pool.Raw().Exec(ctx,
-			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-			 VALUES (gen_random_uuid(), $1, $2, 'website', $3, $4, 300)`,
+			`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+			 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url`,
+			targetkey.Website(fmt.Sprintf("https://p%d-%d.example.com", n, uniq%100000), ""),
+			fmt.Sprintf("https://p%d-%d.example.com", n, uniq%100000)); err != nil {
+			t.Fatalf("seed probe_target %d: %v", n, err)
+		}
+		if _, err := f.pool.Raw().Exec(ctx,
+			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+			 SELECT gen_random_uuid(), $1, $2, 'website', $3, $4, 300, pt.id
+			  FROM probe_target pt WHERE pt.url = $4`,
 			f.tenantID, p.projectID, p.monitor,
 			fmt.Sprintf("https://p%d-%d.example.com", n, uniq%100000)); err != nil {
 			t.Fatalf("seed monitor %d: %v", n, err)
@@ -361,7 +370,7 @@ func TestStatusPageIsPerProject(t *testing.T) {
 	}
 	one, two := seed(1), seed(2)
 
-	wa := NewWriteAPI(f.pool, nil, f.sess, false, nil, nil, false)
+	wa := NewWriteAPI(f.pool, nil, f.sess, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/status-page", wa)
 	mux.Handle("GET /public/status/{slug}", wa)

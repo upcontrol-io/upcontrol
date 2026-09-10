@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -33,11 +34,18 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/analytics"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
+	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/discover"
+	"go.upcontrol.io/back/internal/dnstokens"
+	"go.upcontrol.io/back/internal/platform/config"
 	"go.upcontrol.io/back/internal/probe/executor"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
+	"go.upcontrol.io/back/internal/targetkey"
+
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 )
 
 // writeAPI handles all the POST/PATCH/DELETE + public endpoints.
@@ -67,6 +75,16 @@ type writeAPI struct {
 	// Resolves an ingest key for the key-authenticated board doors (replace,
 	// append, the board read). Same pool, no extra wiring.
 	keys *pg.KeyResolver
+	// The permanent-status-page knobs (config.StatusPageKnobs): the mint
+	// ceilings and the index kill switch this door consults. Read from the
+	// same env vars ucworker reads; zero values fall back to the defaults
+	// where they are used, so a struct built by hand in a test never refuses
+	// every mint.
+	statusKnobs config.StatusPageKnobs
+	// mintSecret keys the mint audit's IP hash (HMAC-SHA256) when the
+	// deployment sets UC_SECRET_KEY_HEX. nil keeps the plain sha256
+	// self-hosts without a secret have always stored.
+	mintSecret []byte
 }
 
 // checkCacheTTL is short enough that a reader who just fixed their site sees the
@@ -78,8 +96,20 @@ type cachedCheck struct {
 	at   time.Time
 }
 
-func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool) *writeAPI {
-	return &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted, keys: pg.NewKeyResolver(p, nil)}
+// NewWriteAPI wires the write API. secretHex is the deployment's
+// UC_SECRET_KEY_HEX, "" when none is set: it keys the mint audit's IP hash
+// and is OPTIONAL - without it the audit keeps the plain sha256, so a
+// self-host with no secret works exactly as before.
+func NewWriteAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, devMode bool, mail auth.Mailer, rec *analytics.Recorder, selfHosted bool, secretHex string) *writeAPI {
+	h := &writeAPI{pool: p, pgs: pgs, sess: sm, exec: executor.New(), checkSeenAt: map[string]time.Time{}, checkCache: map[string]cachedCheck{}, devMode: devMode, mailer: mail, rec: rec, selfHosted: selfHosted, keys: pg.NewKeyResolver(p, nil), statusKnobs: config.LoadStatusPageKnobs(nil)}
+	// A bad hex never reaches here in a real boot (config.Load fails first);
+	// falling back to the unkeyed hash keeps a hand-built handler honest.
+	if secretHex != "" {
+		if k, err := config.SecretKeyFromHex(secretHex); err == nil {
+			h.mintSecret = k[:]
+		}
+	}
+	return h
 }
 
 func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -850,6 +880,10 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	defer func() { _ = tx.Rollback(ctx) }()
 	if projectID != 0 {
 		if err := releaseProject(ctx, tx, projectID); err != nil {
+			if errors.Is(err, errPageRemoved) {
+				writeAPIErr(w, http.StatusConflict, "page_removed")
+				return
+			}
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -872,6 +906,11 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	writeAPIJSON(w, http.StatusOK, map[string]any{"accountDeleted": last})
 }
 
+// errPageRemoved is releaseProject's refusal for a project whose page was
+// taken down: deleteProject maps it to 409 page_removed, and the deferred
+// rollback leaves the project exactly as it was.
+var errPageRemoved = errors.New("a status page of this project was removed")
+
 // releaseProject hands a project to a fresh UNCLAIMED tenant instead of
 // deleting it: **removing a project does not remove its status page — the page
 // simply becomes ownerless** (user decision, 2026-08-27). It keeps its slug and
@@ -888,10 +927,26 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 // Deleting the key is also what lets the reaper collect the page later: its
 // exclusion spares an anonymous tenant that has BOTH ingested and still holds a
 // key, which is the `uc init` install in use and not this.
+//
+// A project one of whose pages was REMOVED is refused (errPageRemoved): a
+// removed page stays removed, and release is a live page's second life.
 func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 	var domain string
 	if err := tx.QueryRow(ctx, `SELECT domain FROM project WHERE id = $1`, projectID).Scan(&domain); err != nil {
 		return err
+	}
+	// A removed page stays removed (plan part 2): release hands the page to a
+	// fresh ownerless tenant, which is a live page's second life - a page the
+	// owner took down must not come back as ownerless-and-alive. Refuse; the
+	// caller maps errPageRemoved to 409 and the transaction rolls back.
+	var removed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM status_page WHERE project_id = $1 AND removed_at IS NOT NULL)`,
+		projectID).Scan(&removed); err != nil {
+		return err
+	}
+	if removed {
+		return errPageRemoved
 	}
 	claimHash := sha256.Sum256([]byte(randomHex()))
 	var orphanTenant int64
@@ -1037,8 +1092,8 @@ func (h *writeAPI) getStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
-	cfg, domain, verified := h.statusConfig(ctx, projectID)
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified))
+	cfg, domain, verified, page := h.statusConfig(ctx, projectID)
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, projectID, cfg, domain, verified, page))
 }
 
 // PUT /v1/status-page: persist the settings. Components are not stored: they
@@ -1051,6 +1106,7 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		Shown         map[string]bool `json:"shown"`
 		ShowNetwork   *bool           `json:"showNetwork"`
 		ShowPoweredBy *bool           `json:"showPoweredBy"`
+		IndexOptIn    *bool           `json:"indexOptIn"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAPIErr(w, http.StatusBadRequest, "bad_body")
@@ -1063,7 +1119,7 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	s, _ := h.sess.FromRequest(ctx, r)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
-	cfg, current, verified := h.statusConfig(ctx, projectID)
+	cfg, current, verified, page := h.statusConfig(ctx, projectID)
 	if req.Shown != nil {
 		cfg.Shown = req.Shown
 	}
@@ -1072,6 +1128,12 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	if req.ShowPoweredBy != nil {
 		cfg.ShowPoweredBy = *req.ShowPoweredBy
+	}
+	// "List in search engines" (plan part 4): stored with the config blob; it
+	// is one half of a CLAIMED page's index qualification, the other being the
+	// DNS TXT proof the worker verifies.
+	if req.IndexOptIn != nil {
+		cfg.IndexOptIn = *req.IndexOptIn
 	}
 	cfg.Title = req.Title
 	// PAID ONLY: the domain is the one setting a plan pays for. Only a CHANGE
@@ -1100,8 +1162,10 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT id, domain FROM project WHERE id = $1`, projectID).Scan(&projectID, &projectDomain)
 	// First save of a page that never existed: name it after the domain, not
-	// the id. An existing slug is never rewritten.
-	if cfg.Slug == "prj-"+strconv.FormatInt(projectID, 10) {
+	// the id. An existing slug is never rewritten, a stored "prj-N" included
+	// (a page first saved before its project had a domain): the row decides,
+	// the string cannot tell it from the unsaved default.
+	if page.ID == 0 {
 		if claimed := h.claimSlug(ctx, projectDomain, projectID); claimed != "" {
 			cfg.Slug = claimed
 		}
@@ -1112,16 +1176,23 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	if domain != "" {
 		domainVal = domain
 	}
+	// index_opt_in is written to the COLUMN as well as the config blob: the
+	// index gate reads the column (indexCandidates), so a switch that only
+	// lived in the blob was dead for every page it exists for. Switching it
+	// off takes the stamp off too: a page that is no longer opted in drops
+	// out of the gate's candidates, so hysteresis would never unlist it.
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config, index_opt_in)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (slug) DO UPDATE SET
 		   title = EXCLUDED.title,
 		   domain = EXCLUDED.domain,
 		   domain_verified_at = CASE WHEN EXCLUDED.domain = status_page.domain
 		                             THEN status_page.domain_verified_at END,
-		   config = EXCLUDED.config`,
-		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw); err != nil {
+		   config = EXCLUDED.config,
+		   index_opt_in = EXCLUDED.index_opt_in,
+		   indexed_at = CASE WHEN EXCLUDED.index_opt_in THEN status_page.indexed_at END`,
+		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw, cfg.IndexOptIn); err != nil {
 		// The slug conflict is arbitrated above, so a unique violation here is
 		// the domain: another page already rides that host.
 		var pgErr *pgconn.PgError
@@ -1138,7 +1209,8 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	if domain != "" && !verified {
 		verified = h.verifyStatusDomain(ctx, projectID, domain)
 	}
-	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, tenantID, projectID, cfg, domain, verified))
+	_, _, _, page = h.statusConfig(ctx, projectID)
+	writeAPIJSON(w, http.StatusOK, h.statusPageResponse(ctx, projectID, cfg, domain, verified, page))
 }
 
 // statusPageConfig is the owner's decisions about the page. Everything else on
@@ -1155,6 +1227,25 @@ type statusPageConfig struct {
 	// there the plan buys the page's address and nothing about the branding
 	// (owner decision, 2026-08-29). poweredBy() is the one reader.
 	ShowPoweredBy bool `json:"showPoweredBy"`
+	// "List in search engines" (plan part 4): one half of the index
+	// qualification for a claimed page, the TXT verification is the other.
+	IndexOptIn bool `json:"indexOptIn"`
+}
+
+// statusPageRow carries the page's own columns beyond the config blob: the
+// part-2 state the owner API reports and the public door renders from. The
+// zero value means "no page row" (prj-N pages have none yet).
+type statusPageRow struct {
+	ID                int64
+	RootTargetID      *int64
+	IsHostPage        bool
+	RemovedAt         *time.Time
+	IndexedAt         *time.Time
+	HostVerifiedAt    *time.Time
+	LastSeenAt        *time.Time
+	VerificationToken *string
+	RemovalToken      *string
+	Slug              string
 }
 
 // poweredBy answers whether the credit line is published. On the cloud it is
@@ -1167,17 +1258,23 @@ func (h *writeAPI) poweredBy(cfg statusPageConfig) bool {
 // statusConfig loads the saved settings for ONE project, defaulting a page
 // that has never been configured to "publish everything" — the page exists to
 // be public. The caller resolves the project first (currentProjectID for a
-// session, the page's own row for the public door). The domain and its proof
-// come from the columns, never the config blob.
-func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPageConfig, string, bool) {
+// session, the page's own row for the public door). The domain, its proof and
+// the part-2 page columns come from the columns, never the config blob.
+func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPageConfig, string, bool, statusPageRow) {
 	cfg := statusPageConfig{ShowNetwork: true, ShowPoweredBy: true, Shown: map[string]bool{}}
 	var domain, title, slug *string
 	var verifiedAt *time.Time
 	var raw []byte
+	var page statusPageRow
 	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config
+		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config,
+		        s.id, s.root_target_id, s.is_host_page, s.removed_at, s.indexed_at,
+		        s.host_verified_at, s.last_seen_at, s.verification_token, s.removal_token
 		   FROM project p LEFT JOIN status_page s ON s.project_id = p.id
-		  WHERE p.id = $1`, projectID).Scan(&projectID, &slug, &title, &domain, &verifiedAt, &raw)
+		  WHERE p.id = $1`, projectID).Scan(
+		&projectID, &slug, &title, &domain, &verifiedAt, &raw,
+		&page.ID, &page.RootTargetID, &page.IsHostPage, &page.RemovedAt, &page.IndexedAt,
+		&page.HostVerifiedAt, &page.LastSeenAt, &page.VerificationToken, &page.RemovalToken)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
@@ -1186,6 +1283,7 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 	cfg.Slug = "prj-" + strconv.FormatInt(projectID, 10)
 	if slug != nil && *slug != "" {
 		cfg.Slug = *slug
+		page.Slug = *slug
 	}
 	if cfg.Shown == nil {
 		cfg.Shown = map[string]bool{}
@@ -1197,22 +1295,65 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 	if domain != nil {
 		stored = *domain
 	}
-	return cfg, stored, verifiedAt != nil
+	return cfg, stored, verifiedAt != nil, page
 }
 
 // statusPageResponse is the one shape both /v1/status-page handlers answer
 // with: the stored decisions plus the measured components and network.
-func (h *writeAPI) statusPageResponse(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, domain string, verified bool) map[string]any {
-	return map[string]any{
+func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg statusPageConfig, domain string, verified bool, page statusPageRow) map[string]any {
+	resp := map[string]any{
 		"slug":           cfg.Slug,
 		"title":          cfg.Title,
 		"domain":         domain,
 		"domainVerified": verified,
-		"components":     h.statusComponents(ctx, tenantID, projectID, cfg, false),
-		"network":        h.statusNetwork(ctx, tenantID, projectID),
+		"components":     h.statusComponents(ctx, projectID, cfg, false, page),
+		"network":        h.statusNetwork(ctx, projectID),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
+		// The index door's owner-facing facts (plan part 4): the switch, the
+		// DNS proof of control, the tokens, and the live page's address (the
+		// zero-monitors note links it).
+		"indexOptIn":  cfg.IndexOptIn,
+		"hostPage":    page.IsHostPage,
+		"rootPageUrl": "/status/" + cfg.Slug,
 	}
+	if page.HostVerifiedAt != nil {
+		resp["hostVerifiedAt"] = page.HostVerifiedAt.UTC().Format(time.RFC3339)
+	}
+	// The verification token is issued on read while it can still be used:
+	// generated once, stored, returned every time until the TXT record lands
+	// and the worker stamps host_verified_at (then the token is cleared and
+	// this door stops offering one).
+	if page.HostVerifiedAt == nil {
+		if page.VerificationToken != nil {
+			resp["verificationToken"] = *page.VerificationToken
+		} else if page.ID != 0 {
+			token := randomHex()
+			if _, err := h.pool.Raw().Exec(ctx,
+				`UPDATE status_page SET verification_token = $2 WHERE id = $1 AND verification_token IS NULL`,
+				page.ID, token); err == nil {
+				resp["verificationToken"] = token
+			}
+		}
+		// The record the owner publishes, composed server-side with the same
+		// eTLD+1 reduction the worker's dns-tokens job resolves (it reduces the
+		// PROJECT's domain, not the page's custom one): the front renders this
+		// string instead of rebuilding the rule. Omitted when the domain is not
+		// registrable - there is no record to publish.
+		var projectDomain string
+		if err := h.pool.Raw().QueryRow(ctx,
+			`SELECT domain FROM project WHERE id = $1`, projectID).Scan(&projectDomain); err == nil && projectDomain != "" {
+			if registrable, rerr := publicsuffix.EffectiveTLDPlusOne(projectDomain); rerr == nil {
+				resp["verificationRecord"] = dnstokens.VerifyRecord + registrable
+			}
+		}
+	}
+	// The removal token is only ECHOED here: the door that issues it belongs
+	// to the page itself (Group 3's surface), never to the owner's settings.
+	if page.RemovalToken != nil {
+		resp["removalToken"] = *page.RemovalToken
+	}
+	return resp
 }
 
 var errBadStatusDomain = errors.New("unusable status domain")
@@ -1268,7 +1409,7 @@ func (h *writeAPI) verifyStatusPageDomain(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	s, _ := h.sess.FromRequest(ctx, r)
 	projectID := currentProjectID(ctx, h.pool, s, tenantID)
-	_, domain, _ := h.statusConfig(ctx, projectID)
+	_, domain, _, _ := h.statusConfig(ctx, projectID)
 	if domain == "" {
 		writeAPIErr(w, http.StatusBadRequest, "no_domain")
 		return
@@ -1368,27 +1509,64 @@ func barPlanFor(oldest time.Time, intervalSec int32, now time.Time) (window, buc
 }
 
 // statusComponents renders one component per monitor with measured uptime and
-// bars. `publicOnly` drops the owner's unpublished ones.
-func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int64, cfg statusPageConfig, publicOnly bool) []map[string]any {
-	type monRow struct {
-		id          int64
+// bars. `publicOnly` drops the owner's unpublished ones. Since migration 009
+// the checks table is keyed by target: the project's monitors are resolved to
+// their targets ONCE and the rows are read by target_id. A host page PREPENDS
+// its root target as the first component (named by the host), unless one of
+// the project's monitors already subscribes to it - no double draw (plan
+// part 2). Uptime and bucket math EXCLUDE unmeasured rows (the shared
+// pgstore.MeasurableSQL predicate); such rows draw as nodata bars and never
+// count against uptime. The project is the only scope, as in statusConfig:
+// the caller has already resolved it to one the reader may see.
+func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow) []map[string]any {
+	type compRow struct {
+		id          int64 // monitor id; 0 for the root pseudo component
 		key         string
 		name        string
 		intervalSec int32
+		targetID    int64
 	}
-	var mons []monRow
+	var mons []compRow
 	rows, err := h.pool.Raw().Query(ctx,
-		`SELECT id, public_id, name, interval_sec FROM monitor WHERE project_id = $1 ORDER BY id`, projectID)
+		`SELECT id, public_id, name, interval_sec, target_id FROM monitor WHERE project_id = $1 ORDER BY id`, projectID)
 	if err == nil {
 		for rows.Next() {
-			var m monRow
+			var m compRow
 			var pub [16]byte
-			if rows.Scan(&m.id, &pub, &m.name, &m.intervalSec) == nil {
+			if rows.Scan(&m.id, &pub, &m.name, &m.intervalSec, &m.targetID) == nil {
 				m.key = fmt.Sprintf("%x", pub[:])
 				mons = append(mons, m)
 			}
 		}
 		rows.Close()
+	}
+	// The host page's root component: first, named by the host, rendered
+	// whether or not the project still holds a monitor on it (decision 11 -
+	// the owner may delete their check; the page keeps measuring).
+	if page.IsHostPage && page.RootTargetID != nil {
+		rootID := *page.RootTargetID
+		subscribed := false
+		for _, m := range mons {
+			if m.targetID == rootID {
+				subscribed = true
+				break
+			}
+		}
+		if !subscribed {
+			host := projectDomainOf(ctx, h.pool, projectID)
+			name := host
+			if name == "" {
+				name = cfg.Title
+			}
+			mons = append([]compRow{{
+				key:      fmt.Sprintf("root-%d", rootID),
+				name:     name,
+				targetID: rootID,
+				// The host-page ladder's cadence (300/900/3600); the exact
+				// value is corrected from the newest row below.
+				intervalSec: 300,
+			}}, mons...)
+		}
 	}
 	if len(mons) == 0 {
 		return []map[string]any{}
@@ -1396,30 +1574,47 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int
 
 	now := time.Now().UTC()
 
-	// The first check held per monitor: it decides which rung of the ladder the
+	// The first check held per target: it decides which rung of the ladder the
 	// strip is on. Bounded by the retention window, which is all the table has.
-	type day struct{ ok, total uint64 }
 	oldest := map[int64]time.Time{}
+	// The cadence the target is actually checked at: the root component has no
+	// monitor row of its own to carry an interval, so it reads its newest row.
+	cadence := map[int64]int32{}
+	targets := make([]int64, 0, len(mons))
+	for _, m := range mons {
+		targets = append(targets, m.targetID)
+	}
 	if h.pgs != nil {
-		// tenant_id keeps the index; the project narrows through its monitors.
 		chRows, cerr := h.pgs.Raw().Query(ctx, `
-			SELECT monitor_id, min(ts) FROM checks
-			 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '7 days'
-			   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)
-			 GROUP BY monitor_id`, tenantID, projectID)
+			SELECT target_id, min(ts) FROM checks
+			 WHERE target_id = ANY($1) AND ts >= now() - INTERVAL '7 days'
+			 GROUP BY target_id`, targets)
 		if cerr == nil {
 			for chRows.Next() {
-				var monID int64
+				var tid int64
 				var first time.Time
-				if chRows.Scan(&monID, &first) == nil {
-					oldest[monID] = first.UTC()
+				if chRows.Scan(&tid, &first) == nil {
+					oldest[tid] = first.UTC()
 				}
 			}
 			chRows.Close()
 		}
+		cRows, cerr := h.pgs.Raw().Query(ctx, `
+			SELECT DISTINCT ON (target_id) target_id, interval_sec FROM checks
+			 WHERE target_id = ANY($1) ORDER BY target_id, ts DESC`, targets)
+		if cerr == nil {
+			for cRows.Next() {
+				var tid int64
+				var interval int32
+				if cRows.Scan(&tid, &interval) == nil && interval > 0 {
+					cadence[tid] = interval
+				}
+			}
+			cRows.Close()
+		}
 	}
 
-	// Every strip's plan, and how far back the widest of them reaches — that
+	// Every strip's plan, and how far back the widest of them reaches - that
 	// bounds the one raw query below.
 	type barPlan struct {
 		bucket time.Duration
@@ -1428,32 +1623,39 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int
 	plans := map[int64]barPlan{}
 	var rawFrom time.Time
 	for _, m := range mons {
-		window, bucket, count := barPlanFor(oldest[m.id], m.intervalSec, now)
-		plans[m.id] = barPlan{bucket: bucket, count: count}
+		interval := m.intervalSec
+		if m.id == 0 && cadence[m.targetID] > 0 {
+			interval = cadence[m.targetID]
+		}
+		window, bucket, count := barPlanFor(oldest[m.targetID], interval, now)
+		plans[m.targetID] = barPlan{bucket: bucket, count: count}
 		if from := now.Add(-window); rawFrom.IsZero() || from.Before(rawFrom) {
 			rawFrom = from
 		}
 	}
 
 	// Buckets counted BACKWARDS from now: a probe is not clock-aligned, and
-	// wall-clock buckets would draw false gaps.
+	// wall-clock buckets would draw false gaps. Unmeasured rows ride along
+	// flagged: they make a bucket nodata when nothing measured did, and never
+	// enter the ok/total math.
+	type day struct {
+		ok, total  uint64
+		unmeasured uint64
+	}
 	recent := map[int64]map[int]day{}
 	if h.pgs != nil && !rawFrom.IsZero() {
-		chRows, cerr := h.pgs.Raw().Query(ctx, `
-			SELECT monitor_id, ts, ok FROM checks
-			 WHERE tenant_id = $1 AND ts >= $2
-			   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $3)`,
-			tenantID, rawFrom, projectID)
+		chRows, cerr := h.pgs.Raw().Query(ctx, fmt.Sprintf(`
+			SELECT target_id, ts, ok, (%s) FROM checks
+			 WHERE target_id = ANY($1) AND ts >= $2`, pgstore.MeasurableSQL), targets, rawFrom)
 		if cerr == nil {
 			for chRows.Next() {
-				var monID int64
+				var tid int64
 				var ts time.Time
-				var okFlag bool
-				if chRows.Scan(&monID, &ts, &okFlag) != nil {
+				var okFlag, measurable bool
+				if chRows.Scan(&tid, &ts, &okFlag, &measurable) != nil {
 					continue
 				}
-				id := monID
-				p := plans[id]
+				p := plans[tid]
 				if p.bucket <= 0 {
 					continue
 				}
@@ -1461,15 +1663,19 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int
 				if bucket < 0 || bucket >= p.count {
 					continue
 				}
-				m := recent[id]
+				m := recent[tid]
 				if m == nil {
 					m = map[int]day{}
-					recent[id] = m
+					recent[tid] = m
 				}
 				entry := m[bucket]
-				entry.total++
-				if okFlag {
-					entry.ok++
+				if measurable {
+					entry.total++
+					if okFlag {
+						entry.ok++
+					}
+				} else {
+					entry.unmeasured++
 				}
 				m[bucket] = entry
 			}
@@ -1486,13 +1692,15 @@ func (h *writeAPI) statusComponents(ctx context.Context, tenantID, projectID int
 		if publicOnly && !shown {
 			continue
 		}
-		p := plans[m.id]
+		p := plans[m.targetID]
 		bars := make([]string, p.count)
 		var okTotal, total uint64
 		for i := range p.count {
-			d := recent[m.id][p.count-1-i] // bucket 0 is the newest, so it lands last
+			d := recent[m.targetID][p.count-1-i] // bucket 0 is the newest, so it lands last
 			switch {
 			case d.total == 0:
+				// Nothing measured here: unmeasured-only and empty buckets
+				// alike draw nodata - an unreadable host is not a down one.
 				bars[i] = "nodata"
 			case d.ok == d.total:
 				bars[i] = "ok"
@@ -1524,22 +1732,25 @@ func pctLabelAPI(ok, total uint64) string { return pctLabel(ok, total) }
 // (owner decision, 2026-08-27) — do not add a TLS tile back thinking it was
 // dropped by accident. tls_ms is still measured and still stored; it is only
 // not published here.
-func (h *writeAPI) statusNetwork(ctx context.Context, tenantID, projectID int64) []map[string]any {
+func (h *writeAPI) statusNetwork(ctx context.Context, projectID int64) []map[string]any {
 	if h.pgs == nil {
 		return []map[string]any{}
 	}
 	var dns, connect, total float64
 	var samples uint64
+	// Since migration 009 the checks table is keyed by target: the project's
+	// monitors resolve to their targets in the subquery and the rows are read
+	// by target_id.
 	err := h.pgs.Raw().QueryRow(ctx, `
 		SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY dns_ms),
 		       percentile_cont(0.5) WITHIN GROUP (ORDER BY connect_ms),
 		       percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms),
 		       count(*)
 		  FROM checks
-		 WHERE tenant_id = $1 AND ts >= now() - INTERVAL '24 hours' AND ok
+		 WHERE ts >= now() - INTERVAL '24 hours' AND ok
 		   AND region <> 'heartbeat'
-		   AND monitor_id IN (SELECT id FROM monitor WHERE project_id = $2)`,
-		tenantID, projectID).Scan(&dns, &connect, &total, &samples)
+		   AND target_id IN (SELECT target_id FROM monitor WHERE project_id = $1)`,
+		projectID).Scan(&dns, &connect, &total, &samples)
 	if err != nil || samples == 0 {
 		// Nothing measured in the window: no tiles. An empty section is the
 		// honest answer for an account whose first probe has not run yet.
@@ -1941,6 +2152,13 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		meta = fmt.Sprintf("%d ms · %s", res.TotalMs, res.ErrorClass)
 	}
+	// Could-not-measure is a state here too: an auth wall or a bot filter
+	// answered, so this one request says nothing about whether the service
+	// is up, and the page Start watching mints will say the same.
+	if availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
+		status = "nodata"
+		meta = fmt.Sprintf("%d ms · HTTP %d, refuses automated checks", res.TotalMs, res.StatusCode)
+	}
 	if res.ErrorClass == "blocked_target" {
 		meta = "blocked — internal address refused"
 	}
@@ -2073,7 +2291,7 @@ func networkRowsFrom(res executor.Result, status string) []map[string]any {
 	}
 	// RESPONSE is the whole request as the visitor experiences it.
 	responseNote := fmt.Sprintf("HTTP %d", res.StatusCode)
-	if !res.OK {
+	if !res.OK && !availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
 		responseNote = res.ErrorClass
 	}
 	rows = append(rows, map[string]any{
@@ -2307,17 +2525,21 @@ func (h *writeAPI) cacheCheck(host string, body map[string]any) {
 	}
 }
 
+// watchRequest is the anonymous watch body: a host, an optional address, and
+// the landing's ticked rows.
+type watchRequest struct {
+	Host    string   `json:"host"`
+	Email   string   `json:"email"`
+	Targets []string `json:"targets"`
+}
+
 func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// A host typed on the landing becomes a real account: with an address the
 	// door provisions exactly what the magic link would, so the two doors
 	// agree; without one it mints an unclaimed tenant the visitor can claim
 	// later, because the result comes first and the account second.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
-	var req struct {
-		Host    string   `json:"host"`
-		Email   string   `json:"email"`
-		Targets []string `json:"targets"`
-	}
+	var req watchRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Host == "" {
 		writeAPIErr(w, http.StatusBadRequest, "missing_host_or_email")
@@ -2339,10 +2561,29 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := req.Host
-	if !strings.Contains(target, "://") {
-		target = "https://" + target
+	// Host canonicalization before any lookup or mint (plan part 2): the
+	// project's domain, the slug and the root target all key on the result,
+	// so www.example.com and example.com are one host, one probe, one page.
+	host, cerr := canonicalHost(req.Host)
+	if cerr != nil {
+		writeAPIErr(w, http.StatusBadRequest, "missing_host_or_email")
+		return
 	}
+	target := "https://" + host
+
+	// The mint door is the only door blocked_host guards: a host that asked
+	// for removal is never minted again, and an unregistrable host (an IP
+	// literal, a bare public suffix) has no page to hand out. The check door
+	// and a signed-in owner's /v1/monitors are never gated here.
+	if refused, code := blockedHostRefused(ctx, h.pool, host); refused {
+		if code == "blocked_host" {
+			writeAPIErr(w, http.StatusForbidden, code)
+		} else {
+			writeAPIErr(w, http.StatusBadRequest, code)
+		}
+		return
+	}
+
 	// The target is probed by the same guarded executor as any check, so an
 	// internal address cannot be turned into a monitor by typing it here.
 	if res := h.exec.Execute(ctx, executor.CheckSpec{
@@ -2355,13 +2596,26 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// Decision 7: the e-mail-less arm reads the session. A signed-in visitor
 	// whose plan has room for another project gets it in their own tenant
 	// below; signed out, or no room, keeps the anonymous demo mint. An error
-	// is simply no session — the door is public, a missing cookie must never
+	// is simply no session - the door is public, a missing cookie must never
 	// fail it.
 	s, serr := h.sess.FromRequest(ctx, r)
 
+	// Mint audit and ceilings (plan part 2): counted from status_page rows
+	// before anything is created - a refusal creates nothing - and counted
+	// again inside the mint transaction where the count is authoritative.
+	audit := h.mintAuditFromRequest(r)
+	if code := h.mintCeilingRefused(ctx, h.pool.Raw(), audit); code != "" {
+		writeAPIErr(w, http.StatusTooManyRequests, code)
+		return
+	}
+
+	// The client's target list is not trusted: each must belong to the asked
+	// host, or this becomes a probe-enrolment service for strangers. The cap
+	// is the Free plan's watch limit, the same number the check answer sends.
+	wanted := h.wantedTargets(target, req.Targets)
+
 	// The project is named after the site asked about; an existing account
 	// keeps the name it has.
-	host := bareHost(req.Host)
 	var tenantID, projectID int64
 	if req.Email != "" {
 		_, tid, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
@@ -2373,107 +2627,537 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		h.rec.LinkEmail(ctx, req.Email)
 		_ = h.pool.Raw().QueryRow(ctx,
 			`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
-	} else {
-		// One page per host at this anonymous door. The ORDER BY prefers a
-		// CLAIMED tenant over an unclaimed one, so the claimed answer wins when
-		// both somehow exist — and a claimed host is never re-minted or added
-		// to: reusing it would let anyone who types the domain add monitors to
-		// somebody's account.
-		var claimed bool
-		err := h.pool.Raw().QueryRow(ctx,
-			`SELECT t.id, p.id, (t.claim_token_hash IS NULL)
-			   FROM tenant t
-			   JOIN project p ON p.tenant_id = t.id
-			  WHERE p.domain = $1
-			  ORDER BY (t.claim_token_hash IS NULL) DESC, p.id LIMIT 1`, host).Scan(&tenantID, &projectID, &claimed)
-		if err == nil && claimed {
-			var slug string
-			if serr := h.pool.Raw().QueryRow(ctx,
-				`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, projectID).Scan(&slug); serr == nil {
-				// Nothing was created — no monitors, no channel, no event — so
-				// nothing is counted: only the existing page's address.
-				writeAPIJSON(w, http.StatusOK, map[string]any{
-					"statusUrl": "/status/" + slug,
-					"slug":      slug,
-					"watching":  0,
-					"login":     map[string]any{},
-				})
+		// The e-mail arm's page follows the first-page rule like every mint:
+		// a host that already has a live page gets a suffixed page on the same
+		// root target, a fresh host gets the host page.
+		watching, slug, err := h.watchMintPage(watchMint{
+			host: host, wanted: wanted, audit: audit,
+			tenantID: tenantID, projectID: projectID, existing: hostLivePage(ctx, h.pool, host),
+		})
+		if err != nil {
+			watchRefuse(w, err)
+			return
+		}
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+		return
+	}
+
+	// One page per host at this anonymous door. The claimed page wins when
+	// both kinds exist (hostLivePage's ORDER BY): a claimed host is never
+	// re-minted or added to - reusing it would let anyone who types the
+	// domain add monitors to somebody's account - so the visitor gets their
+	// OWN suffixed page on the same root target (decision 9, never a second
+	// probe). An unclaimed page is reused exactly as before.
+	if existing := hostLivePage(ctx, h.pool, host); existing != nil {
+		if existing.Claimed {
+			t, p, watching, slug, err := h.mintOwnPage(ctx, host, existing, wanted, audit)
+			if err != nil {
+				watchRefuse(w, err)
 				return
 			}
-			// A claimed tenant with no status page: nothing to point at, mint
-			// as if the host were new.
+			tenantID, projectID = t, p
+			h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
+			h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
+			h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+			return
 		}
-		if err != nil || claimed {
-			// The mint arm is where the session matters (Decision 7): a host
-			// nobody holds, typed by a signed-in visitor with room for one more
-			// project, becomes a project in their OWN tenant — no demo page to
-			// claim later, and the monitors and status page below land on the
-			// caller's account from the first check. Everything else keeps the
-			// demo mint exactly as today: signed out, no room (the wall is on
-			// the claim button, never on the check), and a claimed domain
-			// without a page — somebody already owns that one.
-			own := false
-			if err != nil && serr == nil && s.TenantID != 0 {
-				if msg, _ := h.projectsRefusal(ctx, s.TenantID); msg == "" {
-					pid, perr := createTenantProject(ctx, h.pool, s.TenantID, host)
-					if perr == nil {
-						tenantID, projectID = s.TenantID, pid
-						own = true
-						// Decision 18: the caller just created this project;
-						// the app must open on it. Same pick as createProject,
-						// and like it the pick never gates the response.
-						if s.ID != 0 {
-							_ = h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
-								ID: s.ID, ProjectID: &pid,
-							})
-						}
-					}
+		// Unclaimed: answer its slug, create no new page, but DO subscribe the
+		// ticked rows - a watch that asks to watch more than the page holds is
+		// additive, as it always was. Nothing minted: no event, no audit row.
+		tenantID, projectID = existing.TenantID, existing.ProjectID
+		watching := h.subscribeWanted(ctx, tenantID, projectID, host, wanted)
+		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, existing.Slug)
+		return
+	}
+
+	// No live page for the host: the mint arm is where the session matters
+	// (Decision 7) - a host nobody holds, typed by a signed-in visitor with
+	// room for one more project, becomes a project in their OWN tenant - no
+	// demo page to claim later, and the monitors and status page below land
+	// on the caller's account from the first check. Everything else keeps
+	// the demo mint exactly as today: signed out, no room (the wall is on
+	// the claim button, never on the check).
+	own := false
+	if serr == nil && s.TenantID != 0 {
+		if msg, _ := h.projectsRefusal(ctx, s.TenantID); msg == "" {
+			pid, perr := createTenantProject(ctx, h.pool, s.TenantID, host)
+			if perr == nil {
+				tenantID, projectID = s.TenantID, pid
+				own = true
+				// Decision 18: the caller just created this project;
+				// the app must open on it. Same pick as createProject,
+				// and like it the pick never gates the response.
+				if s.ID != 0 {
+					_ = h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
+						ID: s.ID, ProjectID: &pid,
+					})
 				}
-			}
-			if !own {
-				t, terr := newUnclaimedTenant(ctx, h.pool, host, host)
-				if terr != nil {
-					writeAPIErr(w, http.StatusInternalServerError, "internal")
-					return
-				}
-				tenantID, projectID = t.TenantID, t.ProjectID
 			}
 		}
 	}
-	// Both paths count: this is the funnel's step between check_run and
-	// signed_in. The event goes to Postgres with the host only; the e-mail,
-	// when there is one, went to the visitor row above and nowhere else.
+	if !own {
+		t, p, watching, slug, err := h.mintOwnPage(ctx, host, nil, wanted, audit)
+		if err != nil {
+			watchRefuse(w, err)
+			return
+		}
+		tenantID, projectID = t, p
+		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
+		h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+		return
+	}
+	// The signed-in arm: same page rules as every mint (no live page exists
+	// for this host - that is how this arm was reached), on the caller's own
+	// project. page_minted fires with the watch source scope fields.
+	watching, slug, err := h.watchMintPage(watchMint{
+		host: host, wanted: wanted, audit: audit,
+		tenantID: tenantID, projectID: projectID, existing: nil,
+	})
+	if err != nil {
+		watchRefuse(w, err)
+		return
+	}
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
+	h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
+	h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+}
 
-	// The client's target list is not trusted: each must belong to the asked
-	// host, or this becomes a probe-enrolment service for strangers.
-	wanted := append([]string{target}, sameHostTargets(target, req.Targets)...)
-	limit := int(h.freeWatchLimit(ctx))
+// canonicalHost reduces what the visitor typed to the host every page, slug
+// and target keys on (plan part 2): lowercase, one leading www. stripped,
+// IDN to punycode. It is the WATCH door's normalization only - /v1/monitors
+// normalizes the URL through targetkey, a different, finer one. Weird input
+// never errors here beyond an empty host: the lowercase spelling stands.
+func canonicalHost(raw string) (string, error) {
+	host := strings.ToLower(bareHost(raw))
+	if host == "" {
+		return "", errNoHost
+	}
+	host = strings.TrimPrefix(host, "www.")
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		host = strings.ToLower(ascii)
+	}
+	return host, nil
+}
+
+var errNoHost = errors.New("no host in input")
+
+// mintPlatformSuffixes are the shared hosting platforms the anonymous mint
+// doors refuse outright - exactly the plan's list. foo.vercel.app is a
+// registrable domain (vercel.app is on the public suffix list), so the
+// eTLD+1 gate below cannot see it, yet a page squatting a platform subdomain
+// is not the subdomain owner's to publish. Growing the list is a one-line
+// change here.
+var mintPlatformSuffixes = map[string]bool{
+	"vercel.app":  true,
+	"github.io":   true,
+	"netlify.app": true,
+}
+
+// blockedHostRefused is the anonymous mint door's host gate: the eTLD+1 is
+// looked up in blocked_host (self-serve removals land there), a host on a
+// shared platform suffix is refused (a tenant of the platform, not an owner
+// of a domain), and a host publicsuffix cannot reduce - an IP literal, a
+// bare public suffix - is unmintable: there is no registrable domain to
+// name a page after. Only this door consults the table: publicCheck never
+// does, and a signed-in owner creating a check via /v1/monitors never
+// passes through here.
+func blockedHostRefused(ctx context.Context, pool *pg.Pool, host string) (refused bool, code string) {
+	for suffix := range mintPlatformSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true, "unmintable_host"
+		}
+	}
+	domain, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return true, "unmintable_host"
+	}
+	var blocked bool
+	_ = pool.Raw().QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM blocked_host WHERE domain = $1)`, domain).Scan(&blocked)
+	if blocked {
+		return true, "blocked_host"
+	}
+	return false, ""
+}
+
+// mintAudit is what every watch-minted page records (plan part 2): who
+// asked, with what agent. Nothing here identifies on its own; the hashes
+// exist so the ceilings can count mints per source without storing either.
+type mintAudit struct {
+	ipHash      string
+	visitorHash *string
+	ua          string
+}
+
+// mintAuditFromRequest hashes the request's scope: the client IP always, the
+// analytics visitor cookie when one exists, the User-Agent truncated. The IP
+// hash is HMAC-SHA256 under the deployment's secret key when one is
+// configured: a bare sha256(IP) is reconstructable from any traffic dump
+// (enumerate the address space, match the hashes), a keyed one is not. With
+// no key it stays the plain sha256 existing audit rows carry - the ceiling
+// counts per spelling, so flipping the key on (or off) only resets the
+// per-IP day window, never the audit itself.
+func (h *writeAPI) mintAuditFromRequest(r *http.Request) mintAudit {
+	audit := mintAudit{ipHash: h.mintIPHash(analytics.ClientIP(r)), ua: r.UserAgent()}
+	if len(audit.ua) > 256 {
+		audit.ua = audit.ua[:256]
+	}
+	if token, ok := analytics.VisitorToken(r); ok {
+		v := sha256.Sum256([]byte(token))
+		s := hex.EncodeToString(v[:])
+		audit.visitorHash = &s
+	}
+	return audit
+}
+
+// mintIPHash is the audit's IP identity: HMAC-SHA256 under the deployment's
+// key when one is configured, plain sha256 otherwise (self-hosts without a
+// secret keep working; see mintAuditFromRequest for why the key exists).
+func (h *writeAPI) mintIPHash(ip string) string {
+	if h.mintSecret != nil {
+		m := hmac.New(sha256.New, h.mintSecret)
+		m.Write([]byte(ip))
+		return hex.EncodeToString(m.Sum(nil))
+	}
+	s := sha256.Sum256([]byte(ip))
+	return hex.EncodeToString(s[:])
+}
+
+// knobsOrDefaults guards the ceilings against a zero-valued knob struct (a
+// handler built by hand in a test): the defaults are the config package's.
+func (h *writeAPI) knobsOrDefaults() (perIP, perDay, hostMax int) {
+	k := h.statusKnobs.WithDefaults()
+	return k.MintPerIPPerDay, k.MintPerDay, k.HostPagesMax
+}
+
+// rowQuerier is the one capability the ceiling counts and slug claiming
+// need; both the pool and an open transaction provide it, so the same code
+// runs outside the mint (early refusal) and inside it (authoritative).
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// mintCeilingRefused counts the day's mints from the audit columns: per IP
+// and per instance (the instance count covers every page, whatever minted
+// it - the seed door counts against this one too). Empty answer = allowed.
+func (h *writeAPI) mintCeilingRefused(ctx context.Context, db rowQuerier, audit mintAudit) string {
+	perIP, perDay, _ := h.knobsOrDefaults()
+	var n int
+	if err := db.QueryRow(ctx,
+		`SELECT count(*) FROM status_page
+		  WHERE minted_ip_hash = $1 AND created_at > now() - interval '1 day'`,
+		audit.ipHash).Scan(&n); err == nil && n >= perIP {
+		return "mint_ip_ceiling"
+	}
+	if err := db.QueryRow(ctx,
+		`SELECT count(*) FROM status_page
+		  WHERE created_at > now() - interval '1 day'`).Scan(&n); err == nil && n >= perDay {
+		return "mint_ceiling"
+	}
+	return ""
+}
+
+// hostPagesCeilingRefused caps the eternal population (review decision 15):
+// live host pages held by unclaimed tenants are forever, so their number has
+// a hard instance limit past which the mint answers 429.
+func (h *writeAPI) hostPagesCeilingRefused(ctx context.Context, db rowQuerier) string {
+	_, _, hostMax := h.knobsOrDefaults()
+	var n int
+	if err := db.QueryRow(ctx,
+		`SELECT count(*) FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
+		  WHERE sp.is_host_page AND sp.removed_at IS NULL AND t.claim_token_hash IS NOT NULL`).Scan(&n); err == nil && n >= hostMax {
+		return "host_pages_ceiling"
+	}
+	return ""
+}
+
+// wantedTargets is the landing's pick list: the root URL first, then the
+// ticked rows that belong to the asked host, capped at the Free watch limit
+// (the same number the check answer sends as watchLimit).
+func (h *writeAPI) wantedTargets(target string, ticked []string) []string {
+	wanted := append([]string{target}, sameHostTargets(target, ticked)...)
+	limit := int(h.freeWatchLimit(context.Background()))
 	if len(wanted) > limit {
 		wanted = wanted[:limit]
 	}
+	return wanted
+}
 
+// hostPageRow is what the watch door needs to know about a host's live page:
+// who holds it, whether it is claimed, and which target is its root.
+type hostPageRow struct {
+	TenantID     int64
+	ProjectID    int64
+	Slug         string
+	RootTargetID *int64
+	IsHostPage   bool
+	Claimed      bool
+}
+
+// hostLivePage finds the host's LIVE page (a removed page does not exist for
+// this door): the claimed one wins when both kinds exist, the host page wins
+// within a holder. No row means the host is fresh for minting.
+func hostLivePage(ctx context.Context, pool *pg.Pool, host string) *hostPageRow {
+	var row hostPageRow
+	err := pool.Raw().QueryRow(ctx,
+		`SELECT sp.tenant_id, sp.project_id, sp.slug, sp.root_target_id, sp.is_host_page,
+		       (t.claim_token_hash IS NULL) AS claimed
+		  FROM status_page sp
+		  JOIN project p ON p.id = sp.project_id
+		  JOIN tenant t ON t.id = sp.tenant_id
+		 WHERE p.domain = $1 AND sp.removed_at IS NULL
+		 ORDER BY (t.claim_token_hash IS NULL) DESC, sp.is_host_page DESC, sp.id
+		 LIMIT 1`, host).Scan(
+		&row.TenantID, &row.ProjectID, &row.Slug, &row.RootTargetID, &row.IsHostPage, &row.Claimed)
+	if err != nil {
+		return nil
+	}
+	return &row
+}
+
+// subscribeWanted turns the landing's ticked rows into subscriptions on the
+// SHARED targets (plan part 1: one URL, one probe - a reused page's project
+// subscribes to the same target a fresh mint would). Idempotent per
+// (project, target); returns how many rows the project now watches.
+func (h *writeAPI) subscribeWanted(ctx context.Context, tenantID, projectID int64, host string, wanted []string) int {
+	watching := 0
+	_ = h.watchTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
+		var err error
+		watching, err = subscribeWantedTx(ctx, q, tx, tenantID, projectID, host, wanted)
+		return err
+	})
+	return watching
+}
+
+// subscribeWantedTx is subscribeWanted inside a caller's transaction: every
+// row resolves through GetOrCreateProbeTarget and pulls the target due, so a
+// subscription's first check runs at the next lease.
+func subscribeWantedTx(ctx context.Context, q *sqlc.Queries, tx pgx.Tx, tenantID, projectID int64, host string, wanted []string) (int, error) {
 	watching := 0
 	for _, t := range wanted {
-		var monitorID int64
-		_ = h.pool.Raw().QueryRow(ctx,
-			`SELECT id FROM monitor WHERE tenant_id = $1 AND target = $2 AND project_id = $3`,
-			tenantID, t, projectID).Scan(&monitorID)
-		if monitorID != 0 {
-			watching++
-			continue
+		targetID, terr := q.GetOrCreateProbeTarget(ctx, sqlc.GetOrCreateProbeTargetParams{
+			Key: targetkey.Website(t, ""), Kind: "website", Url: t,
+		})
+		if terr != nil {
+			return watching, terr
 		}
-		if err := h.pool.Raw().QueryRow(ctx,
-			`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec)
-			 VALUES (gen_random_uuid(), $1, $2, 'website', $3, $4, 300) RETURNING id`,
-			tenantID, projectID, monitorName(host, t), t).Scan(&monitorID); err == nil {
-			_ = h.pool.Queries().EnsureMonitorSchedule(ctx, sqlc.EnsureMonitorScheduleParams{
-				MonitorID: monitorID, Region: scheduleRegion(),
-			})
-			watching++
+		if terr := q.EnsureTargetSchedule(ctx, sqlc.EnsureTargetScheduleParams{
+			TargetID: targetID, Region: scheduleRegion(),
+		}); terr != nil {
+			return watching, terr
+		}
+		row, created, ierr := insertMonitorOnTarget(ctx, tx, sqlc.CreateMonitorParams{
+			TenantID: tenantID, ProjectID: projectID, Kind: "website",
+			Name: monitorName(host, t), Target: t, IntervalSec: 300,
+		}, targetID)
+		if ierr != nil {
+			return watching, ierr
+		}
+		if created {
+			if terr := q.PullTargetDue(ctx, targetID); terr != nil {
+				return watching, terr
+			}
+		}
+		_ = row
+		watching++
+	}
+	return watching, nil
+}
+
+// watchMint is one page-minting run on an EXISTING tenant and project (the
+// e-mail arm and the signed-in arm): subscribe the wanted rows, upsert the
+// page row with its audit columns and the first-page rule from `existing`
+// (nil = no live page for the host, so this mint IS the host page).
+type watchMint struct {
+	host      string
+	wanted    []string
+	audit     mintAudit
+	tenantID  int64
+	projectID int64
+	existing  *hostPageRow
+}
+
+// watchMintPage runs a watchMint in one transaction. A refusal code
+// travels as refusalError; any other error is a real failure. On either the
+// transaction rolled back - nothing was created, which is the whole point
+// of counting inside it.
+func (h *writeAPI) watchMintPage(m watchMint) (watching int, slug string, err error) {
+	err = h.watchTx(context.Background(), func(q *sqlc.Queries, tx pgx.Tx) error {
+		if code := h.mintCeilingRefused(context.Background(), tx, m.audit); code != "" {
+			return refusalError(code)
+		}
+		var serr error
+		watching, serr = subscribeWantedTx(context.Background(), q, tx, m.tenantID, m.projectID, m.host, m.wanted)
+		if serr != nil {
+			return serr
+		}
+		slug, serr = upsertWatchPage(context.Background(), tx, m)
+		return serr
+	})
+	return watching, slug, err
+}
+
+// mintUnclaimedTriple is the unclaimed tenant + project + project_seq the
+// anonymous and seed mint doors share: newUnclaimedTenant's triple minus the
+// api key, on the caller's open transaction so a refusal leaves nothing
+// behind. The doors that hand out a key mint it themselves, tx-bound.
+func mintUnclaimedTriple(ctx context.Context, tx pgx.Tx, host string) (tenantID, projectID int64, err error) {
+	claimHash := sha256.Sum256([]byte(randomHex()))
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name, claim_token_hash)
+		 VALUES (gen_random_uuid(), $1, $2) RETURNING id`, host, claimHash[:]).Scan(&tenantID); err != nil {
+		return 0, 0, err
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, $3) RETURNING id`,
+		newUUID(), tenantID, host).Scan(&projectID); err != nil {
+		return 0, 0, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID); err != nil {
+		return 0, 0, err
+	}
+	return tenantID, projectID, nil
+}
+
+// mintOwnPage is the anonymous door's own-project mint: a fresh unclaimed
+// tenant and project (the demo triple), the wanted subscriptions, and a page
+// that is either the host's first (existing == nil) or a SUFFIXED second
+// page sharing the claimed one's root target (decision 9). One transaction;
+// on refusal nothing exists afterwards.
+func (h *writeAPI) mintOwnPage(ctx context.Context, host string, existing *hostPageRow, wanted []string, audit mintAudit) (tenantID, projectID int64, watching int, slug string, err error) {
+	err = h.watchTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
+		if code := h.mintCeilingRefused(ctx, tx, audit); code != "" {
+			return refusalError(code)
+		}
+		// The host-pages cap guards only ETERNAL pages: a second (suffixed)
+		// page is not one - the reaper collects it under the old rule.
+		if existing == nil {
+			if code := h.hostPagesCeilingRefused(ctx, tx); code != "" {
+				return refusalError(code)
+			}
+		}
+		var terr error
+		tenantID, projectID, terr = mintUnclaimedTriple(ctx, tx, host)
+		if terr != nil {
+			return terr
+		}
+		// The api key, tx-bound like createTenantProject's: a pool-bound mint
+		// would autocommit outside this transaction.
+		secret := randomHex()
+		keyHash := sha256.Sum256([]byte(keyScheme(keyKindSecret) + secret))
+		if _, err := q.CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
+			TenantID: tenantID, ProjectID: projectID, Prefix: secret[:12],
+			SecretHash: keyHash[:], Kind: keyKindSecret, Origins: []string{},
+		}); err != nil {
+			return err
+		}
+		var serr error
+		watching, serr = subscribeWantedTx(ctx, q, tx, tenantID, projectID, host, wanted)
+		if serr != nil {
+			return serr
+		}
+		slug, serr = upsertWatchPage(ctx, tx, watchMint{
+			host: host, audit: audit, tenantID: tenantID, projectID: projectID,
+			existing: existing,
+		})
+		return serr
+	})
+	if err != nil {
+		return 0, 0, 0, "", err
+	}
+	return tenantID, projectID, watching, slug, nil
+}
+
+// upsertWatchPage writes the page row a watch mint leaves behind: the audit
+// columns, minted_source='watch', and the first-page rule - the mint that
+// finds no live page for the host IS the host page (is_host_page, bare
+// slug); a second page shares the root target and takes a suffixed slug. ON
+// CONFLICT DO NOTHING: a handed-out slug must not change under a returning
+// visitor, and a project that already had a page keeps ITS slug (re-read).
+func upsertWatchPage(ctx context.Context, tx pgx.Tx, m watchMint) (string, error) {
+	rootURL := "https://" + m.host
+	isHostPage := m.existing == nil
+	rootID := int64(0)
+	if m.existing != nil {
+		if m.existing.RootTargetID != nil {
+			rootID = *m.existing.RootTargetID
 		}
 	}
+	if rootID == 0 {
+		// The root target of https://{host}: shared like every other, so the
+		// page's reference keeps it measured even with no subscriber left.
+		var err error
+		rootID, err = h0GetOrCreateProbeTarget(ctx, tx, rootURL)
+		if err != nil {
+			return "", err
+		}
+	}
+	slug := claimSlugOn(ctx, tx, m.host, m.projectID)
+	if slug == "" {
+		slug = "prj-" + strconv.FormatInt(m.projectID, 10)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, root_target_id, is_host_page,
+		                         minted_source, minted_ip_hash, minted_visitor_hash, minted_ua)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'watch', $7, $8, $9) ON CONFLICT (slug) DO NOTHING`,
+		m.tenantID, m.projectID, slug, m.host, rootID, isHostPage,
+		m.audit.ipHash, m.audit.visitorHash, m.audit.ua); err != nil {
+		return "", err
+	}
+	_ = tx.QueryRow(ctx,
+		`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, m.projectID).Scan(&slug)
+	return slug, nil
+}
 
+// h0GetOrCreateProbeTarget resolves (or mints) the target of a raw URL on a
+// transaction the sqlc Queries object does not wrap (upsertWatchPage works
+// on the tx directly).
+func h0GetOrCreateProbeTarget(ctx context.Context, tx pgx.Tx, rawURL string) (int64, error) {
+	var id int64
+	err := tx.QueryRow(ctx,
+		`INSERT INTO probe_target (key, kind, url) VALUES ($1, 'website', $2)
+		 ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id`,
+		targetkey.Website(rawURL, ""), rawURL).Scan(&id)
+	return id, err
+}
+
+// refusalError marks a refusal code travelling out of a transaction closure;
+// watchRefuse unpacks it (429 with the code) and treats anything else as a
+// real failure on the internal path - never as a silent empty answer.
+type refusalError string
+
+func (e refusalError) Error() string { return string(e) }
+
+func watchRefuse(w http.ResponseWriter, err error) {
+	var code refusalError
+	if errors.As(err, &code) {
+		writeAPIErr(w, http.StatusTooManyRequests, string(code))
+		return
+	}
+	slog.Warn("watch: mint failed", "err", err)
+	writeAPIErr(w, http.StatusInternalServerError, "internal")
+}
+
+// watchTx is the watch vertical's transaction runner: nil commits, anything
+// else rolls back. A refusal code wrapped in refusalError travels as itself.
+func (h *writeAPI) watchTx(ctx context.Context, fn func(*sqlc.Queries, pgx.Tx) error) error {
+	tx, err := h.pool.Raw().BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(h.pool.Queries().WithTx(tx), tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// watchTail is the e-mail arm's response side: the e-mail channel, the
+// login code (dev echoes it), and the JSON answer.
+func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http.Request, req watchRequest, tenantID, projectID int64, watching int, slug string) {
 	// The e-mail channel is the point of leaving an address: without it the
 	// account would watch the host and tell nobody.
 	if req.Email != "" {
@@ -2483,25 +3167,6 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND target = $3)`,
 			tenantID, projectID, req.Email)
 	}
-
-	// The page's public address is the site's name, not our internal id.
-	slug := h.claimSlug(ctx, host, projectID)
-	if slug == "" {
-		slug = "prj-" + strconv.FormatInt(projectID, 10)
-	}
-	// Components ARE the monitors created above. ON CONFLICT DO NOTHING: a
-	// handed-out slug must not change under a returning visitor.
-	_, _ = h.pool.Raw().Exec(ctx,
-		`INSERT INTO status_page (tenant_id, project_id, slug, title)
-		 VALUES ($1, $2, $3, $4) ON CONFLICT (slug) DO NOTHING`,
-		tenantID, projectID, slug, host)
-	// A project that already had a page keeps ITS slug, whatever we just picked.
-	_ = h.pool.Raw().QueryRow(ctx,
-		`SELECT slug FROM status_page WHERE project_id = $1 ORDER BY id LIMIT 1`, projectID).Scan(&slug)
-
-	// A way in: the sign-in door's own code, e-mail only in prod (handing it
-	// back anonymously is account takeover). Dev echoes it. Without an address
-	// there is nobody to tell and nobody to let in: login stays empty.
 	login := map[string]any{}
 	if req.Email != "" {
 		if code, cerr := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r)); cerr == nil {
@@ -2517,7 +3182,6 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"statusUrl": "/status/" + slug,
 		"slug":      slug,
@@ -2619,9 +3283,13 @@ func slugFromHost(host string) string {
 	}
 	slug := strings.Trim(b.String(), "-")
 	// A host of nothing but punctuation, or an IDN we cannot spell in ASCII,
-	// leaves an empty string; the caller falls back to the project id.
+	// leaves an empty string; the caller falls back to the project id. A slug
+	// past 40 chars is cut AND salted with a short hash of the host (plan part
+	// 2): the same host always yields the same slug, where a plain cut could
+	// collide two long hosts sharing a prefix.
 	if len(slug) > 40 {
-		slug = strings.Trim(slug[:40], "-")
+		sum := sha256.Sum256([]byte(bareHost(host)))
+		slug = strings.Trim(slug[:40], "-") + "-" + hex.EncodeToString(sum[:])[:6]
 	}
 	return slug
 }
@@ -2635,6 +3303,12 @@ func (h *writeAPI) claimSlug(ctx context.Context, host string, projectID int64) 
 // claimSlugFor is the pool-level claim both doors share: the watch door at
 // provisioning, the sign-in door when its project is named.
 func claimSlugFor(ctx context.Context, pool *pg.Pool, host string, projectID int64) string {
+	return claimSlugOn(ctx, pool.Raw(), host, projectID)
+}
+
+// claimSlugOn is claimSlugFor on whatever can run the lookup — the pool or
+// the watch mint's open transaction.
+func claimSlugOn(ctx context.Context, db rowQuerier, host string, projectID int64) string {
 	base := slugFromHost(host)
 	if base == "" {
 		return ""
@@ -2645,7 +3319,7 @@ func claimSlugFor(ctx context.Context, pool *pg.Pool, host string, projectID int
 			candidate = fmt.Sprintf("%s-%03d", base, rand.IntN(1000))
 		}
 		var owner int64
-		err := pool.Raw().QueryRow(ctx,
+		err := db.QueryRow(ctx,
 			`SELECT project_id FROM status_page WHERE slug = $1`, candidate).Scan(&owner)
 		if err != nil { // no row: free
 			return candidate
@@ -2681,6 +3355,24 @@ func monitorName(host, target string) string {
 	return u.Host
 }
 
+// canonicalAliasSlug folds a www-shaped slug to the host page's canonical
+// slug (www.example.com and example.com are one host, one page): "" when
+// the slug is no page's alias. Every slug-miss door runs it - the JSON
+// door's fold and the HTML door's - so the two can never drift.
+func (h *writeAPI) canonicalAliasSlug(ctx context.Context, slug string) string {
+	var canon string
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT sp.slug
+		   FROM status_page sp
+		   JOIN project p ON p.id = sp.project_id
+		  WHERE p.domain <> '' AND sp.is_host_page AND sp.removed_at IS NULL
+		    AND trim(both '-' FROM regexp_replace(lower('www.' || p.domain), '[^a-z0-9]+', '-', 'g')) = $1
+		  LIMIT 1`, slug).Scan(&canon); err != nil {
+		return ""
+	}
+	return canon
+}
+
 func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	// The public page shows the same measured components as the config screen,
 	// minus the ones the owner unpublished. Nothing here is typed in by hand.
@@ -2695,73 +3387,167 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 		if bare, _, err := net.SplitHostPort(host); err == nil {
 			host = bare
 		}
+		var removedAt *time.Time
 		if err := h.pool.Raw().QueryRow(ctx,
-			`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL)
+			`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL), sp.removed_at
 			   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
-			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &projectID, &claimed); err != nil {
+			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &projectID, &claimed, &removedAt); err != nil {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
 			return
 		}
-		h.renderPublicStatus(w, r, tenantID, projectID, claimed)
+		if removedAt != nil {
+			writeAPIErr(w, http.StatusGone, "page_removed")
+			return
+		}
+		h.renderPublicStatus(w, r, projectID, claimed)
 		return
 	}
 	slug := pathLast(r.URL.Path)
+	var removedAt *time.Time
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL)
+		`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL), sp.removed_at
 		   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
-		  WHERE sp.slug = $1`, slug).Scan(&tenantID, &projectID, &claimed); err != nil {
-		// A page not yet configured resolves by its project slug: the parsed
-		// id already IS the project, so only its workspace is looked up.
-		if _, perr := fmt.Sscanf(slug, "prj-%d", &projectID); perr != nil || projectID == 0 {
-			writeAPIErr(w, http.StatusNotFound, "no_such_page")
+		  WHERE sp.slug = $1`, slug).Scan(&tenantID, &projectID, &claimed, &removedAt); err == nil {
+		// A removed page answers 410 on every door (plan part 2): the link a
+		// visitor may still hold says "gone", not "never existed".
+		if removedAt != nil {
+			writeAPIErr(w, http.StatusGone, "page_removed")
 			return
 		}
-		if qerr := h.pool.Raw().QueryRow(ctx,
-			`SELECT p.tenant_id, (t.claim_token_hash IS NULL)
-			   FROM project p JOIN tenant t ON t.id = p.tenant_id
-			  WHERE p.id = $1`, projectID).Scan(&tenantID, &claimed); qerr != nil || tenantID == 0 {
-			writeAPIErr(w, http.StatusNotFound, "no_such_page")
-			return
-		}
+		h.renderPublicStatus(w, r, projectID, claimed)
+		return
 	}
-	h.renderPublicStatus(w, r, tenantID, projectID, claimed)
+	// Slug miss: the alias fold — a request for the www-shaped slug of a host
+	// page redirects to the page's canonical slug (www.example.com and
+	// example.com are one host, one page). One query, only on a miss.
+	if canon := h.canonicalAliasSlug(ctx, slug); canon != "" && canon != slug {
+		w.Header().Set("Location", "/status/"+canon)
+		w.WriteHeader(http.StatusMovedPermanently)
+		return
+	}
+	// A page not yet configured resolves by its project slug: the parsed
+	// id already IS the project, so only its workspace is looked up.
+	if _, perr := fmt.Sscanf(slug, "prj-%d", &projectID); perr != nil || projectID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "no_such_page")
+		return
+	}
+	if qerr := h.pool.Raw().QueryRow(ctx,
+		`SELECT p.tenant_id, (t.claim_token_hash IS NULL), (SELECT sp.removed_at FROM status_page sp WHERE sp.project_id = p.id LIMIT 1)
+		   FROM project p JOIN tenant t ON t.id = p.tenant_id
+		  WHERE p.id = $1`, projectID).Scan(&tenantID, &claimed, &removedAt); qerr != nil || tenantID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "no_such_page")
+		return
+	}
+	if removedAt != nil {
+		writeAPIErr(w, http.StatusGone, "page_removed")
+		return
+	}
+	h.renderPublicStatus(w, r, projectID, claimed)
 }
 
 // renderPublicStatus is the tail both doors share once the page's project is
-// found: the config load, the components, the incidents, the response map. A
-// slug in the path and a Host header differ only in how it is looked up.
-func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, claimed bool) {
+// found: the shared assembly, then the one request-shaped fact no other
+// surface can compute. A slug in the path and a Host header differ only in
+// how the project is looked up.
+func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, projectID int64, claimed bool) {
 	ctx := r.Context()
-	// The page's OWN project decides what is rendered: a signed-in viewer's
-	// session must not bend somebody else's page toward their current project.
-	cfg, storedDomain, _ := h.statusConfig(ctx, projectID)
-	resp := map[string]any{
-		"title":      cfg.Title,
-		"components": h.statusComponents(ctx, tenantID, projectID, cfg, true),
-		"incidents":  []map[string]any{},
-		"network":    []map[string]any{},
-		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
-		"claimed":    claimed,
-		"poweredBy":  h.poweredBy(cfg),
-	}
+	resp, meta := h.publicStatusData(ctx, projectID, claimed)
 	// The viewer's own page says so: mine is present and true only when a
-	// session resolves AND that person reaches THIS project — a member of a
+	// session resolves AND that person reaches THIS project - a member of a
 	// sibling project is a visitor here. Absent = not the viewer's page
-	// (signed out, or somebody else's); errors are ignored — the door is
-	// public and must answer the same either way.
+	// (signed out, or somebody else's); errors are ignored - the door is
+	// public and must answer the same either way. This block reads the
+	// request's session, so it lives in the request-bearing door, never in
+	// the shared assembly.
 	if vs, verr := h.sess.FromRequest(ctx, r); verr == nil && h.reachesProject(ctx, vs.PersonID, projectID) {
 		resp["mine"] = true
 		// Same visibility rule, one purpose: the owner reading their own page on
 		// our link is the one viewer the upgrade banner speaks to, and it must
 		// not sell an address they already own. A visitor never learns this.
-		if storedDomain != "" {
+		if meta.storedDomain != "" {
 			resp["hasCustomDomain"] = true
 		}
+	}
+	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+// statusPageMeta carries what a rendering surface needs beyond the JSON map
+// (plan part 4): the slug (already the canonical one - an alias slug is
+// folded to it with a 301 before any assembly runs, and the claim door's
+// URL shape is /status/{slug}#claim, derivable from it), the host the page
+// words its title and sentences from, the host-page marker that decides the
+// robots meta and the canonical link, and the index gate's stamp.
+type statusPageMeta struct {
+	slug         string
+	host         string
+	isHostPage   bool
+	storedDomain string
+	rootTargetID int64 // 0 when the page carries no root reference
+	removedAt    *time.Time
+	indexedAt    *time.Time
+}
+
+// publicStatusData is the ONE assembly every public surface of a page
+// renders from (the JSON door, the crawler's HTML door, the OG image):
+// config, components, incidents, the state sentence, the index facts and
+// the liveness stamp. Part 4 lifted it out of renderPublicStatus unchanged;
+// the JSON door's bytes stay what they were.
+func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claimed bool) (map[string]any, statusPageMeta) {
+	// The page's OWN project decides what is rendered: a signed-in viewer's
+	// session must not bend somebody else's page toward their current project.
+	cfg, storedDomain, _, page := h.statusConfig(ctx, projectID)
+	meta := statusPageMeta{
+		slug:         cfg.Slug,
+		host:         projectDomainOf(ctx, h.pool, projectID),
+		isHostPage:   page.IsHostPage,
+		storedDomain: storedDomain,
+		removedAt:    page.RemovedAt,
+		indexedAt:    page.IndexedAt,
+	}
+	if page.RootTargetID != nil {
+		meta.rootTargetID = *page.RootTargetID
+	}
+	resp := map[string]any{
+		"title":      cfg.Title,
+		"components": h.statusComponents(ctx, projectID, cfg, true, page),
+		"incidents":  []map[string]any{},
+		"network":    []map[string]any{},
+		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
+		"claimed":    claimed,
+		"poweredBy":  h.poweredBy(cfg),
+		// The gate's public face (plan part 4): a page is indexable only with a
+		// stamp AND the kill switch off. Suffixed and unhosted pages carry no
+		// hostPage; the front words its banners from these three facts.
+		"hostPage": page.IsHostPage,
+	}
+	if page.HostVerifiedAt == nil {
+		resp["unverifiedClaim"] = claimed
+	} else {
+		resp["unverifiedClaim"] = false
+	}
+	indexable := page.IndexedAt != nil && !h.statusKnobs.IndexDisabled
+	resp["indexable"] = indexable
+	// The host page's measured state sentence (plan part 3): worded from the
+	// probe's point of view, exactly the four forms the plan fixes.
+	if page.IsHostPage && page.RootTargetID != nil {
+		if state, ok := h.hostPageState(ctx, projectDomainOf(ctx, h.pool, projectID), *page.RootTargetID); ok {
+			resp["state"] = state
+		}
+		// Best-effort liveness stamp, throttled to one an hour: it feeds the
+		// index gate's origin rule and the unclaimed-page slowdown, and must
+		// never delay or fail the response.
+		go func(id int64) {
+			bctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, _ = h.pool.Raw().Exec(bctx,
+				`UPDATE status_page SET last_seen_at = now()
+			  WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '1 hour')`, id)
+		}(page.ID)
 	}
 	// The owner's switch decides whether the section is published at all; what it
 	// then shows is measured, never sample data.
 	if cfg.ShowNetwork {
-		resp["network"] = h.statusNetwork(ctx, tenantID, projectID)
+		resp["network"] = h.statusNetwork(ctx, projectID)
 	}
 	incidents := []map[string]any{}
 	if rows, rerr := h.pool.Raw().Query(ctx,
@@ -2784,7 +3570,7 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, te
 		rows.Close()
 	}
 	resp["incidents"] = incidents
-	writeAPIJSON(w, http.StatusOK, resp)
+	return resp, meta
 }
 
 // reachesProject answers whether this person owns the project's workspace or
@@ -2797,6 +3583,128 @@ func (h *writeAPI) reachesProject(ctx context.Context, personID, projectID int64
 		PersonID: &personID, ProjectID: projectID,
 	})
 	return err == nil
+}
+
+// projectDomainOf reads the project's domain ("" when unset): the host page's
+// component name and state sentence are worded from it.
+func projectDomainOf(ctx context.Context, pool *pg.Pool, projectID int64) string {
+	var domain string
+	_ = pool.Raw().QueryRow(ctx, `SELECT domain FROM project WHERE id = $1`, projectID).Scan(&domain)
+	return domain
+}
+
+// hostPageState builds the host page's `state` object (plan part 3): the
+// measured verdict of the page's root target, worded from the probe's point
+// of view. Kinds: ok | down | could_not_measure | nodata (the detector's
+// "check" - something wrong, not yet an outage - maps to ok's shape with its
+// own sentence through the same newest row). False when there is nothing to
+// say (no facts row yet).
+func (h *writeAPI) hostPageState(ctx context.Context, host string, targetID int64) (map[string]any, bool) {
+	if host == "" {
+		return nil, false
+	}
+	var status *string
+	var newestOK *bool
+	var newestCode *int
+	var newestClass *string
+	var newestMs *int
+	var newestTS *time.Time
+	var lastOK *time.Time
+	// Scalar subqueries, one row always: a page minted a minute ago has no
+	// facts row and no checks, and its honest state is nodata, not an error.
+	err := h.pool.Raw().QueryRow(ctx,
+		`SELECT (SELECT status FROM target_facts WHERE target_id = $1),
+		        (SELECT ok FROM checks c WHERE c.target_id = $1 ORDER BY ts DESC LIMIT 1),
+		        (SELECT status_code FROM checks c WHERE c.target_id = $1 ORDER BY ts DESC LIMIT 1),
+		        (SELECT error_class FROM checks c WHERE c.target_id = $1 ORDER BY ts DESC LIMIT 1),
+		        (SELECT total_ms FROM checks c WHERE c.target_id = $1 ORDER BY ts DESC LIMIT 1),
+		        (SELECT ts FROM checks c WHERE c.target_id = $1 ORDER BY ts DESC LIMIT 1),
+		        (SELECT max(ts) FROM checks c WHERE c.target_id = $1 AND ok)`, targetID).
+		Scan(&status, &newestOK, &newestCode, &newestClass, &newestMs, &newestTS, &lastOK)
+	if err != nil {
+		return nil, false
+	}
+	kind := "nodata"
+	if status != nil {
+		switch *status {
+		case availability.StatusOK, availability.StatusCheck:
+			kind = "ok"
+		case availability.StatusDown:
+			kind = "down"
+		case availability.StatusCouldNotMeasure:
+			kind = "could_not_measure"
+		case availability.StatusNoData, "":
+			kind = "nodata"
+		}
+	}
+	state := map[string]any{"kind": kind}
+	clock := func(t *time.Time) string {
+		if t == nil {
+			return ""
+		}
+		return t.UTC().Format("15:04") + " UTC"
+	}
+	if newestTS != nil {
+		state["asOf"] = clock(newestTS)
+	}
+	switch kind {
+	case "ok":
+		code, ms := 0, 0
+		if newestCode != nil {
+			code = *newestCode
+		}
+		if newestMs != nil {
+			ms = *newestMs
+		}
+		state["sentence"] = fmt.Sprintf("As of %s, %s answered HTTP %d in %d ms from our check.",
+			clock(newestTS), host, code, ms)
+	case "down":
+		// The outage began at the last answer we did get; without one, at the
+		// newest attempt. The parenthetical names why, in the plan's words.
+		since := newestTS
+		if lastOK != nil {
+			since = lastOK
+		}
+		state["sentence"] = fmt.Sprintf("Our check has had no answer from %s since %s (%s).",
+			host, clock(since), errorPhrase(newestClass, newestCode))
+	case "could_not_measure":
+		state["sentence"] = fmt.Sprintf(
+			"%s refuses automated checks from our location; we cannot measure it.", host)
+	default:
+		state["sentence"] = "No data yet: the first check runs at the next probe cycle, usually within a few minutes."
+	}
+	return state, true
+}
+
+// errorPhrase words the down sentence's parenthetical (plan part 3): the
+// class in the reader's words, an unknown class falling back to the plain
+// connection failure.
+func errorPhrase(class *string, code *int) string {
+	name := ""
+	if class != nil {
+		name = *class
+	}
+	switch name {
+	case "dns":
+		return "DNS lookup failed"
+	case "connect":
+		return "connection failed"
+	case "timeout":
+		return "connection timed out"
+	case "tls":
+		return "TLS error"
+	case "keyword_missing":
+		return "expected keyword missing"
+	case "challenge":
+		return "a bot filter answered instead"
+	case "status":
+		if code != nil {
+			return fmt.Sprintf("HTTP %d", *code)
+		}
+		return "connection failed"
+	default:
+		return "connection failed"
+	}
 }
 
 func pathLast(path string) string {

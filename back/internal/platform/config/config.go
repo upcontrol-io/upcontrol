@@ -91,6 +91,77 @@ type Config struct {
 	// The exact redirect_uri values a code may be exchanged for; Google
 	// matches character for character. Defaults to PublicOrigin + /sign-in.
 	GoogleRedirectURIs []string
+
+	// StatusPageKnobs are the permanent-status-page knobs (part 2/4 of
+	// docs/plans/permanent-status-pages.md): the anonymous mint ceilings, the
+	// eternal-host-page cap and the index ramp. Env-only on purpose: changing
+	// a knob is a container restart, never a core release. Embedded so both
+	// shapes read the same way (d.Config.IndexMaxPages, knobs.IndexMaxPages).
+	StatusPageKnobs
+}
+
+// StatusPageKnobs is read straight from the environment by two processes:
+// ucworker through Config (the gate job), and ucapi's write API through
+// LoadStatusPageKnobs (its constructor predates the struct; the env is the
+// single source, so the reads and defaults live here and nowhere else).
+type StatusPageKnobs struct {
+	// Anonymous page mints per client IP per day, and per instance per day.
+	MintPerIPPerDay int
+	MintPerDay      int
+	// Hard cap on eternal unclaimed host targets on this instance.
+	HostPagesMax int
+	// Index ramp: at most this many pages stamped indexed_at per day, never
+	// more than this many indexed at once, and IndexDisabled empties the
+	// index (every page noindex, the sitemap empty) regardless of stamps.
+	IndexRampPerDay int
+	IndexMaxPages   int
+	IndexDisabled   bool
+	// The origin every handed-out status URL is built from (one constant,
+	// owner decision 13: the path shape /status/{slug} never varies).
+	StatusOrigin string
+}
+
+// LoadStatusPageKnobs reads the knob subset. errs may be nil: a malformed
+// knob falls back to its default instead of failing a boot that only wanted
+// the subset (Load passes its own errs sink and does fail) - the env read
+// yields a zero and WithDefaults fills it.
+func LoadStatusPageKnobs(errs *[]string) StatusPageKnobs {
+	return StatusPageKnobs{
+		MintPerIPPerDay: getenvInt("UC_MINT_PER_IP_PER_DAY", 0, errs),
+		MintPerDay:      getenvInt("UC_MINT_PER_DAY", 0, errs),
+		HostPagesMax:    getenvInt("UC_HOST_PAGES_MAX", 0, errs),
+		IndexRampPerDay: getenvInt("UC_INDEX_RAMP_PER_DAY", 0, errs),
+		IndexMaxPages:   getenvInt("UC_INDEX_MAX_PAGES", 0, errs),
+		IndexDisabled:   os.Getenv("UC_INDEX_DISABLED") == "1",
+		StatusOrigin:    getenv("UC_STATUS_ORIGIN", ""),
+	}.WithDefaults()
+}
+
+// WithDefaults fills the zero fields of a knob set: the ONE place the
+// defaults live. LoadStatusPageKnobs applies it to what the env said (an
+// unset or malformed knob is a zero, not a boot failure), and every reader
+// of a possibly hand-built set - the API's ceilings, the worker's gate -
+// goes through it too, so the numbers below can never drift apart.
+func (k StatusPageKnobs) WithDefaults() StatusPageKnobs {
+	if k.MintPerIPPerDay <= 0 {
+		k.MintPerIPPerDay = 5
+	}
+	if k.MintPerDay <= 0 {
+		k.MintPerDay = 200
+	}
+	if k.HostPagesMax <= 0 {
+		k.HostPagesMax = 500
+	}
+	if k.IndexRampPerDay <= 0 {
+		k.IndexRampPerDay = 25
+	}
+	if k.IndexMaxPages <= 0 {
+		k.IndexMaxPages = 300
+	}
+	if k.StatusOrigin == "" {
+		k.StatusOrigin = "https://upcontrol.io"
+	}
+	return k
 }
 
 // Load reads the environment into Config, aggregating missing/invalid values
@@ -165,6 +236,8 @@ func Load(service string) (Config, error) {
 	// a second one lists both, comma-separated (Google compares verbatim).
 	c.GoogleRedirectURIs = splitList(getenv("UC_GOOGLE_REDIRECT_URIS",
 		strings.TrimRight(c.PublicOrigin, "/")+"/sign-in"))
+
+	c.StatusPageKnobs = LoadStatusPageKnobs(&errs)
 
 	// Required production values; dev allows missing DB URLs so a skeleton
 	// can boot without infrastructure.

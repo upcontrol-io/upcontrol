@@ -2482,6 +2482,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/public/status/{slug}/og.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The page's Open Graph image, rendered from the measured data. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A 1200x630 PNG. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                    };
+                };
+                404: components["responses"]["NotFound"];
+                /** @description The page was removed. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/public/status/{slug}/remove-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue the DNS TXT removal token for a host page.
+         * @description Idempotent: returns the standing token when one was already issued. The caller publishes the record named in the answer; the worker's dns-tokens job performs the removal once the record resolves. Rate-limited to one issue per IP per minute.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The token and the record to publish. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description 32 hex chars. */
+                            token: string;
+                            /** @example _upcontrol-remove.example.com */
+                            record: string;
+                            /**
+                             * @description The registrable domain (eTLD+1).
+                             * @example example.com
+                             */
+                            domain: string;
+                        };
+                    };
+                };
+                /** @description not_removable (the page is not a host page). */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description The page was removed. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description rate_limited (one issue per IP per minute). */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/public/ping/{token}": {
         parameters: {
             query?: never;
@@ -3228,10 +3347,9 @@ export interface components {
             /** @enum {string} */
             interval: "1m" | "5m" | "30m" | "1h";
         };
+        /** @description Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them. */
         MonitorPatch: {
             name?: string;
-            target?: string;
-            keyword?: string;
             /** @enum {string} */
             interval?: "1m" | "5m" | "30m" | "1h";
             paused?: boolean;
@@ -3534,14 +3652,25 @@ export interface components {
             name: string;
             lines: number;
         };
-        /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. */
+        /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry. */
         DashboardMetricRef: {
             /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric" | "service" | "funnel" | "experiment" | "retention" | "dimension";
+            source: "logs" | "check" | "event" | "metric" | "people" | "service" | "funnel" | "experiment" | "retention" | "dimension";
             name?: string;
             where?: {
                 [key: string]: string;
             };
+            /** @description `people` only: a funnel's step event names, in journey order. The card is the journey's one definition. */
+            steps?: string[];
+            /** @description `people` only: `week` reads the retention grid. */
+            cohort?: string;
+            /** @description `people` only: the event field a breakdown ranks the values of. */
+            field?: string;
+            /**
+             * @description `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
+             * @enum {string}
+             */
+            count?: "people" | "events";
             label?: string;
         };
         DashboardWidget: {
@@ -3587,10 +3716,6 @@ export interface components {
             checks: components["schemas"]["CatalogCheck"][];
             events: components["schemas"]["CatalogEvent"][];
             metrics: components["schemas"]["CatalogMetric"][];
-            funnels: components["schemas"]["CatalogFunnel"][];
-            experiments: components["schemas"]["CatalogExperiment"][];
-            retentions: components["schemas"]["CatalogRetention"][];
-            dimensions: components["schemas"]["CatalogDimension"][];
         };
         /** @description One message group: the lines of a service and level that share a fingerprint. This is what lets a card plot one specific kind of warning rather than every warning of a service. */
         CatalogGroup: {
@@ -3617,37 +3742,20 @@ export interface components {
             name: string;
             type: string;
         };
+        /** @description One event name the project sent, and the field keys its recent rows carried. The fields are what a breakdown folds by: an event is picked, then one of its own fields, so nobody has to remember what they named it. Reserved `uc.`-prefixed keys are left out — they are the wire's, not a dimension. */
         CatalogEvent: {
             name: string;
             times: number;
             /** Format: date-time */
             lastTs: string;
+            /** @description Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth. */
+            fields: string[];
         };
         CatalogMetric: {
             name: string;
             readings: number;
             /** @description The label keys seen on this metric's readings — what a widget can narrow it by. */
             labels: string[];
-        };
-        /** @description A funnel and its steps, ordered by the `i` label of each step's latest reading. A funnel is picked whole; its steps are read as one grouped series (`name: funnel`, `group: [funnel, step]`). */
-        CatalogFunnel: {
-            name: string;
-            steps: string[];
-        };
-        /** @description One A/B test the customer's agent reports: its name and its arms in the order they were declared, control first. The board orders the card's rows by this list. */
-        CatalogExperiment: {
-            name: string;
-            variants: string[];
-        };
-        /** @description One retention the customer's agent reports, and how many weekly cohorts it has sent. The grid itself is read through POST /v1/series. */
-        CatalogRetention: {
-            name: string;
-            cohorts: number;
-        };
-        /** @description One dimension the customer's agent reports, and how many distinct values it has sent. The ranking itself is read through POST /v1/series. */
-        CatalogDimension: {
-            name: string;
-            values: number;
         };
         /** @description One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws. */
         SeriesQuery: {
@@ -3665,7 +3773,7 @@ export interface components {
             where?: {
                 [key: string]: string;
             };
-            /** @description Label keys to fold by. For `metric` it folds a counter's labels; for `people` it names the label whose values a breakdown ranks (one key), or the variant label of an A/B test (two). With `group` the answer carries `rows` instead of a time series: a funnel's steps, an A/B test's variants, a retention grid's cohorts, a dimension's values. One read per card, whatever the label set turns out to hold. */
+            /** @description Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold. */
             group?: string[];
             /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */
             steps?: string[];
@@ -3674,6 +3782,11 @@ export interface components {
              * @enum {string}
              */
             cohort?: "week";
+            /**
+             * @description What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ''`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
+             * @enum {string}
+             */
+            count?: "people" | "events";
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {
@@ -3765,6 +3878,19 @@ export interface components {
             showNetwork: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy: boolean;
+            /** @description "List in search engines": one half of a claimed page's index qualification; the DNS TXT proof (hostVerifiedAt) is the other. */
+            indexOptIn?: boolean;
+            /**
+             * Format: date-time
+             * @description When the DNS TXT proof of control of the host landed. Null until verified.
+             */
+            hostVerifiedAt?: string | null;
+            /** @description The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null. */
+            verificationToken?: string | null;
+            /** @description Echo of the removal token when one was already issued through the page's own door. Never minted here. */
+            removalToken?: string | null;
+            /** @description The host's public page address on our link, when this project rides one (host pages and their suffixed siblings). */
+            rootPageUrl?: string | null;
         };
         /** @description One phase of the request, as a median over the last 24 h of successful probes: dns, tcp and response. Measured from the checks table (dns_ms / connect_ms / total_ms), never sample data — a phase that never ran (no lookup on a reused connection) is absent rather than reported as zero. The TLS handshake is measured and stored but deliberately NOT published as a tile (owner decision, 2026-08-27). */
         NetworkTile: {
@@ -3787,6 +3913,8 @@ export interface components {
             showNetwork?: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy?: boolean;
+            /** @description "List in search engines". Stored with the settings; honoured only on a claimed, host-verified page. */
+            indexOptIn?: boolean;
         };
         PublicIncident: {
             title: string;
@@ -3810,6 +3938,20 @@ export interface components {
             mine?: boolean;
             /** @description Present and true only for the OWNER (same rule as `mine`), when this page already has a custom domain stored, verified or not. It exists so the owner's own view of the page on our link can stop offering an address they have already bought. A boolean rather than the domain itself: nothing on a public page needs to print that address, and a field that carries it invites a caller to. */
             hasCustomDomain?: boolean;
+            /** @description Host pages only: the measured verdict of the page's root target, worded from the probe's point of view. Absent on non-host pages and on pages with no facts row yet. */
+            state?: {
+                /** @enum {string} */
+                kind: "ok" | "down" | "could_not_measure" | "nodata";
+                sentence: string;
+                /** @description The clock time of the newest check, "15:04 UTC". */
+                asOf?: string;
+            };
+            /** @description Whether search engines may list this page: the index gate's stamp AND the kill switch off. Mirrors the HTML door's robots meta. */
+            indexable?: boolean;
+            /** @description Whether this is the host's first page (the bare slug). Suffixed pages carry false. */
+            hostPage?: boolean;
+            /** @description True when the page is claimed but the host was never proven by DNS TXT: the page stays out of the index and keeps its not-affiliated line. */
+            unverifiedClaim?: boolean;
         };
         /** @enum {string} */
         WatchStatus: "ok" | "check" | "down" | "nodata";

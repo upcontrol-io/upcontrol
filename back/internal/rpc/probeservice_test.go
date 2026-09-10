@@ -20,6 +20,7 @@ func TestErrClassStr_RoundTrip(t *testing.T) {
 		{probev1.ErrorClass_ERROR_CLASS_STATUS, "status"},
 		{probev1.ErrorClass_ERROR_CLASS_KEYWORD_MISSING, "keyword_missing"},
 		{probev1.ErrorClass_ERROR_CLASS_BLOCKED_TARGET, "blocked_target"},
+		{probev1.ErrorClass_ERROR_CLASS_CHALLENGE, "challenge"},
 		{probev1.ErrorClass_ERROR_CLASS_NONE, "none"},
 		{probev1.ErrorClass_ERROR_CLASS_UNSPECIFIED, ""},
 	} {

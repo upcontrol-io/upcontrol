@@ -6,6 +6,61 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-09-10
+
+### Added
+- **One URL is checked once, for everybody.** A monitor is now a subscription to a shared
+  `probe_target`: two projects watching `https://example.com` cost one fetch, and each still
+  sees its own bars and its own incidents. A subscriber who joins an outage gets its incident
+  and alert within one result. Heartbeats get a private target each. Liveness and cadence are
+  derived in the lease query, so pausing, deleting or releasing a monitor needs no recount, and
+  paying subscribers lease first. `www.` folds into the bare host, default ports and a lone `/`
+  drop out of the key.
+- **A permanent public page per watched host.** `/status/{slug}` for a host minted from the
+  landing check keeps its root probe running for good: deleting the root check, or the whole
+  project, empties the project and the page lives on. Watching a host whose page somebody
+  already claimed mints a second page on the same probe, never a second probe. The reaper
+  spares host pages.
+- **A crawler gets a real page, a chat gets a picture.** `GET /status/{slug}` serves
+  server-rendered HTML with the state sentence, canonical, Open Graph and JSON-LD, and
+  `/public/status/{slug}/og.png` renders a 1200×630 card (Inter, OFL). New public doors: the
+  directory `/status`, `/sitemap-status.xml`, `/bot` and `/status/policy`.
+- **An index gate, not an index flood.** A page enters the sitemap only after 72 hours of
+  continuous, measured, mostly-ok checks on a registrable host without wildcard DNS, at a daily
+  ramp and under a cap, and leaves with hysteresis. A claimed page needs a DNS TXT proof and
+  the owner's "List in search engines". Knobs: `UC_INDEX_RAMP_PER_DAY`, `UC_INDEX_MAX_PAGES`,
+  and `UC_INDEX_DISABLED=1` as the kill switch. Removal is self-serve through a DNS TXT token.
+- **Mint ceilings and a seed door.** `UC_MINT_PER_IP_PER_DAY`, `UC_MINT_PER_DAY` and
+  `UC_HOST_PAGES_MAX` bound anonymous minting; `POST /internal/seed-host` (node token) seeds
+  pages for outreach, which stay out of the index until a person interacts with them.
+- **ucprobe fetches up to 20 checks at once**, and the server paces the fleet from queue depth:
+  2 s after a full batch, 30 s after a partial one, 5 s on an empty queue.
+
+### Changed
+- **Could-not-measure is a third state:** HTTP 401, 403, 429, and a bot filter's challenge at
+  any status, recognised by header (`cf-mitigated`, `x-amzn-waf-action`, `x-vercel-mitigated`).
+  No incident, drawn as no data, never counted against uptime, and the target is asked less
+  often. The landing check says "no data" for it instead of "down".
+- **A check's target and keyword are immutable:** `PATCH /v1/monitors/{id}` answers 400
+  `target_immutable`. Delete and re-create to move a check.
+- **`checks` is partitioned by day**, and retention drops whole partitions; each row records
+  the effective interval it was taken at.
+- The probe protocol carries `target_id`; a result without one is dropped and counted.
+
+### Fixed
+- **A host that hangs is a timeout,** not "connection refused".
+- **Saving status page settings created a second page** once the project gained a domain.
+- **Switching "List in search engines" off now unlists the page** at once.
+- A finished check closes its idle connection instead of holding a socket for 30 s.
+
+### Upgrading
+- **Migration 009 rewrites `checks` into daily partitions** and folds identical monitor URLs
+  into shared targets; it takes time in proportion to `checks`. It fails if one project has
+  two checks on the same normalised URL and keyword, for example `example.com` and
+  `https://www.example.com/`: delete one of them before upgrading.
+- **Upgrade ucapi and ucprobe together.** A probe older than this release sends no
+  `target_id`, and its results are dropped.
+
 ## [0.27.0] — 2026-09-09
 
 ### Added

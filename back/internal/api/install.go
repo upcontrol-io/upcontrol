@@ -18,6 +18,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
@@ -39,6 +40,10 @@ type install struct {
 	// self-host has no use-before-signup story.
 	selfHosted bool
 
+	// rec fires the claim's page_claimed server event. Optional: nil skips
+	// only the count, never the claim; the cmd wiring attaches the recorder.
+	rec *analytics.Recorder
+
 	mu   sync.Mutex
 	last map[string]time.Time
 }
@@ -53,6 +58,12 @@ func NewInstall(pool *pg.Pool, pgs *pgstore.Store, sm *session.Manager, publicOr
 		last:         map[string]time.Time{},
 		selfHosted:   selfHosted,
 	}
+}
+
+// WithRecorder attaches the analytics recorder that fires page_claimed.
+func (h *install) WithRecorder(rec *analytics.Recorder) *install {
+	h.rec = rec
+	return h
 }
 
 func (h *install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -302,9 +313,16 @@ func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 // case for either.
 func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc.Session, slug string) {
 	var anonTenantID int64
+	var removedAt *time.Time
+	// A removed page is not claimable, on either door's shape (plan part 2):
+	// the host asked for it to be gone, and a claim would resurrect it.
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT tenant_id FROM status_page WHERE slug = $1`, slug).Scan(&anonTenantID); err != nil {
+		`SELECT tenant_id, removed_at FROM status_page WHERE slug = $1`, slug).Scan(&anonTenantID, &removedAt); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_claimable")
+		return
+	}
+	if removedAt != nil {
+		writeAPIErr(w, http.StatusGone, "page_removed")
 		return
 	}
 	h.adoptTenant(ctx, w, s, anonTenantID)
@@ -338,6 +356,18 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		  WHERE id = $1 AND claim_token_hash IS NOT NULL
 		 RETURNING id`, anonTenantID).Scan(&burned); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_claimable")
+		return
+	}
+	// Decision 16: the index is for pages nobody claimed or whose claimer
+	// proved control of the host. A claim changes the page's voice, so a
+	// stamp earned while the page was nobody's comes OFF now; verification
+	// plus the opt-in switch re-enter it through the ramp like anyone else.
+	if _, err := tx.Exec(ctx,
+		`UPDATE status_page SET indexed_at = NULL
+		   WHERE tenant_id = $1
+		     AND NOT (host_verified_at IS NOT NULL AND index_opt_in)`,
+		anonTenantID); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	// Serialize the claimer's tenant for the rest of this transaction: the
@@ -426,6 +456,11 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	if err := tx.Commit(ctx); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	// The claim is the one moment a page changes hands: it counts (plan part
+	// 5's server event), and a nil recorder skips only the count.
+	if h.rec != nil {
+		h.rec.ServerEvent(ctx, "page_claimed", s.PersonID, s.TenantID, nil)
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"claimed": true})
 }

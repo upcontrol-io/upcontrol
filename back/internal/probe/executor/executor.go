@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ const UserAgent = "upcontrol/1.0 (+https://upcontrol.io/bot)"
 type Result struct {
 	OK            bool
 	StatusCode    uint16
-	ErrorClass    string // none|dns|connect|tls|timeout|status|keyword_missing|blocked_target
+	ErrorClass    string // none|dns|connect|tls|timeout|status|keyword_missing|blocked_target|challenge
 	ErrorDetail   string
 	DNSMs         uint32
 	ConnectMs     uint32
@@ -61,6 +62,10 @@ type Result struct {
 	// Header is the response's headers, nil when no response arrived; carried so
 	// HSTS/Cache-Control need no second request for a page we already have.
 	Header http.Header
+	// RetryAfterSec is the response's Retry-After header in seconds when the
+	// host served the integer form; 0 means absent (or the HTTP-date form,
+	// which this deliberately does not parse).
+	RetryAfterSec int32
 	// Body is the response body, present only when CheckSpec.CollectBody asked
 	// for it (link discovery reads the homepage we already fetched).
 	Body []byte
@@ -105,6 +110,7 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 
 	// Build the transport with a guarded dialer.
 	transport := e.buildTransport(timeout)
+	defer transport.CloseIdleConnections()
 
 	// Set up the timing recorder.
 	tr := newTimingRecorder(start)
@@ -171,11 +177,27 @@ func (e *Executor) Execute(ctx context.Context, spec CheckSpec) Result {
 	if resp.TLS != nil {
 		result.TLSVersion = tlsVersionName(resp.TLS.Version)
 	}
+	// Retry-After in its integer-seconds form (the HTTP-date form is ignored:
+	// a refusal backoff may be conservative, never clever). A host that asks
+	// for a pause gets at least that long.
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && secs > 0 {
+			result.RetryAfterSec = int32(secs)
+		}
+	}
 
 	// Status assertion: 2xx/3xx is OK; anything else is a status error.
 	if !result.OK {
 		result.ErrorClass = "status"
 		result.ErrorDetail = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+
+	// A bot filter's challenge, whatever status it came with, is not the
+	// service answering: the result is could-not-measure, never up or down.
+	if isChallenge(resp.Header) {
+		result.OK = false
+		result.ErrorClass = "challenge"
+		result.ErrorDetail = fmt.Sprintf("HTTP %d bot challenge", resp.StatusCode)
 	}
 
 	// Keyword assertion: the body must contain the keyword.
@@ -317,6 +339,16 @@ func tlsVersionName(v uint16) string {
 	}
 }
 
+// isChallenge reads the header each bot filter marks its challenge with. The
+// body is never sniffed: a Cloudflare 52x origin-error page carries no marker
+// and is a real outage.
+func isChallenge(h http.Header) bool {
+	waf := h.Get("X-Amzn-Waf-Action")
+	return strings.EqualFold(h.Get("Cf-Mitigated"), "challenge") ||
+		strings.EqualFold(waf, "challenge") || strings.EqualFold(waf, "captcha") ||
+		strings.EqualFold(h.Get("X-Vercel-Mitigated"), "challenge")
+}
+
 func hashBody(body []byte) uint64 {
 	h := sha256.Sum256(body)
 	return binary.BigEndian.Uint64(h[:8])
@@ -350,7 +382,12 @@ func errorResult(err error, start time.Time) Result {
 	}
 }
 
-func isTimeout(err error) bool { return err != nil && strings.Contains(err.Error(), "timeout") }
+// isTimeout keeps the text match for timeouts the chain hides: a resolver
+// timeout arrives as "dns: %w" inside a url.Error, whose Timeout() does not
+// look past that wrap.
+func isTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || (err != nil && strings.Contains(err.Error(), "timeout"))
+}
 func isBlocked(err error) bool {
 	return errors.Is(err, guard.ErrBlockedTarget)
 }

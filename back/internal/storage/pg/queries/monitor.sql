@@ -1,18 +1,18 @@
 -- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
        m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
-       mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
+       tf.status, tf.ssl_expires_at, tf.domain_expires_at, tf.last_check_at
   FROM monitor m
-  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+  LEFT JOIN target_facts tf ON tf.target_id = m.target_id
  WHERE m.tenant_id = $1
  ORDER BY m.created_at;
 
 -- name: ListMonitorsByProject :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
        m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
-       mf.status, mf.ssl_expires_at, mf.domain_expires_at, mf.last_check_at
+       tf.status, tf.ssl_expires_at, tf.domain_expires_at, tf.last_check_at
   FROM monitor m
-  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+  LEFT JOIN target_facts tf ON tf.target_id = m.target_id
  WHERE m.project_id = $1
  ORDER BY m.created_at;
 
@@ -26,14 +26,15 @@ RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, 
 -- name: GetMonitorByPublicID :one
 SELECT m.id, m.public_id, m.tenant_id, m.project_id, m.kind, m.name, m.target,
        m.keyword, m.interval_sec, m.paused, m.ping_token, m.created_at,
-       mf.status, mf.ssl_expires_at, mf.domain_expires_at
+       tf.status, tf.ssl_expires_at, tf.domain_expires_at
   FROM monitor m
-  LEFT JOIN monitor_facts mf ON mf.monitor_id = m.id
+  LEFT JOIN target_facts tf ON tf.target_id = m.target_id
  WHERE m.public_id = $1 AND m.tenant_id = $2;
 
 -- name: GetMonitorByPingToken :one
--- The token is the credential: a miss is a 404, never a hint.
-SELECT m.id, m.tenant_id, m.name, m.paused, m.interval_sec,
+-- The token is the credential: a miss is a 404, never a hint. target_id is
+-- the heartbeat's private probe target, where its facts and schedule live.
+SELECT m.id, m.target_id, m.tenant_id, m.name, m.paused, m.interval_sec,
        COALESCE(m.grace_sec, m.interval_sec)::int AS grace_sec
   FROM monitor m
  WHERE m.ping_token = $1 AND m.kind = 'heartbeat';

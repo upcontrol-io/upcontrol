@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecuteOK(t *testing.T) {
@@ -46,6 +47,40 @@ func TestExecute500(t *testing.T) {
 	}
 	if r.StatusCode != 500 {
 		t.Errorf("StatusCode = %d, want 500", r.StatusCode)
+	}
+}
+
+// A bot filter's challenge is recognised by its header alone, at any status,
+// with the status kept as measured. A Cloudflare origin error (522, no
+// marker) and a bare 403 stay plain status failures.
+func TestExecuteChallenge(t *testing.T) {
+	for _, tc := range []struct {
+		name, header, value string
+		status              int
+		wantClass           string
+	}{
+		{"cloudflare", "Cf-Mitigated", "challenge", 403, "challenge"},
+		{"aws waf challenge", "X-Amzn-Waf-Action", "challenge", 202, "challenge"},
+		{"aws waf captcha", "X-Amzn-Waf-Action", "captcha", 405, "challenge"},
+		{"vercel", "X-Vercel-Mitigated", "challenge", 429, "challenge"},
+		{"cloudflare origin down", "Server", "cloudflare", 522, "status"},
+		{"plain 403", "", "", 403, "status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.header != "" {
+					w.Header().Set(tc.header, tc.value)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			r := (&Executor{}).Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 5000, Keyword: "x"})
+			if r.OK || r.ErrorClass != tc.wantClass || int(r.StatusCode) != tc.status {
+				t.Fatalf("got OK=%v class=%q status=%d, want false %q %d",
+					r.OK, r.ErrorClass, r.StatusCode, tc.wantClass, tc.status)
+			}
+		})
 	}
 }
 
@@ -207,6 +242,24 @@ func TestExecuteSendsAUserAgent(t *testing.T) {
 	}
 	if !strings.Contains(got, "http") {
 		t.Errorf("User-Agent %q carries no URL to identify us by", got)
+	}
+}
+
+// A host that accepts the connection and then hangs is a timeout, not a
+// connection failure: the error the executor sees reads "context deadline
+// exceeded", with no "timeout" in its text.
+func TestExecuteHangIsTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	r := (&Executor{}).Execute(context.Background(), CheckSpec{URL: srv.URL, TimeoutMs: 200})
+	if r.ErrorClass != "timeout" {
+		t.Errorf("ErrorClass = %q (%s), want timeout", r.ErrorClass, r.ErrorDetail)
 	}
 }
 

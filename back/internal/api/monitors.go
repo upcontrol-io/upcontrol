@@ -8,30 +8,37 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/incident"
+	"go.upcontrol.io/back/internal/incident/triage"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
+	"go.upcontrol.io/back/internal/targetkey"
 )
 
 // monitors serves GET/POST /v1/monitors and GET/PATCH/DELETE /v1/monitors/{id}.
 type monitors struct {
 	pool   *pg.Pool
+	pgs    *pgstore.Store
 	sess   *session.Manager
 	origin string
 }
 
-func NewMonitors(p *pg.Pool, sm *session.Manager, origin string) *monitors {
-	return &monitors{pool: p, sess: sm, origin: strings.TrimRight(origin, "/")}
+func NewMonitors(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, origin string) *monitors {
+	return &monitors{pool: p, pgs: pgs, sess: sm, origin: strings.TrimRight(origin, "/")}
 }
 
 // ServeHTTP routes by method + path pattern.
@@ -123,6 +130,21 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	if req.Keyword != "" {
 		keyword = &req.Keyword
 	}
+	// A check is a subscription (plan part 1): the fetch lives in probe_target
+	// and is SHARED — one URL is checked once for everybody. A heartbeat owns
+	// a private target keyed by the monitor's public id, minted here because
+	// the key must exist before the monitor row that references it.
+	normTarget := req.Target
+	var key string
+	if kind != "heartbeat" {
+		n, nerr := targetkey.NormalizeURL(req.Target)
+		if nerr != nil {
+			writeAPIErr(w, http.StatusBadRequest, "bad_target")
+			return
+		}
+		normTarget = n
+		key = targetkey.Website(normTarget, req.Keyword)
+	}
 	// A heartbeat's credential is its ping token; the URL built from it is the
 	// only thing the customer's job ever holds.
 	var pingToken *string
@@ -137,39 +159,85 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	}
 	params := sqlc.CreateMonitorParams{
 		PublicID: pubID, TenantID: tenantID, ProjectID: projectID,
-		Kind: kind, Name: req.Name, Target: req.Target,
+		Kind: kind, Name: req.Name, Target: normTarget,
 		Keyword: keyword, IntervalSec: parseInterval(req.Interval),
 		PingToken: pingToken,
 	}
-	// Create the monitor AND seed its schedule row in one transaction: without
-	// EnsureMonitorSchedule the probe fleet never leases the monitor.
+	// Target, monitor, schedule and (when the target is already down) the
+	// first incident land in ONE transaction: a subscriber who joins an
+	// outage gets its incident with the insert, not one check later.
 	var row sqlc.CreateMonitorRow
-	err := h.inTx(r.Context(), func(q *sqlc.Queries) error {
-		var cerr error
-		row, cerr = q.CreateMonitor(r.Context(), params)
-		if cerr != nil {
-			return cerr
+	// Set when the subscription joined a target already down: its incident
+	// opened inside the transaction, the evidence slice follows the commit.
+	var openedMonitor int64
+	err := h.inTx(r.Context(), func(q *sqlc.Queries, tx pgx.Tx) error {
+		tkey, tkind, turl := key, kind, normTarget
+		if kind == "heartbeat" {
+			// Private target, never shared: the key is the monitor's public id
+			// (dashed lowercase, the same text migration 009 builds).
+			pub := uuid.UUID(pubID.Bytes).String()
+			tkey = targetkey.Heartbeat(pub)
+			// url is a tokenless stable label, never the ping URL: the fleet
+			// never fetches heartbeat targets (the lease filters the kind) and
+			// the ping door joins through monitor.ping_token, so a tokened URL
+			// here would be a secret copy nobody reads. 009's backfill stores
+			// the same label.
+			turl = "heartbeat:" + pub
 		}
-		if cerr = q.EnsureMonitorSchedule(r.Context(), sqlc.EnsureMonitorScheduleParams{
-			MonitorID: row.ID,
-			Region:    scheduleRegion(),
-		}); cerr != nil {
-			return cerr
+		targetID, terr := q.GetOrCreateProbeTarget(r.Context(), sqlc.GetOrCreateProbeTargetParams{
+			Key: tkey, Kind: tkind, Url: turl, Keyword: keyword,
+		})
+		if terr != nil {
+			return terr
 		}
-		if kind != "heartbeat" {
+		if terr := q.EnsureTargetSchedule(r.Context(), sqlc.EnsureTargetScheduleParams{
+			TargetID: targetID, Region: scheduleRegion(),
+		}); terr != nil {
+			return terr
+		}
+		var created bool
+		var ierr error
+		row, created, ierr = insertMonitorOnTarget(r.Context(), tx, params, targetID)
+		if ierr != nil {
+			return ierr
+		}
+		if kind == "heartbeat" {
+			// Open the first window at 2x the interval (grace defaults to the
+			// interval): a job that starts on its next cron tick is not "missed"
+			// the minute it is born.
+			return q.SetHeartbeatDue(r.Context(), sqlc.SetHeartbeatDueParams{
+				Secs: float64(2 * params.IntervalSec), MonitorID: row.ID,
+			})
+		}
+		// A subscription starts now: the first check runs at the next lease,
+		// not one interval later.
+		if terr := q.PullTargetDue(r.Context(), targetID); terr != nil {
+			return terr
+		}
+		if !created {
 			return nil
 		}
-		// Open the first window at 2x the interval (grace defaults to the
-		// interval): a job that starts on its next cron tick is not "missed"
-		// the minute it is born.
-		return q.SetHeartbeatDue(r.Context(), sqlc.SetHeartbeatDueParams{
-			Secs:      float64(2 * params.IntervalSec),
-			MonitorID: row.ID,
-		})
+		// Subscribing onto a target that is already down opens the incident
+		// here, in the same transaction as the insert (plan part 1).
+		if facts, ferr := q.GetTargetFacts(r.Context(), targetID); ferr == nil &&
+			facts.Status == availability.StatusDown {
+			title, eff := downTargetTitle(r.Context(), tx, monitorTitleName(row.Name, row.Target), targetID)
+			lc := incident.New(h.pool, h.pgs)
+			_, created, _ := lc.OpenOnTx(r.Context(), q, row.ID, title, eff)
+			if created {
+				// The evidence slice waits for the commit (incident_slice's FK
+				// cannot see an uncommitted incident); the caller freezes.
+				openedMonitor = row.ID
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	if openedMonitor != 0 {
+		incident.New(h.pool, h.pgs).FreezeOpenIncident(r.Context(), openedMonitor)
 	}
 	// The first website check names the project, only when it is still unnamed:
 	// a shared status-page link must not be renamed out from under it.
@@ -239,14 +307,32 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	if !decodeStrict(w, r, &req) {
 		return
 	}
+	// A different fetch is a different check: target and keyword are immutable
+	// (plan part 1). Patching either would show one URL and measure another;
+	// recreating a check is free (create is idempotent per (project, target)).
+	if req.Target != nil || req.Keyword != nil {
+		writeAPIErr(w, http.StatusBadRequest, "target_immutable")
+		return
+	}
 	pubID := parseUUID(id)
+	ctx := r.Context()
+	// The BEFORE state decides the pulls below: unpausing or lowering the
+	// interval starts a check sooner, and unpausing onto a down target opens
+	// the incident in the same transaction as the PATCH.
+	var targetID int64
+	var wasPaused bool
+	var oldInterval int32
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT target_id, paused, interval_sec FROM monitor WHERE public_id = $1 AND tenant_id = $2`,
+		pubID, tenantID).Scan(&targetID, &wasPaused, &oldInterval); err != nil {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
 	params := sqlc.PatchMonitorParams{PublicID: pubID, TenantID: tenantID}
 	params.Name = req.Name
-	params.Target = req.Target
-	params.Keyword = req.Keyword
 	if req.Interval != nil {
 		// Same floor as create, or the wall is one PATCH away from not existing.
-		if msg := h.intervalRefusal(r.Context(), h.tenantPlan(r.Context(), tenantID), *req.Interval); msg != "" {
+		if msg := h.intervalRefusal(ctx, h.tenantPlan(ctx, tenantID), *req.Interval); msg != "" {
 			writeUpgradeRequired(w, msg, "")
 			return
 		}
@@ -254,12 +340,55 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		params.IntervalSec = &v
 	}
 	params.Paused = req.Paused
-	row, err := h.pool.Queries().PatchMonitor(r.Context(), params)
+	var row sqlc.PatchMonitorRow
+	// Set when unpausing rejoined a target still down: same commit-ordering
+	// as the create path — the slice is frozen after the transaction lands.
+	var unpausedOntoDown int64
+	err := h.inTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
+		var perr error
+		row, perr = q.PatchMonitor(ctx, params)
+		if perr != nil {
+			return perr
+		}
+		newPaused, newInterval := wasPaused, oldInterval
+		if req.Paused != nil {
+			newPaused = *req.Paused
+		}
+		if params.IntervalSec != nil {
+			newInterval = *params.IntervalSec
+		}
+		unpaused := wasPaused && !newPaused
+		// Unpausing or tightening the interval lowers the target's effective
+		// interval: pull the next check to now so it runs at the next lease.
+		if unpaused || newInterval < oldInterval {
+			if terr := q.PullTargetDue(ctx, targetID); terr != nil {
+				return terr
+			}
+		}
+		if unpaused {
+			// Unpausing onto a target that is already down opens the incident
+			// here, in the same transaction (a paused subscriber that comes back
+			// joins the outage, not the next edge).
+			if facts, ferr := q.GetTargetFacts(ctx, targetID); ferr == nil &&
+				facts.Status == availability.StatusDown {
+				title, eff := downTargetTitle(ctx, tx, monitorTitleName(row.Name, row.Target), targetID)
+				lc := incident.New(h.pool, h.pgs)
+				_, created, _ := lc.OpenOnTx(ctx, q, row.ID, title, eff)
+				if created {
+					unpausedOntoDown = row.ID
+				}
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
-	// status/ssl/domain expiry live in monitor_facts, so PatchMonitor's
+	if unpausedOntoDown != 0 {
+		incident.New(h.pool, h.pgs).FreezeOpenIncident(ctx, unpausedOntoDown)
+	}
+	// status/ssl/domain expiry live in target_facts, so PatchMonitor's
 	// RETURNING cannot reach them: re-read, the same query `list` uses.
 	full, err := h.pool.Queries().GetMonitorByPublicID(r.Context(), sqlc.GetMonitorByPublicIDParams{
 		PublicID: pubID, TenantID: tenantID,
@@ -308,18 +437,81 @@ func (h *monitors) notFound(w http.ResponseWriter) {
 	writeAPIErr(w, http.StatusNotFound, "not_found")
 }
 
-// inTx runs fn on Queries bound to a fresh transaction; commits on nil, rolls
-// back otherwise. Used so monitor create + schedule row land atomically.
-func (h *monitors) inTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
+// inTx runs fn on Queries and the raw transaction bound together; commits on
+// nil, rolls back otherwise. The tx is fn's to reach for the statements that
+// predate sqlc (the idempotent monitor insert, title evidence reads).
+func (h *monitors) inTx(ctx context.Context, fn func(*sqlc.Queries, pgx.Tx) error) error {
 	tx, err := h.pool.Raw().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := fn(h.pool.Queries().WithTx(tx)); err != nil {
+	if err := fn(h.pool.Queries().WithTx(tx), tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// insertMonitorOnTarget is the idempotent subscription insert: one project,
+// one fetch (UNIQUE (project_id, target_id)). A second create of the same
+// (project, target) is the same subscription — the existing row comes back
+// as the answer, so recreating a check is free (plan part 1).
+func insertMonitorOnTarget(ctx context.Context, tx pgx.Tx, params sqlc.CreateMonitorParams, targetID int64) (sqlc.CreateMonitorRow, bool, error) {
+	var row sqlc.CreateMonitorRow
+	scan := func(r pgx.Row) error {
+		return r.Scan(&row.ID, &row.PublicID, &row.Kind, &row.Name, &row.Target,
+			&row.Keyword, &row.IntervalSec, &row.PingToken, &row.CreatedAt)
+	}
+	err := scan(tx.QueryRow(ctx, `
+		INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keyword, interval_sec, ping_token, target_id)
+		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (project_id, target_id) DO NOTHING
+		RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, created_at`,
+		params.PublicID, params.TenantID, params.ProjectID, params.Kind, params.Name,
+		params.Target, params.Keyword, params.IntervalSec, params.PingToken, targetID))
+	if err == nil {
+		return row, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return row, false, err
+	}
+	// The conflict arm: answer the existing subscription, not an error.
+	err = scan(tx.QueryRow(ctx, `
+		SELECT id, public_id, kind, name, target, keyword, interval_sec, ping_token, created_at
+		  FROM monitor WHERE project_id = $1 AND target_id = $2`,
+		params.ProjectID, targetID))
+	return row, false, err
+}
+
+// monitorTitleName is the probe path's rule: the name the incident title
+// carries, falling back to the target when the row was left unnamed.
+func monitorTitleName(name, target string) string {
+	if name == "" {
+		return target
+	}
+	return name
+}
+
+// downTargetTitle builds the incident title for a subscription joining a
+// target that is already down: the same triage the probe path applies, read
+// from the target's newest measurement (there is no fresh result in hand —
+// the outage was measured before this subscriber arrived). The effective
+// interval of that newest row is returned with it (0 when there is none).
+func downTargetTitle(ctx context.Context, tx pgx.Tx, monitorName string, targetID int64) (string, int32) {
+	var errClass string
+	var statusCode *int
+	var intervalSec int32
+	err := tx.QueryRow(ctx,
+		`SELECT error_class, status_code, interval_sec FROM checks
+		  WHERE target_id = $1 ORDER BY ts DESC LIMIT 1`, targetID).
+		Scan(&errClass, &statusCode, &intervalSec)
+	code := 0
+	if err != nil || statusCode == nil {
+		intervalSec = 0
+	} else {
+		code = *statusCode
+	}
+	return triage.Build(monitorName, errClass, code).Title, intervalSec
 }
 
 // scheduleRegion reads UC_NODE_REGION, the SAME env var ucprobe leases with, so

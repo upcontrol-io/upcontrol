@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -52,21 +53,23 @@ type EventRow struct {
 }
 
 // CheckRow is one row of the checks table: the availability detector's history
-// and the public status page; written once per SubmitResults batch.
+// and the public status page; written once per SubmitResults batch. TargetID
+// names the shared probe_target the row measured; IntervalSec records the
+// effective cadence the row was taken at (review decision 14).
 type CheckRow struct {
-	TenantID   uint64
-	MonitorID  uint64
-	TS         time.Time
-	Region     string
-	OK         bool
-	StatusCode uint16
-	ErrorClass string
-	DNSMs      uint32
-	ConnectMs  uint32
-	TLSMs      uint32
-	TTFBMs     uint32
-	TotalMs    uint32
-	BodyHash   uint64 // same int64 wrap as LogRow.Fingerprint
+	TargetID    uint64
+	IntervalSec uint32
+	TS          time.Time
+	Region      string
+	OK          bool
+	StatusCode  uint16
+	ErrorClass  string
+	DNSMs       uint32
+	ConnectMs   uint32
+	TLSMs       uint32
+	TTFBMs      uint32
+	TotalMs     uint32
+	BodyHash    uint64 // same int64 wrap as LogRow.Fingerprint
 }
 
 // MetricRow is one row of the metrics table, written by the ingest batcher
@@ -151,18 +154,24 @@ func (s *Store) InsertEvents(ctx context.Context, rows []EventRow) error {
 		})
 }
 
-// InsertChecks writes a batch of check rows.
+// InsertChecks writes a batch of check rows. A failed insert is logged with
+// the error and the row count, never silently discarded (the plan's
+// no-silent-loss rule); the error still travels to callers that want it.
 func (s *Store) InsertChecks(ctx context.Context, rows []CheckRow) error {
-	return copyFrom(ctx, s.pool, "checks",
-		[]string{"tenant_id", "monitor_id", "ts", "region", "ok", "status_code",
+	err := copyFrom(ctx, s.pool, "checks",
+		[]string{"target_id", "interval_sec", "ts", "region", "ok", "status_code",
 			"error_class", "dns_ms", "connect_ms", "tls_ms", "ttfb_ms", "total_ms", "body_hash"},
 		rows, func(r CheckRow) []any {
 			// int columns take a Go int (not int64): binary COPY encodes each
 			// value against the column's own OID.
-			return []any{int64(r.TenantID), int64(r.MonitorID), r.TS, r.Region, r.OK,
+			return []any{int64(r.TargetID), int(r.IntervalSec), r.TS, r.Region, r.OK,
 				int(r.StatusCode), r.ErrorClass, int(r.DNSMs), int(r.ConnectMs),
 				int(r.TLSMs), int(r.TTFBMs), int(r.TotalMs), int64(r.BodyHash)}
 		})
+	if err != nil {
+		slog.Error("checks insert failed", "err", err, "rows", len(rows))
+	}
+	return err
 }
 
 // InsertMetrics writes a batch of metric rows.
