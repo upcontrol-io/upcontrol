@@ -151,6 +151,23 @@ func (q *Queries) RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (int
 	return result.RowsAffected(), nil
 }
 
+const revokeProjectAPIKeys = `-- name: RevokeProjectAPIKeys :execrows
+UPDATE api_key
+   SET state = 'revoked', revoked_at = now()
+ WHERE project_id = $1 AND state <> 'revoked'
+`
+
+// Every key of one project that still works, at once: the door a frozen
+// project keeps, since no by-id door reaches a project no session stands in.
+// Marked, never deleted, like RevokeAPIKey.
+func (q *Queries) RevokeProjectAPIKeys(ctx context.Context, projectID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeProjectAPIKeys, projectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const rotateAPIKey = `-- name: RotateAPIKey :one
 WITH old AS (
     UPDATE api_key

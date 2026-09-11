@@ -12,12 +12,16 @@ import (
 )
 
 const countMonitorsByTenant = `-- name: CountMonitorsByTenant :one
-SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat'
+SELECT count(*)::int FROM monitor m
+  JOIN project p ON p.id = m.project_id AND p.frozen_at IS NULL
+ WHERE m.tenant_id = $1 AND m.kind <> 'heartbeat'
 `
 
 // HTTP checks are the one counted axis (new-plan.md §5.2). A heartbeat costs us
 // nothing to run — the customer's job calls us — so counting one against the
-// plan fires a paid wall on an axis the product gives away.
+// plan fires a paid wall on an axis the product gives away. A frozen project's
+// checks hold no live slot: the budget sweep's predicate, so gate, bar and
+// sweep count one set.
 func (q *Queries) CountMonitorsByTenant(ctx context.Context, tenantID int64) (int32, error) {
 	row := q.db.QueryRow(ctx, countMonitorsByTenant, tenantID)
 	var column_1 int32
@@ -30,7 +34,7 @@ INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, keywo
 VALUES ($1, $2, $3,
         $4, $5, $6, $7,
         $8, $9)
-RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, created_at
+RETURNING id, public_id, kind, name, target, keyword, interval_sec, ping_token, paused, paused_by, created_at
 `
 
 type CreateMonitorParams struct {
@@ -54,6 +58,8 @@ type CreateMonitorRow struct {
 	Keyword     *string
 	IntervalSec int32
 	PingToken   *string
+	Paused      bool
+	PausedBy    *string
 	CreatedAt   pgtype.Timestamptz
 }
 
@@ -79,6 +85,8 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (C
 		&i.Keyword,
 		&i.IntervalSec,
 		&i.PingToken,
+		&i.Paused,
+		&i.PausedBy,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -288,7 +296,7 @@ func (q *Queries) ListMonitorsByProject(ctx context.Context, projectID int64) ([
 
 const listMonitorsByTenant = `-- name: ListMonitorsByTenant :many
 SELECT m.id, m.public_id, m.kind, m.name, m.target, m.keyword,
-       m.interval_sec, m.availability_target, m.paused, m.paused_by, m.ping_token, m.created_at,
+       m.interval_sec, m.availability_target, m.paused, m.ping_token, m.created_at,
        tf.status, tf.ssl_expires_at, tf.domain_expires_at, tf.last_check_at
   FROM monitor m
   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
@@ -306,7 +314,6 @@ type ListMonitorsByTenantRow struct {
 	IntervalSec        int32
 	AvailabilityTarget pgtype.Numeric
 	Paused             bool
-	PausedBy           *string
 	PingToken          *string
 	CreatedAt          pgtype.Timestamptz
 	Status             *string
@@ -334,7 +341,6 @@ func (q *Queries) ListMonitorsByTenant(ctx context.Context, tenantID int64) ([]L
 			&i.IntervalSec,
 			&i.AvailabilityTarget,
 			&i.Paused,
-			&i.PausedBy,
 			&i.PingToken,
 			&i.CreatedAt,
 			&i.Status,

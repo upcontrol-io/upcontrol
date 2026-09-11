@@ -3,7 +3,8 @@
 // The broadcast paid wall (plan_entitlement.telegram_rooms): a group redeem on
 // Free is refused with the transaction rolled back — the invite survives for a
 // private chat and no channel row exists — while the same link on a paid plan
-// connects the group as a broadcast destination.
+// connects the group as a broadcast destination. A frozen project refuses
+// every redeem the same way.
 // Run: UC_TEST_POSTGRES=... go test -tags=integration ./internal/channel/telegram/...
 package telegram
 
@@ -85,5 +86,52 @@ func TestGroupRedeemPaidWall(t *testing.T) {
 	}
 	if !redeemed() {
 		t.Fatal("the successful redeem left the invite unredeemed")
+	}
+}
+
+// A frozen project's team does not change: a private redeem is refused whole,
+// nothing linked and the link left unredeemed, and the same link connects
+// once the project is live again.
+func TestFrozenProjectRedeemRefused(t *testing.T) {
+	b, tenantID, projectID := openTelegramDB(t)
+	ctx := context.Background()
+	inviterID := seedOwner(t, b, tenantID, projectID, "active")
+	payload := seedUnboundInvite(t, b, tenantID, projectID, inviterID)
+	tgID := time.Now().UnixNano() % 1_000_000_000
+	destinations := func() int {
+		var n int
+		if err := b.pool.Raw().QueryRow(ctx,
+			`SELECT count(*) FROM alert_channel WHERE project_id = $1 AND kind = 'telegram'`,
+			projectID).Scan(&n); err != nil {
+			t.Fatalf("count destinations: %v", err)
+		}
+		return n
+	}
+	redeemed := func() bool {
+		var done bool
+		if err := b.pool.Raw().QueryRow(ctx,
+			`SELECT redeemed_at IS NOT NULL FROM telegram_invite WHERE token_hash = $1`,
+			InviteTokenHash(payload)).Scan(&done); err != nil {
+			t.Fatalf("read invite: %v", err)
+		}
+		return done
+	}
+	setFrozen := func(frozen bool) {
+		t.Helper()
+		if _, err := b.pool.Raw().Exec(ctx,
+			`UPDATE project SET frozen_at = CASE WHEN $2 THEN now() END WHERE id = $1`, projectID, frozen); err != nil {
+			t.Fatalf("set frozen=%v: %v", frozen, err)
+		}
+	}
+
+	setFrozen(true)
+	startFrom(ctx, b, tgID, payload)
+	if destinations() != 0 || redeemed() {
+		t.Fatalf("a redeem into a frozen project connected %d destinations (redeemed=%v)", destinations(), redeemed())
+	}
+	setFrozen(false)
+	startFrom(ctx, b, tgID, payload)
+	if destinations() != 1 || !redeemed() {
+		t.Fatalf("the same link on the live project connected %d destinations (redeemed=%v), want 1", destinations(), redeemed())
 	}
 }

@@ -58,3 +58,11 @@ SELECT count(*) FROM api_key
 UPDATE api_key
    SET state = 'revoked', revoked_at = now()
  WHERE id = sqlc.arg(id) AND project_id = sqlc.arg(project_id) AND state <> 'revoked';
+
+-- name: RevokeProjectAPIKeys :execrows
+-- Every key of one project that still works, at once: the door a frozen
+-- project keeps, since no by-id door reaches a project no session stands in.
+-- Marked, never deleted, like RevokeAPIKey.
+UPDATE api_key
+   SET state = 'revoked', revoked_at = now()
+ WHERE project_id = sqlc.arg(project_id) AND state <> 'revoked';

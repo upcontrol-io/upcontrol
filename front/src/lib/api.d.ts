@@ -377,6 +377,15 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 402: components["responses"]["PaymentRequired"];
+                /** @description `no_current_project`: the caller reaches no live project in this workspace (every one they reach is frozen), so there is nothing to add the check to. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -429,6 +438,7 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -467,11 +477,13 @@ export interface paths {
                     content?: never;
                 };
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
                 404: components["responses"]["NotFound"];
             };
         };
         options?: never;
         head?: never;
+        /** @description 402 when the check lives in a frozen project, and on `paused: false` for a check the plan paused (`pausedBy: plan`): only the plan lifts that pause. */
         patch: {
             parameters: {
                 query?: never;
@@ -497,6 +509,7 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -622,7 +635,7 @@ export interface paths {
         head?: never;
         /**
          * Pause or resume a connected source.
-         * @description Pausing keeps the row and stops reading it. Only sources the tenant connected can be paused: `src_checks` and `src_logs` are derived from what has arrived and answer 400.
+         * @description Pausing keeps the row and stops reading it. Only sources the tenant connected can be paused: `src_checks` and `src_logs` are derived from what has arrived and answer 400. A source outside the session's current project answers 404, on this door and on DELETE.
          */
         patch: {
             parameters: {
@@ -655,6 +668,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
             };
         };
         trace?: never;
@@ -747,6 +761,15 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 /** @description Not the workspace owner (`owner_only`). A guest invited to the project, even with the `login` role, cannot delete it. */
                 403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `no_current_project`: every project left in the workspace is frozen, so there is no current project to delete, and closing the account from here would take every snapshot with it. */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -888,7 +911,75 @@ export interface paths {
                     content?: never;
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description `plan_limit_exceeded` — the project is a frozen snapshot; the switch is the one door into it, so the wall lives here. For the workspace's owner `upgrade.plan` names the cheapest plan that carries every project the workspace holds; a guest gets the reason alone, since no plan they can buy thaws somebody else's project. */
+                402: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 /** @description Not one of this tenant's projects (`unknown_project`). */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/projects/{id}/keys/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke every working key of one of the caller's own projects.
+         * @description Addressed by project id rather than the session's current project, because a frozen project is one no session stands in: without this door a leaked key in a snapshot could only be withdrawn by buying a plan. Frozen or live, every active or rotating key of the project is revoked at once, with no overlap window. The rows are kept and marked, never deleted. Issuing and rotating stay behind the freeze wall: a frozen project gets no new credential. Owner only.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description The project's id as GET /v1/projects lists it. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Revoked (a project with no working key answers the same). */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description `owner_only`: the caller reaches the project but does not own its workspace. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not one of the caller's projects (`unknown_project`). */
                 404: {
                     headers: {
                         [name: string]: unknown;
@@ -1346,6 +1437,15 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description `plan_limit_exceeded` — the destination carries `mutedBy: plan`: real alerts skip it, so a test that went through would lie. */
+                402: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 404: components["responses"]["NotFound"];
             };
         };
@@ -3294,7 +3394,9 @@ export interface components {
         };
         MeResponse: {
             account: components["schemas"]["Account"];
-            /** @description The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15). */
+            /** @description Whether the session's person owns the session's workspace. Present even when `project` is null, which is exactly when `project.owned` cannot say it (every project the caller reaches there is frozen). */
+            owner: boolean;
+            /** @description The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15) or every project the caller reaches in it is frozen. Never a frozen project. */
             project: components["schemas"]["Project"] | null;
         };
         ProjectListItem: {
@@ -3304,6 +3406,8 @@ export interface components {
             domain: string;
             /** Format: date-time */
             createdAt: string;
+            /** @description The freeze sweeper's snapshot: a plan buys live projects, the rest stop running but keep everything and come back on upgrade. The row stays in the list for members — a project vanishing from a guest's list reads as deleted data. */
+            frozen: boolean;
             /** @description Whether the caller owns the workspace this project lives in. */
             owned: boolean;
             role: components["schemas"]["RecipientRole"];
@@ -3318,6 +3422,13 @@ export interface components {
         Monitor: {
             /** @example mon_1 */
             id: string;
+            /** @description Whether the check runs. The budget sweeper pauses the checks past the plan's http_checks, newest first, exactly like an owner's own pause does; pausedBy says whose pause it is. */
+            paused: boolean;
+            /**
+             * @description Present only on the budget sweeper's pause: the row's card words it as the plan's wall with a resume-through-upgrade door, and a PATCH `paused: false` on it answers 402. It lifts within a minute of the plan carrying the check again. Absent means the owner paused it themselves.
+             * @enum {string}
+             */
+            pausedBy?: "plan";
             /** @enum {string} */
             type: "Website" | "Heartbeat";
             name: string;
@@ -3472,7 +3583,7 @@ export interface components {
         };
         /** @enum {string} */
         ChannelKind: "telegram" | "email" | "discord" | "slack" | "webhook";
-        /** @description What this channel is notified about (docs/plans/channel-notify-settings.md). The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix. */
+        /** @description What this channel is notified about. The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix. */
         NotifySettings: {
             /** @description The incident-open page. Default true — what already sends today. */
             websiteDown: boolean;
@@ -3497,6 +3608,11 @@ export interface components {
              * @description Present only while a /mute window is still running — the moment the channel's alerts resume; never sent for a channel that is live or a window that has already expired.
              */
             mutedUntil?: string;
+            /**
+             * @description Present when the plan no longer carries this Telegram destination: a group or channel while the plan has no Telegram rooms, or a destination past the plan's Telegram recipients (the oldest connections keep their seats). Delivery skips it, and its test send answers 402.
+             * @enum {string}
+             */
+            mutedBy?: "plan";
             /** @description One extra line, only where the channel behaves differently. */
             note?: string;
             notify?: components["schemas"]["NotifySettings"];
@@ -3839,14 +3955,21 @@ export interface components {
              * @example 300
              */
             minIntervalSec?: number;
-            httpChecks: components["schemas"]["UsedMax"];
+            /** @description `used` counts the HTTP checks of the workspace's live projects, the set the create gate counts and the budget ranks, so it includes the ones the budget paused. */
+            httpChecks: components["schemas"]["UsedMax"] & {
+                /** @description Checks in live projects the budget paused because the plan carries fewer than the workspace holds (`pausedBy: plan`). They resume within a minute of the plan carrying them again. Absent when zero. */
+                pausedByPlan?: number;
+            };
             logWindow: components["schemas"]["LogWindow"];
             telegramRecipients?: components["schemas"]["UsedMax"];
             incidentHistoryDays: number;
             /** @description How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back. */
             historyDays?: number;
-            /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. */
-            projects?: components["schemas"]["UsedMax"];
+            /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. `used` counts LIVE projects only, because live projects are what a plan buys. */
+            projects?: components["schemas"]["UsedMax"] & {
+                /** @description The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero. */
+                frozen?: number;
+            };
             /** @description Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time. */
             telegramRooms?: boolean;
         };
@@ -3873,6 +3996,11 @@ export interface components {
             domain?: string;
             /** @description Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify. */
             domainVerified?: boolean;
+            /**
+             * Format: date-time
+             * @description Present while the plan no longer carries a custom domain and the grace period runs: the moment the domain is unbound. The page stays on its own address. Absent when the plan carries the domain.
+             */
+            domainLapsesAt?: string;
             components: components["schemas"]["PublicComponent"][];
             network?: components["schemas"]["NetworkTile"][];
             showNetwork: boolean;
@@ -3887,6 +4015,8 @@ export interface components {
             hostVerifiedAt?: string | null;
             /** @description The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null. */
             verificationToken?: string | null;
+            /** @description The full DNS record NAME the worker resolves for verification (_upcontrol-verify.<registrable domain>), composed server-side: a project on a deeper subdomain must publish on the registrable domain, and the front cannot compute one without the public suffix list. Null on hosts the suffix list cannot fold. */
+            verificationRecord?: string | null;
             /** @description Echo of the removal token when one was already issued through the page's own door. Never minted here. */
             removalToken?: string | null;
             /** @description The host's public page address on our link, when this project rides one (host pages and their suffixed siblings). */
@@ -4039,7 +4169,7 @@ export interface components {
             slug?: string;
             /**
              * Format: int32
-             * @description How many checks now exist, after the plan's ceiling applied.
+             * @description How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused.
              */
             watching?: number;
             login?: components["schemas"]["WatchLogin"];

@@ -1,6 +1,6 @@
 //go:build integration
 
-// The projects axis endpoints (docs/plans/projects-axis.md T6) and the
+// The projects axis endpoints and the
 // current-project resolver's four-state matrix, asserted against a real
 // Postgres: list/switch over the mounted writeAPI routes, the 402 wall with
 // its upgrade.plan, missing_domain, the provisioning POST owes a new project,

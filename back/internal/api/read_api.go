@@ -17,6 +17,7 @@ import (
 
 	"go.upcontrol.io/back/internal/account/session"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
+	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
@@ -74,12 +75,18 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		plan = "Free"
 	}
 	ent, _ := h.pool.Queries().GetPlanEntitlement(ctx, plan)
-	used, _ := h.pool.Queries().CountMonitors(ctx, tenantID)
+	used, _ := h.pool.Queries().CountMonitorsByTenant(ctx, tenantID)
+	held, _ := h.pool.Queries().PlanCapacityHeld(ctx, tenantID)
 	tgUsed, tgMax, _ := countTelegramRecipients(ctx, h.pool, tenantID)
 	personID := s.PersonID
 	owned, _ := h.pool.Queries().IsTenantOwner(ctx, sqlc.IsTenantOwnerParams{
 		TenantID: tenantID, PersonID: &personID,
 	})
+	// Zero is silence: nothing the plan holds back is not a number to print.
+	checks := map[string]int{"used": int(used), "max": int(ent.HttpChecks)}
+	if held.PausedByPlan > 0 {
+		checks["pausedByPlan"] = int(held.PausedByPlan)
+	}
 	resp := map[string]any{
 		"plan": plan,
 		// Inside somebody else's project the plan is a fact, not a purchase.
@@ -87,7 +94,7 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		// How often this plan may check: the picker needs the wall, and a
 		// hardcoded 5m would be a second home for this row's number.
 		"minIntervalSec": int(ent.MinIntervalSec),
-		"httpChecks":     map[string]int{"used": int(used), "max": int(ent.HttpChecks)},
+		"httpChecks":     checks,
 		// Depth, not consumption — the ring has no remainder, so the client says
 		// it in a sentence. Both numbers are the plan's own entitlement row.
 		"logWindow":           map[string]any{"lines": int(ent.WindowLines), "approxHours": float64(ent.WindowHours)},
@@ -105,9 +112,14 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		resp["historyDays"] = int(*ent.HistoryDays)
 	}
 	// Absent when the plan is unlimited (Self-hosted): a bar needs a remainder.
+	// A plan buys LIVE projects, so the frozen ones are not used; they ride
+	// alongside, like the checks the budget paused.
 	if ent.Projects != nil {
-		projUsed, _ := h.pool.Queries().CountProjectsByTenant(ctx, tenantID)
-		resp["projects"] = map[string]int{"used": int(projUsed), "max": int(*ent.Projects)}
+		projects := map[string]int{"used": int(held.LiveProjects), "max": int(*ent.Projects)}
+		if held.FrozenProjects > 0 {
+			projects["frozen"] = int(held.FrozenProjects)
+		}
+		resp["projects"] = projects
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
@@ -115,6 +127,7 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 // GET /v1/channels — connected channels + what is still connectable.
 func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
 	rows, _ := h.pool.Queries().ListChannelsByProject(r.Context(), projectID)
+	muted := incident.MutedByPlan(r.Context(), h.pool.Queries(), tenantID, rows)
 	channels := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		ch := map[string]any{
@@ -134,6 +147,11 @@ func (h *readAPI) channels(w http.ResponseWriter, r *http.Request, tenantID, pro
 		// render "muted" over a channel whose alerts already flow.
 		if row.MutedUntil.Valid && row.MutedUntil.Time.After(time.Now()) {
 			ch["mutedUntil"] = row.MutedUntil.Time.UTC().Format(time.RFC3339)
+		}
+		// Delivery skips what the plan's Telegram seats or rooms exclude; the
+		// screen says so instead of a destination that looks connected.
+		if muted[row.ID] {
+			ch["mutedBy"] = "plan"
 		}
 		channels = append(channels, ch)
 	}

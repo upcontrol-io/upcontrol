@@ -1,7 +1,6 @@
 //go:build integration
 
-// The /v1/me fallback join (docs/plans/projects-axis.md T7; the [T1+T2]
-// Critic finding): a session whose pick was deleted or reparented away still
+// The /v1/me fallback join: a session whose pick was deleted or reparented away still
 // answers with the tenant's lowest-id project; a zero-project tenant answers
 // `"project":null` on the wire (Decision 15) while the query row keeps NULL
 // project columns; DELETE FROM project nulls session.project_id (the FK's ON
@@ -207,8 +206,8 @@ func TestMeZeroProjectsAnswersNullProject(t *testing.T) {
 
 	// On the wire the handler answers "project":null (Decision 15), not a
 	// zero-valued object — cookie door first, then the identity conversion.
-	if body := f.me(t); string(body["project"]) != "null" {
-		t.Fatalf(`/v1/me project = %s, want null`, body["project"])
+	if body := f.me(t); string(body["project"]) != "null" || string(body["owner"]) != "true" {
+		t.Fatalf(`/v1/me project = %s owner = %s, want null and true: the owner is still named with no project`, body["project"], body["owner"])
 	}
 	rec := httptest.NewRecorder()
 	sm := session.New(f.pool, 0, nil).WithFixedIdentity(f.personID, f.tenantID)
@@ -223,8 +222,8 @@ func TestMeZeroProjectsAnswersNullProject(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode identity /v1/me body: %v", err)
 	}
-	if string(body["project"]) != "null" {
-		t.Fatalf(`identity /v1/me project = %s, want null (the GetMeByIdentity conversion must emit nil too)`, body["project"])
+	if string(body["project"]) != "null" || string(body["owner"]) != "true" {
+		t.Fatalf(`identity /v1/me project = %s owner = %s, want null and true (the GetMeByIdentity conversion must emit nil too)`, body["project"], body["owner"])
 	}
 }
 

@@ -44,6 +44,13 @@ func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusUnauthorized, "no_session")
 		return
 	}
+	// A whole project's key set, addressed by project rather than by the
+	// session's scope: a frozen project is one no session stands in, and a
+	// key that leaked there must not take a plan to withdraw.
+	if strings.HasPrefix(r.URL.Path, "/v1/projects/") {
+		h.revokeProject(w, r, s, r.PathValue("id"))
+		return
+	}
 	// The key is the project's, not the workspace's: a sibling project keeps
 	// its own.
 	projectID := currentProjectID(r.Context(), h.pool, s, s.TenantID)
@@ -230,6 +237,37 @@ func (h *keys) revoke(w http.ResponseWriter, r *http.Request, projectID int64, i
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeProject answers POST /v1/projects/{id}/keys/revoke. The id is matched
+// against the rows this person reaches as the list encodes them, as the
+// switch does, so a stranger's id and an unknown one read the same 404. Owner
+// only: an Admin manages keys inside the session's scope, and this door
+// reaches past it into any project of the workspace, frozen ones included.
+func (h *keys) revokeProject(w http.ResponseWriter, r *http.Request, s sqlc.Session, id string) {
+	ctx := r.Context()
+	personID := s.PersonID
+	rows, err := h.pool.Queries().ListProjectsForPerson(ctx, &personID)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	for _, row := range rows {
+		if uuidStr(row.PublicID) != id {
+			continue
+		}
+		if !row.Owned {
+			writeAPIErr(w, http.StatusForbidden, "owner_only")
+			return
+		}
+		if _, err := h.pool.Queries().RevokeProjectAPIKeys(ctx, row.ID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "revoke_failed")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeAPIErr(w, http.StatusNotFound, "unknown_project")
 }
 
 func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {

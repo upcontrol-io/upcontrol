@@ -9,7 +9,7 @@ VALUES (sqlc.arg(token_hash), sqlc.arg(person_id), sqlc.arg(tenant_id), sqlc.nar
 -- name: GetSessionByToken :one
 -- Only non-expired sessions match. last_seen_at is touched separately.
 -- project_id rides along: every /v1/* request resolves the current project
--- off the session (docs/plans/projects-axis.md), so it must survive this read.
+-- off the session, so it must survive this read.
 -- Column order follows the table, so sqlc returns the Session model itself
 -- rather than a one-off row struct.
 SELECT id, token_hash, person_id, tenant_id, project_id, created_at, last_seen_at, expires_at
@@ -48,7 +48,9 @@ RETURNING id, public_id, email, name;
 -- session. `owned` says whether the reader owns the workspace; member_role is
 -- their role in the CURRENT project, and the owner always answers 'login'.
 -- The project is the session's own while it still belongs to the workspace and
--- the reader can reach it, else the lowest project there they can reach.
+-- the reader can reach it, else the lowest project there they can reach - a
+-- frozen project never, the predicate ReachableProjectInTenant uses, so
+-- /v1/me names the project every read serves (none: project null).
 SELECT
   p.id       AS person_id,
   p.public_id AS person_public_id,
@@ -70,12 +72,12 @@ JOIN tenant t ON t.id = s.tenant_id
 LEFT JOIN person o ON o.id = t.owner_person_id
 LEFT JOIN project pr ON pr.id = COALESCE(
   (SELECT x.id FROM project x
-    WHERE x.id = s.project_id AND x.tenant_id = t.id
+    WHERE x.id = s.project_id AND x.tenant_id = t.id AND x.frozen_at IS NULL
       AND (t.owner_person_id = p.id
            OR EXISTS (SELECT 1 FROM project_member m
                        WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active'))),
   (SELECT min(x.id) FROM project x
-    WHERE x.tenant_id = t.id
+    WHERE x.tenant_id = t.id AND x.frozen_at IS NULL
       AND (t.owner_person_id = p.id
            OR EXISTS (SELECT 1 FROM project_member m
                        WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active'))))
@@ -88,7 +90,7 @@ LIMIT 1;
 -- (UC_AUTH=none) has no session row, so the token-hash join above can never
 -- answer for it. Columns mirror GetMe exactly — the handler converts between
 -- the two generated row types. session_project_id is the NULL literal (no
--- session row exists here) and the project is the lowest reachable one.
+-- session row exists here) and the project is the lowest reachable live one.
 SELECT
   p.id       AS person_id,
   p.public_id AS person_public_id,
@@ -109,7 +111,7 @@ JOIN tenant t ON t.id = sqlc.arg(tenant_id)
 LEFT JOIN person o ON o.id = t.owner_person_id
 LEFT JOIN project pr ON pr.id = (
   SELECT min(x.id) FROM project x
-   WHERE x.tenant_id = t.id
+   WHERE x.tenant_id = t.id AND x.frozen_at IS NULL
      AND (t.owner_person_id = p.id
           OR EXISTS (SELECT 1 FROM project_member m
                       WHERE m.project_id = x.id AND m.person_id = p.id AND m.status = 'active')))
@@ -119,10 +121,12 @@ LIMIT 1;
 
 -- name: LastSessionScope :one
 -- Where this person was last working: a new session reopens on it instead of
--- on whichever project happens to sort lowest.
-SELECT tenant_id, project_id FROM session
- WHERE person_id = $1 AND project_id IS NOT NULL
- ORDER BY last_seen_at DESC LIMIT 1;
+-- on whichever project happens to sort lowest. A frozen project is never
+-- reopened: the session would name a project no read serves.
+SELECT s.tenant_id, s.project_id FROM session s
+  JOIN project p ON p.id = s.project_id AND p.frozen_at IS NULL
+ WHERE s.person_id = $1
+ ORDER BY s.last_seen_at DESC LIMIT 1;
 
 -- name: OwnTenant :one
 -- The workspace this person owns; no row means they own none yet.
@@ -141,24 +145,22 @@ SELECT p.id, p.tenant_id,
    AND (t.owner_person_id = sqlc.arg(person_id) OR m.person_id IS NOT NULL);
 
 -- name: FirstReachableProject :one
--- Their own workspace's lowest project, else the lowest one they were invited
--- to: where a session lands when it has no remembered scope.
+-- Their own workspace's lowest live project, else the lowest live one they
+-- were invited to: where a session lands when it has no remembered scope.
 SELECT p.id, p.tenant_id
   FROM project p
   JOIN tenant t ON t.id = p.tenant_id
   LEFT JOIN project_member m ON m.project_id = p.id AND m.person_id = sqlc.arg(person_id) AND m.status = 'active'
- WHERE t.owner_person_id = sqlc.arg(person_id) OR m.person_id IS NOT NULL
+ WHERE (t.owner_person_id = sqlc.arg(person_id) OR m.person_id IS NOT NULL)
+   AND p.frozen_at IS NULL
  ORDER BY (t.owner_person_id = sqlc.arg(person_id)) DESC, p.id
  LIMIT 1;
 
 -- name: ReachableProjectInTenant :one
 -- The session's current-project resolver: the session's own pick while it is
 -- still reachable, else the lowest reachable project in that workspace, else 0.
--- A FROZEN project is never a landing place (docs/plans/trial-and-free.md):
--- neither the pick nor the fallback resolves onto one, so every
--- currentProjectID consumer serves a live project — or 0, which renders empty
--- and lets the front draw its lock list. Entering a frozen project goes
--- through POST /v1/project/switch, which answers 402 instead.
+-- A FROZEN project is never a landing place, pick or fallback; entering one
+-- goes through POST /v1/project/switch, which answers 402.
 SELECT COALESCE(
   (SELECT x.id FROM project x
     WHERE x.id = sqlc.arg(pick) AND x.tenant_id = sqlc.arg(tenant_id)
@@ -175,7 +177,11 @@ SELECT COALESCE(
 
 -- name: ActivateInvites :many
 -- Redeeming an identity accepts every project invite waiting on it, and the
--- rows come back so the caller knows where the session may now land.
+-- rows come back so the caller knows where the session may now land. An
+-- invite into a frozen project stays pending: the snapshot's team does not
+-- change until the plan carries the project again.
 UPDATE project_member SET status = 'active'
  WHERE person_id = $1 AND status = 'pending'
+   AND NOT EXISTS (SELECT 1 FROM project p
+                    WHERE p.id = project_member.project_id AND p.frozen_at IS NOT NULL)
 RETURNING project_id, tenant_id;

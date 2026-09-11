@@ -6,6 +6,93 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-09-11
+
+A plan now buys live capacity, and the data stays the customer's. Migration 010 adds
+`project.frozen_at`, `monitor.paused_by` and `status_page.domain_lapsed_at`, and makes the
+cadence ladder (`_uc_effective_interval`) ignore frozen projects' subscriptions.
+
+### Added
+- **One `plan-capacity` ucworker job** runs at start and then every minute, in order: the
+  project freeze, the check budget, the custom-domain grace.
+- **Project freeze.** A workspace over `plan_entitlement.projects` keeps that many projects live
+  and freezes the rest as snapshots. A live project stays live, so the pick is made once;
+  between equals the project with more running checks wins, then the newest log or event. A
+  frozen project keeps its configuration and keeps ingesting, but its checks stop and nothing
+  is delivered from it (queued deliveries die as `project_frozen`). Its incidents and its
+  dashboard history (`series_1h`) up to the freeze are exempt from the purge and the trim.
+  Incidents on targets that are still probed keep feeding its public status page, and an
+  outage still open when the project thaws is delivered then. `GET /v1/projects` rows carry
+  `frozen`. `POST /v1/project/switch` into a frozen project
+  answers 402, and PATCH or DELETE of its checks answers 402 too. The owner's 402 names the
+  cheapest plan that carries every project; a guest's names none. The session resolver, `/v1/me`
+  and sign-in never land on a frozen project: with no live project `/v1/me` answers
+  `"project": null`, and `DELETE /v1/project` and `POST /v1/monitors` answer 409
+  `no_current_project`. Deleting the live project promotes a snapshot in the same request.
+  `/v1/me` carries a top-level `owner`, so the owner is named even when `project` is null.
+- **`POST /v1/projects/{id}/keys/revoke`** revokes every working key of one of the caller's
+  own projects, frozen ones included, so a key that leaked from a snapshot is withdrawn
+  without buying a plan. Owner only; the rows are kept. Issuing and rotating a frozen
+  project's keys stay walled.
+- **Check budget.** Checks past `plan_entitlement.http_checks` are paused, newest first, and
+  resume within a minute of the plan carrying them again. `Monitor` rows carry `paused`, and
+  `pausedBy: "plan"` marks the budget's own pause. `PATCH {"paused": false}` on such a check
+  answers 402. A check the budget pauses has its open incident closed as `plan_paused` ("Paused
+  by the plan's check limit"), because nothing measures it any more. Nothing measured a
+  recovery either, so the public status page leaves such an incident out and its 15-minute
+  follow-up dies as `closed_unmeasured`. `GET /v1/plan` says what the plan holds back:
+  `httpChecks.pausedByPlan` (the budget's pauses in live projects) and `projects.frozen`,
+  both absent at zero.
+- **Telegram seats and rooms at delivery.** Past `telegram_recipients`, the newest
+  destinations are muted (the oldest keep their seats), and groups and channels are muted while
+  the plan has no `telegram_rooms`. This applies to incident pages and to error-log alerts. The
+  channel list marks such a destination `mutedBy: "plan"`, and its test send answers 402. An
+  unreadable plan mutes nothing. The seats are counted over each project's own destinations,
+  while the connect gate counts the whole workspace, so a workspace with several live projects
+  can keep more destinations audible than the plan's seats after a downgrade.
+- **Custom-domain grace.** When the plan stops carrying custom domains, a status page's domain
+  keeps answering for 3 days (the Caddy ask included) and is then unbound; the page stays on
+  its own address. The settings read carries `domainLapsesAt` while the grace runs.
+
+### Changed
+- **Contract:** `Monitor.paused`, `ProjectListItem.frozen` and `MeResponse.owner` are required. New 402s:
+  `PATCH /v1/checks/{id}` and `PATCH`/`DELETE /v1/monitors/{id}` (frozen project, plan-paused
+  unpause), `POST /v1/project/switch` (frozen project) and `POST /v1/channels/{id}/test` (muted
+  destination). New 409 `no_current_project` on `POST /v1/monitors` and `DELETE /v1/project`.
+  `PATCH /v1/sources/{id}` declares its 404. New optional fields: `Monitor.pausedBy`,
+  `AlertChannel.mutedBy`, `StatusPageResponse.domainLapsesAt`, `PlanResponse.httpChecks.pausedByPlan`,
+  `PlanResponse.projects.frozen`.
+- **The check count skips frozen projects.** The create gate and `GET /v1/plan`'s
+  `httpChecks.used` count only live projects' checks, the same set the budget ranks.
+  `projects.used` counts live projects only.
+- **`POST /public/watch` spends the check budget.** Every arm that subscribes into an existing
+  workspace (the e-mail arm, the signed-in arm, a reused unclaimed page) creates new checks
+  only while the plan's `http_checks` has room. Rows the project already watches cost nothing,
+  the rest are left out, and `watching` counts what the project watches.
+- **`POST /public/watch` signed in creates the project in the caller's own workspace**, like
+  `POST /v1/projects`, never in the one the session stands in, and the session follows it
+  there. A guest standing in somebody else's workspace no longer spends its owner's projects
+  and checks.
+- **`POST /v1/project/switch` is open to every role.** It changes where the session stands,
+  not a project, so a Member may switch, and a guest whose every project in a workspace is
+  frozen can switch back out.
+- **The public status page lists an open incident only while its target is measured** (within
+  three of its intervals, at the slower of the cadence at open and the target's current one).
+  It leaves an unmeasured one out and never shows it as resolved.
+- **`PATCH` and `DELETE /v1/sources/{id}` reach only the current project's sources** (404
+  otherwise).
+
+### Self-hosting
+- The `Self-hosted` plan carries 1000 checks and unlimited projects, so nothing freezes there
+  and the budget pauses only past 1000 checks. **A tenant on `Free` gets Free's limits**: one
+  live project and three running checks. `UC_SELF_HOSTED=1` puts NEW tenants on
+  `Self-hosted`, but it does not move existing ones. Set it, and move tenants created without
+  it before upgrading:
+  `UPDATE tenant SET plan = 'Self-hosted' WHERE plan = 'Free';`
+- **Rolling back to 0.28.x:** older code never resumes a check the budget paused. Run
+  `UPDATE monitor SET paused = false WHERE paused_by = 'plan';` before pinning an older core.
+  Migration 010's Down runs it first, before it drops `paused_by`.
+
 ## [0.28.1] — 2026-09-10
 
 ### Changed

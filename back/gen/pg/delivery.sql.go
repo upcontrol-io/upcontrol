@@ -74,7 +74,8 @@ func (q *Queries) EnqueueDeliveryAt(ctx context.Context, arg EnqueueDeliveryAtPa
 
 const getChannelForDelivery = `-- name: GetChannelForDelivery :one
 SELECT ac.id, ac.public_id, ac.kind, ac.target, ac.breaker_open_until,
-       ac.recipient_person_id, ac.muted_until, ac.project_id
+       ac.recipient_person_id, ac.muted_until, ac.project_id,
+       EXISTS (SELECT 1 FROM project p WHERE p.id = ac.project_id AND p.frozen_at IS NOT NULL)::bool AS frozen
   FROM alert_channel ac
  WHERE ac.id = $1
 `
@@ -88,8 +89,11 @@ type GetChannelForDeliveryRow struct {
 	RecipientPersonID *int64
 	MutedUntil        pgtype.Timestamptz
 	ProjectID         int64
+	Frozen            bool
 }
 
+// frozen: the channel's project is a snapshot, and a snapshot delivers
+// nothing - not even what was queued before the freeze.
 func (q *Queries) GetChannelForDelivery(ctx context.Context, id int64) (GetChannelForDeliveryRow, error) {
 	row := q.db.QueryRow(ctx, getChannelForDelivery, id)
 	var i GetChannelForDeliveryRow
@@ -102,6 +106,7 @@ func (q *Queries) GetChannelForDelivery(ctx context.Context, id int64) (GetChann
 		&i.RecipientPersonID,
 		&i.MutedUntil,
 		&i.ProjectID,
+		&i.Frozen,
 	)
 	return i, err
 }
@@ -121,7 +126,7 @@ func (q *Queries) GetEmailChannelTarget(ctx context.Context, projectID int64) (s
 
 const getIncidentForFollowUp = `-- name: GetIncidentForFollowUp :one
 SELECT i.status, i.title, i.public_id, coalesce(m.name, '') AS monitor_name,
-       i.detected_at, i.resolved_at
+       i.detected_at, i.resolved_at, i.close_reason
   FROM incident i LEFT JOIN monitor m ON m.id = i.monitor_id
  WHERE i.id = $1
 `
@@ -133,11 +138,13 @@ type GetIncidentForFollowUpRow struct {
 	MonitorName string
 	DetectedAt  pgtype.Timestamptz
 	ResolvedAt  pgtype.Timestamptz
+	CloseReason *string
 }
 
 // The follow-up's facts, read at send time: still open → "still down",
 // resolved → "recovered". The two timestamps are the recovered message's
 // duration line — measured bounds, not a number composed at enqueue time.
+// close_reason separates a measured recovery from a close nothing measured.
 func (q *Queries) GetIncidentForFollowUp(ctx context.Context, id int64) (GetIncidentForFollowUpRow, error) {
 	row := q.db.QueryRow(ctx, getIncidentForFollowUp, id)
 	var i GetIncidentForFollowUpRow
@@ -148,6 +155,7 @@ func (q *Queries) GetIncidentForFollowUp(ctx context.Context, id int64) (GetInci
 		&i.MonitorName,
 		&i.DetectedAt,
 		&i.ResolvedAt,
+		&i.CloseReason,
 	)
 	return i, err
 }

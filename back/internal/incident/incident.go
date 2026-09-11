@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +33,11 @@ const (
 	ReasonRecovered     = "recovered"
 	ReasonMonitorDelete = "monitor_deleted"
 	ReasonByHuman       = "by_human"
+	// ReasonPlanPaused: the budget sweep paused the check, so nothing
+	// measures it any more; an open incident left behind would claim an
+	// outage nobody is watching. Nothing measured a recovery either, so the
+	// public page and the 15-minute follow-up leave such a close out.
+	ReasonPlanPaused = "plan_paused"
 )
 
 // Lifecycle manages incident open/close against the Postgres tables.
@@ -140,36 +147,58 @@ func (l *Lifecycle) open(ctx context.Context, q *sqlc.Queries, monitorID int64, 
 		_ = l.freezeSlice(ctx, row.ID, mon.TenantID, mon.ProjectID)
 	}
 
-	// The facts the row holds, so the alert names what broke; a field the row
-	// does not carry is omitted, never sent as blank. Built once, not per channel.
+	l.notifyChannels(ctx, q, mon.TenantID, mon.ProjectID,
+		downSpec(row.ID, uuidStr(row.PublicID), title, mon.Name, mon.Target, time.Now()))
+
+	return row.ID, true, nil
+}
+
+// downSpec is an availability incident's notification. The facts the row
+// holds, so the alert names what broke; a field the row does not carry is
+// omitted, never sent as blank. Built once, not per channel.
+func downSpec(incidentID int64, publicID, title, monitorName, target string, since time.Time) notifySpec {
 	fields := []deliver.Field{}
-	if mon.Target != "" {
-		fields = append(fields, deliver.Field{Label: "Target", Value: mon.Target, Mono: true})
+	if target != "" {
+		fields = append(fields, deliver.Field{Label: "Target", Value: target, Mono: true})
 	}
 	fields = append(fields, deliver.Field{
 		Label: "Down since",
-		Value: time.Now().UTC().Format("2 Jan 2006, 15:04") + " UTC",
+		Value: since.UTC().Format("2 Jan 2006, 15:04") + " UTC",
 	})
 	payload, _ := json.Marshal(map[string]any{
 		"title":        title,
 		"status":       "down",
-		"incident_id":  uuidStr(row.PublicID),
-		"monitor_name": mon.Name,
+		"incident_id":  publicID,
+		"monitor_name": monitorName,
 		"fields":       fields,
 	})
 	fuPayload, _ := json.Marshal(map[string]any{
-		"incident_id":  uuidStr(row.PublicID),
-		"monitor_name": mon.Name,
+		"incident_id":  publicID,
+		"monitor_name": monitorName,
 	})
-
-	l.notifyChannels(ctx, q, mon.TenantID, mon.ProjectID, notifySpec{
-		incidentID: row.ID,
+	return notifySpec{
+		incidentID: incidentID,
 		payload:    payload,
 		wants:      func(s notifysettings.Settings) bool { return s.WebsiteDown },
 		followup:   fuPayload,
-	})
+	}
+}
 
-	return row.ID, true, nil
+// NotifyThawed delivers the open outages a project recorded while it was
+// frozen: notifyChannels skipped them, and open() never notifies an incident
+// that is already open, so without this an outage spanning the thaw is never
+// paged. Replays are no-ops (EnqueueDelivery dedupes on idem_key).
+func (l *Lifecycle) NotifyThawed(ctx context.Context, projectID int64) error {
+	q := l.pool.Queries()
+	rows, err := q.ListUndeliveredOpenIncidents(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("incident: thawed %d: %w", projectID, err)
+	}
+	for _, r := range rows {
+		l.notifyChannels(ctx, q, r.TenantID, projectID,
+			downSpec(r.ID, uuidStr(r.PublicID), r.Title, r.Name, r.Target, r.DetectedAt.Time))
+	}
+	return nil
 }
 
 // notifySpec is one incident's side of a notification: the payload every
@@ -188,6 +217,12 @@ type notifySpec struct {
 // the caller's transaction when the open rides one: the delivery lands with
 // the incident or not at all.
 func (l *Lifecycle) notifyChannels(ctx context.Context, q *sqlc.Queries, tenantID, projectID int64, n notifySpec) {
+	// A frozen project keeps recording what is still measured (its public
+	// status page reads those incidents) but delivers nothing: this is the one
+	// guard every opener passes through. A failed read delivers.
+	if frozen, err := q.IsProjectFrozen(ctx, projectID); err == nil && frozen {
+		return
+	}
 	// A project's incident reaches that project's destinations and nobody
 	// else's — a sibling project of the same workspace is not an audience.
 	chans, err := q.ListChannelsByProject(ctx, projectID)
@@ -201,43 +236,11 @@ func (l *Lifecycle) notifyChannels(ctx context.Context, q *sqlc.Queries, tenantI
 		plan, _ = q.GetTenantPlan(ctx, tenantID)
 	}
 
-	// The telegram_recipients axis at DELIVERY time (docs/plans/trial-and-
-	// freeze.md): adding a recipient is 402-gated, but a downgrade (or a trial's
-	// end) leaves more connected than the plan carries, and a seat beyond the
-	// limit must not page. One seat per distinct linked person, one per
-	// group/channel destination (recipient_person_id NULL) — the channel-set
-	// shadow of countTelegramRecipients. Rows arrive created_at-first, so the
-	// oldest connections stay audible.
-	// ponytail: channel-set approximation of the workspace-wide person count;
-	// move to that count per enqueue if a discrepancy is ever observed.
-	tgMax := -1
-	tgSeats := 0
-	tgSeen := make(map[int64]bool)
+	muted := MutedByPlan(ctx, q, tenantID, chans)
 	sent := 0
 	for _, ch := range chans {
-		if ch.Kind == "telegram" {
-			if tgMax < 0 { // loaded once, on the first telegram channel
-				tgMax = 0
-				if plan, err := q.GetTenantPlan(ctx, tenantID); err == nil {
-					if ent, err := q.GetPlanEntitlement(ctx, plan); err == nil {
-						tgMax = int(ent.TelegramRecipients)
-					}
-				}
-			}
-			// A person's seat keys on their id (one seat however many
-			// channels), a group/channel destination on its own channel id —
-			// negative so the two key spaces never collide.
-			seat := -ch.ID
-			if ch.RecipientPersonID != nil {
-				seat = *ch.RecipientPersonID
-			}
-			if _, seen := tgSeen[seat]; !seen {
-				if tgSeats >= tgMax {
-					continue // beyond the plan's seats: mute, oldest first kept
-				}
-				tgSeen[seat] = true
-				tgSeats++
-			}
+		if muted[ch.ID] {
+			continue
 		}
 		settings := notifysettings.Resolve(ch.Notify)
 		if !n.wants(settings) {
@@ -274,6 +277,65 @@ func (l *Lifecycle) notifyChannels(ctx context.Context, q *sqlc.Queries, tenantI
 	}
 }
 
+// MutedByPlan answers which of a project's channels the plan silences at
+// DELIVERY time. Adding a Telegram destination is 402-gated, but a downgrade
+// (or a trial's end) leaves more connected than the plan carries: a group or
+// channel (recipient_person_id NULL) is muted while the plan has no
+// telegram_rooms, and past plan_entitlement.telegram_recipients the rest
+// are muted, oldest connections kept. Pass the rows created_at-first, as
+// ListChannelsByProject returns them. An unknown limit mutes nothing: the
+// wall already stood at connect time, and a lost page is the worse error.
+func MutedByPlan(ctx context.Context, q *sqlc.Queries, tenantID int64, chans []sqlc.ListChannelsByProjectRow) map[int64]bool {
+	if !slices.ContainsFunc(chans, func(ch sqlc.ListChannelsByProjectRow) bool { return ch.Kind == "telegram" }) {
+		return nil
+	}
+	plan, err := q.GetTenantPlan(ctx, tenantID)
+	var ent sqlc.PlanEntitlement
+	if err == nil {
+		ent, err = q.GetPlanEntitlement(ctx, plan)
+	}
+	if err != nil {
+		slog.Warn("telegram seat limit unknown, delivering to every destination", "tenant_id", tenantID, "err", err)
+		return nil
+	}
+	return mutedTelegram(chans, int(ent.TelegramRecipients), ent.TelegramRooms)
+}
+
+// mutedTelegram is MutedByPlan's arithmetic. One seat per distinct linked
+// person however many channels they hold, one per group or channel; a room
+// the plan does not carry takes no seat. The channel-set shadow of
+// countTelegramRecipients.
+// ponytail: counts this project's channels, not the workspace-wide person
+// count; switch to that count if the two are ever seen to disagree.
+func mutedTelegram(chans []sqlc.ListChannelsByProjectRow, seats int, rooms bool) map[int64]bool {
+	muted := map[int64]bool{}
+	held := map[int64]bool{}
+	for _, ch := range chans {
+		if ch.Kind != "telegram" {
+			continue
+		}
+		if ch.RecipientPersonID == nil && !rooms {
+			muted[ch.ID] = true
+			continue
+		}
+		// A room's seat keys on its own channel id, negated so it never
+		// collides with a person id.
+		seat := -ch.ID
+		if ch.RecipientPersonID != nil {
+			seat = *ch.RecipientPersonID
+		}
+		if held[seat] {
+			continue
+		}
+		if len(held) >= seats {
+			muted[ch.ID] = true
+			continue
+		}
+		held[seat] = true
+	}
+	return muted
+}
+
 // Close resolves the open incident for a monitor with the given reason.
 func (l *Lifecycle) Close(ctx context.Context, monitorID int64, reason string) error {
 	q := l.pool.Queries()
@@ -301,6 +363,8 @@ func (l *Lifecycle) Close(ctx context.Context, monitorID int64, reason string) e
 		// The incident is real history and stays; what ended it was the owner
 		// removing the check, so the timeline may not imply a recovery.
 		text = "Monitor deleted"
+	case ReasonPlanPaused:
+		text = "Paused by the plan's check limit"
 	}
 	_ = q.AddIncidentUpdate(ctx, sqlc.AddIncidentUpdateParams{
 		IncidentID: existing.ID,
@@ -309,6 +373,21 @@ func (l *Lifecycle) Close(ctx context.Context, monitorID int64, reason string) e
 	})
 
 	return nil
+}
+
+// ClosePlanPaused closes the open incident of every check the budget sweep
+// paused. It reads by predicate, not by what one sweep paused, so a close
+// that failed or was cut off by a restart is retried on the next run.
+func (l *Lifecycle) ClosePlanPaused(ctx context.Context) error {
+	ids, err := l.pool.Queries().ListPlanPausedWithOpenIncident(ctx)
+	if err != nil {
+		return fmt.Errorf("incident: plan-paused read: %w", err)
+	}
+	var errs []error
+	for _, id := range ids {
+		errs = append(errs, l.Close(ctx, id, ReasonPlanPaused))
+	}
+	return errors.Join(errs...)
 }
 
 // DetectOpen is the project-scoped opener's payload: detection keys incidents

@@ -195,8 +195,8 @@ SELECT t.id, t.kind, t.url, t.keyword,
   JOIN target_schedule ts ON ts.target_id = t.id
   LEFT JOIN target_facts tf ON tf.target_id = t.id
   LEFT JOIN LATERAL (
-    -- A frozen project's subscription keeps nothing due (docs/plans/trial-and-
-    -- freeze.md): the snapshot spends no probe money, same as a paused monitor.
+    -- A frozen project's subscription keeps nothing due: the snapshot spends
+    -- no probe money, same as a paused monitor (and sets no pace, 010).
     SELECT min(m.interval_sec)::int AS eff
       FROM monitor m
       JOIN project pr ON pr.id = m.project_id AND pr.frozen_at IS NULL

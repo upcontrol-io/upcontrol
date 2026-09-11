@@ -27,6 +27,21 @@ func (e AccountRole) Valid() bool {
 	}
 }
 
+// Defines values for AlertChannelMutedBy.
+const (
+	AlertChannelMutedByPlan AlertChannelMutedBy = "plan"
+)
+
+// Valid indicates whether the value is a known member of the AlertChannelMutedBy enum.
+func (e AlertChannelMutedBy) Valid() bool {
+	switch e {
+	case AlertChannelMutedByPlan:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ApiKeyKind.
 const (
 	Public ApiKeyKind = "public"
@@ -414,6 +429,21 @@ func (e LogLevel) Valid() bool {
 	case LogLevelInfo:
 		return true
 	case LogLevelWarn:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for MonitorPausedBy.
+const (
+	MonitorPausedByPlan MonitorPausedBy = "plan"
+)
+
+// Valid indicates whether the value is a known member of the MonitorPausedBy enum.
+func (e MonitorPausedBy) Valid() bool {
+	switch e {
+	case MonitorPausedByPlan:
 		return true
 	default:
 		return false
@@ -855,18 +885,24 @@ type AlertChannel struct {
 	// Label The Telegram chat's own name — a person's name (plus @username) or a group's title; absent when the channel has none, and the reader then sees the raw target.
 	Label *string `json:"label,omitempty"`
 
+	// MutedBy Present when the plan no longer carries this Telegram destination: a group or channel while the plan has no Telegram rooms, or a destination past the plan's Telegram recipients (the oldest connections keep their seats). Delivery skips it, and its test send answers 402.
+	MutedBy *AlertChannelMutedBy `json:"mutedBy,omitempty"`
+
 	// MutedUntil Present only while a /mute window is still running — the moment the channel's alerts resume; never sent for a channel that is live or a window that has already expired.
 	MutedUntil *time.Time `json:"mutedUntil,omitempty"`
 
 	// Note One extra line, only where the channel behaves differently.
 	Note *string `json:"note,omitempty"`
 
-	// Notify What this channel is notified about (docs/plans/channel-notify-settings.md). The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
+	// Notify What this channel is notified about. The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
 	Notify *NotifySettings `json:"notify,omitempty"`
 
 	// Target A handle, an address or a URL.
 	Target string `json:"target"`
 }
+
+// AlertChannelMutedBy Present when the plan no longer carries this Telegram destination: a group or channel while the plan has no Telegram rooms, or a destination past the plan's Telegram recipients (the oldest connections keep their seats). Delivery skips it, and its test send answers 402.
+type AlertChannelMutedBy string
 
 // ApiKey One of the project's API keys. The full secret is never stored and never
 // returned by a read — only this identifier (the prefix). The full key is
@@ -1296,7 +1332,10 @@ type LogsResponse struct {
 type MeResponse struct {
 	Account Account `json:"account"`
 
-	// Project The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15).
+	// Owner Whether the session's person owns the session's workspace. Present even when `project` is null, which is exactly when `project.owned` cannot say it (every project the caller reaches there is frozen).
+	Owner bool `json:"owner"`
+
+	// Project The tenant's current project, or null when the tenant has no projects (possible after a lost claim race or deleting the last project; Decision 15) or every project the caller reaches in it is frozen. Never a frozen project.
 	Project *Project `json:"project"`
 }
 
@@ -1329,11 +1368,11 @@ type Monitor struct {
 	Keyword *string `json:"keyword,omitempty"`
 	Name    string  `json:"name"`
 
-	// Paused Whether the check runs. The budget sweeper pauses past the plan's http_checks (docs/plans/trial-and-freeze.md) exactly like an owner's own pause does; pausedBy says whose pause it is.
+	// Paused Whether the check runs. The budget sweeper pauses the checks past the plan's http_checks, newest first, exactly like an owner's own pause does; pausedBy says whose pause it is.
 	Paused bool `json:"paused"`
 
-	// PausedBy Present only on the budget sweeper's pause ('plan'): the row's card words it as the plan's wall with a resume-through-upgrade door. Absent means the owner paused it themselves.
-	PausedBy *string `json:"pausedBy,omitempty"`
+	// PausedBy Present only on the budget sweeper's pause: the row's card words it as the plan's wall with a resume-through-upgrade door, and a PATCH `paused: false` on it answers 402. It lifts within a minute of the plan carrying the check again. Absent means the owner paused it themselves.
+	PausedBy *MonitorPausedBy `json:"pausedBy,omitempty"`
 
 	// PingUrl Heartbeat only. The URL the job calls on every run (GET or POST); absent for a website check.
 	PingUrl *string      `json:"pingUrl,omitempty"`
@@ -1343,6 +1382,9 @@ type Monitor struct {
 	Target string      `json:"target"`
 	Type   MonitorType `json:"type"`
 }
+
+// MonitorPausedBy Present only on the budget sweeper's pause: the row's card words it as the plan's wall with a resume-through-upgrade door, and a PATCH `paused: false` on it answers 402. It lifts within a minute of the plan carrying the check again. Absent means the owner paused it themselves.
+type MonitorPausedBy string
 
 // MonitorType defines model for Monitor.Type.
 type MonitorType string
@@ -1393,7 +1435,7 @@ type NetworkTile struct {
 	Value string `json:"value"`
 }
 
-// NotifySettings What this channel is notified about (docs/plans/channel-notify-settings.md). The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
+// NotifySettings What this channel is notified about. The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
 type NotifySettings struct {
 	// ErrorLogs Every new error fingerprint in the log stream. One axis with repeatingErrorLogs (none / every new / only repeating): setting one true turns the other off, and a row carrying both resolves to the stricter repeating-only reading. Default false.
 	ErrorLogs bool `json:"errorLogs"`
@@ -1438,8 +1480,16 @@ type Plan string
 // PlanResponse defines model for PlanResponse.
 type PlanResponse struct {
 	// HistoryDays How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back.
-	HistoryDays         *int      `json:"historyDays,omitempty"`
-	HttpChecks          UsedMax   `json:"httpChecks"`
+	HistoryDays *int `json:"historyDays,omitempty"`
+
+	// HttpChecks `used` counts the HTTP checks of the workspace's live projects, the set the create gate counts and the budget ranks, so it includes the ones the budget paused.
+	HttpChecks struct {
+		Max int `json:"max"`
+
+		// PausedByPlan Checks in live projects the budget paused because the plan carries fewer than the workspace holds (`pausedBy: plan`). They resume within a minute of the plan carrying them again. Absent when zero.
+		PausedByPlan *int `json:"pausedByPlan,omitempty"`
+		Used         int  `json:"used"`
+	} `json:"httpChecks"`
 	IncidentHistoryDays int       `json:"incidentHistoryDays"`
 	LogWindow           LogWindow `json:"logWindow"`
 
@@ -1453,8 +1503,13 @@ type PlanResponse struct {
 	Owned *bool `json:"owned,omitempty"`
 	Plan  Plan  `json:"plan"`
 
-	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw.
-	Projects           *UsedMax `json:"projects,omitempty"`
+	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. `used` counts LIVE projects only, because live projects are what a plan buys.
+	Projects *struct {
+		// Frozen The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero.
+		Frozen *int `json:"frozen,omitempty"`
+		Max    int  `json:"max"`
+		Used   int  `json:"used"`
+	} `json:"projects,omitempty"`
 	TelegramRecipients *UsedMax `json:"telegramRecipients,omitempty"`
 
 	// TelegramRooms Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time.
@@ -1505,7 +1560,7 @@ type ProjectListItem struct {
 	// Domain Example: example.com
 	Domain string `json:"domain"`
 
-	// Frozen The freeze sweeper's snapshot (docs/plans/trial-and-freeze.md): a plan buys live projects, the rest stop running but keep everything and come back on upgrade. The row stays in the list for members — a project vanishing from a guest's list reads as deleted data.
+	// Frozen The freeze sweeper's snapshot: a plan buys live projects, the rest stop running but keep everything and come back on upgrade. The row stays in the list for members — a project vanishing from a guest's list reads as deleted data.
 	Frozen bool `json:"frozen"`
 
 	// Id Example: 6f9619ff8b86d97111d1c1e4bba1f0b2
@@ -1747,6 +1802,9 @@ type StatusPageResponse struct {
 	// Domain Custom domain, from the first paid plan. Empty until set.
 	Domain *string `json:"domain,omitempty"`
 
+	// DomainLapsesAt Present while the plan no longer carries a custom domain and the grace period runs: the moment the domain is unbound. The page stays on its own address. Absent when the plan carries the domain.
+	DomainLapsesAt *time.Time `json:"domainLapsesAt,omitempty"`
+
 	// DomainVerified Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify.
 	DomainVerified *bool `json:"domainVerified,omitempty"`
 
@@ -1897,7 +1955,7 @@ type WatchResponse struct {
 	// StatusUrl Example: https://status.example.com
 	StatusUrl string `json:"statusUrl"`
 
-	// Watching How many checks now exist, after the plan's ceiling applied.
+	// Watching How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused.
 	Watching *int32 `json:"watching,omitempty"`
 }
 
@@ -1983,7 +2041,7 @@ type PatchV1ChannelsIdJSONBody struct {
 	// Muted Only false is accepted: lifts the /mute window and releases the alerts it parked.
 	Muted *bool `json:"muted,omitempty"`
 
-	// Notify What this channel is notified about (docs/plans/channel-notify-settings.md). The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
+	// Notify What this channel is notified about. The server stores keys sparsely (absent = default) but always RETURNS the resolved object, so a screen renders state, not guesses. These pick which classes of alert land on the destination — not a per-monitor matrix.
 	Notify *NotifySettings `json:"notify,omitempty"`
 }
 

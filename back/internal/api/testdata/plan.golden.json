@@ -1,8 +1,8 @@
 {
   "plan": "Free",
-  "httpChecks": { "used": 2, "max": 3 },
+  "httpChecks": { "used": 5, "max": 3, "pausedByPlan": 2 },
   "logWindow": { "lines": 25000, "approxHours": 14 },
   "incidentHistoryDays": 10,
-  "projects": { "used": 1, "max": 1 },
+  "projects": { "used": 1, "max": 1, "frozen": 2 },
   "telegramRooms": false
 }

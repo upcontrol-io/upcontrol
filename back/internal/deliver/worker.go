@@ -69,6 +69,13 @@ func (w *worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 		w.dead(ctx, queueID, "channel not found")
 		return
 	}
+	// A frozen project delivers nothing, including a follow-up or a retry
+	// queued before the freeze. Dead, not held: a held row would go out stale
+	// the day the project thaws. The owner's own test send still goes.
+	if ch.Frozen && item.Class != "test" {
+		w.dead(ctx, queueID, "project_frozen")
+		return
+	}
 
 	breaker := w.getBreaker(item.ChannelID)
 
@@ -132,6 +139,12 @@ func (w *worker) processItem(ctx context.Context, item sqlc.LeasePendingDeliveri
 		inc, ierr := q.GetIncidentForFollowUp(ctx, *item.IncidentID)
 		if ierr != nil {
 			w.dead(ctx, queueID, "followup: incident not found")
+			return
+		}
+		// The plan paused the check: nothing measured a recovery, so there is
+		// no "back up" to report, and "still down" is no longer measured either.
+		if inc.CloseReason != nil && *inc.CloseReason == "plan_paused" {
+			w.dead(ctx, queueID, "closed_unmeasured")
 			return
 		}
 		name := payload.MonitorName

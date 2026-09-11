@@ -92,8 +92,8 @@ type Config struct {
 	// matches character for character. Defaults to PublicOrigin + /sign-in.
 	GoogleRedirectURIs []string
 
-	// StatusPageKnobs are the permanent-status-page knobs (part 2/4 of
-	// docs/plans/permanent-status-pages.md): the anonymous mint ceilings, the
+	// StatusPageKnobs are the permanent-status-page knobs: the anonymous mint
+	// ceilings, the
 	// eternal-host-page cap and the index ramp. Env-only on purpose: changing
 	// a knob is a container restart, never a core release. Embedded so both
 	// shapes read the same way (d.Config.IndexMaxPages, knobs.IndexMaxPages).

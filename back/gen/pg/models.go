@@ -398,6 +398,7 @@ type StatusPage struct {
 	CreatedAt         pgtype.Timestamptz
 	VerificationToken *string
 	RemovalToken      *string
+	DomainLapsedAt    pgtype.Timestamptz
 }
 
 type TargetFact struct {

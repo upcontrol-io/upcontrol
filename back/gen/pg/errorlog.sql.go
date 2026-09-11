@@ -64,7 +64,7 @@ type ListErrorSubscribedChannelsRow struct {
 	Notify    []byte
 }
 
-// The error-log scanner's queries (docs/plans/channel-notify-settings.md).
+// The error-log scanner's queries.
 // The scan itself reads the logs table; these queries answer "who subscribed"
 // and remember what was already alerted so a persisting error does not page
 // every 60-second tick.

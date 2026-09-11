@@ -330,7 +330,7 @@ func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc
 
 // adoptTenant moves the anonymous tenant's whole project footprint into the
 // claimer's tenant, then deletes the anonymous tenant. Claim adopts, it never
-// adds a membership (docs/plans/projects-axis.md Decision 6). One
+// adds a membership. One
 // transaction; the conditional burn is the race lock, exactly as the slug
 // path always had it.
 func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc.Session, anonTenantID int64) {

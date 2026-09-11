@@ -1,6 +1,6 @@
 //go:build integration
 
-// The watch door reads the session (docs/plans/projects-axis.md Decision 7)
+// The watch door reads the session
 // and the public status page says whose it is (T8): a signed-in visitor with
 // room gets the project in their own tenant — with the session's pick set to
 // it (Decision 18) — at the limit or signed out they still get the anonymous
@@ -160,6 +160,47 @@ func TestWatchSignedInWithRoomCreatesTheProjectInTheCallersTenant(t *testing.T) 
 	if err := f.pool.Raw().QueryRow(ctx,
 		`SELECT project_id FROM session WHERE person_id = $1`, f.personID).Scan(&pick); err != nil || pick != projectID {
 		t.Fatalf("session project_id = %d (err %v), want the new project %d", pick, err, projectID)
+	}
+}
+
+// A guest whose session stands in somebody else's workspace (an invite redeem
+// lands it there) watches a fresh host: the project lands in the guest's OWN
+// workspace, created on demand like createProject's, never in the host's, and
+// the session's workspace follows the new project.
+func TestWatchSignedInGuestCreatesTheProjectInTheirOwnTenant(t *testing.T) {
+	f := newWatchFixture(t)
+	ctx := context.Background()
+	var guestID int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`INSERT INTO person (public_id, email, name) VALUES (gen_random_uuid(), $1, 'Guest') RETURNING id`,
+		fmt.Sprintf("guest-%d@example.com", time.Now().UnixNano())).Scan(&guestID); err != nil {
+		t.Fatalf("guest: %v", err)
+	}
+	token, err := f.sess.Create(ctx, guestID, f.tenantID, nil)
+	if err != nil {
+		t.Fatalf("guest session: %v", err)
+	}
+	host := fmt.Sprintf("guest-%d.example.com", time.Now().UnixNano())
+
+	w := f.watch(t, host, &http.Cookie{Name: session.CookieName, Value: token})
+	if w.Code != http.StatusOK {
+		t.Fatalf("guest watch = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.tenantID); n != 0 {
+		t.Fatalf("host workspace projects = %d, want 0 (a guest never spends the host's plan)", n)
+	}
+	var ownTenant, projectID int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT t.id, p.id FROM tenant t JOIN project p ON p.tenant_id = t.id
+		  WHERE t.owner_person_id = $1 AND p.domain = $2`, guestID, host).Scan(&ownTenant, &projectID); err != nil {
+		t.Fatalf("the guest's own project for %s: %v", host, err)
+	}
+	var sessTenant, sessProject int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id, project_id FROM session WHERE person_id = $1`, guestID).Scan(&sessTenant, &sessProject); err != nil ||
+		sessTenant != ownTenant || sessProject != projectID {
+		t.Fatalf("session scope = (%d, %d) err %v, want the guest's own (%d, %d)",
+			sessTenant, sessProject, err, ownTenant, projectID)
 	}
 }
 
@@ -442,5 +483,60 @@ func TestStatusPageIsPerProject(t *testing.T) {
 	}
 	if got := public(two.slug); got["mine"] != nil {
 		t.Fatalf("a member of the SIBLING project reads mine = %v, want the field absent", got["mine"])
+	}
+}
+
+// The e-mail arm spends the workspace's http_checks like the create gate: a
+// Free account holding two checks has room for one more, so three asked rows
+// become one new check and `watching` says so. Asking again costs nothing: the
+// rows the project already holds still count as watched.
+func TestWatchEmailArmStaysInsideTheCheckBudget(t *testing.T) {
+	f := newWatchFixture(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+	var projectID int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, $2) RETURNING id`,
+		f.tenantID, fmt.Sprintf("budget-%d.example.com", uniq)).Scan(&projectID); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	for i := range 2 {
+		url := fmt.Sprintf("https://held-%d-%d.example.com", uniq, i)
+		if _, err := f.pool.Raw().Exec(ctx,
+			`WITH tgt AS (INSERT INTO probe_target (key, kind, url) VALUES ($3, 'website', $3) RETURNING id)
+			 INSERT INTO monitor (public_id, tenant_id, project_id, target_id, kind, name, target, interval_sec)
+			 SELECT gen_random_uuid(), $1, $2, tgt.id, 'http', 'Held', $3, 300 FROM tgt`,
+			f.tenantID, projectID, url); err != nil {
+			t.Fatalf("seed monitor: %v", err)
+		}
+	}
+	var email string
+	if err := f.pool.Raw().QueryRow(ctx, `SELECT email FROM person WHERE id = $1`, f.personID).Scan(&email); err != nil {
+		t.Fatalf("read email: %v", err)
+	}
+	host := fmt.Sprintf("asked-%d.example.com", uniq)
+	watch := func() int {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/public/watch", strings.NewReader(fmt.Sprintf(
+			`{"host":%q,"email":%q,"targets":["https://%s/pricing","https://%s/docs"]}`, host, email, host, host)))
+		r.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", time.Now().UnixNano()%254+1))
+		w := httptest.NewRecorder()
+		f.route.ServeHTTP(w, r)
+		var resp struct {
+			Watching int `json:"watching"`
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil {
+			t.Fatalf("watch = %d (%s), want 200", w.Code, w.Body.String())
+		}
+		return resp.Watching
+	}
+	if got := watch(); got != 1 {
+		t.Fatalf("watching = %d, want 1: Free's third slot, and nothing past it", got)
+	}
+	if n := f.count(t, `SELECT count(*) FROM monitor WHERE tenant_id = $1`, f.tenantID); n != 3 {
+		t.Fatalf("monitors on the account = %d, want 3 (none created over the budget)", n)
+	}
+	if got := watch(); got != 1 {
+		t.Fatalf("watching on a repeat = %d, want 1: the held row still counts", got)
 	}
 }

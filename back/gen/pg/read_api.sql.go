@@ -11,19 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countMonitors = `-- name: CountMonitors :one
-SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat'
-`
-
-// Same axis as CountMonitorsByTenant, and it must stay the same predicate: this
-// one is the number the sidebar and the Plan page print, that one is the gate.
-func (q *Queries) CountMonitors(ctx context.Context, tenantID int64) (int32, error) {
-	row := q.db.QueryRow(ctx, countMonitors, tenantID)
-	var column_1 int32
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const getAPIKeyForProject = `-- name: GetAPIKeyForProject :one
 SELECT id, prefix, name, state, created_at, last_used_at, revoked_at, kind, origins
   FROM api_key WHERE project_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
@@ -508,6 +495,30 @@ func (q *Queries) ListSourceConnections(ctx context.Context, projectID int64) ([
 	return items, nil
 }
 
+const planCapacityHeld = `-- name: PlanCapacityHeld :one
+SELECT (SELECT count(*) FROM project x WHERE x.tenant_id = $1 AND x.frozen_at IS NULL)::int AS live_projects,
+       (SELECT count(*) FROM project x WHERE x.tenant_id = $1 AND x.frozen_at IS NOT NULL)::int AS frozen_projects,
+       (SELECT count(*) FROM monitor m
+          JOIN project p ON p.id = m.project_id AND p.frozen_at IS NULL
+         WHERE m.tenant_id = $1 AND m.paused_by = 'plan')::int AS paused_by_plan
+`
+
+type PlanCapacityHeldRow struct {
+	LiveProjects   int32
+	FrozenProjects int32
+	PausedByPlan   int32
+}
+
+// What the plan-capacity sweep holds back in a workspace, for the Plan page:
+// live projects (the axis a plan buys), frozen ones, and the checks the
+// budget paused in live projects.
+func (q *Queries) PlanCapacityHeld(ctx context.Context, tenantID int64) (PlanCapacityHeldRow, error) {
+	row := q.db.QueryRow(ctx, planCapacityHeld, tenantID)
+	var i PlanCapacityHeldRow
+	err := row.Scan(&i.LiveProjects, &i.FrozenProjects, &i.PausedByPlan)
+	return i, err
+}
+
 const projectSignals = `-- name: ProjectSignals :one
 SELECT
   (SELECT count(*)::int FROM monitor m WHERE m.project_id = $1) AS monitor_count,
@@ -546,17 +557,28 @@ func (q *Queries) ProjectSignals(ctx context.Context, projectID int64) (ProjectS
 	return i, err
 }
 
-const setSourcePaused = `-- name: SetSourcePaused :exec
-UPDATE source_connection SET paused = $1 WHERE id = $2 AND tenant_id = $3
+const setSourcePaused = `-- name: SetSourcePaused :execrows
+UPDATE source_connection SET paused = $1 WHERE id = $2 AND tenant_id = $3 AND project_id = $4
 `
 
 type SetSourcePausedParams struct {
-	Paused   bool
-	ID       int64
-	TenantID int64
+	Paused    bool
+	ID        int64
+	TenantID  int64
+	ProjectID int64
 }
 
-func (q *Queries) SetSourcePaused(ctx context.Context, arg SetSourcePausedParams) error {
-	_, err := q.db.Exec(ctx, setSourcePaused, arg.Paused, arg.ID, arg.TenantID)
-	return err
+// Scoped to the session's current project, like every other by-id write: a
+// sibling project's hook (a frozen one included) is not this reader's.
+func (q *Queries) SetSourcePaused(ctx context.Context, arg SetSourcePausedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setSourcePaused,
+		arg.Paused,
+		arg.ID,
+		arg.TenantID,
+		arg.ProjectID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

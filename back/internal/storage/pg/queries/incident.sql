@@ -17,7 +17,7 @@ RETURNING id, public_id;
 
 -- name: CloseIncident :exec
 -- Close an open incident. close_reason is one of: recovered|maintenance|
--- monitor_deleted|by_human|absorbed|detector_off.
+-- monitor_deleted|by_human|absorbed|detector_off|plan_paused.
 UPDATE incident
    SET resolved_at = now(), status = 'ok', close_reason = $1
  WHERE monitor_id = $2 AND resolved_at IS NULL;
@@ -38,6 +38,22 @@ VALUES ($1, $2, $3);
 -- Mark the notified_at timestamp when the first alert goes out for this incident.
 UPDATE incident SET notified_at = now()
  WHERE id = $1 AND notified_at IS NULL;
+
+-- name: ListPlanPausedWithOpenIncident :many
+-- Checks the budget sweep paused that still hold an open incident. Read by
+-- predicate on every run, so a close that failed or was cut off by a restart
+-- is retried instead of stranded.
+SELECT m.id FROM monitor m
+  JOIN incident i ON i.monitor_id = m.id AND i.resolved_at IS NULL
+ WHERE m.paused AND m.paused_by = 'plan';
+
+-- name: ListUndeliveredOpenIncidents :many
+-- A project's open availability incidents no destination took: what a frozen
+-- project recorded without delivering, read the moment it thaws.
+SELECT i.id, i.public_id, i.tenant_id, i.title, i.detected_at, m.name, m.target
+  FROM incident i JOIN monitor m ON m.id = i.monitor_id
+ WHERE i.project_id = $1 AND i.resolved_at IS NULL AND i.notified_at IS NULL
+   AND i.detector = 'availability';
 
 -- name: GetMonitorForIncident :one
 -- Fetch the monitor's tenant/project/name for incident context.

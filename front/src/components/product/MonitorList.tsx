@@ -110,6 +110,7 @@ export function MonitorList({ publish }: MonitorListProps) {
       status: 'nodata',
       interval: newInterval,
       keyword: newKeyword.trim() || undefined,
+      paused: false,
     };
     setMonitors((current) => [...current, draft]);
     setFormOpen(false);

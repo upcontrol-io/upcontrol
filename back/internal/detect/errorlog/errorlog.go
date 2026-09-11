@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/deliver"
+	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
@@ -140,6 +142,13 @@ func (s *Scanner) Tick(ctx context.Context) error {
 func (s *Scanner) scanProject(ctx context.Context, sc scope, subs []subscription) error {
 	now := time.Now()
 	q := s.pool.Queries()
+
+	// The plan's Telegram seats and rooms mute here exactly as they mute an
+	// incident page. A failed read keeps every subscriber.
+	if chans, err := q.ListChannelsByProject(ctx, sc.projectID); err == nil {
+		muted := incident.MutedByPlan(ctx, q, sc.tenantID, chans)
+		subs = slices.DeleteFunc(subs, func(sub subscription) bool { return muted[sub.channelID] })
+	}
 
 	// What this project's channels asked for: the distinct repeat windows (each
 	// gets its own aggregate query) and whether anyone wants the "appeared" pass.
