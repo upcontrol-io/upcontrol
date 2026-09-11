@@ -70,7 +70,7 @@ type CloseIncidentParams struct {
 }
 
 // Close an open incident. close_reason is one of: recovered|maintenance|
-// monitor_deleted|by_human|absorbed|detector_off.
+// monitor_deleted|by_human|absorbed|detector_off|plan_paused.
 func (q *Queries) CloseIncident(ctx context.Context, arg CloseIncidentParams) error {
 	_, err := q.db.Exec(ctx, closeIncident, arg.CloseReason, arg.MonitorID)
 	return err
@@ -199,6 +199,82 @@ func (q *Queries) ListIncidentUpdates(ctx context.Context, incidentID int64) ([]
 	for rows.Next() {
 		var i ListIncidentUpdatesRow
 		if err := rows.Scan(&i.At, &i.Kind, &i.Text); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPlanPausedWithOpenIncident = `-- name: ListPlanPausedWithOpenIncident :many
+SELECT m.id FROM monitor m
+  JOIN incident i ON i.monitor_id = m.id AND i.resolved_at IS NULL
+ WHERE m.paused AND m.paused_by = 'plan'
+`
+
+// Checks the budget sweep paused that still hold an open incident. Read by
+// predicate on every run, so a close that failed or was cut off by a restart
+// is retried instead of stranded.
+func (q *Queries) ListPlanPausedWithOpenIncident(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listPlanPausedWithOpenIncident)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUndeliveredOpenIncidents = `-- name: ListUndeliveredOpenIncidents :many
+SELECT i.id, i.public_id, i.tenant_id, i.title, i.detected_at, m.name, m.target
+  FROM incident i JOIN monitor m ON m.id = i.monitor_id
+ WHERE i.project_id = $1 AND i.resolved_at IS NULL AND i.notified_at IS NULL
+   AND i.detector = 'availability'
+`
+
+type ListUndeliveredOpenIncidentsRow struct {
+	ID         int64
+	PublicID   pgtype.UUID
+	TenantID   int64
+	Title      string
+	DetectedAt pgtype.Timestamptz
+	Name       string
+	Target     string
+}
+
+// A project's open availability incidents no destination took: what a frozen
+// project recorded without delivering, read the moment it thaws.
+func (q *Queries) ListUndeliveredOpenIncidents(ctx context.Context, projectID int64) ([]ListUndeliveredOpenIncidentsRow, error) {
+	rows, err := q.db.Query(ctx, listUndeliveredOpenIncidents, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUndeliveredOpenIncidentsRow
+	for rows.Next() {
+		var i ListUndeliveredOpenIncidentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.TenantID,
+			&i.Title,
+			&i.DetectedAt,
+			&i.Name,
+			&i.Target,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

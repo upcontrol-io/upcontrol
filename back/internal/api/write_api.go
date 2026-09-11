@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -37,12 +38,14 @@ import (
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/discover"
 	"go.upcontrol.io/back/internal/dnstokens"
+	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/platform/config"
 	"go.upcontrol.io/back/internal/probe/executor"
 	"go.upcontrol.io/back/internal/ring/query"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
 	"go.upcontrol.io/back/internal/targetkey"
+	"go.upcontrol.io/back/internal/worker"
 
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
@@ -155,10 +158,15 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notify members read (GETs below); every mutation needs login. POST /v1/series
 	// is a read that travels as a POST for its body, so it stays open to them.
-	// POST /v1/projects is the one write a guest may make: it creates in their
-	// OWN workspace, where they are the owner.
+	// POST /v1/projects creates in the caller's OWN workspace, where they are
+	// the owner. The switch changes no project, only where this session
+	// stands, and the current scope is no gate on leaving it: a Member moves
+	// between projects, and a guest whose every project here is frozen
+	// resolves to none and could otherwise never leave. switchProject admits
+	// only a row the caller reaches.
 	newProject := r.URL.Path == "/v1/projects" && r.Method == http.MethodPost
-	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !newProject &&
+	switchScope := r.URL.Path == "/v1/project/switch" && r.Method == http.MethodPost
+	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !newProject && !switchScope &&
 		!canManage(r.Context(), h.pool, s) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
@@ -421,9 +429,17 @@ func (h *writeAPI) testChannel(w http.ResponseWriter, r *http.Request, tenantID 
 		writeAPIErr(w, http.StatusBadRequest, "bad_path")
 		return
 	}
-	chID := h.channelRowIDFor(r.Context(), r, tenantID, parts[3])
+	projectID := h.currentProject(r.Context(), r, tenantID)
+	chID := h.channelRowID(r.Context(), tenantID, projectID, parts[3])
 	if chID == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_such_channel")
+		return
+	}
+	// A destination the plan mutes would pass a test and then miss every real
+	// alert: the one diagnostic answers the plan's wall instead.
+	if chans, err := h.pool.Queries().ListChannelsByProject(r.Context(), projectID); err == nil &&
+		incident.MutedByPlan(r.Context(), h.pool.Queries(), tenantID, chans)[chID] {
+		writeUpgradeRequired(w, "Your plan's Telegram limit mutes this destination, so alerts skip it. Upgrade to deliver to it again.", "")
 		return
 	}
 	// The delivery's id travels back so the caller can poll the outcome via
@@ -870,6 +886,13 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// 0 with projects left means every one of them is frozen: there is no
+	// current project to delete, and closing the account from here would
+	// cascade every snapshot with it.
+	if projectID == 0 && count > 0 {
+		writeAPIErr(w, http.StatusConflict, "no_current_project")
+		return
+	}
 	last := projectID == 0 || count <= 1
 
 	tx, err := h.pool.Raw().Begin(ctx)
@@ -902,6 +925,13 @@ func (h *writeAPI) deleteProject(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	if last {
 		session.ClearCookie(w)
+	} else {
+		// The released slot goes to a snapshot now rather than on the next
+		// tick, so the owner never lands on zero live projects, and with its
+		// budget applied, so the thawed checks never run past the plan. A
+		// failure here only defers that to the plan-capacity job.
+		pgs := pgstore.New(h.pool.Raw())
+		worker.PlanCapacity(ctx, pgs, incident.New(h.pool, pgs), slog.Default())
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"accountDeleted": last})
 }
@@ -965,7 +995,9 @@ func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE monitor SET paused = true WHERE project_id = $1`, projectID); err != nil {
+	// paused_by NULL: an ownerless page's checks are nobody's to resume, and
+	// a 'plan' marker would let the budget sweep resume them in the orphan.
+	if _, err := tx.Exec(ctx, `UPDATE monitor SET paused = true, paused_by = NULL WHERE project_id = $1`, projectID); err != nil {
 		return err
 	}
 	// The owner's own rows, now that a channel, an invite, a team and the
@@ -1052,8 +1084,20 @@ func (h *writeAPI) deleteSource(w http.ResponseWriter, r *http.Request, tenantID
 		writeAPIErr(w, http.StatusBadRequest, "not_disconnectable")
 		return
 	}
-	_, _ = h.pool.Raw().Exec(r.Context(),
-		`DELETE FROM source_connection WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	// The current project's own hook only, like every other by-id write: a
+	// sibling project's (a frozen one included) is not this reader's.
+	ctx := r.Context()
+	tag, err := h.pool.Raw().Exec(ctx,
+		`DELETE FROM source_connection WHERE id = $1 AND tenant_id = $2 AND project_id = $3`,
+		id, tenantID, h.currentProject(ctx, r, tenantID))
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1071,10 +1115,17 @@ func (h *writeAPI) patchSource(w http.ResponseWriter, r *http.Request, tenantID 
 	if !decodeStrict(w, r, &req) {
 		return
 	}
-	if err := h.pool.Queries().SetSourcePaused(r.Context(), sqlc.SetSourcePausedParams{
+	ctx := r.Context()
+	n, err := h.pool.Queries().SetSourcePaused(ctx, sqlc.SetSourcePausedParams{
 		Paused: req.Paused, ID: id, TenantID: tenantID,
-	}); err != nil {
+		ProjectID: h.currentProject(ctx, r, tenantID),
+	})
+	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if n == 0 {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"id": pathLast(r.URL.Path), "paused": req.Paused})
@@ -1245,6 +1296,7 @@ type statusPageRow struct {
 	LastSeenAt        *time.Time
 	VerificationToken *string
 	RemovalToken      *string
+	DomainLapsedAt    *time.Time
 	Slug              string
 }
 
@@ -1269,12 +1321,14 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config,
 		        s.id, s.root_target_id, s.is_host_page, s.removed_at, s.indexed_at,
-		        s.host_verified_at, s.last_seen_at, s.verification_token, s.removal_token
+		        s.host_verified_at, s.last_seen_at, s.verification_token, s.removal_token,
+		        s.domain_lapsed_at
 		   FROM project p LEFT JOIN status_page s ON s.project_id = p.id
 		  WHERE p.id = $1`, projectID).Scan(
 		&projectID, &slug, &title, &domain, &verifiedAt, &raw,
 		&page.ID, &page.RootTargetID, &page.IsHostPage, &page.RemovedAt, &page.IndexedAt,
-		&page.HostVerifiedAt, &page.LastSeenAt, &page.VerificationToken, &page.RemovalToken)
+		&page.HostVerifiedAt, &page.LastSeenAt, &page.VerificationToken, &page.RemovalToken,
+		&page.DomainLapsedAt)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
@@ -1319,6 +1373,11 @@ func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg 
 	}
 	if page.HostVerifiedAt != nil {
 		resp["hostVerifiedAt"] = page.HostVerifiedAt.UTC().Format(time.RFC3339)
+	}
+	// The plan stopped carrying custom domains: the grace clock runs and the
+	// domain sweep unbinds the domain at this moment.
+	if page.DomainLapsedAt != nil {
+		resp["domainLapsesAt"] = page.DomainLapsedAt.Add(pgstore.DomainGraceDays * 24 * time.Hour).UTC().Format(time.RFC3339)
 	}
 	// The verification token is issued on read while it can still be used:
 	// generated once, stored, returned every time until the TXT record lands
@@ -2085,10 +2144,13 @@ func (h *writeAPI) public(w http.ResponseWriter, r *http.Request) {
 
 // GET /internal/domain-allowed?domain=... — Caddy's on-demand TLS ask: may a
 // certificate be issued for this host? 200 with an empty body only when this
-// exact domain is stored, verified, and owned by a plan that pays for it;
-// anything else is 404. The strictness is load-bearing — no prefix matching,
-// no wildcards, no unverified shortcut — because this one answer is what
-// keeps Let's Encrypt's rate limits from being spent on hosts nobody proved.
+// exact domain is stored, verified, and owned by a plan that pays for it (or
+// still inside the grace window the plan-capacity job runs after the plan
+// stopped paying; that job unbinds the domain when the window closes, which
+// is what ends the host routing too); anything else is 404. The strictness is
+// load-bearing — no prefix matching, no wildcards, no unverified shortcut —
+// because this one answer is what keeps Let's Encrypt's rate limits from
+// being spent on hosts nobody proved.
 func (h *writeAPI) domainAllowed(w http.ResponseWriter, r *http.Request) {
 	var allowed bool
 	if err := h.pool.Raw().QueryRow(r.Context(),
@@ -2096,8 +2158,9 @@ func (h *writeAPI) domainAllowed(w http.ResponseWriter, r *http.Request) {
 		   SELECT 1 FROM status_page sp
 		   JOIN tenant t ON t.id = sp.tenant_id
 		   JOIN plan_entitlement pe ON pe.plan = t.plan
-		    WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL AND pe.custom_domain)`,
-		r.URL.Query().Get("domain")).Scan(&allowed); err != nil || !allowed {
+		    WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL
+		      AND (pe.custom_domain OR sp.domain_lapsed_at > now() - make_interval(days => $2)))`,
+		r.URL.Query().Get("domain"), pgstore.DomainGraceDays).Scan(&allowed); err != nil || !allowed {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -2625,8 +2688,10 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		tenantID = tid
 		h.rec.LinkEmail(ctx, req.Email)
+		// A live project: a frozen one is a snapshot no door may add to, and
+		// every plan carries at least one live project.
 		_ = h.pool.Raw().QueryRow(ctx,
-			`SELECT id FROM project WHERE tenant_id = $1 ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
+			`SELECT id FROM project WHERE tenant_id = $1 AND frozen_at IS NULL ORDER BY id LIMIT 1`, tenantID).Scan(&projectID)
 		// The e-mail arm's page follows the first-page rule like every mint:
 		// a host that already has a live page gets a suffixed page on the same
 		// root target, a fresh host gets the host page.
@@ -2677,21 +2742,27 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// demo page to claim later, and the monitors and status page below land
 	// on the caller's account from the first check. Everything else keeps
 	// the demo mint exactly as today: signed out, no room (the wall is on
-	// the claim button, never on the check).
+	// the claim button, never on the check). The tenant is the caller's own,
+	// never the session's: a guest standing in a host workspace would
+	// otherwise spend its owner's projects and checks.
 	own := false
-	if serr == nil && s.TenantID != 0 {
-		if msg, _ := h.projectsRefusal(ctx, s.TenantID); msg == "" {
-			pid, perr := createTenantProject(ctx, h.pool, s.TenantID, host)
-			if perr == nil {
-				tenantID, projectID = s.TenantID, pid
-				own = true
-				// Decision 18: the caller just created this project;
-				// the app must open on it. Same pick as createProject,
-				// and like it the pick never gates the response.
-				if s.ID != 0 {
-					_ = h.pool.Queries().SetSessionProject(ctx, sqlc.SetSessionProjectParams{
-						ID: s.ID, ProjectID: &pid,
-					})
+	if serr == nil && s.PersonID != 0 {
+		ownTenant, oerr := auth.OwnTenantID(ctx, h.pool, s.PersonID, h.selfHosted)
+		if oerr == nil && ownTenant != 0 {
+			if msg, _ := h.projectsRefusal(ctx, ownTenant); msg == "" {
+				pid, perr := createTenantProject(ctx, h.pool, ownTenant, host)
+				if perr == nil {
+					tenantID, projectID = ownTenant, pid
+					own = true
+					// Decision 18: the caller just created this project;
+					// the app must open on it, and the workspace follows.
+					// Same pick as createProject, and like it the pick
+					// never gates the response.
+					if s.ID != 0 {
+						_ = h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
+							ID: s.ID, TenantID: ownTenant, ProjectID: &pid,
+						})
+					}
 				}
 			}
 		}
@@ -2934,11 +3005,37 @@ func (h *writeAPI) subscribeWanted(ctx context.Context, tenantID, projectID int6
 // subscribeWantedTx is subscribeWanted inside a caller's transaction: every
 // row resolves through GetOrCreateProbeTarget and pulls the target due, so a
 // subscription's first check runs at the next lease.
+//
+// Every arm reaches a tenant with a plan, so the create gate's budget holds
+// here too: a row the project already watches costs nothing, a new one takes
+// a free http_checks slot, and past the last slot the rest are left out
+// rather than created for the budget sweep to pause a minute later.
 func subscribeWantedTx(ctx context.Context, q *sqlc.Queries, tx pgx.Tx, tenantID, projectID int64, host string, wanted []string) (int, error) {
+	room := math.MaxInt
+	plan, _ := q.GetTenantPlan(ctx, tenantID)
+	if plan == "" {
+		plan = "Free"
+	}
+	if limit, err := q.GetPlanHTTPChecks(ctx, plan); err == nil && limit > 0 {
+		used, _ := q.CountMonitorsByTenant(ctx, tenantID)
+		room = int(limit - used)
+	}
 	watching := 0
 	for _, t := range wanted {
+		key := targetkey.Website(t, "")
+		if room <= 0 {
+			var held bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM monitor m JOIN probe_target pt ON pt.id = m.target_id
+				                 WHERE m.project_id = $1 AND pt.key = $2)`, projectID, key).Scan(&held); err != nil {
+				return watching, err
+			}
+			if !held {
+				continue
+			}
+		}
 		targetID, terr := q.GetOrCreateProbeTarget(ctx, sqlc.GetOrCreateProbeTargetParams{
-			Key: targetkey.Website(t, ""), Kind: "website", Url: t,
+			Key: key, Kind: "website", Url: t,
 		})
 		if terr != nil {
 			return watching, terr
@@ -2956,6 +3053,7 @@ func subscribeWantedTx(ctx context.Context, q *sqlc.Queries, tx pgx.Tx, tenantID
 			return watching, ierr
 		}
 		if created {
+			room--
 			if terr := q.PullTargetDue(ctx, targetID); terr != nil {
 				return watching, terr
 			}
@@ -3551,11 +3649,24 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 	}
 	incidents := []map[string]any{}
 	if rows, rerr := h.pool.Raw().Query(ctx,
-		// monitor_id IS NOT NULL drops incidents of DELETED checks: the
-		// component is gone from the page; the detector filter does the rest.
-		`SELECT title, status, detected_at FROM incident
-		  WHERE project_id = $1 AND detector = 'availability' AND monitor_id IS NOT NULL
-		  ORDER BY detected_at DESC LIMIT 10`, projectID); rerr == nil {
+		// The monitor join drops incidents of DELETED checks: the component is
+		// gone from the page; the detector filter does the rest. An OPEN
+		// incident is published only while its target is still measured
+		// (within three of its intervals, the slower of the cadence at open
+		// and the target's current one): a paused or frozen check can
+		// neither confirm the outage nor close it, and a public page never
+		// says down on nothing measured. Left out, never shown as resolved;
+		// so is a plan_paused close, which measured no recovery.
+		`SELECT i.title, i.status, i.detected_at FROM incident i
+		   JOIN monitor m ON m.id = i.monitor_id
+		   JOIN probe_target pt ON pt.id = m.target_id
+		   LEFT JOIN target_facts tf ON tf.target_id = m.target_id
+		  WHERE i.project_id = $1 AND i.detector = 'availability'
+		    AND i.close_reason IS DISTINCT FROM 'plan_paused'
+		    AND (i.resolved_at IS NOT NULL
+		         OR tf.last_check_at > now() - make_interval(secs =>
+		              3 * GREATEST(COALESCE(i.effective_interval_sec, 0), _uc_effective_interval(pt))))
+		  ORDER BY i.detected_at DESC LIMIT 10`, projectID); rerr == nil {
 		for rows.Next() {
 			var title, status string
 			var at time.Time

@@ -2,19 +2,18 @@
 -- the Projects page renders.
 
 -- name: CountProjectsByTenant :one
--- The projects plan axis (docs/plans/projects-axis.md): this count against
+-- The projects plan axis: this count against
 -- plan_entitlement.projects (NULL = unlimited) is the create/claim gate.
 SELECT count(*) FROM project WHERE tenant_id = $1;
-
--- name: ListProjectsByTenant :many
--- The Projects page: every project in the tenant, oldest first.
-SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id;
 
 -- name: ListProjectsForPerson :many
 -- Every project this person can reach: their own workspace's first, then the
 -- ones they were invited to, oldest first within each. owner_email names whose
--- workspace a guest row lives in.
+-- workspace a guest row lives in. frozen marks the freeze sweeper's snapshots:
+-- the row stays visible to members - a project a guest holds vanishing from
+-- their list reads as deleted data.
 SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
+       (p.frozen_at IS NOT NULL)::bool AS frozen,
        COALESCE(t.owner_person_id = sqlc.arg(person_id), false)::bool AS owned,
        (CASE WHEN t.owner_person_id = sqlc.arg(person_id) THEN 'login' ELSE m.role END)::text AS role,
        o.email AS owner_email
@@ -31,6 +30,11 @@ SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
 SELECT p.id, p.public_id, p.email, p.name, p.telegram_id, p.telegram_username
   FROM tenant t JOIN person p ON p.id = t.owner_person_id
  WHERE t.id = $1;
+
+-- name: IsProjectFrozen :one
+-- The delivery guard's one question: a frozen project keeps recording what
+-- is still measured, but nothing is delivered from it.
+SELECT EXISTS (SELECT 1 FROM project WHERE id = $1 AND frozen_at IS NOT NULL);
 
 -- name: IsTenantOwner :one
 SELECT EXISTS (SELECT 1 FROM tenant WHERE id = sqlc.arg(tenant_id) AND owner_person_id = sqlc.arg(person_id));

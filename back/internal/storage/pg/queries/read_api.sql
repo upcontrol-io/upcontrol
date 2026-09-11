@@ -1,10 +1,15 @@
 -- name: GetPlanEntitlement :one
 SELECT * FROM plan_entitlement WHERE plan = $1;
 
--- name: CountMonitors :one
--- Same axis as CountMonitorsByTenant, and it must stay the same predicate: this
--- one is the number the sidebar and the Plan page print, that one is the gate.
-SELECT count(*)::int FROM monitor WHERE tenant_id = $1 AND kind <> 'heartbeat';
+-- name: PlanCapacityHeld :one
+-- What the plan-capacity sweep holds back in a workspace, for the Plan page:
+-- live projects (the axis a plan buys), frozen ones, and the checks the
+-- budget paused in live projects.
+SELECT (SELECT count(*) FROM project x WHERE x.tenant_id = sqlc.arg(tenant_id) AND x.frozen_at IS NULL)::int AS live_projects,
+       (SELECT count(*) FROM project x WHERE x.tenant_id = sqlc.arg(tenant_id) AND x.frozen_at IS NOT NULL)::int AS frozen_projects,
+       (SELECT count(*) FROM monitor m
+          JOIN project p ON p.id = m.project_id AND p.frozen_at IS NULL
+         WHERE m.tenant_id = sqlc.arg(tenant_id) AND m.paused_by = 'plan')::int AS paused_by_plan;
 
 -- name: ListChannelsByTenant :many
 -- Every channel in the workspace, whichever project owns it: the export is
@@ -109,5 +114,7 @@ SELECT
 SELECT id, kind, status, last_signal_at, paused, hook_token, last_event
   FROM source_connection WHERE project_id = $1 AND status != 'draft' ORDER BY id;
 
--- name: SetSourcePaused :exec
-UPDATE source_connection SET paused = $1 WHERE id = $2 AND tenant_id = $3;
+-- name: SetSourcePaused :execrows
+-- Scoped to the session's current project, like every other by-id write: a
+-- sibling project's hook (a frozen one included) is not this reader's.
+UPDATE source_connection SET paused = $1 WHERE id = $2 AND tenant_id = $3 AND project_id = $4;

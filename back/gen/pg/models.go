@@ -259,6 +259,7 @@ type Monitor struct {
 	GraceSec           *int32
 	CreatedAt          pgtype.Timestamptz
 	TargetID           int64
+	PausedBy           *string
 }
 
 type Person struct {
@@ -310,6 +311,7 @@ type Project struct {
 	TenantID  int64
 	Domain    string
 	CreatedAt pgtype.Timestamptz
+	FrozenAt  pgtype.Timestamptz
 }
 
 type ProjectMember struct {
@@ -396,6 +398,7 @@ type StatusPage struct {
 	CreatedAt         pgtype.Timestamptz
 	VerificationToken *string
 	RemovalToken      *string
+	DomainLapsedAt    pgtype.Timestamptz
 }
 
 type TargetFact struct {

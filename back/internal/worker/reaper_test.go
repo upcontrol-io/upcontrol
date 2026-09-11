@@ -1,6 +1,6 @@
 //go:build integration
 
-// The reaper's two statements (Decision 10 of docs/plans/projects-axis.md):
+// The reaper's two statements:
 // an unclaimed tenant older than 24 h has its monitors paused, one older than
 // 7 days is deleted (cascade), and a claimed tenant is never touched. Run
 // with -tags=integration, UC_TEST_POSTGRES set.

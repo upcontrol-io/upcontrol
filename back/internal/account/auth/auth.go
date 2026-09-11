@@ -486,6 +486,10 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"role": row.MemberRole,
 		},
 		"project": project,
+		// Whether the reader owns the session's workspace, said even with no
+		// project: at 0 the project cannot carry it, and the owner-only doors
+		// still need the answer.
+		"owner": row.Owned,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

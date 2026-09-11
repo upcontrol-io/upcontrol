@@ -150,27 +150,41 @@ components:
             card can name whose it is.
     MeResponse:
       type: object
-      required: [account, project]
+      required: [account, project, owner]
       properties:
         account: { $ref: "#/components/schemas/Account" }
+        owner:
+          type: boolean
+          description: >-
+            Whether the session's person owns the session's workspace. Present
+            even when `project` is null, which is exactly when `project.owned`
+            cannot say it (every project the caller reaches there is frozen).
         project:
           allOf:
             - $ref: "#/components/schemas/Project"
           nullable: true
           description: >-
             The tenant's current project, or null when the tenant has no projects
-            (possible after a lost claim race or deleting the last project; Decision 15).
+            (possible after a lost claim race or deleting the last project; Decision 15)
+            or every project the caller reaches in it is frozen. Never a frozen project.
     # One row of GET /v1/projects: every project the person can reach, own ones
     # first, then the ones they were invited to. The id is the same public-id
     # encoding /v1/me's project carries, so the front's "current row" is an
     # equality check against me.project.id — no second source of that fact here.
     ProjectListItem:
       type: object
-      required: [id, domain, createdAt, owned, role]
+      required: [id, domain, createdAt, owned, role, frozen]
       properties:
         id: { type: string, example: "6f9619ff8b86d97111d1c1e4bba1f0b2" }
         domain: { type: string, example: "example.com" }
         createdAt: { type: string, format: date-time }
+        frozen:
+          type: boolean
+          description: >-
+            The freeze sweeper's snapshot: a plan buys live projects, the rest
+            stop running but keep everything and come back on upgrade. The row
+            stays in the list for members — a project vanishing from a guest's
+            list reads as deleted data.
         owned:
           type: boolean
           description: Whether the caller owns the workspace this project lives in.
@@ -186,9 +200,24 @@ components:
       enum: [ok, check, down, nodata]
     Monitor:
       type: object
-      required: [id, type, name, target, status, interval]
+      required: [id, type, name, target, status, interval, paused]
       properties:
         id: { type: string, example: "mon_1" }
+        paused:
+          type: boolean
+          description: >-
+            Whether the check runs. The budget sweeper pauses the checks past
+            the plan's http_checks, newest first, exactly like an owner's own
+            pause does; pausedBy says whose pause it is.
+        pausedBy:
+          type: string
+          enum: [plan]
+          description: >-
+            Present only on the budget sweeper's pause: the row's card words it
+            as the plan's wall with a resume-through-upgrade door, and a PATCH
+            `paused: false` on it answers 402. It lifts within a minute of the
+            plan carrying the check again. Absent means the owner paused it
+            themselves.
         type:
           type: string
           enum: [Website, Heartbeat]
@@ -392,8 +421,7 @@ components:
     NotifySettings:
       type: object
       description: >
-        What this channel is notified about (docs/plans/channel-notify-settings.md).
-        The server stores keys sparsely (absent = default) but always RETURNS the
+        What this channel is notified about. The server stores keys sparsely (absent = default) but always RETURNS the
         resolved object, so a screen renders state, not guesses. These pick which
         classes of alert land on the destination — not a per-monitor matrix.
       required:
@@ -451,6 +479,15 @@ components:
             Present only while a /mute window is still running — the moment the
             channel's alerts resume; never sent for a channel that is live or a
             window that has already expired.
+        mutedBy:
+          type: string
+          enum: [plan]
+          description: >
+            Present when the plan no longer carries this Telegram destination:
+            a group or channel while the plan has no Telegram rooms, or a
+            destination past the plan's Telegram recipients (the oldest
+            connections keep their seats). Delivery skips it, and its test send
+            answers 402.
         note:
           type: string
           description: One extra line, only where the channel behaves differently.
@@ -1020,7 +1057,22 @@ components:
             paid one. The picker still offers the faster options and opens
             the upgrade prompt when one is chosen (a paid wall is never a
             disabled control); this number is only how it knows where the wall is.
-        httpChecks: { $ref: "#/components/schemas/UsedMax" }
+        httpChecks:
+          description: >
+            `used` counts the HTTP checks of the workspace's live projects, the
+            set the create gate counts and the budget ranks, so it includes the
+            ones the budget paused.
+          allOf:
+            - $ref: "#/components/schemas/UsedMax"
+            - type: object
+              properties:
+                pausedByPlan:
+                  type: integer
+                  description: >
+                    Checks in live projects the budget paused because the plan
+                    carries fewer than the workspace holds (`pausedBy: plan`).
+                    They resume within a minute of the plan carrying them again.
+                    Absent when zero.
         logWindow: { $ref: "#/components/schemas/LogWindow" }
         telegramRecipients: { $ref: "#/components/schemas/UsedMax" }
         incidentHistoryDays: { type: integer }
@@ -1037,9 +1089,18 @@ components:
         projects:
           description: >
             Absent when the plan is unlimited (Self-hosted): a usage bar needs
-            a remainder, and an unlimited axis has none to draw.
+            a remainder, and an unlimited axis has none to draw. `used` counts
+            LIVE projects only, because live projects are what a plan buys.
           allOf:
             - $ref: "#/components/schemas/UsedMax"
+            - type: object
+              properties:
+                frozen:
+                  type: integer
+                  description: >
+                    The workspace's frozen projects: snapshots past the plan's
+                    projects limit, kept whole and thawed by a plan that carries
+                    them. Absent when zero.
         telegramRooms:
           type: boolean
           description: >
@@ -1095,6 +1156,13 @@ components:
             Whether the stored domain's DNS has been proven to point where we
             do. A domain that just changed starts false and is re-proven by
             POST /v1/status-page/domain/verify.
+        domainLapsesAt:
+          type: string
+          format: date-time
+          description: >
+            Present while the plan no longer carries a custom domain and the
+            grace period runs: the moment the domain is unbound. The page
+            stays on its own address. Absent when the plan carries the domain.
         components:
           type: array
           items: { $ref: "#/components/schemas/PublicComponent" }
@@ -1412,7 +1480,11 @@ components:
         statusUrl: { type: string, example: "https://status.example.com" }
         slug: { type: string, example: "prj-42" }
         watching:
-          description: How many checks now exist, after the plan's ceiling applied.
+          description: >
+            How many of the asked rows the project now watches: the ones it
+            already held, plus the new ones the workspace's remaining
+            `http_checks` allowed (the same count the create gate reads). The
+            rest were left out, never created paused.
           type: integer
           format: int32
         login:
@@ -1741,6 +1813,14 @@ paths:
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "402": { $ref: "#/components/responses/PaymentRequired" }
+        "409":
+          description: >-
+            `no_current_project`: the caller reaches no live project in this
+            workspace (every one they reach is frozen), so there is nothing to
+            add the check to.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/checks/{id}:
     patch:
@@ -1771,11 +1851,16 @@ paths:
                 { schema: { $ref: "#/components/schemas/Monitor" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/monitors/{id}:
     patch:
       tags: [monitors]
+      description: >
+        402 when the check lives in a frozen project, and on `paused: false`
+        for a check the plan paused (`pausedBy: plan`): only the plan lifts
+        that pause.
       parameters:
         - in: path
           name: id
@@ -1797,6 +1882,7 @@ paths:
                 { schema: { $ref: "#/components/schemas/Monitor" } },
             }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [monitors]
@@ -1811,6 +1897,7 @@ paths:
       responses:
         "204": { description: Deleted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/sources:
@@ -1861,7 +1948,8 @@ paths:
       description: >
         Pausing keeps the row and stops reading it. Only sources the tenant
         connected can be paused: `src_checks` and `src_logs` are derived from
-        what has arrived and answer 400.
+        what has arrived and answer 400. A source outside the session's
+        current project answers 404, on this door and on DELETE.
       parameters:
         - in: path
           name: id
@@ -1889,6 +1977,7 @@ paths:
                   paused: { type: boolean }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [sources]
       parameters:
@@ -1960,6 +2049,14 @@ paths:
           description: >-
             Not the workspace owner (`owner_only`). A guest invited to the
             project, even with the `login` role, cannot delete it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >-
+            `no_current_project`: every project left in the workspace is
+            frozen, so there is no current project to delete, and closing the
+            account from here would take every snapshot with it.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2050,8 +2147,50 @@ paths:
         "204": { description: Switched (a single-user session has no row to write). }
         "400": { description: "`missing_project_id` — the body carried no id, or would not parse." }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: >-
+            `plan_limit_exceeded` — the project is a frozen snapshot; the
+            switch is the one door into it, so the wall lives here. For the
+            workspace's owner `upgrade.plan` names the cheapest plan that
+            carries every project the workspace holds; a guest gets the reason
+            alone, since no plan they can buy thaws somebody else's project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: Not one of this tenant's projects (`unknown_project`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/projects/{id}/keys/revoke:
+    post:
+      tags: [sources]
+      summary: Revoke every working key of one of the caller's own projects.
+      description: >
+        Addressed by project id rather than the session's current project,
+        because a frozen project is one no session stands in: without this door
+        a leaked key in a snapshot could only be withdrawn by buying a plan.
+        Frozen or live, every active or rotating key of the project is revoked
+        at once, with no overlap window. The rows are kept and marked, never
+        deleted. Issuing and rotating stay behind the freeze wall: a frozen
+        project gets no new credential. Owner only.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The project's id as GET /v1/projects lists it.
+          schema: { type: string, example: "6f9619ff8b86d97111d1c1e4bba1f0b2" }
+      responses:
+        "204": { description: Revoked (a project with no working key answers the same). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "`owner_only`: the caller reaches the project but does not own its workspace."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not one of the caller's projects (`unknown_project`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -2302,6 +2441,13 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeliveryStatusResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: >-
+            `plan_limit_exceeded` — the destination carries `mutedBy: plan`:
+            real alerts skip it, so a test that went through would lie.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/deliveries/{id}:

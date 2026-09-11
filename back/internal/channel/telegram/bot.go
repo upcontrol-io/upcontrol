@@ -332,6 +332,14 @@ func (b *bot) handleStart(ctx context.Context, msg *tgMessage, payload string) {
 		b.send(msg.Chat.ID, "This invite link is no longer valid. Ask the project owner for a fresh one from the Alerts screen.")
 		return
 	}
+	// A frozen project is a snapshot: its team and its destinations do not
+	// change. The rollback keeps the link unredeemed, but it still expires,
+	// so the reply promises no second life. A failed read connects, like
+	// every other wall here.
+	if frozen, _ := b.pool.Queries().IsProjectFrozen(ctx, projectID); frozen {
+		b.send(msg.Chat.ID, "This project is paused by its owner's plan, so it cannot connect anyone right now. Ask the owner for a fresh link once the project is active again.")
+		return
+	}
 	var tenantName string
 	_ = tx.QueryRow(ctx,
 		`SELECT name FROM tenant WHERE id = $1`, tenantID).Scan(&tenantName)

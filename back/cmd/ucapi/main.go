@@ -221,6 +221,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/keys", keys)
 	mux.Handle("DELETE /v1/keys/{id}", keys)
 	mux.Handle("POST /v1/keys/rotate", keys)
+	// By project id, frozen projects included: the one key door past the
+	// session's scope, owner only.
+	mux.Handle("POST /v1/projects/{id}/keys/revoke", keys)
 
 	// Instance settings (self-host only; the hosted cloud answers 404): the
 	// Settings fields write here, sealed before storage.

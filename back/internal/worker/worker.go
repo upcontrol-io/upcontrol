@@ -104,7 +104,7 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	})
 
 	// Unclaimed anonymous tenants: monitors pause after 24 h, the tenant dies
-	// after 7 days (Decision 10, docs/plans/projects-axis.md) - except a tenant
+	// after 7 days - except a tenant
 	// holding a live host page whose root target has answered at least once:
 	// that page is forever (plan part 2).
 	go runWithLock(ctx, pool, d, "unclaimed-reaper", 10*time.Minute, func(ctx context.Context) {
@@ -145,12 +145,18 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	// it closed incidents are merely hidden by the read clamp (ListIncidents-
 	// ByTenant.since_days), so an upgrade restores them at once. The ceiling
 	// comes from plan_entitlement, never a constant: the table decides.
-	// Cascades take slices, updates and queue rows with the incident.
+	// Cascades take slices, updates and queue rows with the incident. A frozen
+	// project's incidents up to the freeze are a snapshot and never purge: the
+	// freeze promise is "as it stopped", and an upgrade restores exactly that.
+	// What it records after the freeze purges like anyone's.
 	go runWithLock(ctx, pool, d, "incident-purge", time.Hour, func(ctx context.Context) {
 		if _, err := pool.Raw().Exec(ctx,
 			`DELETE FROM incident
 			  WHERE resolved_at IS NOT NULL
-			    AND detected_at < now() - make_interval(days => (SELECT max(incident_days)::int FROM plan_entitlement))`); err != nil {
+			    AND detected_at < now() - make_interval(days => (SELECT max(incident_days)::int FROM plan_entitlement))
+			    AND NOT EXISTS (SELECT 1 FROM project p
+			                    WHERE p.id = incident.project_id AND p.frozen_at IS NOT NULL
+			                      AND incident.detected_at <= p.frozen_at)`); err != nil {
 			d.Logger.Warn("incident purge tick error", "err", err)
 		}
 	})
@@ -169,6 +175,16 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	})
 	jobs += "+history-trim"
 
+	// Plan capacity, once at start and then every minute, so a payment lifts
+	// the walls within a minute and a deploy does not push that minute back.
+	lc := incident.New(pool, pgs)
+	capacity := func(ctx context.Context) { PlanCapacity(ctx, pgs, lc, d.Logger) }
+	go func() {
+		runLocked(ctx, pool, hashJobName("plan-capacity"), capacity)
+		runWithLock(ctx, pool, d, "plan-capacity", time.Minute, capacity)
+	}()
+	jobs += "+plan-capacity"
+
 	// Error-log notification scanner, every 60 seconds; it backs the per-channel
 	// "Error logs" / "Repeating error logs" settings.
 	scanner := errorlog.New(pool, pgs, d.Logger)
@@ -180,7 +196,6 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	jobs += "+errorlog"
 	// Heartbeat miss sweep, every minute: a window that closed without
 	// a ping is a failed check. Shares the lifecycle with detect below.
-	lc := incident.New(pool, pgs)
 	hb := heartbeat.New(pool, pgs, lc)
 	go runWithLock(ctx, pool, d, "heartbeat", time.Minute, func(ctx context.Context) {
 		if err := hb.Tick(ctx); err != nil {
@@ -202,6 +217,35 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	return nil
 }
 
+// PlanCapacity is one run of the plan-capacity job: a plan buys live
+// projects, live HTTP checks and a custom domain. In order: the freeze first,
+// so a frozen project's checks hold no budget slot when the budget is
+// counted; then the budget, and the close of every plan-paused check's open
+// incident; then the outages a thawed project recorded while frozen, after
+// the budget so a check about to be paused is never paged; then the domain
+// grace. Project deletion runs it too, so a snapshot takes the released slot
+// at once.
+func PlanCapacity(ctx context.Context, pgs *pgstore.Store, lc *incident.Lifecycle, log *slog.Logger) {
+	thawed, err := pgs.FreezeSweep(ctx)
+	if err != nil {
+		log.Warn("project freeze tick error", "err", err)
+	}
+	if _, err := pgs.MonitorBudgetSweep(ctx); err != nil {
+		log.Warn("monitor budget tick error", "err", err)
+	}
+	if err := lc.ClosePlanPaused(ctx); err != nil {
+		log.Warn("plan pause: incident close failed", "err", err)
+	}
+	for _, id := range thawed {
+		if err := lc.NotifyThawed(ctx, id); err != nil {
+			log.Warn("thaw: incident delivery failed", "project_id", id, "err", err)
+		}
+	}
+	if err := pgs.DomainGraceSweep(ctx); err != nil {
+		log.Warn("domain grace tick error", "err", err)
+	}
+}
+
 // runWithLock acquires a named advisory lock, runs fn, then releases; if the
 // lock is held by another instance it skips (non-blocking, single-writer).
 func runWithLock(ctx context.Context, pool *pg.Pool, _ app.Deps, jobName string, every time.Duration, fn func(context.Context)) {
@@ -213,32 +257,33 @@ func runWithLock(ctx context.Context, pool *pg.Pool, _ app.Deps, jobName string,
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Advisory locks are session-scoped: the try-lock, fn and unlock must
-			// ride ONE pooled connection, or the unlock lands on another session.
-			conn, err := pool.Raw().Acquire(ctx)
-			if err != nil {
-				continue
-			}
-			// Try to acquire the lock (non-blocking — skip if held).
-			var got bool
-			if err := conn.QueryRow(ctx,
-				"SELECT pg_try_advisory_lock($1)", lockKey).Scan(&got); err != nil || !got {
-				conn.Release()
-				continue // another instance is handling it
-			}
-			func() {
-				defer func() {
-					_, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
-					conn.Release()
-				}()
-				fn(ctx)
-			}()
+			runLocked(ctx, pool, lockKey, fn)
 		}
 	}
 }
 
-// reapUnclaimed retires abandoned anonymous tenants (Decision 10 of
-// docs/plans/projects-axis.md): their monitors pause after 24 h and the
+// runLocked is one run of fn under the advisory lock, skipped when another
+// instance holds it.
+func runLocked(ctx context.Context, pool *pg.Pool, lockKey int64, fn func(context.Context)) {
+	// Advisory locks are session-scoped: the try-lock, fn and unlock must
+	// ride ONE pooled connection, or the unlock lands on another session.
+	conn, err := pool.Raw().Acquire(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Release()
+	// Try to acquire the lock (non-blocking — skip if held).
+	var got bool
+	if err := conn.QueryRow(ctx,
+		"SELECT pg_try_advisory_lock($1)", lockKey).Scan(&got); err != nil || !got {
+		return // another instance is handling it
+	}
+	defer func() { _, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey) }()
+	fn(ctx)
+}
+
+// reapUnclaimed retires abandoned anonymous tenants: their monitors pause
+// after 24 h and the
 // tenant row is deleted after 7 days. The delete's cascade clears the
 // tenant's remaining rows, the same cascade claim adoption relies on.
 func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {

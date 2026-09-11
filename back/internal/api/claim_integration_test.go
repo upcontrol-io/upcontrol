@@ -1,6 +1,6 @@
 //go:build integration
 
-// Claim adopts (docs/plans/projects-axis.md Decisions 5 and 6): the anonymous
+// Claim adopts: the anonymous
 // tenant's footprint moves into the claimer's ONE tenant and the anonymous
 // row dies — never a second membership. Both doors (token and slug) route
 // through adoptTenant, so every test here drives the real POST /v1/claim with

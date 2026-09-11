@@ -1,4 +1,4 @@
-// The projects plan axis (docs/plans/projects-axis.md): Free 1, Indie 2,
+// The projects plan axis: Free 1, Indie 2,
 // Growth 5, Agency 10 projects in the one tenant a person has; Self-hosted's
 // NULL row means unlimited, the same contract telegram_recipients carries.
 // The gate and the upgrade hint live here so claim, create and the watch door
@@ -52,6 +52,20 @@ func upgradePlanForProjects(ctx context.Context, pool *pg.Pool, count int64) str
 	return strings.ToLower(cheapestPlan(ctx, pool, func(ent sqlc.PlanEntitlement) bool {
 		return ent.Projects == nil || int64(*ent.Projects) > count
 	}))
+}
+
+// writeFrozen answers the frozen-project wall. Reactivating needs a plan that
+// CARRIES every project the workspace holds (>=, not room for one more), and
+// only the owner is offered one: a guest's purchase would buy their own
+// workspace a plan and thaw nothing.
+func writeFrozen(ctx context.Context, w http.ResponseWriter, pool *pg.Pool, tenantID int64, owned bool) {
+	plan := ""
+	if count, err := pool.Queries().CountProjectsByTenant(ctx, tenantID); owned && err == nil {
+		plan = strings.ToLower(cheapestPlan(ctx, pool, func(ent sqlc.PlanEntitlement) bool {
+			return ent.Projects == nil || int64(*ent.Projects) >= count
+		}))
+	}
+	writeUpgradeRequired(w, "This project is frozen. Reactivate it by upgrading your plan.", plan)
 }
 
 // scope is what a request acts on: the session's person, the current
@@ -189,6 +203,7 @@ func (h *writeAPI) listProjects(w http.ResponseWriter, r *http.Request, s sqlc.S
 			"createdAt": row.CreatedAt,
 			"owned":     row.Owned,
 			"role":      row.Role,
+			"frozen":    row.Frozen,
 		}
 		// Zero is silence: a workspace with no owner row names nobody.
 		if row.OwnerEmail != nil && *row.OwnerEmail != "" {
@@ -315,6 +330,7 @@ func (h *writeAPI) createProject(w http.ResponseWriter, r *http.Request, s sqlc.
 		"createdAt": createdAt,
 		"owned":     true,
 		"role":      "login",
+		"frozen":    false,
 	})
 }
 
@@ -351,6 +367,12 @@ func (h *writeAPI) switchProject(w http.ResponseWriter, r *http.Request, s sqlc.
 	for _, row := range rows {
 		if uuidStr(row.PublicID) != req.ID {
 			continue
+		}
+		// A frozen project is a snapshot the plan stopped running: the switch
+		// is the one door into it, so the door is where the wall lives.
+		if row.Frozen {
+			writeFrozen(ctx, w, h.pool, row.TenantID, row.Owned)
+			return
 		}
 		if err := h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
 			ID: s.ID, TenantID: row.TenantID, ProjectID: &row.ID,

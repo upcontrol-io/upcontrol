@@ -1,9 +1,8 @@
 # upcontrol backend
 
 Three Go services — `ucapi`, `ucworker`, `ucprobe` — plus the contracts and
-infrastructure for the upcontrol monitoring product. See
-[`docs/plans/backend-build-plan.md`](../docs/plans/backend-build-plan.md) for the
-authoritative build plan; this README is the operator/developer quickstart.
+infrastructure for the upcontrol monitoring product. This README is the
+operator/developer quickstart.
 
 ## Layout
 

@@ -18,13 +18,26 @@ SELECT count(*) FROM project WHERE tenant_id = $1
 
 // Project queries: the tenant's projects — the plan-axis count and the list
 // the Projects page renders.
-// The projects plan axis (docs/plans/projects-axis.md): this count against
+// The projects plan axis: this count against
 // plan_entitlement.projects (NULL = unlimited) is the create/claim gate.
 func (q *Queries) CountProjectsByTenant(ctx context.Context, tenantID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, countProjectsByTenant, tenantID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const isProjectFrozen = `-- name: IsProjectFrozen :one
+SELECT EXISTS (SELECT 1 FROM project WHERE id = $1 AND frozen_at IS NOT NULL)
+`
+
+// The delivery guard's one question: a frozen project keeps recording what
+// is still measured, but nothing is delivered from it.
+func (q *Queries) IsProjectFrozen(ctx context.Context, id int64) (bool, error) {
+	row := q.db.QueryRow(ctx, isProjectFrozen, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const isTenantOwner = `-- name: IsTenantOwner :one
@@ -43,45 +56,9 @@ func (q *Queries) IsTenantOwner(ctx context.Context, arg IsTenantOwnerParams) (b
 	return exists, err
 }
 
-const listProjectsByTenant = `-- name: ListProjectsByTenant :many
-SELECT id, public_id, domain, created_at FROM project WHERE tenant_id = $1 ORDER BY id
-`
-
-type ListProjectsByTenantRow struct {
-	ID        int64
-	PublicID  pgtype.UUID
-	Domain    string
-	CreatedAt pgtype.Timestamptz
-}
-
-// The Projects page: every project in the tenant, oldest first.
-func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID int64) ([]ListProjectsByTenantRow, error) {
-	rows, err := q.db.Query(ctx, listProjectsByTenant, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListProjectsByTenantRow
-	for rows.Next() {
-		var i ListProjectsByTenantRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.PublicID,
-			&i.Domain,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listProjectsForPerson = `-- name: ListProjectsForPerson :many
 SELECT p.id, p.public_id, p.domain, p.created_at, p.tenant_id,
+       (p.frozen_at IS NOT NULL)::bool AS frozen,
        COALESCE(t.owner_person_id = $1, false)::bool AS owned,
        (CASE WHEN t.owner_person_id = $1 THEN 'login' ELSE m.role END)::text AS role,
        o.email AS owner_email
@@ -99,6 +76,7 @@ type ListProjectsForPersonRow struct {
 	Domain     string
 	CreatedAt  pgtype.Timestamptz
 	TenantID   int64
+	Frozen     bool
 	Owned      bool
 	Role       string
 	OwnerEmail *string
@@ -106,7 +84,9 @@ type ListProjectsForPersonRow struct {
 
 // Every project this person can reach: their own workspace's first, then the
 // ones they were invited to, oldest first within each. owner_email names whose
-// workspace a guest row lives in.
+// workspace a guest row lives in. frozen marks the freeze sweeper's snapshots:
+// the row stays visible to members - a project a guest holds vanishing from
+// their list reads as deleted data.
 func (q *Queries) ListProjectsForPerson(ctx context.Context, personID *int64) ([]ListProjectsForPersonRow, error) {
 	rows, err := q.db.Query(ctx, listProjectsForPerson, personID)
 	if err != nil {
@@ -122,6 +102,7 @@ func (q *Queries) ListProjectsForPerson(ctx context.Context, personID *int64) ([
 			&i.Domain,
 			&i.CreatedAt,
 			&i.TenantID,
+			&i.Frozen,
 			&i.Owned,
 			&i.Role,
 			&i.OwnerEmail,

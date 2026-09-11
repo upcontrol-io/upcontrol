@@ -5,6 +5,7 @@
   "target": "https://example.com/checkout",
   "status": "ok",
   "interval": "5m",
+  "paused": false,
   "keyword": "Add to cart",
   "expiry": { "ssl": "SSL Nov 2, in 84 days", "domain": "domain Mar 14, in 217 days" }
 }

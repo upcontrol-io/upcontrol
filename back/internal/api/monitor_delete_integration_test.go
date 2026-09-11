@@ -83,6 +83,13 @@ func newOrphanFixture(t *testing.T) *orphanFixture {
 		fmt.Sprintf("https://down-%d.example.com", uniq%100000)).Scan(&targetID); err != nil {
 		t.Fatalf("probe_target: %v", err)
 	}
+	// Measured just now: the public page publishes an open incident only
+	// while its target is still being measured.
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO target_facts (target_id, status, last_check_at) VALUES ($1, 'down', now())
+		 ON CONFLICT (target_id) DO UPDATE SET last_check_at = now()`, targetID); err != nil {
+		t.Fatalf("target_facts: %v", err)
+	}
 	if err := pool.Raw().QueryRow(ctx,
 		`INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
 		 VALUES (gen_random_uuid(), $1, $2, 'website', 'Checkout', $3, 300, $4)
@@ -200,5 +207,25 @@ func TestADeletedMonitorsIncidentLeavesTheStatusPage(t *testing.T) {
 
 	if slices.Contains(f.publicIncidentTitles(t), f.incidentTitle) {
 		t.Fatalf("the public page still lists %q after its monitor was deleted", f.incidentTitle)
+	}
+}
+
+// An open incident whose target nobody measures any more (a paused or frozen
+// check) leaves the public page: it is never shown as resolved, and never
+// as an outage we are not watching. Three intervals is the cutoff.
+func TestAnUnmeasuredOpenIncidentLeavesTheStatusPage(t *testing.T) {
+	f := newOrphanFixture(t)
+	if !slices.Contains(f.publicIncidentTitles(t), f.incidentTitle) {
+		t.Fatalf("the measured open incident is not on the public page; fixture is broken")
+	}
+	// The monitor checks every 300 s: a last check 20 minutes ago is past 3x.
+	if _, err := f.pool.Raw().Exec(context.Background(),
+		`UPDATE target_facts SET last_check_at = now() - interval '20 minutes'
+		  WHERE target_id = (SELECT target_id FROM monitor WHERE replace(public_id::text, '-', '') = $1)`,
+		f.monitorPubID); err != nil {
+		t.Fatalf("age the last check: %v", err)
+	}
+	if slices.Contains(f.publicIncidentTitles(t), f.incidentTitle) {
+		t.Fatalf("the public page still lists %q with nothing measuring it", f.incidentTitle)
 	}
 }

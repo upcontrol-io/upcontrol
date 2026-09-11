@@ -165,8 +165,9 @@ func openTestDB(t *testing.T, why string) *pg.Pool {
 }
 
 // Pins the timeline wording: the raw reason is storage detail and must not
-// leak. UC_TEST_POSTGRES unset = skip.
-func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
+// leak, and a close nobody measured never reads as a recovery.
+// UC_TEST_POSTGRES unset = skip.
+func TestClose_WordsTheTimeline(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestDB(t, "close-wording test")
 
@@ -181,34 +182,41 @@ func TestClose_MonitorDeleteWordsTheTimeline(t *testing.T) {
 		tenantID).Scan(&projectID); err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	var monitorID int64
-	if err := pool.Raw().QueryRow(ctx,
-		`WITH pt AS (
-		   INSERT INTO probe_target (key, kind, url) VALUES ($3, 'website', 'https://shop.example.com') ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id)
-		 INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
-		 SELECT gen_random_uuid(), $1, $2, 'http', 'Checkout', 'https://shop.example.com', 300, pt.id FROM pt
-		 RETURNING id`,
-		tenantID, projectID, targetkey.Website("https://shop.example.com", "")).Scan(&monitorID); err != nil {
-		t.Fatalf("monitor: %v", err)
-	}
+	for reason, want := range map[string]string{
+		ReasonMonitorDelete: "Monitor deleted",
+		ReasonPlanPaused:    "Paused by the plan's check limit",
+	} {
+		// One target per reason: a project subscribes to a target once.
+		url := "https://" + reason + ".shop.example.com"
+		var monitorID int64
+		if err := pool.Raw().QueryRow(ctx,
+			`WITH pt AS (
+			   INSERT INTO probe_target (key, kind, url) VALUES ($3, 'website', $4) ON CONFLICT (key) DO UPDATE SET url = EXCLUDED.url RETURNING id)
+			 INSERT INTO monitor (public_id, tenant_id, project_id, kind, name, target, interval_sec, target_id)
+			 SELECT gen_random_uuid(), $1, $2, 'http', 'Checkout', $4, 300, pt.id FROM pt
+			 RETURNING id`,
+			tenantID, projectID, targetkey.Website(url, ""), url).Scan(&monitorID); err != nil {
+			t.Fatalf("monitor: %v", err)
+		}
 
-	l := New(pool, nil)
-	incidentID, created, err := l.Open(ctx, monitorID, "Checkout is down", 0)
-	if err != nil || !created {
-		t.Fatalf("open incident: created=%v err=%v", created, err)
-	}
-	if err := l.Close(ctx, monitorID, ReasonMonitorDelete); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+		l := New(pool, nil)
+		incidentID, created, err := l.Open(ctx, monitorID, "Checkout is down", 0)
+		if err != nil || !created {
+			t.Fatalf("open incident: created=%v err=%v", created, err)
+		}
+		if err := l.Close(ctx, monitorID, reason); err != nil {
+			t.Fatalf("close: %v", err)
+		}
 
-	var kind, text string
-	if err := pool.Raw().QueryRow(ctx,
-		`SELECT kind, text FROM incident_update WHERE incident_id = $1 ORDER BY id DESC LIMIT 1`,
-		incidentID).Scan(&kind, &text); err != nil {
-		t.Fatalf("read newest update: %v", err)
-	}
-	if kind != "resolved" || text != "Monitor deleted" {
-		t.Fatalf("newest update = kind %q text %q, want resolved / \"Monitor deleted\"", kind, text)
+		var kind, text string
+		if err := pool.Raw().QueryRow(ctx,
+			`SELECT kind, text FROM incident_update WHERE incident_id = $1 ORDER BY id DESC LIMIT 1`,
+			incidentID).Scan(&kind, &text); err != nil {
+			t.Fatalf("read newest update: %v", err)
+		}
+		if kind != "resolved" || text != want {
+			t.Fatalf("%s: newest update = kind %q text %q, want resolved / %q", reason, kind, text, want)
+		}
 	}
 }
 
