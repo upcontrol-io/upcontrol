@@ -259,6 +259,12 @@ type directoryRow struct {
 	Sentence string
 }
 
+// directoryData is everything the directory template renders.
+type directoryData struct {
+	Rows   []directoryRow
+	JSONLD template.JS
+}
+
 // indexedList reads the sitemap's predicate: pages with a stamp, live, the
 // index gate's own ordering (newest first). The kill switch empties it.
 func (h *statusPages) indexedList(ctx context.Context) []directoryRow {
@@ -295,8 +301,29 @@ func (h *statusPages) indexedList(ctx context.Context) []directoryRow {
 
 func (h *statusPages) directory(w http.ResponseWriter, r *http.Request) {
 	rows := h.indexedList(r.Context())
+	data := directoryData{Rows: rows}
+	// ItemList structured data for the rows actually shown; an empty
+	// directory has nothing to list and gets none.
+	if len(rows) > 0 {
+		origin := strings.TrimRight(h.wa.statusKnobs.StatusOrigin, "/")
+		items := make([]map[string]any, 0, len(rows))
+		for i, row := range rows {
+			items = append(items, map[string]any{
+				"@type":    "ListItem",
+				"position": i + 1,
+				"url":      origin + "/status/" + row.Slug,
+				"name":     row.Host,
+			})
+		}
+		ld, _ := json.Marshal(map[string]any{
+			"@context":        "https://schema.org",
+			"@type":           "ItemList",
+			"itemListElement": items,
+		})
+		data.JSONLD = template.JS(ld)
+	}
 	htmlHeaders(w)
-	_ = h.tmpl.ExecuteTemplate(w, "directory", rows)
+	_ = h.tmpl.ExecuteTemplate(w, "directory", data)
 }
 
 // sitemap mirrors the directory predicate exactly, one URL per indexed
@@ -487,31 +514,77 @@ const directoryTmpl = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, follow">
-<title>Status pages directory</title>
+<title>Status pages directory · UpControl</title>
+<meta name="description" content="Every public status page UpControl measures, in one index.">
+{{- if .JSONLD}}
+<script type="application/ld+json">{{.JSONLD}}</script>
+{{- end}}
 <style>
-body { margin: 0; font: 16px/1.6 system-ui, sans-serif; color: #111; background: #fafafa; }
-main { max-width: 720px; margin: 0 auto; padding: 24px 20px 40px; }
-ul { list-style: none; margin: 0; padding: 0; }
-li { padding: 10px 0; border-bottom: 1px solid #eee; }
-.state { color: #555; font-size: 14px; }
-a { color: #111; }
+:root {
+color-scheme: dark;
+--bg: #16181b; --line: #2a2f35;
+--ink: #e7e9eb; --ink-body: #c2c7cd; --ink-muted: #878e97;
+--accent: #8fa9d8;
+}
+@media (prefers-color-scheme: light) {
+:root {
+color-scheme: light;
+--bg: #f2f2ef; --line: #deded7;
+--ink: #191b1d; --ink-body: #3a3e42; --ink-muted: #6b7178;
+--accent: #3e5c96;
+}
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.6 -apple-system, system-ui, sans-serif; color: var(--ink-body); background: var(--bg); }
+header, main, footer { max-width: 640px; margin: 0 auto; padding-left: 20px; padding-right: 20px; }
+header { display: flex; align-items: baseline; gap: 10px; padding-top: 20px; padding-bottom: 18px; }
+.brand { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; color: var(--ink); text-decoration: none; }
+.tag { color: var(--ink-muted); font-size: 14px; }
+main { padding-top: 8px; padding-bottom: 40px; }
+h1 { font-size: 22px; margin: 4px 0 20px; color: var(--ink); }
+ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+li { padding: 14px 0; border-bottom: 1px solid var(--line); }
+li a { color: var(--ink); font-weight: 600; text-decoration: none; }
+li a:hover { color: var(--accent); }
+.state { display: block; margin-top: 2px; color: var(--ink-muted); font-size: 14px; }
+.empty { color: var(--ink-muted); }
+footer { margin-top: 20px; padding-top: 24px; padding-bottom: 40px; border-top: 1px solid var(--line); }
+footer nav { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+footer a { color: var(--ink-muted); font-size: 14px; text-decoration: none; }
+footer a:hover { color: var(--ink); }
+footer p { margin: 16px 0 0; color: var(--ink-muted); font-size: 13px; }
 </style>
 </head>
 <body>
+<header>
+<a class="brand" href="/">UpControl</a>
+<span class="tag">status directory</span>
+</header>
 <main>
 <h1>Status pages</h1>
-{{- if .}}
+{{- if .Rows}}
 <ul>
-{{- range .}}
-<li><a href="/status/{{.Slug}}">{{.Host}}</a><br>
+{{- range .Rows}}
+<li><a href="/status/{{.Slug}}">{{.Host}}</a>
 <span class="state">{{.Sentence}}</span></li>
 {{- end}}
 </ul>
 {{- else}}
-<p>The directory is temporarily empty.</p>
+<p class="empty">The directory is temporarily empty.</p>
 {{- end}}
 </main>
+<footer>
+<nav>
+<a href="/">Home</a>
+<a href="/docs">Docs</a>
+<a href="/pricing">Pricing</a>
+<a href="/privacy">Privacy</a>
+<a href="/terms">Terms</a>
+</nav>
+<p>UpControl is operated by an independent sole trader based in Finland.</p>
+</footer>
 </body>
 </html>`
 

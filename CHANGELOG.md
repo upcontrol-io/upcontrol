@@ -6,6 +6,18 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.29.1] — 2026-09-11
+
+### Changed
+- **The status directory (`GET /status`) matches the rest of the site.** A header (brand link
+  + "status directory" tag) and footer (Home/Docs/Pricing/Privacy/Terms, the same operator
+  line the front's footer carries) now bracket the list, styled with the product's real dark
+  (default) and light palettes via `prefers-color-scheme` instead of the old fixed light-only
+  sheet. Still one dependency-free HTML string — no asset pipeline, no JS. Added the missing
+  `<meta name="viewport">`, a `<meta name="description">`, and `ItemList` JSON-LD for the
+  listed pages. `noindex, follow` is unchanged, and each project's own `/status/{slug}` page
+  is untouched.
+
 ## [0.29.0] — 2026-09-11
 
 A plan now buys live capacity, and the data stays the customer's. Migration 010 adds
