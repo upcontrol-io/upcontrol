@@ -318,6 +318,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	statusHTML := api.NewStatusPages(wa)
 	mux.Handle("GET /status/{slug}", statusHTML)
 	mux.Handle("GET /status", statusHTML)
+	mux.Handle("GET /public/status-directory", statusHTML)
 	mux.Handle("GET /sitemap-status.xml", statusHTML)
 	mux.Handle("GET /public/status/{slug}/og.png", statusHTML)
 	static := api.NewStaticPages()

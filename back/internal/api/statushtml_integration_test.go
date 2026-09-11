@@ -70,6 +70,7 @@ func newSurfacesWorld(t *testing.T) (*pg.Pool, http.Handler, *writeAPI) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /status/{slug}", sh)
 	mux.Handle("GET /status", sh)
+	mux.Handle("GET /public/status-directory", sh)
 	mux.Handle("GET /sitemap-status.xml", sh)
 	mux.Handle("GET /public/status/{slug}/og.png", sh)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -352,6 +353,18 @@ func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 		t.Fatal("the unindexed page is listed")
 	}
 
+	// The browser's copy of the same list: one predicate, two renderings.
+	j := get(t, mux, "/public/status-directory")
+	if j.Code != http.StatusOK || !strings.Contains(j.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("directory json = %d %q", j.Code, j.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(j.Body.String(), `"slug":"`+slug+`"`) {
+		t.Fatal("the indexed page is not in the directory json")
+	}
+	if strings.Contains(j.Body.String(), unlisted) {
+		t.Fatal("the unindexed page is in the directory json")
+	}
+
 	sm := get(t, mux, "/sitemap-status.xml")
 	if sm.Code != http.StatusOK || sm.Header().Get("Content-Type") != "application/xml; charset=utf-8" {
 		t.Fatalf("sitemap = %d %q", sm.Code, sm.Header().Get("Content-Type"))
@@ -369,6 +382,9 @@ func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 	wa.statusKnobs.IndexDisabled = true
 	if body := get(t, mux, "/status").Body.String(); !strings.Contains(body, "The directory is temporarily empty.") {
 		t.Fatal("the kill-switched directory is not empty")
+	}
+	if body := get(t, mux, "/public/status-directory").Body.String(); !strings.Contains(body, `{"pages":[]}`) {
+		t.Fatalf("the kill-switched directory json is not an empty list: %s", body)
 	}
 	if body := get(t, mux, "/sitemap-status.xml").Body.String(); strings.Contains(body, "<url>") {
 		t.Fatal("the kill-switched sitemap is not empty")

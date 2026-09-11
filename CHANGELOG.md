@@ -6,6 +6,20 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-09-11
+
+### Added
+- **`GET /public/status-directory`** answers the directory's list as JSON (`{pages: [{host,
+  slug, sentence?}]}`), from the same predicate as the HTML directory and the sitemap, and
+  `[]` under the kill switch. A browser's `/status` is now a front page reading it, split at
+  the edge by User-Agent exactly like `/status/{slug}`: crawlers keep the HTML directory.
+
+### Changed
+- The HTML directory is the crawler copy again: back to the minimal achromatic sheet, with no
+  header or footer (0.29.1's look-alike ones only ever served humans). It keeps the viewport,
+  the description and the `ItemList` JSON-LD, and its title is the front's own:
+  `Status pages directory | UpControl`.
+
 ## [0.29.1] — 2026-09-11
 
 ### Changed

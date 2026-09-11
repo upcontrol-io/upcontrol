@@ -1795,6 +1795,25 @@ type SourcesResponse struct {
 	Sources            []Source            `json:"sources"`
 }
 
+// StatusDirectoryPage defines model for StatusDirectoryPage.
+type StatusDirectoryPage struct {
+	// Host Example: inssist.com
+	Host string `json:"host"`
+
+	// Sentence The page's own measured state line; absent while nothing has been measured.
+	//
+	// Example: inssist.com answered HTTP 200 in 138 ms from our check
+	Sentence *string `json:"sentence,omitempty"`
+
+	// Slug Example: inssist.com
+	Slug string `json:"slug"`
+}
+
+// StatusDirectoryResponse defines model for StatusDirectoryResponse.
+type StatusDirectoryResponse struct {
+	Pages []StatusDirectoryPage `json:"pages"`
+}
+
 // StatusPageResponse defines model for StatusPageResponse.
 type StatusPageResponse struct {
 	Components []PublicComponent `json:"components"`

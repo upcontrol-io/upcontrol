@@ -1269,6 +1269,23 @@ components:
         since: { type: string }
         status: { $ref: "#/components/schemas/HealthStatus" }
         ongoing: { type: boolean }
+    StatusDirectoryResponse:
+      type: object
+      required: [pages]
+      properties:
+        pages:
+          type: array
+          items: { $ref: "#/components/schemas/StatusDirectoryPage" }
+    StatusDirectoryPage:
+      type: object
+      required: [host, slug]
+      properties:
+        host: { type: string, example: inssist.com }
+        slug: { type: string, example: inssist.com }
+        sentence:
+          description: The page's own measured state line; absent while nothing has been measured.
+          type: string
+          example: inssist.com answered HTTP 200 in 138 ms from our check
     PublicStatusResponse:
       type: object
       required: [components, incidents, updatedAt]
@@ -3159,6 +3176,27 @@ paths:
                 },
             }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /public/status-directory:
+    get:
+      tags: [public]
+      security: []
+      summary: Every status page the directory lists, newest first.
+      description: >
+        The same pages the HTML directory at /status and the sitemap list:
+        stamped by the index gate and not removed, newest first. The kill
+        switch empties it. A browser's /status reads this; a crawler gets
+        the HTML directory built from the same list.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                {
+                  schema: { $ref: "#/components/schemas/StatusDirectoryResponse" },
+                },
+            }
 
   /public/status/{slug}/og.png:
     get:
