@@ -69,9 +69,8 @@ func (h *instanceSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	s, err := h.sess.FromRequest(ctx, r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// Changing how the instance talks to the world is a settings act, not a

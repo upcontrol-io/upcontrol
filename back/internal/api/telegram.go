@@ -33,9 +33,8 @@ func NewTelegram(p *pg.Pool, sm *session.Manager, botUsername func(context.Conte
 }
 
 func (h *telegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s, err := h.sess.FromRequest(r.Context(), r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	if !canManage(r.Context(), h.pool, s) {

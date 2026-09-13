@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
@@ -21,7 +22,23 @@ const (
 	DefaultTTL = 30 * 24 * time.Hour
 )
 
-var errNoSession = errors.New("session: no valid session")
+// ErrNoSession is the one refusal meaning the reader really has no session, and the only
+// one a caller may answer 401 with. Every other error from this package is the CHECK
+// failing — a dead pool, a statement timeout — which is a 500: the front reads every 401 as
+// a lost session and leaves the app, so a database blip answered 401 signs everyone out.
+var ErrNoSession = errors.New("session: no valid session")
+
+// Refusal is the status and error code a session error deserves, and the ONE place that
+// decides it: 401 only when the reader really has no session — no cookie, or a token that
+// resolves to no row — and 500 when the check itself failed. Every door that reads a session
+// answers through this, because the front leaves the app on any 401 and a database blip
+// answered 401 signs every signed-in reader out at once (prod, 2026-09-12).
+func Refusal(err error) (int, string) {
+	if errors.Is(err, ErrNoSession) || errors.Is(err, pgx.ErrNoRows) {
+		return http.StatusUnauthorized, "no_session"
+	}
+	return http.StatusInternalServerError, "internal"
+}
 
 // Manager creates and validates sessions against the session table.
 type Manager struct {
@@ -69,8 +86,12 @@ func (m *Manager) LookupSession(ctx context.Context, rawToken string) (sqlc.Sess
 	if err != nil {
 		// Never log the token or its hash: a log that can be replayed into a
 		// session is a second credential store.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			m.log.Error("session: lookup failed", "err", err)
+			return sqlc.Session{}, err
+		}
 		m.log.Info("session: refused", "reason", "no valid session for token")
-		return sqlc.Session{}, errNoSession
+		return sqlc.Session{}, ErrNoSession
 	}
 	_ = m.pool.Queries().TouchSession(ctx, s.ID)
 	return s, nil
@@ -92,13 +113,13 @@ func (m *Manager) WithFixedIdentity(personID, tenantID int64) *Manager {
 // FromRequest extracts the session from an HTTP request's cookie.
 func (m *Manager) FromRequest(ctx context.Context, r *http.Request) (sqlc.Session, error) {
 	// The nil check keeps a cookieless request on a nil Manager answering
-	// errNoSession, which is what tests that never mint sessions construct.
+	// ErrNoSession, which is what tests that never mint sessions construct.
 	if m != nil && m.fixedPersonID != 0 {
 		return sqlc.Session{PersonID: m.fixedPersonID, TenantID: m.fixedTenantID}, nil
 	}
 	c, err := r.Cookie(CookieName)
 	if err != nil || c.Value == "" {
-		return sqlc.Session{}, errNoSession
+		return sqlc.Session{}, ErrNoSession
 	}
 	return m.LookupSession(ctx, c.Value)
 }

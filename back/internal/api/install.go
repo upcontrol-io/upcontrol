@@ -97,9 +97,8 @@ const installTokenTTL = 10 * time.Minute
 // bare signed-out init would mint an anonymous project and bypass this account.
 func (h *install) issueToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	s, err := h.sess.FromRequest(ctx, r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// The session's current project (the tenant's first as the fallback).
@@ -279,9 +278,8 @@ type claimReq struct {
 
 func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	s, err := h.sess.FromRequest(ctx, r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	var req claimReq

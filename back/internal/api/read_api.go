@@ -38,9 +38,8 @@ func NewReadAPI(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, botUsername
 }
 
 func (h *readAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s, err := h.sess.FromRequest(r.Context(), r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// Everything a screen shows is the CURRENT project's; the workspace still

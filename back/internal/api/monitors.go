@@ -44,9 +44,8 @@ func NewMonitors(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, origin str
 
 // ServeHTTP routes by method + path pattern.
 func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s, err := h.sess.FromRequest(r.Context(), r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// Notify members read, login members change: creating/editing/deleting a
@@ -739,6 +738,20 @@ func writeUpgradeRequired(w http.ResponseWriter, reason, plan string) {
 			"upgrade": upgrade,
 		},
 	})
+}
+
+// requireSession is the one gate every session-only door opens through: it answers the
+// request itself when there is no usable session and reports false. A lookup that FAILED is
+// a 500, never a 401 — the front reads every 401 as a lost session and leaves the app, so a
+// database blip answered 401 would sign every signed-in reader out mid-action.
+func requireSession(w http.ResponseWriter, r *http.Request, sm *session.Manager) (sqlc.Session, bool) {
+	s, err := sm.FromRequest(r.Context(), r)
+	if err == nil {
+		return s, true
+	}
+	code, msg := session.Refusal(err)
+	writeAPIErr(w, code, msg)
+	return sqlc.Session{}, false
 }
 
 func writeAPIErr(w http.ResponseWriter, code int, msg string) {

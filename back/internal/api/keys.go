@@ -39,9 +39,8 @@ func NewKeys(p *pg.Pool, sm *session.Manager) *keys {
 }
 
 func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s, err := h.sess.FromRequest(r.Context(), r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// A whole project's key set, addressed by project rather than by the

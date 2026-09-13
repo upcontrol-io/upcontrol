@@ -432,7 +432,8 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.sess.FromRequest(ctx, r)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "no_session")
+		code, msg := session.Refusal(err)
+		writeErr(w, code, msg)
 		return
 	}
 	// s.TokenHash is the sha256 of the cookie value. Single-user mode carries
@@ -443,7 +444,8 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			PersonID: s.PersonID, TenantID: s.TenantID,
 		})
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "no_session")
+			code, msg := session.Refusal(err)
+			writeErr(w, code, msg)
 			return
 		}
 		row = sqlc.GetMeRow(byID)
@@ -451,7 +453,8 @@ func (h *me) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var err error
 		row, err = h.pool.Queries().GetMe(ctx, s.TokenHash)
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "no_session")
+			code, msg := session.Refusal(err)
+			writeErr(w, code, msg)
 			return
 		}
 	}

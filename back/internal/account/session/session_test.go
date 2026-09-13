@@ -3,10 +3,13 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestFromRequest_FixedIdentity(t *testing.T) {
@@ -22,8 +25,8 @@ func TestFromRequest_FixedIdentity(t *testing.T) {
 	}
 
 	plain := New(nil, 0, nil)
-	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, errNoSession) {
-		t.Fatalf("without fixed identity a cookieless request must be errNoSession, got %v", err)
+	if _, err := plain.FromRequest(context.Background(), httptest.NewRequest("GET", "/v1/me", nil)); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("without fixed identity a cookieless request must be ErrNoSession, got %v", err)
 	}
 }
 
@@ -84,5 +87,27 @@ func TestRandomToken_EntropyAndLength(t *testing.T) {
 			t.Fatalf("token collision after %d draws", i)
 		}
 		seen[tok] = true
+	}
+}
+
+// A failed CHECK is a 500, never a 401. The front leaves the app on any 401, so the day this
+// maps a dead pool to "no session" every signed-in reader is thrown out by a database blip
+// (prod, 2026-09-12: a customer pressing Upgrade landed on /sign-in instead).
+func TestRefusal(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		code int
+		msg  string
+	}{
+		{"no session", ErrNoSession, http.StatusUnauthorized, "no_session"},
+		{"wrapped no session", fmt.Errorf("lookup: %w", ErrNoSession), http.StatusUnauthorized, "no_session"},
+		{"token resolves to no row", pgx.ErrNoRows, http.StatusUnauthorized, "no_session"},
+		{"the pool is dead", errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"), http.StatusInternalServerError, "internal"},
+		{"the query timed out", fmt.Errorf("query: %w", context.DeadlineExceeded), http.StatusInternalServerError, "internal"},
+	} {
+		if code, msg := Refusal(c.err); code != c.code || msg != c.msg {
+			t.Errorf("%s: got %d %q, want %d %q", c.name, code, msg, c.code, c.msg)
+		}
 	}
 }

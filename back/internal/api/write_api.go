@@ -151,9 +151,8 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Everything else needs a session.
-	s, err := h.sess.FromRequest(r.Context(), r)
-	if err != nil {
-		writeAPIErr(w, http.StatusUnauthorized, "no_session")
+	s, ok := requireSession(w, r, h.sess)
+	if !ok {
 		return
 	}
 	// Notify members read (GETs below); every mutation needs login. POST /v1/series
