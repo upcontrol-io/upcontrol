@@ -25,15 +25,14 @@ import (
 // statusPages is the HTML door handler: the write API it borrows carries
 // the pool, the knobs and the shared assembly.
 type statusPages struct {
-	wa    *writeAPI
-	tmpl  *template.Template
-	stats *staticPages
+	wa   *writeAPI
+	tmpl *template.Template
 }
 
 // NewStatusPages parses the templates once (they are constants in this
 // file; a parse error is a programming fault and fails loudly at wiring).
 func NewStatusPages(wa *writeAPI) *statusPages {
-	return &statusPages{wa: wa, tmpl: mustParseStatusTemplates(), stats: NewStaticPages()}
+	return &statusPages{wa: wa, tmpl: mustParseStatusTemplates()}
 }
 
 func (h *statusPages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +140,7 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 		// The prj-N fallback: a page not yet configured resolves by its
 		// project, exactly like publicStatus.
 		if _, perr := fmt.Sscanf(slug, "prj-%d", &projectID); perr != nil || projectID == 0 {
-			h.stats.notFound(w)
+			notFoundPage(w)
 			return
 		}
 		if qerr := h.wa.pool.Raw().QueryRow(ctx,
@@ -149,12 +148,12 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 			       (SELECT sp.removed_at FROM status_page sp WHERE sp.project_id = p.id LIMIT 1)
 			   FROM project p JOIN tenant t ON t.id = p.tenant_id
 			  WHERE p.id = $1`, projectID).Scan(&tenantID, &claimed, &removedAt); qerr != nil || tenantID == 0 {
-			h.stats.notFound(w)
+			notFoundPage(w)
 			return
 		}
 	}
 	if removedAt != nil {
-		h.stats.removed(w)
+		removedPage(w)
 		return
 	}
 	resp, meta := h.wa.publicStatusData(ctx, projectID, claimed)
@@ -517,8 +516,6 @@ footer nav a { margin-right: 14px; }
 <p>Measured from one location outside {{.Host}} by UpControl.</p>
 <nav>
 <a href="{{.ClaimHref}}">Site owner? Claim this page.</a>
-<a href="/status/policy">Want it removed? See the policy.</a>
-<a href="/bot">About our bot</a>
 <a href="/status">Status directory</a>
 <a href="{{.CheckHref}}">Check your own site</a>
 </nav>

@@ -37,7 +37,7 @@ type CheckSpec struct {
 
 // UserAgent identifies us on every request; Go's default "Go-http-client/2.0"
 // is blocked by WAFs and tells an operator nothing about who is asking.
-const UserAgent = "upcontrol/1.0 (+https://upcontrol.io/bot)"
+const UserAgent = "upcontrol/1.0 (+https://upcontrol.io)"
 
 // Result is the output: the check outcome and its timings.
 type Result struct {

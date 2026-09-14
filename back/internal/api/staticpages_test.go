@@ -5,53 +5,34 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"go.upcontrol.io/back/internal/probe/executor"
 )
 
-// The static pages carry no data: they render from constants, print the
-// executor's User-Agent string verbatim, and carry no em-dash.
-
-func staticGet(h http.Handler, path string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(http.MethodGet, path, nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	return w
-}
-
+// The crawler door's fixed answers carry the right status, the shared
+// headers, and no em-dash.
 func TestStaticPagesRender(t *testing.T) {
-	static := NewStaticPages()
-	mux := http.NewServeMux()
-	mux.Handle("GET /bot", static)
-	mux.Handle("GET /status/policy", static)
-
-	bot := staticGet(mux, "/bot")
-	if bot.Code != http.StatusOK {
-		t.Fatalf("/bot = %d", bot.Code)
-	}
-	if !strings.Contains(bot.Body.String(), "<code>"+executor.UserAgent+"</code>") {
-		t.Fatal("the bot page does not print the executor's User-Agent verbatim")
-	}
-	for k, want := range map[string]string{
-		"Content-Type":  "text/html; charset=utf-8",
-		"Vary":          "User-Agent",
-		"Cache-Control": "public, max-age=60",
+	for _, tc := range []struct {
+		name string
+		call func(http.ResponseWriter)
+		code int
+		want string
+	}{
+		{"removed", removedPage, http.StatusGone, "removed at the site owner's request"},
+		{"notFound", notFoundPage, http.StatusNotFound, "no status page at this address"},
 	} {
-		if got := bot.Header().Get(k); got != want {
-			t.Fatalf("bot %s = %q, want %q", k, got, want)
+		w := httptest.NewRecorder()
+		tc.call(w)
+		if w.Code != tc.code {
+			t.Fatalf("%s = %d, want %d", tc.name, w.Code, tc.code)
 		}
-	}
-
-	pol := staticGet(mux, "/status/policy")
-	if pol.Code != http.StatusOK {
-		t.Fatalf("/status/policy = %d", pol.Code)
-	}
-	for _, want := range []string{"_upcontrol-remove.", "removal@upcontrol.io", "one business day", "not affiliated"} {
-		if !strings.Contains(pol.Body.String(), want) {
-			t.Fatalf("the policy page is missing %q", want)
+		if got := w.Header().Get("Vary"); got != "User-Agent" {
+			t.Fatalf("%s Vary = %q", tc.name, got)
 		}
-	}
-	if strings.Contains(bot.Body.String(), "—") || strings.Contains(pol.Body.String(), "—") {
-		t.Fatal("a static page carries an em-dash")
+		body := w.Body.String()
+		if !strings.Contains(body, tc.want) {
+			t.Fatalf("%s is missing %q", tc.name, tc.want)
+		}
+		if strings.Contains(body, "—") {
+			t.Fatalf("%s carries an em-dash", tc.name)
+		}
 	}
 }

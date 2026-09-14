@@ -19,6 +19,13 @@ All notable changes to the self-hosted package. The format follows
   averaging, so a short outage still reads red even folded into a wide bucket. Uptime is measured
   over the shown window only. The status page's Open Graph image now summarises the WHOLE strip
   into its 24 squares instead of only the oldest 24 bars.
+- The probe's User-Agent is now `upcontrol/1.0 (+https://upcontrol.io)`: the `/bot` page it
+  pointed at is gone.
+
+### Removed
+- **`GET /bot` and `GET /status/policy`.** The crawler copy of a status page no longer links
+  them, and the 410 page no longer points at the policy. A self-hosted edge that routed both
+  paths to ucapi can drop them from its matcher.
 
 ## [0.30.0] — 2026-09-11
 

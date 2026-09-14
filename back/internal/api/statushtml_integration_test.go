@@ -199,8 +199,6 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 	for _, want := range []string{
 		"Measured from one location outside " + host + " by UpControl.",
 		`href="/status/` + slug + `#claim"`,
-		`href="/status/policy"`,
-		`href="/bot"`,
 		`href="/status"`,
 		`href="/?check=` + host,
 		"Powered by UpControl",

@@ -313,7 +313,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// page's slug back.
 	mux.Handle("POST /internal/seed-host", api.NewSeedDoor(wa, d.Config.NodeToken))
 	// The crawler surfaces (plan part 4): the HTML door, the directory, the
-	// policy pages, the sitemap, and the page's OG image. All render from
+	// sitemap, and the page's OG image. All render from
 	// the same assembly as the JSON door above.
 	statusHTML := api.NewStatusPages(wa)
 	mux.Handle("GET /status/{slug}", statusHTML)
@@ -321,9 +321,6 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("GET /public/status-directory", statusHTML)
 	mux.Handle("GET /sitemap-status.xml", statusHTML)
 	mux.Handle("GET /public/status/{slug}/og.png", statusHTML)
-	static := api.NewStaticPages()
-	mux.Handle("GET /bot", static)
-	mux.Handle("GET /status/policy", static)
 	// The public removal-token door: issues the DNS TXT token the worker's
 	// dns-tokens job verifies. Rate-limited per IP, idempotent per page.
 	mux.Handle("POST /public/status/{slug}/remove-token", api.NewRemoveTokenDoor(wa))
