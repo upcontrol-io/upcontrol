@@ -37,12 +37,17 @@ function watchDot(status: string): { background: string; border: string } {
 }
 
 /** One bar per bucket, oldest first — the API decides how many there are and
- *  what one covers (`barSpanSec`). */
-function buildBars(statuses: HealthStatus[], spanSec: number): { status: BarStatus; label: string }[] {
+ *  what one covers (`barSpanSec`). `nowMs` anchors the tooltip alignment to
+ *  the backend's own clock (`updatedAt`), not the viewer's. */
+function buildBars(
+	statuses: HealthStatus[],
+	spanSec: number,
+	nowMs: number,
+): { status: BarStatus; label: string }[] {
 	const count = statuses.length;
 	return statuses.map((status, i) => ({
 		status: status as BarStatus,
-		label: bucketLabel(i, count, spanSec, status),
+		label: bucketLabel(i, count, spanSec, status, nowMs),
 	}));
 }
 
@@ -120,7 +125,8 @@ export function PublicStatus() {
 	const barSpan = shownComponents[0]?.barSpanSec ?? BASE_SPAN_SEC;
 	const network = page.network ?? [];
 	const host = page.title || projectSlug || 'status';
-	const updatedMinutes = page.updatedAt ? Math.floor((Date.now() - Date.parse(page.updatedAt)) / 60_000) : 0;
+	const updatedAtMs = page.updatedAt ? Date.parse(page.updatedAt) : Date.now();
+	const updatedMinutes = page.updatedAt ? Math.floor((Date.now() - updatedAtMs) / 60_000) : 0;
 	const updatedAgo = Number.isFinite(updatedMinutes) ? formatMinutesAgo(updatedMinutes) : 'just now';
 	// Default true: an older backend that does not send the field draws the
 	// line, and switching it off is the owner's explicit act.
@@ -158,7 +164,11 @@ export function PublicStatus() {
 					</div>
 					<div className={styles.componentList}>
 						{shownComponents.map((component, rowIndex) => {
-							const bars = buildBars((component.bars ?? []) as HealthStatus[], component.barSpanSec ?? BASE_SPAN_SEC);
+							const bars = buildBars(
+								(component.bars ?? []) as HealthStatus[],
+								component.barSpanSec ?? BASE_SPAN_SEC,
+								updatedAtMs,
+							);
 							const ongoing = isFailure(currentState(bars.map((bar) => bar.status)));
 							const rowState = ongoing ? currentState(bars.map((bar) => bar.status)) : 'ok';
 							const rowLabel = ongoing
@@ -204,7 +214,7 @@ export function PublicStatus() {
 									? `${spanLabel(barSpan, shownComponents[0].bars.length)} ago`
 									: ''}
 							</span>
-							<span>{'now'}</span>
+							<span>now</span>
 						</div>
 					</div>
 				</section>

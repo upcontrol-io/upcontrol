@@ -151,15 +151,14 @@ func Render(p Page) ([]byte, error) {
 	for _, c := range p.Components[:min(len(p.Components), 4)] {
 		drawText(img, labelFace, colText, margin, y, c.Name)
 		x := margin
+		squares := summarizeBars(c.Bars)
 		for i := 0; i < 24; i++ {
 			col := colNoData
-			if i < len(c.Bars) {
-				switch c.Bars[i] {
-				case "ok", "check":
-					col = colText
-				case "down":
-					col = colDown
-				}
+			switch squares[i] {
+			case "ok", "check":
+				col = colText
+			case "down":
+				col = colDown
 			}
 			draw.Draw(img, image.Rect(x, y+14, x+18, y+32), &image.Uniform{col}, image.Point{}, draw.Src)
 			x += 20
@@ -171,6 +170,48 @@ func Render(p Page) ([]byte, error) {
 	credit := "Powered by UpControl"
 	drawText(img, smallFace, colText, W-margin-width(smallFace, credit), 580, credit)
 	return encode(img)
+}
+
+// barRank orders a bar's status worst-first, matching write_api's own
+// worst-slot-wins convention (down > check > ok > nodata).
+var barRank = map[string]int{"nodata": 0, "ok": 1, "check": 2, "down": 3}
+
+// worstBar returns the worst-ranked status in a group of bars, "nodata" for
+// an empty group.
+func worstBar(group []string) string {
+	worst := "nodata"
+	for _, b := range group {
+		if barRank[b] > barRank[worst] {
+			worst = b
+		}
+	}
+	return worst
+}
+
+// summarizeBars folds a strip of any length down to exactly 24 squares, so the
+// image covers the same window as the page (a strip runs up to 96 bars). Square i covers bars[floor(i*n/24) :
+// floor((i+1)*n/24)), coloured by the worst bar inside it.
+//
+// A strip shorter than 24 bars (a young target on a widened cadence-floor
+// bucket, e.g. 12 bars at 2h on the 24h rung) is STRETCHED rather than
+// padded: square i shows bars[i*n/24], so every square carries real data.
+// Padding would put "nodata" at the newest end - exactly the half of the
+// image a freshly shared link is opened to see.
+func summarizeBars(bars []string) []string {
+	const squares = 24
+	out := make([]string, squares)
+	n := len(bars)
+	if 0 < n && n < squares {
+		for i := range out {
+			out[i] = bars[i*n/squares]
+		}
+		return out
+	}
+	for i := range out {
+		lo, hi := i*n/squares, (i+1)*n/squares
+		out[i] = worstBar(bars[lo:hi])
+	}
+	return out
 }
 
 // drawText writes one line with its baseline at y.

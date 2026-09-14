@@ -6,6 +6,20 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The status-page bar strip now climbs with the target's own history instead of stopping at a
+  day, with the 15-minute UTC slot as the colour unit everywhere.** Under 24h old it's 15m buckets
+  over 96 bars, under 48h it's 30m over 96, under 7 days it's 2h over 84, otherwise 12h over 60 —
+  reaching back up to 30 days. A fixed colour unit means the same moment reads the same colour
+  whether it's shown zoomed in or folded into a wide bucket. A CADENCE FLOOR keeps a bucket at
+  least 2x the target's own slowest check interval (widened through 15m/30m/1h/2h/12h as needed),
+  so a host probed hourly no longer draws three grey bars out of four that were never actually
+  missed. Bars are aligned to the UTC clock (the newest bar starts at the current bucket boundary),
+  not counted backwards from now, and each bar takes the WORST slot inside it rather than
+  averaging, so a short outage still reads red even folded into a wide bucket. Uptime is measured
+  over the shown window only. The status page's Open Graph image now summarises the WHOLE strip
+  into its 24 squares instead of only the oldest 24 bars.
+
 ## [0.30.0] — 2026-09-11
 
 ### Added

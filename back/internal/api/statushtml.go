@@ -81,13 +81,14 @@ func (h *statusPages) aliasCanonical(ctx context.Context, slug string) string {
 	return h.wa.canonicalAliasSlug(ctx, slug)
 }
 
-// componentLine is one row of the components list: the name, the measured
-// 24 h uptime, and the text summary of the bars. The uptime's JSON "no
+// componentLine is one row of the components list: the name, the uptime
+// measured over the window its strip shows, and the text summary of the bars. The uptime's JSON "no
 // data" rendering (an em-dash) is translated here: this page's visible copy
 // carries none.
 type componentLine struct {
 	Name    string
 	Uptime  string
+	Window  string
 	Summary string
 }
 
@@ -223,8 +224,9 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			span, _ := c["barSpanSec"].(int)
 			data.Components = append(data.Components, componentLine{
-				Name: name, Uptime: uptime,
+				Name: name, Uptime: uptime, Window: stripWindowLabel(time.Duration(span)*time.Second, total),
 				Summary: fmt.Sprintf("ok in %d of %d bars", okBars, total),
 			})
 		}
@@ -493,7 +495,7 @@ footer nav a { margin-right: 14px; }
 <ul class="components">
 {{- range .Components}}
 <li><span class="name">{{.Name}}</span><br>
-<span class="meta">24h uptime: {{.Uptime}}. {{.Summary}}.</span></li>
+<span class="meta">Uptime over {{.Window}}: {{.Uptime}}. {{.Summary}}.</span></li>
 {{- end}}
 </ul>
 {{- end}}

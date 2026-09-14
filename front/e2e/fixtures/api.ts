@@ -253,8 +253,9 @@ export async function stubApi(page: Page, opts?: { monitors?: Record<string, unk
 				name: (monitor as any).name,
 				shown: true,
 				uptime: "99.98%",
-				bars: bars(7),
-				barSpanSec: 86400,
+				// A fresh target's first rung: 900 s buckets, 96 of them.
+				bars: bars(96),
+				barSpanSec: 900,
 			})),
 		});
 	});

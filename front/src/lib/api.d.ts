@@ -2582,6 +2582,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/public/status-directory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every status page the directory lists, newest first.
+         * @description The same pages the HTML directory at /status and the sitemap list: stamped by the index gate and not removed, newest first. The kill switch empties it. A browser's /status reads this; a crawler gets the HTML directory built from the same list.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["StatusDirectoryResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/public/status/{slug}/og.png": {
         parameters: {
             query?: never;
@@ -3980,11 +4019,11 @@ export interface components {
             shown: boolean;
             /** @example 99.99% */
             uptime: string;
-            /** @description One status per bucket, oldest first. The page draws exactly this many bars and no more: the strip covers only what the monitor has actually measured. The window climbs 1-2-4-8-16-24 h as history accumulates, doubling the bar count at each rung, so what one bucket covers (`barSpanSec`) holds still while the bars get thinner. */
+            /** @description One status per bucket, oldest first, aligned to the UTC clock (the newest bar always starts at a bucket-aligned point at or before now). The colour unit is always the 15-minute UTC slot, so the same moment reads the same colour at every zoom level. The window climbs with the monitor's own history: under 24h old it's 15m buckets over 96 bars, under 48h it's 30m over 96, under 7 days it's 2h over 84, otherwise 12h over 60 (reaching back at most 30 days). A bucket is never narrower than 2x the monitor's own slowest interval_sec, widened through 15m/30m/1h/2h/12h as needed, so a target probed every 15 or 60 minutes doesn't draw mostly-grey bars for cadence it never missed. Each bar takes the WORST status among the measured slots inside it, never an average, so a short outage stays visible even inside a wide bucket. Bars with no measured slot draw "nodata". */
             bars: components["schemas"]["HealthStatus"][];
             /**
-             * @description Seconds one bar covers: five minutes normally, the monitor's own check interval when that is longer, and wider on the top rungs where the bar count is capped. Multiply by the number of bars for the window the strip reaches, which is at most a day. The page prints its own axis from this number and must not assume a fixed bucket.
-             * @example 300
+             * @description Seconds one bar covers: 900, 1800, 3600, 7200 or 43200 depending on the monitor's own history and cadence (see `bars`). The page prints its own axis from this number and must not assume a fixed bucket.
+             * @example 900
              */
             barSpanSec?: number;
         };
@@ -4051,6 +4090,20 @@ export interface components {
             since: string;
             status?: components["schemas"]["HealthStatus"];
             ongoing: boolean;
+        };
+        StatusDirectoryResponse: {
+            pages: components["schemas"]["StatusDirectoryPage"][];
+        };
+        StatusDirectoryPage: {
+            /** @example inssist.com */
+            host: string;
+            /** @example inssist.com */
+            slug: string;
+            /**
+             * @description The page's own measured state line; absent while nothing has been measured.
+             * @example inssist.com answered HTTP 200 in 138 ms from our check
+             */
+            sentence?: string;
         };
         PublicStatusResponse: {
             title?: string;

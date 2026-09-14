@@ -1354,12 +1354,13 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 // statusPageResponse is the one shape both /v1/status-page handlers answer
 // with: the stored decisions plus the measured components and network.
 func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg statusPageConfig, domain string, verified bool, page statusPageRow) map[string]any {
+	now := time.Now().UTC() // one read, handed to statusComponents below
 	resp := map[string]any{
 		"slug":           cfg.Slug,
 		"title":          cfg.Title,
 		"domain":         domain,
 		"domainVerified": verified,
-		"components":     h.statusComponents(ctx, projectID, cfg, false, page),
+		"components":     h.statusComponents(ctx, projectID, cfg, false, page, now),
 		"network":        h.statusNetwork(ctx, projectID),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
@@ -1507,91 +1508,192 @@ func ipsIntersect(a, b []string) bool {
 	return slices.ContainsFunc(a, func(ip string) bool { return slices.Contains(b, ip) })
 }
 
-// The strip's window climbs a ladder as history accumulates (owner decision,
-// 2026-08-27): an account with forty minutes of checks is shown its forty
-// minutes, never a day of grey. Each rung doubles the window AND the bar count,
-// so a bar keeps covering the same slice of time and simply gets thinner. The
-// ladder stops at a day — this page answers "how has today gone", and the
-// checks table keeps a week only so the window has room to reach 24 h.
-var statusWindows = [...]time.Duration{
-	time.Hour,
-	2 * time.Hour,
-	4 * time.Hour,
-	8 * time.Hour,
-	16 * time.Hour,
-	24 * time.Hour,
+// The strip's window climbs with the target's own history (owner decision,
+// 2026-09-14, replacing the 2026-08-27 1-2-4-8-16-24 h ladder). The colour
+// unit is the 15-minute UTC slot everywhere: a bar is one or more whole
+// slots, so the same moment reads the same colour whether it is shown in
+// 15-minute bars or folded into a 12-hour one. The four rungs (24 h/15 m, 48 h/30 m,
+// 7 d/2 h, 30 d/12 h) are round clock spans so stripWindowLabel and the
+// front's own axis stay simple. rungFor picks the window and base bucket
+// from age alone; the CADENCE FLOOR below then widens the bucket so a host
+// probed every 900 s or 3600 s doesn't draw three grey bars out of four that
+// were never actually missed.
+//
+// Checks are retained for at least the widest plan window plus a day and are
+// never dropped under Self-hosted's NULL history_days, so the widest rung's
+// 30 days is already in the table.
+func rungFor(oldest, now time.Time) (window, base time.Duration) {
+	if oldest.IsZero() {
+		return 24 * time.Hour, 15 * time.Minute
+	}
+	switch age := now.Sub(oldest); {
+	case age < 24*time.Hour:
+		return 24 * time.Hour, 15 * time.Minute
+	case age < 48*time.Hour:
+		return 48 * time.Hour, 30 * time.Minute
+	case age < 7*24*time.Hour:
+		return 7 * 24 * time.Hour, 2 * time.Hour
+	default:
+		return 30 * 24 * time.Hour, 12 * time.Hour
+	}
 }
 
-const (
-	// The first rung's bar count: 1 h over 12 bars is one bar per five minutes,
-	// and every rung above keeps that five minutes by doubling the count.
-	statusBarsBase = 12
-	// Where the doubling has to stop. Past this the bars are hairlines — on a
-	// 350px phone column 96 of them are already under 2px — so the top rungs
-	// widen the bucket instead of multiplying bars nobody can hit.
-	statusBarsMax = 96
-)
+// bucketSteps is the fixed ladder the cadence floor climbs: every value
+// divides every rung's window exactly, so count = window/bucket always comes
+// out whole regardless of which step the floor lands on.
+var bucketSteps = [...]time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 12 * time.Hour}
 
-// barPlanFor sizes one monitor's strip: how far back it reaches, what one bar
-// covers, and how many there are. `oldest` is the first check held (zero when
-// there are none).
-func barPlanFor(oldest time.Time, intervalSec int32, now time.Time) (window, bucket time.Duration, count int) {
-	// A rung is earned by having filled the one below it: an hour of history
-	// buys the two-hour window, sixteen hours buy the day.
-	window = statusWindows[0]
-	if !oldest.IsZero() {
-		have := now.Sub(oldest)
-		for i, w := range statusWindows[:len(statusWindows)-1] {
-			if have >= w {
-				window = statusWindows[i+1]
+// stripPlanFor sizes one strip: rungFor's window/base from the target's age,
+// then the CADENCE FLOOR widens base until it is at least 2x the target's own
+// slowest interval_sec inside that window (a zero/absent interval leaves the
+// rung's base bucket untouched). Below the floor, a bar can straddle a gap
+// between two scheduled checks and read "nodata" for a probe that simply
+// hasn't run yet - not a real miss.
+func stripPlanFor(oldest, now time.Time, maxIntervalSec int32) (bucket time.Duration, count int) {
+	window, bucket := rungFor(oldest, now)
+	if maxIntervalSec > 0 {
+		if floor := 2 * time.Duration(maxIntervalSec) * time.Second; bucket < floor {
+			bucket = bucketSteps[len(bucketSteps)-1] // widest step, in case none reaches the floor
+			for _, step := range bucketSteps {
+				if step >= floor {
+					bucket = step
+					break
+				}
 			}
 		}
 	}
+	return bucket, int(window / bucket)
+}
 
-	// A bucket shorter than the check's own interval draws gaps that are not
-	// outages: most of those bars would hold no check at all.
-	bucket = statusWindows[0] / statusBarsBase
-	if interval := time.Duration(intervalSec) * time.Second; interval > bucket {
-		bucket = interval
+// stripWindowLabel names the span a strip covers, as the fronts' spanLabel
+// does: hours up to two days, whole days past that. bucket*count is always
+// exactly one of the four rung windows, floored or not.
+func stripWindowLabel(bucket time.Duration, count int) string {
+	w := bucket * time.Duration(count)
+	if w <= 48*time.Hour {
+		return fmt.Sprintf("%d h", int(w.Hours()))
 	}
-	count = int(window / bucket)
-	if count > statusBarsMax {
-		count = statusBarsMax
-		bucket = window / time.Duration(count)
+	return fmt.Sprintf("%d days", int(w.Hours()/24))
+}
+
+// slotCounts is one 15-minute UTC slot's measured checks for one target (the
+// shared pgstore.MeasurableSQL predicate excludes challenge/rate-limit noise
+// from both ok and total; a slot with total == 0 held only unmeasured rows,
+// or none at all) plus the widest interval_sec any of the slot's rows were
+// taken at, which feeds the cadence floor.
+type slotCounts struct {
+	ok, total   uint64
+	intervalSec int32
+}
+
+// buildStrip turns one target's 15-minute slots into a bar strip. oldest is
+// the smallest slot key present (any total counts -
+// an unmeasured-only slot still ages the rung but draws nothing). The cadence
+// floor then looks only at slots inside the age-picked rung's own window (an
+// older, faster or slower row outside it must not move the floor) for the
+// widest interval_sec seen, and stripPlanFor turns that into the final
+// bucket. Bars are aligned to the UTC clock (newest bar =
+// floor(now/bucket)*bucket), not counted backwards from now. Each bar takes
+// the WORST slot inside it (down > check > ok) rather than averaging - a
+// short outage folded into a wide bucket must still read red, and the same
+// slot must still read the same colour at every zoom (the whole point of a
+// fixed 15-minute colour unit).
+func buildStrip(slots map[int64]slotCounts, now time.Time) (bars []string, bucket time.Duration, ok, total uint64) {
+	var oldest time.Time
+	for s := range slots {
+		t := time.Unix(s, 0).UTC()
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest = t
+		}
 	}
-	// An interval wider than the whole window: one bar, honestly one bar.
-	if count < 1 {
-		count, bucket = 1, window
+	window, base := rungFor(oldest, now)
+	baseCount := int(window / base)
+	windowStart := now.Truncate(base).Add(-time.Duration(baseCount-1) * base)
+
+	var maxInterval int32
+	for s, c := range slots {
+		if c.intervalSec <= 0 || time.Unix(s, 0).UTC().Before(windowStart) {
+			continue
+		}
+		if c.intervalSec > maxInterval {
+			maxInterval = c.intervalSec
+		}
 	}
-	return window, bucket, count
+
+	var count int
+	bucket, count = stripPlanFor(oldest, now, maxInterval)
+	currentStart := now.Truncate(bucket)
+
+	// rank: 0 nodata, 1 ok, 2 check, 3 down; a bar keeps its worst slot.
+	type bar struct {
+		ok, total uint64
+		rank      int
+	}
+	bs := make([]bar, count)
+	for s, c := range slots {
+		if c.total == 0 {
+			continue // no measurement this slot — doesn't affect worst-status or sums
+		}
+		slotStart := time.Unix(s, 0).UTC()
+		// Align slotStart to the same bucket boundary as currentStart before
+		// diffing: a slot is always 15-minute-granular even when a bar spans
+		// several of them, so an unaligned slot must first fold into its bar.
+		k := int(currentStart.Sub(slotStart.Truncate(bucket)) / bucket)
+		idx := count - 1 - k
+		if idx < 0 || idx >= count {
+			continue // outside the shown window
+		}
+		b := &bs[idx]
+		b.ok += c.ok
+		b.total += c.total
+		rank := 3
+		if c.ok == c.total {
+			rank = 1
+		} else if c.ok*100 >= c.total*95 {
+			rank = 2
+		}
+		b.rank = max(b.rank, rank)
+	}
+
+	bars = make([]string, count)
+	for i, b := range bs {
+		bars[i] = [...]string{"nodata", "ok", "check", "down"}[b.rank]
+		ok += b.ok
+		total += b.total
+	}
+	return bars, bucket, ok, total
 }
 
 // statusComponents renders one component per monitor with measured uptime and
-// bars. `publicOnly` drops the owner's unpublished ones. Since migration 009
-// the checks table is keyed by target: the project's monitors are resolved to
-// their targets ONCE and the rows are read by target_id. A host page PREPENDS
-// its root target as the first component (named by the host), unless one of
-// the project's monitors already subscribes to it - no double draw (plan
-// part 2). Uptime and bucket math EXCLUDE unmeasured rows (the shared
-// pgstore.MeasurableSQL predicate); such rows draw as nodata bars and never
-// count against uptime. The project is the only scope, as in statusConfig:
-// the caller has already resolved it to one the reader may see.
-func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow) []map[string]any {
+// bars, sized per target by stripPlanFor. `publicOnly` drops the owner's
+// unpublished ones. Since migration 009 the checks table is keyed by target:
+// the project's monitors are resolved to their targets ONCE and 15-minute
+// slot counts are read by target_id. A host page PREPENDS its root target as the first
+// component (named by the host), unless one of the project's monitors
+// already subscribes to it - no double draw (plan part 2). Uptime EXCLUDES
+// unmeasured rows (the shared pgstore.MeasurableSQL predicate); such rows
+// draw as nodata bars and never count against uptime. The project is the
+// only scope, as in statusConfig: the caller has already resolved it to one
+// the reader may see. `now` is read ONCE by the caller, not here: a caller
+// that also stamps its own updatedAt (publicStatusData) must hand that same
+// instant to buildStrip, or a bucket boundary crossed between the two reads
+// puts the front's "current bucket" (computed from updatedAt) one bucket
+// ahead of what these bars actually rendered.
+func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow, now time.Time) []map[string]any {
 	type compRow struct {
-		id          int64 // monitor id; 0 for the root pseudo component
-		key         string
-		name        string
-		intervalSec int32
-		targetID    int64
+		id       int64 // monitor id; 0 for the root pseudo component
+		key      string
+		name     string
+		targetID int64
 	}
 	var mons []compRow
 	rows, err := h.pool.Raw().Query(ctx,
-		`SELECT id, public_id, name, interval_sec, target_id FROM monitor WHERE project_id = $1 ORDER BY id`, projectID)
+		`SELECT id, public_id, name, target_id FROM monitor WHERE project_id = $1 ORDER BY id`, projectID)
 	if err == nil {
 		for rows.Next() {
 			var m compRow
 			var pub [16]byte
-			if rows.Scan(&m.id, &pub, &m.name, &m.intervalSec, &m.targetID) == nil {
+			if rows.Scan(&m.id, &pub, &m.name, &m.targetID) == nil {
 				m.key = fmt.Sprintf("%x", pub[:])
 				mons = append(mons, m)
 			}
@@ -1620,9 +1722,6 @@ func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg st
 				key:      fmt.Sprintf("root-%d", rootID),
 				name:     name,
 				targetID: rootID,
-				// The host-page ladder's cadence (300/900/3600); the exact
-				// value is corrected from the newest row below.
-				intervalSec: 300,
 			}}, mons...)
 		}
 	}
@@ -1630,114 +1729,47 @@ func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg st
 		return []map[string]any{}
 	}
 
-	now := time.Now().UTC()
-
-	// The first check held per target: it decides which rung of the ladder the
-	// strip is on. Bounded by the retention window, which is all the table has.
-	oldest := map[int64]time.Time{}
-	// The cadence the target is actually checked at: the root component has no
-	// monitor row of its own to carry an interval, so it reads its newest row.
-	cadence := map[int64]int32{}
 	targets := make([]int64, 0, len(mons))
 	for _, m := range mons {
 		targets = append(targets, m.targetID)
 	}
+
+	// One query for every target's 15-minute slot ok/total, plus the widest
+	// interval_sec any of that slot's rows were taken at (feeds the cadence
+	// floor), over the widest window any rung needs: 60 slots of the 30-day
+	// rung's own 12h bucket, i.e. the last 30 days aligned to a 12h boundary.
+	// buildStrip below picks how much of it each component actually uses.
+	// ponytail: reads up to 30 days of raw checks per request, uncached, on
+	// BOTH the public page and the owner's own statusPage read (the /app board
+	// widget polls that key every 5s while its tab is visible - see
+	// useApiData's polling rule in the data-layer rules); a rollup table is
+	// the upgrade if status-page latency grows.
+	byTarget := map[int64]map[int64]slotCounts{}
 	if h.pgs != nil {
-		chRows, cerr := h.pgs.Raw().Query(ctx, `
-			SELECT target_id, min(ts) FROM checks
-			 WHERE target_id = ANY($1) AND ts >= now() - INTERVAL '7 days'
-			 GROUP BY target_id`, targets)
-		if cerr == nil {
-			for chRows.Next() {
+		from := now.Truncate(12 * time.Hour).Add(-59 * 12 * time.Hour)
+		hRows, herr := h.pgs.Raw().Query(ctx, fmt.Sprintf(`
+			SELECT target_id, date_bin('15 minutes', ts, TIMESTAMPTZ '2000-01-01 00:00:00+00') AS slot,
+			       count(*) FILTER (WHERE ok AND %s),
+			       count(*) FILTER (WHERE %s),
+			       COALESCE(max(interval_sec), 0)
+			  FROM checks
+			 WHERE target_id = ANY($1) AND ts >= $2
+			 GROUP BY 1, 2`, pgstore.MeasurableSQL, pgstore.MeasurableSQL), targets, from)
+		if herr == nil {
+			for hRows.Next() {
 				var tid int64
-				var first time.Time
-				if chRows.Scan(&tid, &first) == nil {
-					oldest[tid] = first.UTC()
-				}
-			}
-			chRows.Close()
-		}
-		cRows, cerr := h.pgs.Raw().Query(ctx, `
-			SELECT DISTINCT ON (target_id) target_id, interval_sec FROM checks
-			 WHERE target_id = ANY($1) ORDER BY target_id, ts DESC`, targets)
-		if cerr == nil {
-			for cRows.Next() {
-				var tid int64
-				var interval int32
-				if cRows.Scan(&tid, &interval) == nil && interval > 0 {
-					cadence[tid] = interval
-				}
-			}
-			cRows.Close()
-		}
-	}
-
-	// Every strip's plan, and how far back the widest of them reaches - that
-	// bounds the one raw query below.
-	type barPlan struct {
-		bucket time.Duration
-		count  int
-	}
-	plans := map[int64]barPlan{}
-	var rawFrom time.Time
-	for _, m := range mons {
-		interval := m.intervalSec
-		if m.id == 0 && cadence[m.targetID] > 0 {
-			interval = cadence[m.targetID]
-		}
-		window, bucket, count := barPlanFor(oldest[m.targetID], interval, now)
-		plans[m.targetID] = barPlan{bucket: bucket, count: count}
-		if from := now.Add(-window); rawFrom.IsZero() || from.Before(rawFrom) {
-			rawFrom = from
-		}
-	}
-
-	// Buckets counted BACKWARDS from now: a probe is not clock-aligned, and
-	// wall-clock buckets would draw false gaps. Unmeasured rows ride along
-	// flagged: they make a bucket nodata when nothing measured did, and never
-	// enter the ok/total math.
-	type day struct {
-		ok, total  uint64
-		unmeasured uint64
-	}
-	recent := map[int64]map[int]day{}
-	if h.pgs != nil && !rawFrom.IsZero() {
-		chRows, cerr := h.pgs.Raw().Query(ctx, fmt.Sprintf(`
-			SELECT target_id, ts, ok, (%s) FROM checks
-			 WHERE target_id = ANY($1) AND ts >= $2`, pgstore.MeasurableSQL), targets, rawFrom)
-		if cerr == nil {
-			for chRows.Next() {
-				var tid int64
-				var ts time.Time
-				var okFlag, measurable bool
-				if chRows.Scan(&tid, &ts, &okFlag, &measurable) != nil {
-					continue
-				}
-				p := plans[tid]
-				if p.bucket <= 0 {
-					continue
-				}
-				bucket := int(now.Sub(ts.UTC()) / p.bucket)
-				if bucket < 0 || bucket >= p.count {
-					continue
-				}
-				m := recent[tid]
-				if m == nil {
-					m = map[int]day{}
-					recent[tid] = m
-				}
-				entry := m[bucket]
-				if measurable {
-					entry.total++
-					if okFlag {
-						entry.ok++
+				var slot time.Time
+				var c slotCounts
+				if hRows.Scan(&tid, &slot, &c.ok, &c.total, &c.intervalSec) == nil {
+					tm := byTarget[tid]
+					if tm == nil {
+						tm = map[int64]slotCounts{}
+						byTarget[tid] = tm
 					}
-				} else {
-					entry.unmeasured++
+					tm[slot.UTC().Unix()] = c
 				}
-				m[bucket] = entry
 			}
-			chRows.Close()
+			hRows.Close()
 		}
 	}
 
@@ -1750,33 +1782,13 @@ func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg st
 		if publicOnly && !shown {
 			continue
 		}
-		p := plans[m.targetID]
-		bars := make([]string, p.count)
-		var okTotal, total uint64
-		for i := range p.count {
-			d := recent[m.targetID][p.count-1-i] // bucket 0 is the newest, so it lands last
-			switch {
-			case d.total == 0:
-				// Nothing measured here: unmeasured-only and empty buckets
-				// alike draw nodata - an unreadable host is not a down one.
-				bars[i] = "nodata"
-			case d.ok == d.total:
-				bars[i] = "ok"
-			case d.ok*100 >= d.total*95:
-				bars[i] = "check"
-			default:
-				bars[i] = "down"
-			}
-			okTotal += d.ok
-			total += d.total
-		}
+		bars, bucket, okSum, total := buildStrip(byTarget[m.targetID], now)
 		out = append(out, map[string]any{
 			"key": m.key, "name": m.name, "shown": shown,
-			"uptime": pctLabelAPI(okTotal, total), "bars": bars,
-			// What one bar covers. The page multiplies it by the bar count to
-			// print its own axis, so a strip can never be labelled a window it
-			// does not reach.
-			"barSpanSec": int(p.bucket / time.Second),
+			"uptime": pctLabelAPI(okSum, total), "bars": bars,
+			// What one bar covers. The page draws its own axis from this, so a
+			// strip of 15-minute bars can never be labelled "30 days ago".
+			"barSpanSec": int(bucket / time.Second),
 		})
 	}
 	return out
@@ -3604,12 +3616,15 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 	if page.RootTargetID != nil {
 		meta.rootTargetID = *page.RootTargetID
 	}
+	now := time.Now().UTC() // one read: also stamped as updatedAt below, so the
+	// front's bucket math (derived from updatedAt) matches what these bars
+	// actually rendered against, even if a bucket boundary passes mid-request.
 	resp := map[string]any{
 		"title":      cfg.Title,
-		"components": h.statusComponents(ctx, projectID, cfg, true, page),
+		"components": h.statusComponents(ctx, projectID, cfg, true, page, now),
 		"incidents":  []map[string]any{},
 		"network":    []map[string]any{},
-		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
+		"updatedAt":  now.Format(time.RFC3339),
 		"claimed":    claimed,
 		"poweredBy":  h.poweredBy(cfg),
 		// The gate's public face (plan part 4): a page is indexable only with a
