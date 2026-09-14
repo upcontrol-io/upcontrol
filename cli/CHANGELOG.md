@@ -3,6 +3,14 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-11 — upcontrol 0.2.3
+
+- **The package description and README catch up to what the CLI already does.**
+  `npx upcontrol board` (read/`--apply`/`--add` the project's dashboard) has
+  been a real command since 0.1.9 — its own release note never mentioned it
+  either — but neither `package.json`'s description nor the README ever said
+  so. Both now name it. No behavior change.
+
 ## 2026-09-09 — upcontrol 0.2.2
 
 - **A breakdown card has an axis now, and the doc says which to pick.** `dashboard.md` gains
