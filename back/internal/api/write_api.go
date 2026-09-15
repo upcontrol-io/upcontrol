@@ -1362,6 +1362,7 @@ func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg 
 		"domainVerified": verified,
 		"components":     h.statusComponents(ctx, projectID, cfg, false, page, now),
 		"network":        h.statusNetwork(ctx, projectID),
+		"updatedAt":      now.Format(time.RFC3339),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
 		// The index door's owner-facing facts (plan part 4): the switch, the
@@ -1674,11 +1675,8 @@ func buildStrip(slots map[int64]slotCounts, now time.Time) (bars []string, bucke
 // unmeasured rows (the shared pgstore.MeasurableSQL predicate); such rows
 // draw as nodata bars and never count against uptime. The project is the
 // only scope, as in statusConfig: the caller has already resolved it to one
-// the reader may see. `now` is read ONCE by the caller, not here: a caller
-// that also stamps its own updatedAt (publicStatusData) must hand that same
-// instant to buildStrip, or a bucket boundary crossed between the two reads
-// puts the front's "current bucket" (computed from updatedAt) one bucket
-// ahead of what these bars actually rendered.
+// the reader may see. `now` is the caller's, so the bars and the updatedAt it
+// stamps bucket against the same instant.
 func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow, now time.Time) []map[string]any {
 	type compRow struct {
 		id       int64 // monitor id; 0 for the root pseudo component
@@ -2206,7 +2204,7 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	// Anonymous endpoint: throttled per source-IP, per-replica (two replicas
 	// admit 2× the cooldown).
 	if !h.checkAllow(analytics.ClientIP(r), host) {
-		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		writeRetryAfter(w, "rate_limited", checkCooldown)
 		return
 	}
 	// Real probe behind the SSRF guard: internal ranges answer
@@ -2506,29 +2504,45 @@ func redirectNote(n uint32) string {
 	return "followed to the final URL"
 }
 
+// The per-IP cooldowns of the three anonymous doors, named so the refusal can
+// answer Retry-After with the very window it was refused inside.
+const (
+	checkCooldown = 10 * time.Second
+	watchCooldown = 3 * time.Second
+	trackCooldown = time.Second
+)
+
+// writeRetryAfter is a 429 with the seconds until the refused thing is allowed
+// again: without it a client can only guess, and guessing means retrying into
+// the same wall.
+func writeRetryAfter(w http.ResponseWriter, code string, after time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(after.Seconds())))))
+	writeAPIErr(w, http.StatusTooManyRequests, code)
+}
+
 // checkAllow applies a per-replica cooldown per source-IP. Host is not part
 // of it: repeat visitors get the cached answer instead.
 func (h *writeAPI) checkAllow(ip, _ string) bool {
-	return h.allowOnce("check", ip, 10*time.Second)
+	return h.allowOnce("check", ip, checkCooldown)
 }
 
 // watchAllow throttles the anonymous watch in a bucket of its OWN: a check
 // and a watch cost different things; one bucket could not price both.
 func (h *writeAPI) watchAllow(ip string) bool {
-	return h.allowOnce("watch", ip, 3*time.Second)
+	return h.allowOnce("watch", ip, watchCooldown)
 }
 
 // trackAllow throttles /public/track: one batch per second per IP. The
 // client coalesces, so a compliant visitor sends far less.
 func (h *writeAPI) trackAllow(ip string) bool {
-	return h.allowOnce("track", ip, time.Second)
+	return h.allowOnce("track", ip, trackCooldown)
 }
 
 // publicTrack is the analytics collector: always 204 (429 on limit), and
 // the ONLY door that mints the uc_vid cookie; others resolve, never create.
 func (h *writeAPI) publicTrack(w http.ResponseWriter, r *http.Request) {
 	if !h.trackAllow(analytics.ClientIP(r)) {
-		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		writeRetryAfter(w, "rate_limited", trackCooldown)
 		return
 	}
 	token, ok := analytics.VisitorToken(r)
@@ -2631,7 +2645,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.watchAllow(analytics.ClientIP(r)) {
-		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
+		writeRetryAfter(w, "rate_limited", watchCooldown)
 		return
 	}
 
@@ -2658,15 +2672,6 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The target is probed by the same guarded executor as any check, so an
-	// internal address cannot be turned into a monitor by typing it here.
-	if res := h.exec.Execute(ctx, executor.CheckSpec{
-		URL: target, Method: "GET", TimeoutMs: 8000, MaxRedirects: 3,
-	}); res.ErrorClass == "blocked_target" {
-		writeAPIErr(w, http.StatusBadRequest, "blocked_target")
-		return
-	}
-
 	// Decision 7: the e-mail-less arm reads the session. A signed-in visitor
 	// whose plan has room for another project gets it in their own tenant
 	// below; signed out, or no room, keeps the anonymous demo mint. An error
@@ -2678,9 +2683,41 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// before anything is created - a refusal creates nothing - and counted
 	// again inside the mint transaction where the count is authoritative.
 	audit := h.mintAuditFromRequest(r)
-	if code := h.mintCeilingRefused(ctx, h.pool.Raw(), audit); code != "" {
-		writeAPIErr(w, http.StatusTooManyRequests, code)
+	if code, after := h.mintCeilingRefused(ctx, h.pool.Raw(), audit); code != "" {
+		writeRetryAfter(w, code, after)
 		return
+	}
+
+	// The host's live page, read once here: every arm below asks the same
+	// question, and it also decides whether the door probes at all.
+	existing := hostLivePage(ctx, h.pool, host)
+
+	// The target is probed by the same guarded executor as any check, so an
+	// internal address cannot be turned into a monitor by typing it here. It
+	// runs LAST and only for a host with no live page: a request this door is
+	// about to refuse must not cost the far side one, and a host that already
+	// has a page already has this root target in probe_target, probed on a
+	// schedule behind the same guard - nothing left to check, nothing to
+	// measure. For a fresh host the result is kept: it becomes the page's
+	// first check row (watchTail), so the page lands measured rather than grey
+	// until the first scheduled probe - taken with the scheduler's own spec
+	// (rpc/probeservice.go: 10 s, 5 redirects), so the row is the same
+	// instrument as every row that follows it.
+	var probe *mintProbe
+	if existing == nil {
+		at := time.Now()
+		res := h.exec.Execute(ctx, executor.CheckSpec{
+			URL: target, Method: "GET", TimeoutMs: 10000, MaxRedirects: 5,
+		})
+		if res.ErrorClass == "blocked_target" {
+			writeAPIErr(w, http.StatusBadRequest, "blocked_target")
+			return
+		}
+		probe = &mintProbe{res: res, at: at}
+		// The probe took up to ten seconds; a second visitor may have minted
+		// this host meanwhile. Re-read before choosing an arm, so the race is
+		// the transaction's own width again, not the probe's.
+		existing = hostLivePage(ctx, h.pool, host)
 	}
 
 	// The client's target list is not trusted: each must belong to the asked
@@ -2708,13 +2745,13 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		// root target, a fresh host gets the host page.
 		watching, slug, err := h.watchMintPage(watchMint{
 			host: host, wanted: wanted, audit: audit,
-			tenantID: tenantID, projectID: projectID, existing: hostLivePage(ctx, h.pool, host),
+			tenantID: tenantID, projectID: projectID, existing: existing,
 		})
 		if err != nil {
 			watchRefuse(w, err)
 			return
 		}
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
 		return
 	}
 
@@ -2724,7 +2761,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// domain add monitors to somebody's account - so the visitor gets their
 	// OWN suffixed page on the same root target (decision 9, never a second
 	// probe). An unclaimed page is reused exactly as before.
-	if existing := hostLivePage(ctx, h.pool, host); existing != nil {
+	if existing != nil {
 		if existing.Claimed {
 			t, p, watching, slug, err := h.mintOwnPage(ctx, host, existing, wanted, audit)
 			if err != nil {
@@ -2734,7 +2771,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			tenantID, projectID = t, p
 			h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 			h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-			h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+			h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
 			return
 		}
 		// Unclaimed: answer its slug, create no new page, but DO subscribe the
@@ -2743,7 +2780,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		tenantID, projectID = existing.TenantID, existing.ProjectID
 		watching := h.subscribeWanted(ctx, tenantID, projectID, host, wanted)
 		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, existing.Slug)
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, existing.Slug, target, probe)
 		return
 	}
 
@@ -2787,7 +2824,7 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		tenantID, projectID = t, p
 		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 		h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
 		return
 	}
 	// The signed-in arm: same page rules as every mint (no live page exists
@@ -2803,7 +2840,45 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 	h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-	h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug)
+	h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
+}
+
+// watchIntervalSec is the cadence every monitor the watch door mints starts
+// at, and the interval its first check row is stamped with.
+const watchIntervalSec = 300
+
+// mintProbe is the watch door's guard probe: the measurement and the moment it
+// was taken, so the row it becomes is stamped at probe time, not at write time.
+type mintProbe struct {
+	res executor.Result
+	at  time.Time
+}
+
+// recordMintProbe stores the watch door's guard probe as the root target's
+// first check row, so a NEW page opens with a coloured slot and its tiles
+// instead of grey until the first scheduled probe. Only into an EMPTY history:
+// a target that already has rows is on the scheduler's series, and a second
+// row for the same instant from a different caller would only muddy it.
+// Best-effort: a failed write is logged by InsertChecks and the page is still
+// handed out.
+func (h *writeAPI) recordMintProbe(ctx context.Context, target string, probe *mintProbe) {
+	if probe == nil || h.pgs == nil {
+		return
+	}
+	var targetID int64
+	if err := h.pool.Raw().QueryRow(ctx,
+		`SELECT pt.id FROM probe_target pt
+		  WHERE pt.key = $1 AND NOT EXISTS (SELECT 1 FROM checks WHERE target_id = pt.id)`,
+		targetkey.Website(target, "")).Scan(&targetID); err != nil {
+		return
+	}
+	res := probe.res
+	_ = h.pgs.InsertChecks(ctx, []pgstore.CheckRow{{
+		TargetID: uint64(targetID), IntervalSec: watchIntervalSec, TS: probe.at,
+		Region: scheduleRegion(), OK: res.OK, StatusCode: res.StatusCode, ErrorClass: res.ErrorClass,
+		DNSMs: res.DNSMs, ConnectMs: res.ConnectMs, TLSMs: res.TLSMs,
+		TTFBMs: res.TTFBMs, TotalMs: res.TotalMs, BodyHash: res.BodyHash,
+	}})
 }
 
 // canonicalHost reduces what the visitor typed to the host every page, slug
@@ -2923,22 +2998,43 @@ type rowQuerier interface {
 
 // mintCeilingRefused counts the day's mints from the audit columns: per IP
 // and per instance (the instance count covers every page, whatever minted
-// it - the seed door counts against this one too). Empty answer = allowed.
-func (h *writeAPI) mintCeilingRefused(ctx context.Context, db rowQuerier, audit mintAudit) string {
+// it - the seed door counts against this one too). Empty answer = allowed;
+// a refusal carries how long it holds, for Retry-After.
+func (h *writeAPI) mintCeilingRefused(ctx context.Context, db rowQuerier, audit mintAudit) (string, time.Duration) {
 	perIP, perDay, _ := h.knobsOrDefaults()
 	var n int
 	if err := db.QueryRow(ctx,
 		`SELECT count(*) FROM status_page
 		  WHERE minted_ip_hash = $1 AND created_at > now() - interval '1 day'`,
 		audit.ipHash).Scan(&n); err == nil && n >= perIP {
-		return "mint_ip_ceiling"
+		return "mint_ip_ceiling", mintCeilingLeft(ctx, db, audit.ipHash, perIP)
 	}
 	if err := db.QueryRow(ctx,
 		`SELECT count(*) FROM status_page
 		  WHERE created_at > now() - interval '1 day'`).Scan(&n); err == nil && n >= perDay {
-		return "mint_ceiling"
+		return "mint_ceiling", mintCeilingLeft(ctx, db, "", perDay)
 	}
-	return ""
+	return "", 0
+}
+
+// mintCeilingLeft is how long a day ceiling still holds: the limit-th newest
+// row inside the window is the one whose ageing out frees a slot. An empty
+// ipHash asks the instance-wide question - the filter drops out. A row that
+// cannot be read falls back to the whole window rather than inviting an
+// immediate retry.
+func mintCeilingLeft(ctx context.Context, db rowQuerier, ipHash string, limit int) time.Duration {
+	const day = 24 * time.Hour
+	var at time.Time
+	if err := db.QueryRow(ctx,
+		`SELECT created_at FROM status_page
+		  WHERE ($1 = '' OR minted_ip_hash = $1) AND created_at > now() - interval '1 day'
+		  ORDER BY created_at DESC OFFSET $2 LIMIT 1`, ipHash, limit-1).Scan(&at); err != nil {
+		return day
+	}
+	if left := time.Until(at.Add(day)); left > 0 {
+		return left
+	}
+	return day
 }
 
 // hostPagesCeilingRefused caps the eternal population (review decision 15):
@@ -3058,7 +3154,7 @@ func subscribeWantedTx(ctx context.Context, q *sqlc.Queries, tx pgx.Tx, tenantID
 		}
 		row, created, ierr := insertMonitorOnTarget(ctx, tx, sqlc.CreateMonitorParams{
 			TenantID: tenantID, ProjectID: projectID, Kind: "website",
-			Name: monitorName(host, t), Target: t, IntervalSec: 300,
+			Name: monitorName(host, t), Target: t, IntervalSec: watchIntervalSec,
 		}, targetID)
 		if ierr != nil {
 			return watching, ierr
@@ -3094,7 +3190,7 @@ type watchMint struct {
 // of counting inside it.
 func (h *writeAPI) watchMintPage(m watchMint) (watching int, slug string, err error) {
 	err = h.watchTx(context.Background(), func(q *sqlc.Queries, tx pgx.Tx) error {
-		if code := h.mintCeilingRefused(context.Background(), tx, m.audit); code != "" {
+		if code, _ := h.mintCeilingRefused(context.Background(), tx, m.audit); code != "" {
 			return refusalError(code)
 		}
 		var serr error
@@ -3138,7 +3234,7 @@ func mintUnclaimedTriple(ctx context.Context, tx pgx.Tx, host string) (tenantID,
 // on refusal nothing exists afterwards.
 func (h *writeAPI) mintOwnPage(ctx context.Context, host string, existing *hostPageRow, wanted []string, audit mintAudit) (tenantID, projectID int64, watching int, slug string, err error) {
 	err = h.watchTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
-		if code := h.mintCeilingRefused(ctx, tx, audit); code != "" {
+		if code, _ := h.mintCeilingRefused(ctx, tx, audit); code != "" {
 			return refusalError(code)
 		}
 		// The host-pages cap guards only ETERNAL pages: a second (suffixed)
@@ -3240,6 +3336,9 @@ type refusalError string
 
 func (e refusalError) Error() string { return string(e) }
 
+// A bare 429, no Retry-After: host_pages_ceiling has no clock to name, and the
+// in-transaction re-count is the race the pre-check already priced - it lost by
+// milliseconds, not by a window.
 func watchRefuse(w http.ResponseWriter, err error) {
 	var code refusalError
 	if errors.As(err, &code) {
@@ -3266,7 +3365,10 @@ func (h *writeAPI) watchTx(ctx context.Context, fn func(*sqlc.Queries, pgx.Tx) e
 
 // watchTail is the e-mail arm's response side: the e-mail channel, the
 // login code (dev echoes it), and the JSON answer.
-func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http.Request, req watchRequest, tenantID, projectID int64, watching int, slug string) {
+func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http.Request, req watchRequest, tenantID, projectID int64, watching int, slug string, target string, probe *mintProbe) {
+	// Every arm ends here with the root target in place, so this is where the
+	// guard probe becomes the page's first measurement. Nil: no probe ran.
+	h.recordMintProbe(ctx, target, probe)
 	// The e-mail channel is the point of leaving an address: without it the
 	// account would watch the host and tell nobody.
 	if req.Email != "" {
@@ -3616,9 +3718,7 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 	if page.RootTargetID != nil {
 		meta.rootTargetID = *page.RootTargetID
 	}
-	now := time.Now().UTC() // one read: also stamped as updatedAt below, so the
-	// front's bucket math (derived from updatedAt) matches what these bars
-	// actually rendered against, even if a bucket boundary passes mid-request.
+	now := time.Now().UTC() // one read: the bars and updatedAt bucket against the same instant
 	resp := map[string]any{
 		"title":      cfg.Title,
 		"components": h.statusComponents(ctx, projectID, cfg, true, page, now),
@@ -3760,6 +3860,27 @@ func (h *writeAPI) hostPageState(ctx context.Context, host string, targetID int6
 			kind = "could_not_measure"
 		case availability.StatusNoData, "":
 			kind = "nodata"
+		}
+	}
+	// No facts row yet, but a check row already: a page minted a minute ago
+	// holds the door's guard probe (recordMintProbe), and a measurement is a
+	// state. "No data yet" over a measured row would be the lie that row
+	// exists to end. The detector's verdict takes over once it has one.
+	if status == nil && newestOK != nil {
+		class, code := "", 0
+		if newestClass != nil {
+			class = *newestClass
+		}
+		if newestCode != nil {
+			code = *newestCode
+		}
+		switch {
+		case availability.Unmeasured(class, code):
+			kind = "could_not_measure"
+		case *newestOK:
+			kind = "ok"
+		default:
+			kind = "down"
 		}
 	}
 	state := map[string]any{"kind": kind}

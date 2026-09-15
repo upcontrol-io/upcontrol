@@ -116,6 +116,18 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		writeAPIErr(w, http.StatusConflict, "no_current_project")
 		return
 	}
+	// An interval the contract does not carry is a 400 before the plan floor:
+	// garbage must not be answered with an upgrade prompt, nor stored as 5m.
+	// Omitted is "not asked for" and keeps the default cadence.
+	intervalSec := int32(300)
+	if req.Interval != "" {
+		v, ok := parseInterval(req.Interval)
+		if !ok {
+			writeAPIErr(w, http.StatusBadRequest, "invalid_interval")
+			return
+		}
+		intervalSec = v
+	}
 	// How often it may run is a plan number too: the entitlement row is the
 	// gate, answering 402 with the reason the upgrade prompt shows.
 	plan := h.tenantPlan(r.Context(), tenantID)
@@ -165,7 +177,7 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	params := sqlc.CreateMonitorParams{
 		PublicID: pubID, TenantID: tenantID, ProjectID: projectID,
 		Kind: kind, Name: req.Name, Target: normTarget,
-		Keyword: keyword, IntervalSec: parseInterval(req.Interval),
+		Keyword: keyword, IntervalSec: intervalSec,
 		PingToken: pingToken,
 	}
 	// Target, monitor, schedule and (when the target is already down) the
@@ -349,12 +361,18 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	params := sqlc.PatchMonitorParams{PublicID: pubID, TenantID: tenantID}
 	params.Name = req.Name
 	if req.Interval != nil {
+		// Same 400 as create, and before the floor: an unknown cadence is not an
+		// upgrade question.
+		v, ok := parseInterval(*req.Interval)
+		if !ok {
+			writeAPIErr(w, http.StatusBadRequest, "invalid_interval")
+			return
+		}
 		// Same floor as create, or the wall is one PATCH away from not existing.
 		if msg := h.intervalRefusal(ctx, h.tenantPlan(ctx, tenantID), *req.Interval); msg != "" {
 			writeUpgradeRequired(w, msg, "")
 			return
 		}
-		v := parseInterval(*req.Interval)
 		params.IntervalSec = &v
 	}
 	params.Paused = req.Paused
@@ -648,25 +666,29 @@ func (h *monitors) intervalRefusal(ctx context.Context, plan, interval string) s
 	if err != nil || ent.MinIntervalSec <= 0 {
 		return ""
 	}
-	if parseInterval(interval) >= ent.MinIntervalSec {
+	// An unknown value is the caller's 400, already answered before this ran.
+	if sec, ok := parseInterval(interval); !ok || sec >= ent.MinIntervalSec {
 		return ""
 	}
 	return plan + " checks a site every " + intervalLabel(ent.MinIntervalSec) +
 		". A paid plan checks every minute."
 }
 
-func parseInterval(s string) int32 {
+// parseInterval maps the contract's four cadences to seconds. Anything else is
+// false, never a silent 5m: a typo that quietly becomes a different cadence is
+// a check running at a rate nobody asked for.
+func parseInterval(s string) (int32, bool) {
 	switch s {
 	case "1m":
-		return 60
+		return 60, true
 	case "5m":
-		return 300
+		return 300, true
 	case "30m":
-		return 1800
+		return 1800, true
 	case "1h":
-		return 3600
+		return 3600, true
 	default:
-		return 300
+		return 0, false
 	}
 }
 

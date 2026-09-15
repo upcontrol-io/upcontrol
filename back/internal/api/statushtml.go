@@ -109,6 +109,7 @@ type slugPageData struct {
 	JSONLD     template.JS
 	Host       string
 	Slug       string
+	Claimed    bool
 	HasState   bool
 	Sentence   string
 	AsOf       string
@@ -189,6 +190,7 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 		OGImage:   origin + "/public/status/" + meta.slug + "/og.png",
 		Host:      host,
 		Slug:      meta.slug,
+		Claimed:   claimed,
 		CheckHref: "/?check=" + template.URLQueryEscaper(host),
 		ClaimHref: "/status/" + meta.slug + "#claim",
 	}
@@ -482,11 +484,12 @@ footer nav a { margin-right: 14px; }
 <body>
 <main>
 <section class="banner" id="claim">
-<h1>Powered by UpControl</h1>
-<p>Claim it to customize it and put it on your own domain.</p>
-<a href="/">Claim this page</a>
+<h1>{{.Host}} status</h1>
+{{- if not .Claimed}}
+<p>Nobody is alerted when {{.Host}} goes down.</p>
+<a href="/">Get alerts</a>
+{{- end}}
 </section>
-<h2>{{.Host}} status</h2>
 {{- if .HasState}}
 <p class="state">{{.Sentence}}</p>
 {{- end}}
@@ -513,6 +516,7 @@ footer nav a { margin-right: 14px; }
 {{- end}}
 </main>
 <footer>
+<p>Powered by UpControl</p>
 <p>Measured from one location outside {{.Host}} by UpControl.</p>
 <nav>
 <a href="{{.ClaimHref}}">Site owner? Claim this page.</a>

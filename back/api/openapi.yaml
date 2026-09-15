@@ -70,7 +70,10 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     TooManyRequests:
-      description: Rate limited (always with Retry-After).
+      description: >-
+        Rate limited. The public doors (`/public/check`, `/public/watch`,
+        `/public/track`) and the day's mint ceilings carry `Retry-After` in
+        seconds: how long the refusal holds.
       headers:
         Retry-After:
           schema: { type: string }
@@ -254,6 +257,7 @@ components:
         keyword: { type: string }
         interval:
           type: string
+          description: An unknown value is a 400 `invalid_interval`.
           enum: ["1m", "5m", "30m", "1h"]
     MonitorPatch:
       type: object
@@ -266,6 +270,7 @@ components:
         name: { type: string }
         interval:
           type: string
+          description: An unknown value is a 400 `invalid_interval`.
           enum: ["1m", "5m", "30m", "1h"]
         paused: { type: boolean }
 
@@ -1177,6 +1182,13 @@ components:
         network:
           type: array
           items: { $ref: "#/components/schemas/NetworkTile" }
+        updatedAt:
+          type: string
+          format: date-time
+          description: >-
+            The server clock the bars were bucketed against, the same field the
+            public page carries: the owner's preview anchors its bar tooltips
+            to it rather than to the browser's own clock.
         showNetwork: { type: boolean }
         showPoweredBy:
           type: boolean

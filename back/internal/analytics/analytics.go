@@ -156,8 +156,16 @@ func ScopeFromRequest(r *http.Request) *scope {
 	return &scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}
 }
 
-// ClientIP prefers the first X-Forwarded-For entry (set by Caddy) then falls
-// back to the peer address. One canonical copy for auth, api and analytics.
+// ClientIP prefers the first X-Forwarded-For entry then falls back to the peer
+// address. One canonical copy for auth, api and analytics.
+//
+// The invariant that makes trusting that first hop safe: the edge (Caddy,
+// infra/compose/Caddyfile*) REPLACES the header with the peer address - it
+// configures no trusted_proxies - and ucapi publishes no host port, so nothing
+// reaches this process except through Caddy. Adding trusted_proxies, or
+// exposing ucapi directly, makes every per-IP throttle and mint ceiling
+// spoofable by a header, and THIS function must be changed first. The
+// integration tests spoof the header for the same reason it is trusted.
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i >= 0 {

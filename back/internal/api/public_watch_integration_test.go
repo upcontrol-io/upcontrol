@@ -23,6 +23,7 @@ import (
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/migrate"
 	"go.upcontrol.io/back/internal/storage/pg"
+	"go.upcontrol.io/back/internal/storage/pgstore"
 	"go.upcontrol.io/back/internal/targetkey"
 )
 
@@ -36,6 +37,9 @@ type watchFixture struct {
 	sess        *session.Manager
 	route       http.Handler
 	ownerCookie *http.Cookie
+	// How many watches this fixture has sent: each gets its own spoofed
+	// address, so two in a row never share the per-IP cooldown.
+	watches int
 }
 
 func newWatchFixture(t *testing.T) *watchFixture {
@@ -53,6 +57,49 @@ func newWatchFixture(t *testing.T) *watchFixture {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+
+	// Every row these tests create is newer than the ids read here, so the
+	// cleanup can delete down to them and end on the counts it started with -
+	// a run that leaves tenants and targets behind poisons the next one's
+	// ceilings.
+	type tableState struct{ maxID, rows int64 }
+	state := func(table string) tableState {
+		var s tableState
+		if err := pool.Raw().QueryRow(ctx,
+			`SELECT coalesce(max(id), 0), count(*) FROM `+table).Scan(&s.maxID, &s.rows); err != nil {
+			t.Errorf("read %s: %v", table, err)
+		}
+		return s
+	}
+	base := map[string]tableState{}
+	for _, table := range []string{"tenant", "person", "probe_target"} {
+		base[table] = state(table)
+	}
+	t.Cleanup(func() {
+		// Order is forced by the foreign keys: checks carries none, so it goes
+		// first; monitors hold their probe_target (no cascade there) and go with
+		// the tenant that owns them; the tenant points at the person; and the
+		// targets can only go once no monitor names them.
+		for _, d := range []struct {
+			sql string
+			id  int64
+		}{
+			{`DELETE FROM checks WHERE target_id > $1`, base["probe_target"].maxID},
+			{`DELETE FROM tenant WHERE id > $1`, base["tenant"].maxID},
+			{`DELETE FROM person WHERE id > $1`, base["person"].maxID},
+			{`DELETE FROM probe_target WHERE id > $1`, base["probe_target"].maxID},
+		} {
+			if _, err := pool.Raw().Exec(context.Background(), d.sql, d.id); err != nil {
+				t.Errorf("cleanup %q: %v", d.sql, err)
+			}
+		}
+		for table, want := range base {
+			if got := state(table); got != want {
+				t.Errorf("%s left at (max id %d, %d rows), want (%d, %d)",
+					table, got.maxID, got.rows, want.maxID, want.rows)
+			}
+		}
+	})
 
 	uniq := time.Now().UnixNano()
 	f := &watchFixture{pool: pool}
@@ -73,7 +120,9 @@ func newWatchFixture(t *testing.T) *watchFixture {
 		t.Fatalf("mint session: %v", err)
 	}
 	f.ownerCookie = &http.Cookie{Name: session.CookieName, Value: token}
-	wa := NewWriteAPI(pool, nil, f.sess, false, nil, nil, false, "")
+	// A pgstore, not nil: the mint records its guard probe through it, and the
+	// signed-out test below reads that row back.
+	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), f.sess, false, nil, nil, false, "")
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -81,13 +130,16 @@ func newWatchFixture(t *testing.T) *watchFixture {
 	return f
 }
 
-// watch posts a watch body for a fresh host; a unique X-Forwarded-For keeps
-// the per-replica IP throttle out of the picture.
+// watch posts a watch body for a fresh host; a distinct X-Forwarded-For per
+// call (203.0.113.1 … .253; .254 belongs to the cooldown test) keeps the
+// per-replica IP throttle out of the picture. The handler trusts that header
+// because Caddy replaces it in production (see analytics.ClientIP).
 func (f *watchFixture) watch(t *testing.T, host string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
+	f.watches++
 	r := httptest.NewRequest(http.MethodPost, "/public/watch",
 		strings.NewReader(`{"host":"`+host+`"}`))
-	r.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", time.Now().UnixNano()%254+1))
+	r.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", (f.watches-1)%253+1))
 	if cookie != nil {
 		r.AddCookie(cookie)
 	}
@@ -263,6 +315,82 @@ func TestWatchSignedOutMintsTheDemoTenant(t *testing.T) {
 	}
 	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.tenantID); n != 0 {
 		t.Fatalf("caller projects = %d, want 0 (no session, no own-tenant mint)", n)
+	}
+	// The page lands measured: the door's guard probe is the root target's first
+	// check row, stamped with the node's region and the watch interval. The host
+	// does not resolve, so the row is a measured failure, not a missing one.
+	rootChecks := func() int64 {
+		return f.count(t,
+			`SELECT count(*) FROM checks c JOIN probe_target pt ON pt.id = c.target_id
+			  WHERE pt.url = $1 AND c.region = $2 AND c.interval_sec = $3 AND NOT c.ok`,
+			"https://"+host, scheduleRegion(), watchIntervalSec)
+	}
+	if n := rootChecks(); n != 1 {
+		t.Fatalf("guard probe rows for the root target = %d, want 1", n)
+	}
+
+	// A second visitor for the same host, from another address: the live page is
+	// reused and the history keeps the one row the mint measured (this pins the
+	// row count; the door's own "probe nothing" is not observed here).
+	slugOf := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var resp struct {
+			Slug string `json:"slug"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode watch: %v", err)
+		}
+		return resp.Slug
+	}
+	again := f.watch(t, host, nil)
+	if again.Code != http.StatusOK {
+		t.Fatalf("second watch = %d (%s), want 200", again.Code, again.Body.String())
+	}
+	if got, want := slugOf(again), slugOf(w); got != want {
+		t.Fatalf("second watch slug = %q, want the live page's %q", got, want)
+	}
+	if n := rootChecks(); n != 1 {
+		t.Fatalf("check rows after a second watch = %d, want still 1 (no second probe, no second row)", n)
+	}
+
+	// And the page's state line reads that row: a measured failure, never
+	// "No data yet" over a measurement (hostPageState's facts-less fallback).
+	pr := httptest.NewRequest(http.MethodGet, "/public/status/"+slugOf(w), nil)
+	pw := httptest.NewRecorder()
+	f.route.ServeHTTP(pw, pr)
+	var pub struct {
+		State struct {
+			Kind string `json:"kind"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(pw.Body.Bytes(), &pub); err != nil || pub.State.Kind != "down" {
+		t.Fatalf("public state after the mint = %q (%v), want down: the guard probe is the first measurement", pub.State.Kind, err)
+	}
+}
+
+// The per-IP cooldown names its window: a 429 without Retry-After is a wall
+// the client can only guess at, and guessing means retrying into it.
+func TestWatchCooldownCarriesRetryAfter(t *testing.T) {
+	f := newWatchFixture(t)
+	host := fmt.Sprintf("cooldown-%d.example.com", time.Now().UnixNano())
+	// The same address twice, unlike watch(): the cooldown is the thing under test.
+	post := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/public/watch",
+			strings.NewReader(`{"host":"`+host+`"}`))
+		r.Header.Set("X-Forwarded-For", "203.0.113.254")
+		w := httptest.NewRecorder()
+		f.route.ServeHTTP(w, r)
+		return w
+	}
+	if w := post(); w.Code != http.StatusOK {
+		t.Fatalf("first watch = %d (%s), want 200", w.Code, w.Body.String())
+	}
+	again := post()
+	if again.Code != http.StatusTooManyRequests {
+		t.Fatalf("second watch inside the cooldown = %d, want 429", again.Code)
+	}
+	if got := again.Header().Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After = %q, want \"3\" (the watch cooldown, in seconds)", got)
 	}
 }
 

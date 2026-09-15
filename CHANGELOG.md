@@ -21,11 +21,45 @@ All notable changes to the self-hosted package. The format follows
   into its 24 squares instead of only the oldest 24 bars.
 - The probe's User-Agent is now `upcontrol/1.0 (+https://upcontrol.io)`: the `/bot` page it
   pointed at is gone.
+- **A page minted by `POST /public/watch` lands measured.** The door already made one real
+  request to the host as its SSRF guard; that result is now stored as the target's first check
+  row (the node's own region, the watch interval), so the new page opens with a coloured slot
+  and its DNS / TCP / Response tiles instead of a grey strip until the first scheduled probe.
+- The crawler copy of a status page titles itself with the site (`{host} status`) instead of
+  `Powered by UpControl`, and its banner offers `Get alerts` with the missed-alert pitch in place
+  of `Claim this page`; the credit line moved to the footer.
 
 ### Removed
 - **`GET /bot` and `GET /status/policy`.** The crawler copy of a status page no longer links
   them, and the 410 page no longer points at the policy. A self-hosted edge that routed both
   paths to ucapi can drop them from its matcher.
+
+### Fixed
+- **`POST /public/watch` probes a host only when it is about to mint that host's first live
+  page, and only after the mint ceilings have passed.** A refused request no longer costs the
+  far side a request, and a host that already has a page (which already has a scheduled probe
+  behind the same guard) is not dialled again. The probe runs with the scheduler's own spec
+  (10 s, 5 redirects), and its answer becomes the target's first check row only when that
+  target has no history, stamped at probe time. The page is re-read after the probe, so two
+  first visitors inside the probe's window no longer both mint the host's page.
+- **Public `429`s carry `Retry-After`** (seconds): the per-IP cooldowns on `/public/check`,
+  `/public/watch` and `/public/track`, and the day's mint ceilings, which answer with the time
+  until the row that filled the window ages out.
+- **An unknown check interval is a `400 invalid_interval`** on `POST /v1/monitors` and
+  `PATCH /v1/monitors/{id}` instead of being silently stored as 5m — and it is refused before
+  the plan floor, so garbage is never answered with an upgrade prompt.
+- **The public status page labels every strip with its own window.** Strips are sized per
+  target, and the one axis the page drew under the last row named the first row's span for all
+  of them; each row now carries its own "N ago … now" line, and the section's history figure is
+  the widest strip on the page.
+- **The status banner has a fourth state, `No recent measurements`**, for a page whose every
+  shown component has nothing measured in its newest bucket. It used to fall through to
+  `All systems operational`, which asserted what nobody had measured.
+- **`GET /v1/status-page` answers `updatedAt`**, the server clock its bars were bucketed
+  against, so the owner's preview anchors bar tooltips the way the public page does.
+- **A host page's state line reads the newest check row while the detector has no verdict
+  yet**, so a page minted a minute ago states what the door's guard probe measured instead of
+  "No data yet" over a measured row. The detector's status takes over once it exists.
 
 ## [0.30.0] — 2026-09-11
 

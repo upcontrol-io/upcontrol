@@ -31,6 +31,29 @@ func TestValidateMonitorCreate(t *testing.T) {
 	}
 }
 
+// The four cadences the contract carries, and nothing else: a value outside
+// them must be refused, never rounded into a 5m check nobody asked for.
+func TestParseInterval(t *testing.T) {
+	cases := []struct {
+		in   string
+		sec  int32
+		want bool
+	}{
+		{"1m", 60, true},
+		{"5m", 300, true},
+		{"30m", 1800, true},
+		{"1h", 3600, true},
+		{"", 0, false},
+		{"2m", 0, false},
+	}
+	for _, c := range cases {
+		sec, ok := parseInterval(c.in)
+		if sec != c.sec || ok != c.want {
+			t.Errorf("parseInterval(%q) = (%d, %v), want (%d, %v)", c.in, sec, ok, c.sec, c.want)
+		}
+	}
+}
+
 // A PATCH answers with the row as it now is, never a hardcoded "nodata":
 // this pins the helper the caller passes real facts through.
 func TestMonitorPatchKeepsStatus(t *testing.T) {

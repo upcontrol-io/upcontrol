@@ -1391,6 +1391,7 @@ type MonitorType string
 
 // MonitorCreate defines model for MonitorCreate.
 type MonitorCreate struct {
+	// Interval An unknown value is a 400 `invalid_interval`.
 	Interval MonitorCreateInterval `json:"interval"`
 	Keyword  *string               `json:"keyword,omitempty"`
 	Name     string                `json:"name"`
@@ -1398,7 +1399,7 @@ type MonitorCreate struct {
 	Type     MonitorCreateType     `json:"type"`
 }
 
-// MonitorCreateInterval defines model for MonitorCreate.Interval.
+// MonitorCreateInterval An unknown value is a 400 `invalid_interval`.
 type MonitorCreateInterval string
 
 // MonitorCreateType defines model for MonitorCreate.Type.
@@ -1406,12 +1407,13 @@ type MonitorCreateType string
 
 // MonitorPatch Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them.
 type MonitorPatch struct {
+	// Interval An unknown value is a 400 `invalid_interval`.
 	Interval *MonitorPatchInterval `json:"interval,omitempty"`
 	Name     *string               `json:"name,omitempty"`
 	Paused   *bool                 `json:"paused,omitempty"`
 }
 
-// MonitorPatchInterval defines model for MonitorPatch.Interval.
+// MonitorPatchInterval An unknown value is a 400 `invalid_interval`.
 type MonitorPatchInterval string
 
 // NetworkCheck defines model for NetworkCheck.
@@ -1847,6 +1849,9 @@ type StatusPageResponse struct {
 	// Slug The public URL segment. Assigned by us, never taken from the body.
 	Slug  string `json:"slug"`
 	Title string `json:"title"`
+
+	// UpdatedAt The server clock the bars were bucketed against, the same field the public page carries: the owner's preview anchors its bar tooltips to it rather than to the browser's own clock.
+	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 
 	// VerificationRecord The full DNS record NAME the worker resolves for verification (_upcontrol-verify.<registrable domain>), composed server-side: a project on a deeper subdomain must publish on the registrable domain, and the front cannot compute one without the public suffix list. Null on hosts the suffix list cannot fold.
 	VerificationRecord *string `json:"verificationRecord,omitempty"`

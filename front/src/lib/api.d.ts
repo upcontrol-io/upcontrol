@@ -3494,13 +3494,19 @@ export interface components {
             name: string;
             target: string;
             keyword?: string;
-            /** @enum {string} */
+            /**
+             * @description An unknown value is a 400 `invalid_interval`.
+             * @enum {string}
+             */
             interval: "1m" | "5m" | "30m" | "1h";
         };
         /** @description Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them. */
         MonitorPatch: {
             name?: string;
-            /** @enum {string} */
+            /**
+             * @description An unknown value is a 400 `invalid_interval`.
+             * @enum {string}
+             */
             interval?: "1m" | "5m" | "30m" | "1h";
             paused?: boolean;
         };
@@ -4042,6 +4048,11 @@ export interface components {
             domainLapsesAt?: string;
             components: components["schemas"]["PublicComponent"][];
             network?: components["schemas"]["NetworkTile"][];
+            /**
+             * Format: date-time
+             * @description The server clock the bars were bucketed against, the same field the public page carries: the owner's preview anchors its bar tooltips to it rather than to the browser's own clock.
+             */
+            updatedAt?: string;
             showNetwork: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy: boolean;
@@ -4333,7 +4344,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description Rate limited (always with Retry-After). */
+        /** @description Rate limited. The public doors (`/public/check`, `/public/watch`, `/public/track`) and the day's mint ceilings carry `Retry-After` in seconds: how long the refusal holds. */
         TooManyRequests: {
             headers: {
                 "Retry-After"?: string;
