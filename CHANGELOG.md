@@ -6,6 +6,8 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-09-15
+
 ### Changed
 - **The status-page bar strip now climbs with the target's own history instead of stopping at a
   day, with the 15-minute UTC slot as the colour unit everywhere.** Under 24h old it's 15m buckets
