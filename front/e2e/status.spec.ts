@@ -106,6 +106,76 @@ for (const rung of RUNGS) {
 	});
 }
 
+// Each strip is sized from its own target's history, so one axis for the page
+// mislabels every row but the first.
+test("each row's axis states its own window, never the first row's", async ({ page }) => {
+	await servePublicStatus(page, "example-com", {
+		...PUBLIC_PAGE,
+		components: [
+			{
+				...PUBLIC_PAGE.components[0],
+				bars: Array.from({ length: 96 }, () => "ok" as const),
+				barSpanSec: 900,
+			},
+			{
+				...PUBLIC_PAGE.components[0],
+				key: "mon_2",
+				name: "api.example.com",
+				bars: Array.from({ length: 60 }, () => "ok" as const),
+				barSpanSec: 43200,
+			},
+		],
+	});
+	await page.route("**/public/track", (route) => route.fulfill({ status: 204, body: "" }));
+	await page.goto("/status/example-com");
+
+	await expect(page.getByText("24 h ago")).toBeVisible();
+	await expect(page.getByText("30 days ago")).toBeVisible();
+	// One axis per row, not one for the page.
+	await expect(page.getByText("now", { exact: true })).toHaveCount(2);
+});
+
+// Measured, not asserted: nothing may read "operational" for a probe that never ran.
+test("a page with nothing measured says so, it does not say operational", async ({ page }) => {
+	await servePublicStatus(page, "example-com", {
+		...PUBLIC_PAGE,
+		components: [
+			{
+				...PUBLIC_PAGE.components[0],
+				bars: Array.from({ length: 96 }, () => "nodata" as const),
+			},
+		],
+	});
+	await page.route("**/public/track", (route) => route.fulfill({ status: 204, body: "" }));
+	await page.goto("/status/example-com");
+
+	await expect(page.getByRole("heading", { name: "No recent measurements" })).toBeVisible();
+	await expect(page.getByText("All systems operational")).toHaveCount(0);
+	// The row says the same one level down: nothing measured is not "operational".
+	await expect(page.getByText("no data", { exact: true })).toBeVisible();
+	await expect(page.getByText("operational", { exact: true })).toHaveCount(0);
+});
+
+test("one measured component is enough for the operational banner", async ({ page }) => {
+	await servePublicStatus(page, "example-com", {
+		...PUBLIC_PAGE,
+		components: [
+			PUBLIC_PAGE.components[0],
+			{
+				...PUBLIC_PAGE.components[0],
+				key: "mon_2",
+				name: "api.example.com",
+				bars: Array.from({ length: 96 }, () => "nodata" as const),
+			},
+		],
+	});
+	await page.route("**/public/track", (route) => route.fulfill({ status: 204, body: "" }));
+	await page.goto("/status/example-com");
+
+	await expect(page.getByRole("heading", { name: "All systems operational" })).toBeVisible();
+	await expect(page.getByText("No recent measurements")).toHaveCount(0);
+});
+
 test.describe("bar tooltip alignment", () => {
 	// Local-clock text (the day prefix, the hour range) must read the same
 	// everywhere this suite runs, not just on a UTC machine.

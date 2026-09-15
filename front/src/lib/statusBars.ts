@@ -11,7 +11,8 @@ const DAY_SEC = 86400;
 /** The bucket to assume when a backend omits `barSpanSec` — the ladder's first rung. */
 export const BASE_SPAN_SEC = 900;
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "Sep 13": the date prefix a strip wider than a day gets. */
+const DAY = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
 
 /** Status as a word: colour never carries a state alone. */
 const BAR_WORD: Record<HealthStatus, string> = {
@@ -24,11 +25,8 @@ const BAR_WORD: Record<HealthStatus, string> = {
 /** How far back a whole strip reaches, in words: "24 h", "48 h", "7 days", "30 days". */
 export function spanLabel(spanSec: number, count: number): string {
   const total = spanSec * count;
-  const hours = total / 3600;
-  const days = total / DAY_SEC;
-  if (total <= 2 * DAY_SEC && Number.isInteger(hours)) return `${hours} h`;
-  if (Number.isInteger(days)) return `${days} days`;
-  if (total >= 3600 && Number.isInteger(hours)) return `${hours} h`;
+  if (total > 2 * DAY_SEC && total % DAY_SEC === 0) return `${total / DAY_SEC} days`;
+  if (total >= 3600 && total % 3600 === 0) return `${total / 3600} h`;
   return `${Math.round(total / 60)} min`;
 }
 
@@ -45,7 +43,7 @@ function bucketTime(index: number, count: number, spanSec: number, nowMs: number
   const start = new Date(current - (count - 1 - index) * spanMs);
   const clock = (d: Date) => `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
   const range = `${clock(start)}–${clock(new Date(start.getTime() + spanMs))}`;
-  return count * spanSec > DAY_SEC ? `${MONTHS[start.getMonth()]} ${start.getDate()} ${range}` : range;
+  return count * spanSec > DAY_SEC ? `${DAY.format(start)} ${range}` : range;
 }
 
 /** A whole tooltip: when, and what it was. `nowMs` anchors the alignment —

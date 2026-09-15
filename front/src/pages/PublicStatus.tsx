@@ -11,13 +11,15 @@ import styles from './PublicStatus.module.css';
 type BarStatus = 'ok' | 'check' | 'down' | 'nodata';
 
 // The overall banner, from an ongoing incident and/or a component whose
-// current bucket is not ok; it may never say "operational" during downtime.
-type BannerState = 'ok' | 'check' | 'down';
+// current bucket is not ok; it may never say "operational" during downtime,
+// and it may never say operational for a probe that never ran.
+type BannerState = 'ok' | 'check' | 'down' | 'nodata';
 
 const BANNER_COPY: Record<BannerState, string> = {
 	ok: 'All systems operational',
 	down: 'Some systems are down',
 	check: 'Some systems are degraded',
+	nodata: 'No recent measurements',
 };
 
 /** The state a component is in right now: its newest bucket. `nodata` is not
@@ -113,16 +115,20 @@ export function PublicStatus() {
 	const shownComponents = (page.components ?? []).filter((component) => component?.shown);
 	const incidents = page.incidents ?? [];
 
+	const newest = shownComponents.map((c) => currentState((c.bars ?? []) as BarStatus[]));
 	const banner: BannerState =
-		shownComponents.some((c) => currentState((c.bars ?? []) as BarStatus[]) === 'down') ||
-		incidents.some((i) => i.ongoing && i.status === 'down')
+		newest.includes('down') || incidents.some((i) => i.ongoing && i.status === 'down')
 			? 'down'
-			: shownComponents.some((c) => isFailure(currentState((c.bars ?? []) as BarStatus[]))) ||
-				  incidents.some((i) => i.ongoing)
+			: newest.some(isFailure) || incidents.some((i) => i.ongoing)
 				? 'check'
-				: 'ok';
+				: // Components but nothing measured on any of them is not health.
+					newest.length > 0 && newest.every((s) => s === undefined || s === 'nodata')
+					? 'nodata'
+					: 'ok';
 
-	const barSpan = shownComponents[0]?.barSpanSec ?? BASE_SPAN_SEC;
+	// The section's own figure is the widest strip on the page, in seconds: every row's
+	// history lies inside it, where the first row's could name a window a later row reaches past.
+	const widest = Math.max(0, ...shownComponents.map((c) => (c.barSpanSec ?? BASE_SPAN_SEC) * (c.bars ?? []).length));
 	const network = page.network ?? [];
 	const host = page.title || projectSlug || 'status';
 	const updatedAtMs = page.updatedAt ? Date.parse(page.updatedAt) : Date.now();
@@ -157,25 +163,29 @@ export function PublicStatus() {
 					<div className={styles.sectionHead}>
 						<h2 className={styles.sectionTitle}>Components</h2>
 						<span className={styles.sectionMeta}>
-							{shownComponents[0]?.bars?.length
-								? `${spanLabel(barSpan, shownComponents[0].bars.length)} of history`
-								: 'no history yet'}
+							{widest > 0 ? `${spanLabel(widest, 1)} of history` : 'no history yet'}
 						</span>
 					</div>
 					<div className={styles.componentList}>
 						{shownComponents.map((component, rowIndex) => {
-							const bars = buildBars(
-								(component.bars ?? []) as HealthStatus[],
-								component.barSpanSec ?? BASE_SPAN_SEC,
-								updatedAtMs,
-							);
-							const ongoing = isFailure(currentState(bars.map((bar) => bar.status)));
-							const rowState = ongoing ? currentState(bars.map((bar) => bar.status)) : 'ok';
+							// The contract sizes each strip from its own target's history, so spans
+							// and bar counts differ row to row: the axis is drawn per row from this
+							// same spanSec, never borrowed from another row.
+							const spanSec = component.barSpanSec ?? BASE_SPAN_SEC;
+							const bars = buildBars((component.bars ?? []) as HealthStatus[], spanSec, updatedAtMs);
+							// `nodata` is not "it broke", and not "it works" either: an unmeasured newest
+							// bucket says so instead of "operational".
+							const newest = currentState(bars.map((bar) => bar.status));
+							const ongoing = isFailure(newest);
+							const unmeasured = newest === undefined || newest === 'nodata';
+							const rowState = ongoing ? newest : unmeasured ? 'nodata' : 'ok';
 							const rowLabel = ongoing
 								? 'ongoing incident'
 								: bars.some((bar) => isFailure(bar.status))
 									? 'past incident'
-									: 'operational';
+									: unmeasured
+										? 'no data'
+										: 'operational';
 							return (
 								<div key={component.key} className={styles.componentRow}>
 									<div className={styles.componentHead}>
@@ -183,7 +193,7 @@ export function PublicStatus() {
 										<span className={styles.componentName}>{component.name}</span>
 										<span className={styles.componentStatus}>{rowLabel}</span>
 										<span className={styles.componentUptime}>
-											{component.uptime} · {spanLabel(component.barSpanSec ?? BASE_SPAN_SEC, bars.length)}
+											{component.uptime} · {spanLabel(spanSec, bars.length)}
 										</span>
 									</div>
 									<div className={styles.bars}>
@@ -205,17 +215,15 @@ export function PublicStatus() {
 											</Tooltip>
 										))}
 									</div>
+									{bars.length > 0 && (
+										<div className={styles.axis} aria-hidden="true">
+											<span>{spanLabel(spanSec, bars.length)} ago</span>
+											<span>now</span>
+										</div>
+									)}
 								</div>
 							);
 						})}
-						<div className={styles.axis} aria-hidden="true">
-							<span>
-								{shownComponents[0]?.bars?.length
-									? `${spanLabel(barSpan, shownComponents[0].bars.length)} ago`
-									: ''}
-							</span>
-							<span>now</span>
-						</div>
 					</div>
 				</section>
 
