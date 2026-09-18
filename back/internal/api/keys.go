@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -188,7 +189,20 @@ func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID
 			"A public key must list the origins it may be sent from — it is shipped in a browser bundle, and the origin list is its whole scope.")
 		return
 	}
-	if kind != keyKindPublic {
+	if kind == keyKindPublic {
+		// The trust boundary is here, not on the card that collects them: a key
+		// minted for * or null is valid from every page on the web, and one
+		// minted for a page address matches no Origin header at all (public.go
+		// compares byte for byte), so it authenticates nowhere and says nothing
+		// about why.
+		for _, o := range origins {
+			if !validOrigin(o) {
+				writeAPIErrMsg(w, http.StatusBadRequest, "bad_origin",
+					"An origin is a scheme and a host, like https://example.com or http://localhost:5173. Not a page address, not a wildcard, not null.")
+				return
+			}
+		}
+	} else {
 		origins = nil
 	}
 	live, err := h.pool.Queries().CountLiveAPIKeys(ctx, projectID)
@@ -259,6 +273,13 @@ func (h *keys) revokeProject(w http.ResponseWriter, r *http.Request, s sqlc.Sess
 			writeAPIErr(w, http.StatusForbidden, "owner_only")
 			return
 		}
+		// Tokens first, and fatally: an unredeemed install token is one more key
+		// waiting to be minted, and this door answers 204 with nothing shown
+		// once, so a failure here can simply be retried with nothing half done.
+		if _, err := h.pool.Raw().Exec(ctx, `DELETE FROM install_token WHERE project_id = $1`, row.ID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "revoke_failed")
+			return
+		}
 		if _, err := h.pool.Queries().RevokeProjectAPIKeys(ctx, row.ID); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "revoke_failed")
 			return
@@ -280,6 +301,12 @@ func (h *keys) rotate(w http.ResponseWriter, r *http.Request, tenantID, projectI
 	// and looked up under the other.
 	fullKey := keyScheme(keyKindSecret) + secret
 	hash := sha256.Sum256([]byte(fullKey))
+
+	// The panic lever takes the unredeemed install tokens with it: each one is a
+	// secret key waiting to be minted. Before the rotation, so a project with no
+	// active secret key (409 below) loses them too. The error is ignored: a token
+	// is cheap to mint again, and a cleanup miss must not stop the rotation.
+	_, _ = h.pool.Raw().Exec(ctx, `DELETE FROM install_token WHERE project_id = $1`, projectID)
 
 	row, err := h.pool.Queries().RotateAPIKey(ctx, sqlc.RotateAPIKeyParams{
 		TenantID:   tenantID,
@@ -358,6 +385,38 @@ func keyScheme(kind string) string {
 		return "uc_pub_"
 	}
 	return "uc_live_"
+}
+
+// validOrigin: an Origin header is a scheme, a host and an optional port, and
+// public.go matches it byte for byte. A path, a query, a fragment or
+// credentials mean a page address was pasted where an origin belongs, so the
+// key would authenticate nowhere; * and null would hand it to every page on
+// the web.
+func validOrigin(o string) bool {
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	// Ingest compares byte for byte, so the only acceptable spelling is the one a
+	// browser sends: lowercase, scheme://host[:port] and nothing after it. One
+	// comparison against that form refuses a path, "?", "#", userinfo (it is not
+	// part of Host) and an upper-case host alike.
+	if o != strings.ToLower(u.Scheme+"://"+u.Host) {
+		return false
+	}
+	// url.Parse lets RFC 3986 sub-delims and raw non-ASCII through as host bytes,
+	// and a browser sends neither: "*", ",", ";" never, an IDN host as punycode.
+	// A port is digits, present, and not the scheme's default, which a browser omits.
+	for _, c := range []byte(u.Hostname()) {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':') {
+			return false // ':' only occurs inside an IPv6 literal, which Hostname unbrackets
+		}
+	}
+	port := u.Port()
+	if strings.HasSuffix(u.Host, ":") || (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return false
+	}
+	return true
 }
 
 // randomHex mints the 16 random bytes (32 hex chars) behind a uc_live_ key:

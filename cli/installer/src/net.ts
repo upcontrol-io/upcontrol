@@ -2,7 +2,7 @@
 // env var and --endpoint exist for self-hosted stacks and local development.
 
 const DEFAULT_ENDPOINT = 'https://upcontrol.io';
-export const CLI_VERSION = '0.2.3';
+export const CLI_VERSION = '0.2.4';
 
 export function endpointFrom(env: NodeJS.ProcessEnv, flag?: string): string {
   return (flag || env.UPCONTROL_ENDPOINT || DEFAULT_ENDPOINT).replace(/\/+$/, '');
@@ -38,6 +38,9 @@ export async function mintAnonymousProject(endpoint: string, agent: string | nul
 
 interface RedeemResult {
   ok: boolean;
+  // The status separates a throttle from a dead token: a 429 leaves the
+  // one-time token unburned, so the same command works again in a moment.
+  status?: number;
   key?: string;
   error?: string;
 }
@@ -51,7 +54,7 @@ export async function redeemInstallToken(endpoint: string, token: string): Promi
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
     });
-    if (!res.ok) return { ok: false, error: 'refused' };
+    if (!res.ok) return { ok: false, status: res.status, error: 'refused' };
     const body = parseJSON<{ key?: string }>(res.text);
     if (!body?.key) return { ok: false, error: 'malformed' };
     return { ok: true, key: body.key };

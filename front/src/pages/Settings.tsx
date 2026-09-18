@@ -304,7 +304,7 @@ export function Settings() {
 					<>
 						<CopyField text={installCmd.command} />
 						<span className={styles.hint}>
-							One-time token, expires in 10 minutes — it lands this project's key in a gitignored .env
+							One-time token, valid for 24 hours — it lands this project's key in a gitignored .env
 							without ever showing it.{' '}
 							<button type="button" className={styles.linkButton} onClick={generateCommand}>
 								{tokenBusy ? 'Generating…' : 'Generate a new one'}

@@ -12,10 +12,34 @@ type ua struct {
 
 // botSubstrings are the automated-visitor markers; a match is device=bot
 // regardless of the rest of the string.
-var botSubstrings = []string{"bot", "crawl", "spider", "slurp", "headless", "lighthouse", "monitoring"}
+var botSubstrings = []string{"crawl", "spider", "slurp", "headless", "lighthouse", "monitoring"}
+
+// hasBotToken finds "bot" as a product token (Googlebot/2.1, Slackbot-Link…, "+…/bot.html"),
+// not as letters inside a word: Android puts the handset model in its User-Agent, and a
+// CUBOT phone is a visitor. It matters since the list gates a customer's ingest, where a
+// false positive is a real person's events dropped with nothing to say so.
+func hasBotToken(s string) bool {
+	for i := 0; ; {
+		j := strings.Index(s[i:], "bot")
+		if j < 0 {
+			return false
+		}
+		j += i
+		end := j + len("bot")
+		startsWord := j == 0 || s[j-1] < 'a' || s[j-1] > 'z'
+		endsToken := end == len(s) || strings.IndexByte("/-;)", s[end]) >= 0
+		if startsWord || endsToken {
+			return true
+		}
+		i = end
+	}
+}
 
 func parseUA(raw string) ua {
 	s := strings.ToLower(raw)
+	if hasBotToken(s) {
+		return ua{Device: "bot"}
+	}
 	for _, m := range botSubstrings {
 		if strings.Contains(s, m) {
 			return ua{Device: "bot"}
@@ -23,6 +47,12 @@ func parseUA(raw string) ua {
 	}
 	return ua{Device: deviceOf(s), OS: osOf(s), Browser: browserOf(s)}
 }
+
+// IsBot reports whether a User-Agent belongs to an automated visitor. Exported
+// for the ingest coordinator, which drops a crawler's public-key batch but
+// cannot import this package (storage/pg imports ingest), so it takes the
+// detector as an injected function instead.
+func IsBot(userAgent string) bool { return parseUA(userAgent).Device == "bot" }
 
 func deviceOf(s string) string {
 	// Android without "mobile" is a tablet (the Google convention); iPad and

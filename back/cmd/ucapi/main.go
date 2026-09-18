@@ -103,6 +103,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// The endpoint the docs promise: the SAME pipeline under the name agents
 	// read in /docs/api. An alias, not a second ingest.
 	mux.Handle("POST /v1/event", http.HandlerFunc(ingester.Handle))
+	// The alias preflights like /i or it is dead for a page: an NDJSON POST is
+	// never CORS-safelisted, and an unanswered OPTIONS is a 405 with no headers.
+	mux.Handle("OPTIONS /v1/event", http.HandlerFunc(ingester.HandlePreflight))
 	go driveBatcher(ctx, batch, 50*time.Millisecond, d.Logger)
 	d.Shutdown.Register(st("batcher", func(c context.Context) error { return batch.Close(c) }))
 

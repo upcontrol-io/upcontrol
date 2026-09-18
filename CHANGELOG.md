@@ -6,6 +6,36 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-09-18
+
+### Security
+- **A Member can no longer mint an install token.** `POST /v1/install/token` answers 403
+  `notify_role` without the manager role. Redeeming a token lands a secret key, which is what
+  `POST /v1/keys` already refused a Member, and the redeem is unauthenticated by design, so the
+  mint was the way around the gate.
+- **A public key's origins are validated at mint.** An origin is lowercase
+  `scheme://host[:port]` and nothing else: `*`, `null`, a bare host, a path, a query,
+  userinfo, an upper-case or non-ASCII host, or the scheme's default port is a 400
+  `bad_origin`. Ingest compares byte for byte, so such a key authenticated nowhere, or
+  (`null`) from every sandboxed page.
+- **Rotating every key, and revoking a project's keys, delete its unredeemed install tokens.**
+  Each one was a secret key still waiting to be minted.
+
+### Fixed
+- **The browser door delivers.** `/i` and its preflight answer
+  `Access-Control-Allow-Credentials: true` beside a matched origin. Without it every
+  cross-origin `navigator.sendBeacon` was refused at the preflight while returning `true` to
+  the page, so the documented snippet lost every event in silence. `OPTIONS /v1/event` is wired
+  too: the alias answered 405 to every browser preflight.
+- **The install door's brakes key on the client, not on the proxy.** Behind a reverse proxy the
+  redeem and the anonymous mint shared one 30-second bucket across every caller.
+
+### Changed
+- **An install token lives 24 hours**, still single-use. Expired ones are purged by the worker.
+- **Known bots are dropped on a public key**: answered 200 with a `bot_dropped` warning,
+  nothing stored. A secret key is never filtered.
+- The settings screen says 24 hours.
+
 ## [0.32.0] — 2026-09-18
 
 ### Added

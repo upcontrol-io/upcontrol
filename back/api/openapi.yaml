@@ -2271,6 +2271,16 @@ paths:
                   maxLength: 60
                   description: "What to call it, so two keys are told apart by something other than their prefix. Empty is allowed and prints as the prefix."
                   example: "staging"
+                kind:
+                  type: string
+                  enum: [secret, public]
+                  default: secret
+                  description: "`secret` (uc_live_) writes anything and belongs in .env on a server. `public` (uc_pub_) may ship in a browser bundle, writes named events only, and is accepted solely from an origin its owner listed."
+                origins:
+                  type: array
+                  items: { type: string }
+                  description: "Where a public key may be sent from, matched byte for byte with no wildcards: a scheme and a host with an optional port, nothing else. Required for a public key; ignored on a secret one."
+                  example: ["https://example.com", "http://localhost:5173"]
       responses:
         "201":
           description: Issued; the full key is returned exactly once.
@@ -2279,7 +2289,15 @@ paths:
               application/json:
                 { schema: { $ref: "#/components/schemas/IssuedKey" } },
             }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "400":
+          description: >
+            `bad_kind` (a key is either secret or public), `origins_required`
+            (a public key with an empty origin list is the unscoped key it
+            exists to replace), or `bad_origin` (an origin is a scheme and a
+            host, never `*`, `null` or a page address).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: notify_role }
         "409":
@@ -2322,7 +2340,9 @@ paths:
       summary: |
         Rotate every working key of the project at once. Each stays valid for a
         24h overlap window, then 401s — a rotation that kills a deployed app
-        fails at the customer.
+        fails at the customer. The project's unredeemed install tokens are
+        deleted with it: each one is a secret key waiting to be minted, and
+        leaving them standing would contain nothing.
       description: >
         Sugar over the two calls below, kept because "I just leaked it" wants one
         button: it marks every ACTIVE key of the project `rotating` and issues one
@@ -3473,10 +3493,13 @@ paths:
       summary: |
         Mint the one-time install token the dashboard's install card embeds in
         `npx upcontrol init --token ...` (front-distribution-alignment.md §1).
-        Session-authed; bound to the session's project; TTL 10 minutes;
-        single-use. The dashboard never shows a bare `npx upcontrol` — signed
-        out of the terminal it would mint an anonymous project and route this
-        account's logs past it.
+        Session-authed and manager-only (redeeming one lands a secret key, and
+        POST /v1/keys refuses a Member exactly that); bound to the session's
+        project; TTL 24 hours; single-use, and the unredeemed ones are deleted
+        by a key rotation, by a project-wide key revoke and by the purge job.
+        The dashboard never shows a bare `npx upcontrol` — signed out of the
+        terminal it would mint an anonymous project and route this account's
+        logs past it.
       responses:
         "200":
           description: OK
@@ -3490,6 +3513,7 @@ paths:
                   command: { type: string }
                   expiresAt: { type: string, format: date-time }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
 
   /v1/install/redeem:
     post:

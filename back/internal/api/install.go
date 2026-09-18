@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -89,9 +88,12 @@ func (h *install) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// installTokenTTL: the token only has to survive a copy from browser to
-// terminal; a leaked screenshot goes stale before it travels.
-const installTokenTTL = 10 * time.Minute
+// installTokenTTL: a day. The copy from browser to terminal happens between
+// two other things, and a command that dies while the reader switches windows
+// is the pain here. What contains a leak is that the token is single-use (a
+// redeemed one is dead); the unredeemed ones die with a rotation, with a
+// project-wide key revoke, and with the purge job once they expire.
+const installTokenTTL = 24 * time.Hour
 
 // issueToken mints the one-time token for `npx upcontrol init --token`. A
 // bare signed-out init would mint an anonymous project and bypass this account.
@@ -101,8 +103,17 @@ func (h *install) issueToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The session's current project (the tenant's first as the fallback).
-	projectID := currentProjectID(ctx, h.pool, s, s.TenantID)
+	// The token redeems into a secret key, which is what POST /v1/keys refuses
+	// a Member: without the same gate the install card is the way around it.
+	// The scope answers the role AND the session's current project (the tenant's
+	// first as the fallback), which is one read fewer than asking canManage
+	// beside currentProjectID.
+	sc := resolveScope(ctx, h.pool, s)
+	if !sc.canManage() {
+		writeAPIErr(w, http.StatusForbidden, "notify_role")
+		return
+	}
+	projectID := sc.ProjectID
 	if projectID == 0 {
 		writeAPIErr(w, http.StatusInternalServerError, "no_project")
 		return
@@ -141,7 +152,7 @@ type redeemReq struct {
 // rotation: the atomic UPDATE makes a replay answer the same 404 (no oracle).
 func (h *install) redeem(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if !h.allow("redeem:" + installClientIP(r)) {
+	if !h.allow("redeem:" + analytics.ClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
@@ -248,7 +259,7 @@ func newUnclaimedTenant(ctx context.Context, pool *pg.Pool, name, domain string)
 
 func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if !h.allow("mint:" + installClientIP(r)) {
+	if !h.allow("mint:" + analytics.ClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
@@ -537,14 +548,4 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 		resp["verifiedAt"] = verifiedAt.UTC().Format(time.RFC3339)
 	}
 	writeAPIJSON(w, http.StatusOK, resp)
-}
-
-// installClientIP mirrors auth.clientIP without exporting it: the throttle
-// wants the peer address, not a spoofable header.
-func installClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

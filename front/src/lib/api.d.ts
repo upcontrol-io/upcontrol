@@ -1048,6 +1048,20 @@ export interface paths {
                          * @example staging
                          */
                         name?: string;
+                        /**
+                         * @description `secret` (uc_live_) writes anything and belongs in .env on a server. `public` (uc_pub_) may ship in a browser bundle, writes named events only, and is accepted solely from an origin its owner listed.
+                         * @default secret
+                         * @enum {string}
+                         */
+                        kind?: "secret" | "public";
+                        /**
+                         * @description Where a public key may be sent from, matched byte for byte with no wildcards: a scheme and a host with an optional port, nothing else. Required for a public key; ignored on a secret one.
+                         * @example [
+                         *       "https://example.com",
+                         *       "http://localhost:5173"
+                         *     ]
+                         */
+                        origins?: string[];
                     };
                 };
             };
@@ -1061,7 +1075,15 @@ export interface paths {
                         "application/json": components["schemas"]["IssuedKey"];
                     };
                 };
-                400: components["responses"]["BadRequest"];
+                /** @description `bad_kind` (a key is either secret or public), `origins_required` (a public key with an empty origin list is the unscoped key it exists to replace), or `bad_origin` (an origin is a scheme and a host, never `*`, `null` or a page address). */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 401: components["responses"]["Unauthorized"];
                 /** @description notify_role */
                 403: {
@@ -1155,7 +1177,9 @@ export interface paths {
         /**
          * Rotate every working key of the project at once. Each stays valid for a
          *     24h overlap window, then 401s — a rotation that kills a deployed app
-         *     fails at the customer.
+         *     fails at the customer. The project's unredeemed install tokens are
+         *     deleted with it: each one is a secret key waiting to be minted, and
+         *     leaving them standing would contain nothing.
          * @description Sugar over the two calls below, kept because "I just leaked it" wants one button: it marks every ACTIVE key of the project `rotating` and issues one replacement. To withdraw ONE key without touching the others, revoke it with DELETE /v1/keys/{id} and issue its replacement with POST /v1/keys.
          */
         post: {
@@ -3063,10 +3087,13 @@ export interface paths {
         /**
          * Mint the one-time install token the dashboard's install card embeds in
          *     `npx upcontrol init --token ...` (front-distribution-alignment.md §1).
-         *     Session-authed; bound to the session's project; TTL 10 minutes;
-         *     single-use. The dashboard never shows a bare `npx upcontrol` — signed
-         *     out of the terminal it would mint an anonymous project and route this
-         *     account's logs past it.
+         *     Session-authed and manager-only (redeeming one lands a secret key, and
+         *     POST /v1/keys refuses a Member exactly that); bound to the session's
+         *     project; TTL 24 hours; single-use, and the unredeemed ones are deleted
+         *     by a key rotation, by a project-wide key revoke and by the purge job.
+         *     The dashboard never shows a bare `npx upcontrol` — signed out of the
+         *     terminal it would mint an anonymous project and route this account's
+         *     logs past it.
          */
         post: {
             parameters: {
@@ -3092,6 +3119,13 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;

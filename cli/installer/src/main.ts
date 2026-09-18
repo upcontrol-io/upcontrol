@@ -110,7 +110,7 @@ Usage:
   npx upcontrol board      print the project's dashboard layout as JSON
 
 Init flags:
-  --token <uct_...>    one-time token from your dashboard's install card - lands
+  --token <uct_...>    one-time token from your dashboard's Connect page - lands
                        the key of YOUR project (never echoed, single use)
   --key <uc_live_...>  use this key instead of provisioning one (written to .env, never echoed)
   --no-key             skip key provisioning entirely
@@ -144,7 +144,23 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
   // True when this run tried and failed to establish a key: the result says
   // success:false and init exits 1, so no agent wires an app that sends nothing.
   let keyFailed = false;
-  if (flags.token) {
+  const present = keySource === 'env' || keySource === 'dotenv';
+  if (present && (flags.token || flags.key)) {
+    // A key already here is never redeemed or written over: writeDotenvKey
+    // refuses to overwrite, so the request would burn a one-time token for a
+    // key that lands nowhere while the app keeps sending to the old project.
+    const where = keySource === 'env' ? 'UPCONTROL_API_KEY' : '.env';
+    // Nothing is written, but the one anti-leak guarantee still holds on this path:
+    // a key that is already in .env must not be committable. Only there: with the key
+    // in the environment there is no file to guard, and ensureEnvIgnored would create
+    // a .gitignore in a directory that may not even be a repo.
+    const gi = keySource === 'dotenv' ? ensureEnvIgnored(cwd) : { fixed: false };
+    if (flags.key !== (process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd))) {
+      const what = flags.token ? 'the token was not used' : 'the key from --key was not written';
+      keyNote = `a key is already set in ${where} - left as is, and ${what}. Remove that line and rerun to install this project's key.`;
+    }
+    if (gi.fixed) keyNote = (keyNote ? keyNote + ' ' : '') + '.gitignore did not cover .env - fixed.';
+  } else if (flags.token) {
     // The dashboard's one-time token: redeem it for this account's project key.
     // On failure never fall back to the anonymous mint: wrong-project logs.
     const redeemed = await redeemInstallToken(endpoint, flags.token);
@@ -156,6 +172,9 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     } else if (redeemed.error === 'unreachable') {
       keyFailed = true;
       keyNote = `backend unreachable at ${endpoint} - check UPCONTROL_ENDPOINT and retry`;
+    } else if (redeemed.status === 429) {
+      keyFailed = true;
+      keyNote = 'redeem throttled - the token is still valid, run the same command again in 30s';
     } else {
       keyFailed = true;
       keyNote = 'the install token was already used or expired - generate a fresh command in /app/sources';

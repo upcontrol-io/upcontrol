@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -25,6 +26,33 @@ func TestInstallAllow_CooldownPerIP(t *testing.T) {
 	h.mu.Unlock()
 	if !h.allow("1.2.3.4") {
 		t.Fatal("an expired cooldown must pass again")
+	}
+}
+
+// The install brakes key on the CLIENT, not on the proxy. ucapi answers behind
+// Caddy, which replaces X-Forwarded-For with the peer address, so a bucket per
+// r.RemoteAddr was one bucket per replica for every customer at once: the
+// second stranger inside the cooldown was refused a redeem nobody had made.
+func TestInstallRedeem_ThrottlesPerForwardedClient(t *testing.T) {
+	h := NewInstall(nil, nil, nil, "", false)
+	// A body-less redeem stops at missing_token, before anything reaches the
+	// (nil) pool, so 400 is what "past the throttle" looks like here.
+	post := func(client string) int {
+		r := httptest.NewRequest(http.MethodPost, "/v1/install/redeem", nil)
+		r.RemoteAddr = "10.0.0.7:41234" // the proxy: identical for everyone
+		r.Header.Set("X-Forwarded-For", client)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	if code := post("203.0.113.1"); code != http.StatusBadRequest {
+		t.Fatalf("the first client = %d, want 400 (past the throttle, no token in the body)", code)
+	}
+	if code := post("203.0.113.2"); code != http.StatusBadRequest {
+		t.Fatalf("a second client = %d, want 400: two strangers behind one proxy share no bucket", code)
+	}
+	if code := post("203.0.113.1"); code != http.StatusTooManyRequests {
+		t.Fatalf("the same client again = %d, want 429", code)
 	}
 }
 

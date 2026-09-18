@@ -3,6 +3,32 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-18 — upcontrol 0.2.4
+
+- **A key already in place is never redeemed over.** `init --token` and `init --key` read the
+  existing key first: `.env` or `UPCONTROL_API_KEY` already carrying one means no request to
+  `/v1/install/redeem` at all, nothing written, exit 0, and a note saying the key was left as is
+  and the token was not used; `.gitignore` is still checked for `.env` on that path. Before, the redeem burned the one-time token and `writeDotenvKey`
+  then refused to overwrite — the run reported `written to .env` and exited 0 while the app kept
+  sending under the old key, so `verify` came back green against the wrong project. That is
+  exactly the anonymous-project-then-sign-up path.
+- **A throttled redeem stops reading as a dead token.** A 429 leaves the token unburned, but
+  every non-OK status was reported as "already used or expired", which sends the reader back to
+  the dashboard for a command that still works. The redeem carries its status now and says: run
+  the same command again in 30s. The "already used or expired" sentence stays for what it
+  describes.
+- **`wire.md`'s "From a browser" is a decision rule now.** Two rules first, where an agent
+  reads them before it stops anywhere: never a secret key in a bundle (`VITE_` warning kept),
+  and what money depends on is sent from the server. Then two ways to send: a project with a
+  backend relays through its own route with no key in the page (the route is in the file); a
+  static site with no backend mints a PUBLIC key. The public-key snippet moves from
+  `navigator.sendBeacon` to `fetch(..., {keepalive: true})` — the beacon sends with credentials,
+  and a core that answers no `Access-Control-Allow-Credentials` on `/i` refuses that preflight:
+  `sendBeacon` returns `true` and the event arrives nowhere. Measured in a real browser, not
+  reasoned. The `fetch` form works against every core, old and self-hosted.
+- The `--token` help line names the Connect page and no duration: this CLI talks to cores of
+  every age, and how long a token lives is the server's to say. `SDK_PIN` is unchanged.
+
 ## 2026-09-11 — upcontrol 0.2.3
 
 - **The package description and README catch up to what the CLI already does.**

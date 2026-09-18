@@ -44,16 +44,16 @@ func (e AlertChannelMutedBy) Valid() bool {
 
 // Defines values for ApiKeyKind.
 const (
-	Public ApiKeyKind = "public"
-	Secret ApiKeyKind = "secret"
+	ApiKeyKindPublic ApiKeyKind = "public"
+	ApiKeyKindSecret ApiKeyKind = "secret"
 )
 
 // Valid indicates whether the value is a known member of the ApiKeyKind enum.
 func (e ApiKeyKind) Valid() bool {
 	switch e {
-	case Public:
+	case ApiKeyKindPublic:
 		return true
-	case Secret:
+	case ApiKeyKindSecret:
 		return true
 	default:
 		return false
@@ -813,6 +813,24 @@ func (e WatchStatus) Valid() bool {
 	case WatchStatusNodata:
 		return true
 	case WatchStatusOk:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PostV1KeysJSONBodyKind.
+const (
+	PostV1KeysJSONBodyKindPublic PostV1KeysJSONBodyKind = "public"
+	PostV1KeysJSONBodyKindSecret PostV1KeysJSONBodyKind = "secret"
+)
+
+// Valid indicates whether the value is a known member of the PostV1KeysJSONBodyKind enum.
+func (e PostV1KeysJSONBodyKind) Valid() bool {
+	switch e {
+	case PostV1KeysJSONBodyKindPublic:
+		return true
+	case PostV1KeysJSONBodyKindSecret:
 		return true
 	default:
 		return false
@@ -2133,11 +2151,22 @@ type PutV1InstanceTelegramBotJSONBody struct {
 
 // PostV1KeysJSONBody defines parameters for PostV1Keys.
 type PostV1KeysJSONBody struct {
+	// Kind `secret` (uc_live_) writes anything and belongs in .env on a server. `public` (uc_pub_) may ship in a browser bundle, writes named events only, and is accepted solely from an origin its owner listed.
+	Kind *PostV1KeysJSONBodyKind `json:"kind,omitempty"`
+
 	// Name What to call it, so two keys are told apart by something other than their prefix. Empty is allowed and prints as the prefix.
 	//
 	// Example: staging
 	Name *string `json:"name,omitempty"`
+
+	// Origins Where a public key may be sent from, matched byte for byte with no wildcards: a scheme and a host with an optional port, nothing else. Required for a public key; ignored on a secret one.
+	//
+	// Example: ["https://example.com","http://localhost:5173"]
+	Origins *[]string `json:"origins,omitempty"`
 }
+
+// PostV1KeysJSONBodyKind defines parameters for PostV1Keys.
+type PostV1KeysJSONBodyKind string
 
 // GetV1LogsParams defines parameters for GetV1Logs.
 type GetV1LogsParams struct {

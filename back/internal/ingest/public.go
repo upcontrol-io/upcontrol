@@ -51,7 +51,10 @@ const preflightMaxAge = "600"
 // origins list is always a refusal, never "any": a public key with no domain
 // is the unscoped key it exists to replace.
 func matchOrigin(presented string, origins []string) string {
-	if presented == "" {
+	// "null" is what a sandboxed iframe, a file:// page and some redirects send, and
+	// a key minted before origins were validated may still list it: refused on the
+	// read side too, so no stored row can make a key valid from every opaque page.
+	if presented == "" || presented == "null" {
 		return ""
 	}
 	for _, o := range origins {
@@ -149,6 +152,10 @@ func (h *Ingester) HandlePreflight(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Vary", "Origin")
+	// Without this a browser refuses the whole preflight when the beacon
+	// carries credentials mode "include", and the page loses every event
+	// while being told it succeeded (see Handle).
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Upcontrol-Key, Authorization")
 	w.Header().Set("Access-Control-Max-Age", preflightMaxAge)
