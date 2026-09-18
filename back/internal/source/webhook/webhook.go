@@ -171,8 +171,11 @@ func (h *Handler) serveToken(w http.ResponseWriter, r *http.Request, token strin
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if ghEvent := r.Header.Get("X-GitHub-Event"); ghEvent != "" {
+		evt.Name = githubEventName(ghEvent, raw)
+	}
 	if evt.Name == "" || evt.Name == "unknown" {
-		evt.Name = genericEventName(r.Header, raw, conn.Kind)
+		evt.Name = genericEventName(raw, conn.Kind)
 	}
 	if evt.EventID == "" {
 		evt.EventID = genericEventID(r.Header, raw, body)
@@ -227,12 +230,21 @@ func detectProvider(h http.Header) string {
 	return ""
 }
 
-// genericEventName finds a name for a payload no normalizer claimed: the
-// GitHub event header, then common fields, then the connection kind.
-func genericEventName(h http.Header, raw map[string]any, kind string) string {
-	if ghEvent := h.Get("X-GitHub-Event"); ghEvent != "" {
-		return sanitizeEventName("github_" + ghEvent)
+// githubEventName names a GitHub delivery by its event type and, when the body
+// carries one, its action: github_push, github_deployment_status_created. The
+// action alone ("completed", "created") named nothing a reader could use, and a
+// deployment never read as a deploy.
+func githubEventName(event string, raw map[string]any) string {
+	name := "github_" + event
+	if action, ok := raw["action"].(string); ok && action != "" {
+		name += "_" + action
 	}
+	return sanitizeEventName(name)
+}
+
+// genericEventName finds a name for a payload no normalizer claimed: common
+// fields, then the connection kind.
+func genericEventName(raw map[string]any, kind string) string {
 	for _, key := range []string{"event", "type", "action", "event_type"} {
 		if s, ok := raw[key].(string); ok && s != "" {
 			return sanitizeEventName(s)

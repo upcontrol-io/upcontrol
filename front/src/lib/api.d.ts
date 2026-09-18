@@ -3495,19 +3495,19 @@ export interface components {
             target: string;
             keyword?: string;
             /**
-             * @description An unknown value is a 400 `invalid_interval`.
+             * @description An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
              * @enum {string}
              */
-            interval: "1m" | "5m" | "30m" | "1h";
+            interval: "1m" | "5m" | "30m" | "1h" | "6h" | "1d";
         };
         /** @description Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them. */
         MonitorPatch: {
             name?: string;
             /**
-             * @description An unknown value is a 400 `invalid_interval`.
+             * @description An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
              * @enum {string}
              */
-            interval?: "1m" | "5m" | "30m" | "1h";
+            interval?: "1m" | "5m" | "30m" | "1h" | "6h" | "1d";
             paused?: boolean;
         };
         Source: {

@@ -121,7 +121,7 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	// Omitted is "not asked for" and keeps the default cadence.
 	intervalSec := int32(300)
 	if req.Interval != "" {
-		v, ok := parseInterval(req.Interval)
+		v, ok := parseCadence(kind, req.Interval)
 		if !ok {
 			writeAPIErr(w, http.StatusBadRequest, "invalid_interval")
 			return
@@ -219,11 +219,10 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 			return ierr
 		}
 		if kind == "heartbeat" {
-			// Open the first window at 2x the interval (grace defaults to the
-			// interval): a job that starts on its next cron tick is not "missed"
-			// the minute it is born.
+			// Open the first window at interval + grace: a job that starts on its
+			// next cron tick is not "missed" the minute it is born.
 			return q.SetHeartbeatDue(r.Context(), sqlc.SetHeartbeatDueParams{
-				Secs: float64(2 * params.IntervalSec), MonitorID: row.ID,
+				Secs: float64(params.IntervalSec + heartbeatGrace(params.IntervalSec)), MonitorID: row.ID,
 			})
 		}
 		// A subscription starts now: the first check runs at the next lease,
@@ -345,9 +344,10 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	var wasPaused bool
 	var pausedBy *string
 	var oldInterval int32
+	var kind string
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT target_id, paused, paused_by, interval_sec FROM monitor WHERE public_id = $1 AND tenant_id = $2`,
-		pubID, tenantID).Scan(&targetID, &wasPaused, &pausedBy, &oldInterval); err != nil {
+		`SELECT target_id, paused, paused_by, interval_sec, kind FROM monitor WHERE public_id = $1 AND tenant_id = $2`,
+		pubID, tenantID).Scan(&targetID, &wasPaused, &pausedBy, &oldInterval, &kind); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -363,7 +363,7 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	if req.Interval != nil {
 		// Same 400 as create, and before the floor: an unknown cadence is not an
 		// upgrade question.
-		v, ok := parseInterval(*req.Interval)
+		v, ok := parseCadence(kind, *req.Interval)
 		if !ok {
 			writeAPIErr(w, http.StatusBadRequest, "invalid_interval")
 			return
@@ -394,14 +394,27 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 			newInterval = *params.IntervalSec
 		}
 		unpaused := wasPaused && !newPaused
-		// Unpausing or tightening the interval lowers the target's effective
-		// interval: pull the next check to now so it runs at the next lease.
-		if unpaused || newInterval < oldInterval {
+		if kind == "heartbeat" {
+			// A heartbeat's due time is the END of its window, not its next probe:
+			// pulling it to now recorded a miss, and paged, the moment the owner
+			// saved. A resume or a new cadence opens a fresh window instead.
+			if unpaused || newInterval != oldInterval {
+				if terr := q.SetHeartbeatDue(ctx, sqlc.SetHeartbeatDueParams{
+					Secs: float64(newInterval + heartbeatGrace(newInterval)), MonitorID: row.ID,
+				}); terr != nil {
+					return terr
+				}
+			}
+		} else if unpaused || newInterval < oldInterval {
+			// Unpausing or tightening the interval lowers the target's effective
+			// interval: pull the next check to now so it runs at the next lease.
 			if terr := q.PullTargetDue(ctx, targetID); terr != nil {
 				return terr
 			}
 		}
-		if unpaused {
+		// A resumed heartbeat just got a fresh window; only a probed target can
+		// rejoin an outage that is still measured.
+		if unpaused && kind != "heartbeat" {
 			// Unpausing onto a target that is already down opens the incident
 			// here, in the same transaction (a paused subscriber that comes back
 			// joins the outage, not the next edge).
@@ -639,6 +652,10 @@ func intervalLabel(sec int32) string {
 		return "30m"
 	case 3600:
 		return "1h"
+	case 21600:
+		return "6h"
+	case 86400:
+		return "1d"
 	default:
 		return "5m"
 	}
@@ -674,7 +691,7 @@ func (h *monitors) intervalRefusal(ctx context.Context, plan, interval string) s
 		". A paid plan checks every minute."
 }
 
-// parseInterval maps the contract's four cadences to seconds. Anything else is
+// parseInterval maps the contract's cadences to seconds. Anything else is
 // false, never a silent 5m: a typo that quietly becomes a different cadence is
 // a check running at a rate nobody asked for.
 func parseInterval(s string) (int32, bool) {
@@ -687,10 +704,28 @@ func parseInterval(s string) (int32, bool) {
 		return 1800, true
 	case "1h":
 		return 3600, true
+	case "6h":
+		return 21600, true
+	case "1d":
+		return 86400, true
 	default:
 		return 0, false
 	}
 }
+
+// parseCadence is parseInterval for one monitor kind: past an hour is a cadence
+// a job can promise but a probe should not keep, and a website checked twice a
+// day is not being watched.
+func parseCadence(kind, s string) (int32, bool) {
+	v, ok := parseInterval(s)
+	return v, ok && (kind == "heartbeat" || v <= 3600)
+}
+
+// heartbeatGrace is the slack a beat gets past its interval: the interval itself
+// for a frequent job, an hour at most, so a nightly job that never ran is an
+// incident the same morning rather than two days later. The ping query applies
+// the same LEAST to a NULL grace_sec.
+func heartbeatGrace(intervalSec int32) int32 { return min(intervalSec, 3600) }
 
 func formatExpiry(t pgtype.Timestamptz, prefix string) string {
 	if !t.Valid {

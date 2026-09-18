@@ -43,6 +43,8 @@ func TestParseInterval(t *testing.T) {
 		{"5m", 300, true},
 		{"30m", 1800, true},
 		{"1h", 3600, true},
+		{"6h", 21600, true},
+		{"1d", 86400, true},
 		{"", 0, false},
 		{"2m", 0, false},
 	}
@@ -50,6 +52,31 @@ func TestParseInterval(t *testing.T) {
 		sec, ok := parseInterval(c.in)
 		if sec != c.sec || ok != c.want {
 			t.Errorf("parseInterval(%q) = (%d, %v), want (%d, %v)", c.in, sec, ok, c.sec, c.want)
+		}
+		// Every cadence the API accepts prints back as itself: a row that read "5m"
+		// for a daily heartbeat was the old default arm.
+		if ok && intervalLabel(sec) != c.in {
+			t.Errorf("intervalLabel(%d) = %q, want %q", sec, intervalLabel(sec), c.in)
+		}
+	}
+}
+
+func TestHeartbeatCadence(t *testing.T) {
+	// A website may not be asked to run less than hourly; a heartbeat may.
+	if _, ok := parseCadence("website", "1h"); !ok {
+		t.Fatal("a website may run hourly")
+	}
+	if _, ok := parseCadence("website", "1d"); ok {
+		t.Fatal("a website may not run daily")
+	}
+	if v, ok := parseCadence("heartbeat", "1d"); !ok || v != 86400 {
+		t.Fatal("a heartbeat may run daily")
+	}
+	// Grace is the interval up to an hour: a daily job's window closes an hour
+	// late, not a whole day late.
+	for in, want := range map[int32]int32{300: 300, 3600: 3600, 21600: 3600, 86400: 3600} {
+		if got := heartbeatGrace(in); got != want {
+			t.Errorf("heartbeatGrace(%d) = %d, want %d", in, got, want)
 		}
 	}
 }

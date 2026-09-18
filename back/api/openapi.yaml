@@ -257,8 +257,8 @@ components:
         keyword: { type: string }
         interval:
           type: string
-          description: An unknown value is a 400 `invalid_interval`.
-          enum: ["1m", "5m", "30m", "1h"]
+          description: An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
+          enum: ["1m", "5m", "30m", "1h", "6h", "1d"]
     MonitorPatch:
       type: object
       description: >-
@@ -270,8 +270,8 @@ components:
         name: { type: string }
         interval:
           type: string
-          description: An unknown value is a 400 `invalid_interval`.
-          enum: ["1m", "5m", "30m", "1h"]
+          description: An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
+          enum: ["1m", "5m", "30m", "1h", "6h", "1d"]
         paused: { type: boolean }
 
     # --- sources ------------------------------------------------------------

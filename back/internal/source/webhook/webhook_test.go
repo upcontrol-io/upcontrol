@@ -85,25 +85,41 @@ func TestDetectProvider_ByHeaders(t *testing.T) {
 	}
 }
 
-func TestGenericEventName_HeaderFieldsKindFallback(t *testing.T) {
-	// GitHub's push event has no `action` in the body — the header names it.
-	h := http.Header{}
-	h.Set("X-GitHub-Event", "push")
-	if got := genericEventName(h, map[string]any{}, "deployhooks"); got != "github_push" {
-		t.Fatalf("header event: got %q", got)
+func TestGithubEventName_EventThenAction(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		raw   map[string]any
+		want  string
+	}{
+		// A push has no `action`: the header alone names it.
+		{"push", map[string]any{}, "github_push"},
+		{"workflow_run", map[string]any{"action": "completed"}, "github_workflow_run_completed"},
+		// The one that matters: named `github_created` before, it never read as a deploy.
+		{"deployment_status", map[string]any{"action": "created"}, "github_deployment_status_created"},
+	} {
+		if got := githubEventName(tc.event, tc.raw); got != tc.want {
+			t.Fatalf("githubEventName(%q) = %q, want %q", tc.event, got, tc.want)
+		}
 	}
+	// The deploy family is `deploy%` or `%deployment%` (pgstore.LastDeployAt).
+	if got := githubEventName("deployment", map[string]any{"action": "created"}); !strings.Contains(got, "deployment") {
+		t.Fatalf("a GitHub deployment must stay in the deploy family, got %q", got)
+	}
+}
+
+func TestGenericEventName_FieldsKindFallback(t *testing.T) {
 	// The fields half the webhook world uses, in order.
-	if got := genericEventName(http.Header{}, map[string]any{"event": "Deploy Finished"}, ""); got != "deploy_finished" {
+	if got := genericEventName(map[string]any{"event": "Deploy Finished"}, ""); got != "deploy_finished" {
 		t.Fatalf("event field: got %q", got)
 	}
-	if got := genericEventName(http.Header{}, map[string]any{"type": "build.ok"}, ""); got != "build_ok" {
+	if got := genericEventName(map[string]any{"type": "build.ok"}, ""); got != "build_ok" {
 		t.Fatalf("type field: got %q", got)
 	}
 	// Nothing nameable: the connection kind still correlates by time.
-	if got := genericEventName(http.Header{}, map[string]any{}, "deployhooks"); got != "deployhooks" {
+	if got := genericEventName(map[string]any{}, "deployhooks"); got != "deployhooks" {
 		t.Fatalf("kind fallback: got %q", got)
 	}
-	if got := genericEventName(http.Header{}, map[string]any{}, ""); got != "webhook" {
+	if got := genericEventName(map[string]any{}, ""); got != "webhook" {
 		t.Fatalf("last resort: got %q", got)
 	}
 }

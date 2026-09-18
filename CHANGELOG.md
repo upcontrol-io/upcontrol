@@ -6,6 +6,27 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-09-18
+
+### Added
+- **Heartbeats run every 6 hours or daily.** `6h` and `1d` join the interval enum for a
+  Heartbeat only; a Website asked for either is a 400 `invalid_interval`. A heartbeat's default
+  grace is now its interval capped at an hour, so a nightly job that never ran opens its incident
+  an hour past its due time instead of a day later. Heartbeats of an hour or less keep their
+  windows exactly.
+
+### Changed
+- **GitHub deliveries are named by event and action:** `github_deployment_status_created`,
+  `github_workflow_run_completed`, `github_push`. The action alone (`github_created`,
+  `github_completed`) named nothing a reader could use, and a GitHub deployment never counted as
+  a deploy on the incident timeline or in the post-deploy quiet window. Stored events keep their
+  old names.
+
+### Fixed
+- **Resuming a heartbeat, or changing its interval, no longer pages.** The PATCH pulled the
+  target's due time to now, which for a heartbeat is the end of its window: the next sweep
+  recorded a miss and opened an incident the moment the owner saved. It now opens a fresh window.
+
 ## [0.31.0] — 2026-09-15
 
 ### Changed

@@ -34,8 +34,10 @@ SELECT m.id, m.public_id, m.tenant_id, m.project_id, m.kind, m.name, m.target,
 -- name: GetMonitorByPingToken :one
 -- The token is the credential: a miss is a 404, never a hint. target_id is
 -- the heartbeat's private probe target, where its facts and schedule live.
+-- A NULL grace is the interval, capped at an hour (api.heartbeatGrace): a daily
+-- job's window closes an hour late, not a day late.
 SELECT m.id, m.target_id, m.tenant_id, m.name, m.paused, m.interval_sec,
-       COALESCE(m.grace_sec, m.interval_sec)::int AS grace_sec
+       COALESCE(m.grace_sec, LEAST(m.interval_sec, 3600))::int AS grace_sec
   FROM monitor m
  WHERE m.ping_token = $1 AND m.kind = 'heartbeat';
 

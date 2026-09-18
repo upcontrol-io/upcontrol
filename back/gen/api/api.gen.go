@@ -470,15 +470,19 @@ func (e MonitorType) Valid() bool {
 
 // Defines values for MonitorCreateInterval.
 const (
+	MonitorCreateIntervalN1d  MonitorCreateInterval = "1d"
 	MonitorCreateIntervalN1h  MonitorCreateInterval = "1h"
 	MonitorCreateIntervalN1m  MonitorCreateInterval = "1m"
 	MonitorCreateIntervalN30m MonitorCreateInterval = "30m"
 	MonitorCreateIntervalN5m  MonitorCreateInterval = "5m"
+	MonitorCreateIntervalN6h  MonitorCreateInterval = "6h"
 )
 
 // Valid indicates whether the value is a known member of the MonitorCreateInterval enum.
 func (e MonitorCreateInterval) Valid() bool {
 	switch e {
+	case MonitorCreateIntervalN1d:
+		return true
 	case MonitorCreateIntervalN1h:
 		return true
 	case MonitorCreateIntervalN1m:
@@ -486,6 +490,8 @@ func (e MonitorCreateInterval) Valid() bool {
 	case MonitorCreateIntervalN30m:
 		return true
 	case MonitorCreateIntervalN5m:
+		return true
+	case MonitorCreateIntervalN6h:
 		return true
 	default:
 		return false
@@ -512,15 +518,19 @@ func (e MonitorCreateType) Valid() bool {
 
 // Defines values for MonitorPatchInterval.
 const (
+	MonitorPatchIntervalN1d  MonitorPatchInterval = "1d"
 	MonitorPatchIntervalN1h  MonitorPatchInterval = "1h"
 	MonitorPatchIntervalN1m  MonitorPatchInterval = "1m"
 	MonitorPatchIntervalN30m MonitorPatchInterval = "30m"
 	MonitorPatchIntervalN5m  MonitorPatchInterval = "5m"
+	MonitorPatchIntervalN6h  MonitorPatchInterval = "6h"
 )
 
 // Valid indicates whether the value is a known member of the MonitorPatchInterval enum.
 func (e MonitorPatchInterval) Valid() bool {
 	switch e {
+	case MonitorPatchIntervalN1d:
+		return true
 	case MonitorPatchIntervalN1h:
 		return true
 	case MonitorPatchIntervalN1m:
@@ -528,6 +538,8 @@ func (e MonitorPatchInterval) Valid() bool {
 	case MonitorPatchIntervalN30m:
 		return true
 	case MonitorPatchIntervalN5m:
+		return true
+	case MonitorPatchIntervalN6h:
 		return true
 	default:
 		return false
@@ -1391,7 +1403,7 @@ type MonitorType string
 
 // MonitorCreate defines model for MonitorCreate.
 type MonitorCreate struct {
-	// Interval An unknown value is a 400 `invalid_interval`.
+	// Interval An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
 	Interval MonitorCreateInterval `json:"interval"`
 	Keyword  *string               `json:"keyword,omitempty"`
 	Name     string                `json:"name"`
@@ -1399,7 +1411,7 @@ type MonitorCreate struct {
 	Type     MonitorCreateType     `json:"type"`
 }
 
-// MonitorCreateInterval An unknown value is a 400 `invalid_interval`.
+// MonitorCreateInterval An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
 type MonitorCreateInterval string
 
 // MonitorCreateType defines model for MonitorCreate.Type.
@@ -1407,13 +1419,13 @@ type MonitorCreateType string
 
 // MonitorPatch Target and keyword are immutable (400 target_immutable): a check is identified by what it fetches, and a different fetch is a new check. The contract stopped advertising both when the handler began refusing them.
 type MonitorPatch struct {
-	// Interval An unknown value is a 400 `invalid_interval`.
+	// Interval An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
 	Interval *MonitorPatchInterval `json:"interval,omitempty"`
 	Name     *string               `json:"name,omitempty"`
 	Paused   *bool                 `json:"paused,omitempty"`
 }
 
-// MonitorPatchInterval An unknown value is a 400 `invalid_interval`.
+// MonitorPatchInterval An unknown value is a 400 `invalid_interval`. `6h` and `1d` are for a Heartbeat only; a Website asked for either is the same 400.
 type MonitorPatchInterval string
 
 // NetworkCheck defines model for NetworkCheck.
