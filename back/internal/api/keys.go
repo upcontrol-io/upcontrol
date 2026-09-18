@@ -408,7 +408,7 @@ func validOrigin(o string) bool {
 	// and a browser sends neither: "*", ",", ";" never, an IDN host as punycode.
 	// A port is digits, present, and not the scheme's default, which a browser omits.
 	for _, c := range []byte(u.Hostname()) {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != ':' {
 			return false // ':' only occurs inside an IPv6 literal, which Hostname unbrackets
 		}
 	}
