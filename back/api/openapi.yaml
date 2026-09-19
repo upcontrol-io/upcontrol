@@ -1106,6 +1106,15 @@ components:
                     The workspace's frozen projects: snapshots past the plan's
                     projects limit, kept whole and thawed by a plan that carries
                     them. Absent when zero.
+        webVisits:
+          description: >
+            The website tag's visits this UTC month, one visitor on one UTC day
+            per project, counted across the workspace's projects, against the
+            plan's plan_entitlement.web_visits_month. Past `max` POST /w stores
+            nothing until the month turns and the visitor sees no error. Absent
+            when the plan is unlimited (Self-hosted), like projects.
+          allOf:
+            - $ref: "#/components/schemas/UsedMax"
         telegramRooms:
           type: boolean
           description: >
@@ -1680,6 +1689,12 @@ components:
           type: array
           description: "21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %."
           items: { type: integer }
+        heatPages:
+          type: integer
+          description: >
+            How many pages this plan keeps a heatmap for, its busiest by views.
+            Absent when unlimited. A page with views and no heat is one outside
+            them.
     HeatmapLinkRequest:
       type: object
       required: [path]

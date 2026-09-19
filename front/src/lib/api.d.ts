@@ -4294,6 +4294,8 @@ export interface components {
                 /** @description The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero. */
                 frozen?: number;
             };
+            /** @description The website tag's visits this UTC month, one visitor on one UTC day per project, counted across the workspace's projects, against the plan's plan_entitlement.web_visits_month. Past `max` POST /w stores nothing until the month turns and the visitor sees no error. Absent when the plan is unlimited (Self-hosted), like projects. */
+            webVisits?: components["schemas"]["UsedMax"];
             /** @description Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time. */
             telegramRooms?: boolean;
         };
@@ -4607,6 +4609,8 @@ export interface components {
             moves: components["schemas"]["HeatCell"][];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];
+            /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */
+            heatPages?: number;
         };
         HeatmapLinkRequest: {
             /** @description Starts with /, at most 256 bytes. */

@@ -823,17 +823,24 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	}
 	// Events have no depth floor: the table is never displaced, so it holds
 	// every event since the project's first, and an empty bucket is a measured 0.
-	points, total := countPoints(rows, r, from, nil)
+	// The web door's page views are the exception: history-trim expires them
+	// past the web depth, so they read like the rollup, floored at the oldest
+	// one kept.
+	var o *oldest
+	if q.Name == "uc.pageview" {
+		at, found, err := h.pgs.OldestPageview(ctx, tenantID, projectID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		o = &oldest{at: at, found: found}
+	}
+	points, total := countPoints(rows, r, from, o)
 	span := to.Sub(from)
 	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var previous int64
-	for _, b := range prevRows {
-		previous += b.Count
-	}
-	return points, total, previous, nil
+	return points, total, previousTotal(prevRows, from, span, o), nil
 }
 
 // checkNames is what the check source reads: the uptime share, the whole

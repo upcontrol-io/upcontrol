@@ -1,7 +1,7 @@
 // The web door's Postgres half: a page view is an ordinary events row, and
 // everything else a page did lands in web_heat, aggregated per path, device,
-// day and element cell. The heatmap link tokens and the day's visitor salt
-// live here too. Nothing in this file reaches the log ring.
+// day and element cell. The heatmap link tokens, the day's visitor salt and
+// the month's visits live here too. Nothing in this file reaches the log ring.
 
 package pgstore
 
@@ -35,13 +35,123 @@ type HeatCell struct {
 	N        int64  `json:"n"`
 }
 
+// The web caps. A beacon adds at most MaxClickCells click and MaxMoveCells
+// move cells, and the compaction keeps as many of a completed day's hottest
+// cells. webDays caps web data below the plan's history_days: a map older than
+// a month lies over a layout that has moved since. maxVisitViews caps one
+// visitor's stored page views in a project per UTC day: a script, or an SPA
+// reporting every replaceState, is one visit a day however much it sends.
+const (
+	MaxClickCells = 300
+	MaxMoveCells  = 600
+	webDays       = 31
+	maxVisitViews = 200
+)
+
+// WebQuota is a workspace's web axes: this UTC month's visits, and the plan's
+// visit and heatmap-page limits, nil when unlimited.
+type WebQuota struct {
+	Visits    int64
+	MaxVisits *int32
+	HeatPages *int32
+}
+
+// monthOf is the first day of t's UTC month, web_usage's key.
+func monthOf(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// WebQuota reads the workspace's web axes in one query; the collect gate, the
+// heatmap read and the plan read all read them here.
+func (s *Store) WebQuota(ctx context.Context, tenantID int64, now time.Time) (WebQuota, error) {
+	var q WebQuota
+	err := s.pool.QueryRow(ctx, `
+		SELECT coalesce((SELECT visits FROM web_usage WHERE tenant_id = t.id AND month = $2), 0),
+		       p.web_visits_month, p.web_heat_pages
+		  FROM tenant t JOIN plan_entitlement p ON p.plan = t.plan
+		 WHERE t.id = $1`, tenantID, monthOf(now)).Scan(&q.Visits, &q.MaxVisits, &q.HeatPages)
+	return q, err
+}
+
 // InsertPageview stores one page view as a named event; the actor is the
-// web door's cookieless visitor hash.
+// web door's cookieless visitor hash. The actor's first page view of the UTC
+// day in the project is a visit, counted into the workspace's month, and past
+// its maxVisitViews-th the view is not stored. One statement, so the check
+// reads the snapshot from before the insert and never finds the page view
+// itself; two racing first views may count twice.
 func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO events (tenant_id, project_id, ts, name, labels, actor) VALUES ($1,$2,$3,'uc.pageview',$4,$5)`,
-		tenantID, projectID, ts, jsonb(labels), actor)
+	ts = ts.UTC()
+	_, err := s.pool.Exec(ctx, `
+		WITH seen AS (
+		  SELECT count(*) AS n FROM (
+		    SELECT 1 FROM events
+		     WHERE tenant_id = $1 AND project_id = $2 AND actor = $5 AND actor <> ''
+		       AND name = 'uc.pageview' AND ts >= $7 LIMIT $8) x),
+		visit AS (
+		  INSERT INTO web_usage (tenant_id, month, visits)
+		  SELECT $1::bigint, $6::date, 1 FROM seen WHERE n = 0
+		  ON CONFLICT (tenant_id, month) DO UPDATE SET visits = web_usage.visits + 1)
+		INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		SELECT $1, $2, $3::timestamptz, 'uc.pageview', $4::jsonb, $5 FROM seen WHERE n < $8`,
+		tenantID, projectID, ts, jsonb(labels), actor, monthOf(ts), ts.Truncate(24*time.Hour), maxVisitViews)
 	return err
+}
+
+// CompactWeb is the daily compaction that bounds web_heat whatever the
+// traffic. Every step is idempotent, so a rerun changes nothing:
+//   - a row older than a week folds into its ISO week's Monday row;
+//   - a completed day, a weekly bucket included, keeps its hottest
+//     MaxClickCells click and rage cells and MaxMoveCells move cells per
+//     path, device and kind (scroll is 21 rows at most and never pruned);
+//   - a plan's web_heat_pages keeps the workspace's busiest paths by
+//     yesterday's views, read from the scroll rows because each view reports
+//     its scroll once, and drops every row of the rest. A dropped path lost
+//     its rows at the last run, so yesterday is the one whole day every path
+//     holds; the kept total breaks ties. A frozen project's snapshot is
+//     neither ranked nor cut;
+//   - web_usage keeps this month and the last.
+func (s *Store) CompactWeb(ctx context.Context, today time.Time) error {
+	today = today.UTC().Truncate(24 * time.Hour)
+	for _, st := range []struct {
+		sql  string
+		args []any
+	}{
+		{`WITH gone AS (
+		    DELETE FROM web_heat
+		     WHERE day < $1 AND day <> date_trunc('week', day)::date
+		    RETURNING tenant_id, project_id, day, path, device, kind, selector, fx, fy, n)
+		  INSERT INTO web_heat (tenant_id, project_id, day, path, device, kind, selector, fx, fy, n)
+		  SELECT tenant_id, project_id, date_trunc('week', day)::date, path, device, kind, selector, fx, fy, sum(n)
+		    FROM gone GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+		  ON CONFLICT (tenant_id, project_id, path, device, day, kind, selector, fx, fy)
+		  DO UPDATE SET n = web_heat.n + EXCLUDED.n`, []any{today.AddDate(0, 0, -7)}},
+		{`DELETE FROM web_heat WHERE ctid IN (
+		    SELECT ctid FROM (
+		      SELECT ctid, kind, row_number() OVER (
+		               PARTITION BY tenant_id, project_id, path, device, day, kind
+		               ORDER BY n DESC, selector, fx, fy) AS pos
+		        FROM web_heat WHERE day < $1 AND kind <> 'scroll') r
+		     WHERE pos > CASE kind WHEN 'move' THEN $3::int ELSE $2::int END)`,
+			[]any{today, MaxClickCells, MaxMoveCells}},
+		{`DELETE FROM web_heat w USING (
+		    SELECT h.tenant_id, h.project_id, h.path, p.web_heat_pages,
+		           row_number() OVER (PARTITION BY h.tenant_id
+		             ORDER BY coalesce(sum(h.n) FILTER (WHERE h.kind = 'scroll' AND h.day = $1::date - 1), 0) DESC,
+		                      coalesce(sum(h.n) FILTER (WHERE h.kind = 'scroll'), 0) DESC, h.project_id, h.path) AS pos
+		      FROM web_heat h JOIN project pr ON pr.id = h.project_id AND pr.frozen_at IS NULL
+		      JOIN tenant t ON t.id = h.tenant_id JOIN plan_entitlement p ON p.plan = t.plan
+		     WHERE p.web_heat_pages IS NOT NULL
+		     GROUP BY h.tenant_id, h.project_id, h.path, p.web_heat_pages) r
+		   WHERE r.pos > r.web_heat_pages
+		     AND w.tenant_id = r.tenant_id AND w.project_id = r.project_id AND w.path = r.path`, []any{today}},
+		{`DELETE FROM web_usage WHERE month < $1`, []any{monthOf(today).AddDate(0, -1, 0)}},
+	} {
+		if _, err := s.pool.Exec(ctx, st.sql, st.args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AddHeat adds a beacon's cells into web_heat as one statement. The caller

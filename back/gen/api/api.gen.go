@@ -1310,10 +1310,13 @@ type HeatCell struct {
 type Heatmap struct {
 	Clicks []HeatCell    `json:"clicks"`
 	Device HeatmapDevice `json:"device"`
-	Moves  []HeatCell    `json:"moves"`
-	Path   string        `json:"path"`
-	Rage   []HeatCell    `json:"rage"`
-	Range  HeatmapRange  `json:"range"`
+
+	// HeatPages How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them.
+	HeatPages *int         `json:"heatPages,omitempty"`
+	Moves     []HeatCell   `json:"moves"`
+	Path      string       `json:"path"`
+	Rage      []HeatCell   `json:"rage"`
+	Range     HeatmapRange `json:"range"`
 
 	// Scroll 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %.
 	Scroll []int `json:"scroll"`
@@ -1678,6 +1681,9 @@ type PlanResponse struct {
 
 	// TelegramRooms Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time.
 	TelegramRooms *bool `json:"telegramRooms,omitempty"`
+
+	// WebVisits The website tag's visits this UTC month, one visitor on one UTC day per project, counted across the workspace's projects, against the plan's plan_entitlement.web_visits_month. Past `max` POST /w stores nothing until the month turns and the visitor sees no error. Absent when the plan is unlimited (Self-hosted), like projects.
+	WebVisits *UsedMax `json:"webVisits,omitempty"`
 }
 
 // ProbeResult The raw outcome of the live request. Field names are snake_case here because that is the shape already on the wire; the rest of /v1 is camelCase.

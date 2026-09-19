@@ -396,8 +396,9 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	//
 	// Ingest leaves two marks and either one is use: `project_seq.next > 1`
 	// (every project is born at 1 and only LeaseSeqBlock, internal/ring/seq,
-	// moves it) and any events row, because the web door writes page views
-	// straight into events and leases no seq. So neither an SDK-only account
+	// moves it) and any events or web_usage row, because the web door writes
+	// page views straight into events and leases no seq, and history-trim
+	// expires them past the web depth. So neither an SDK-only account
 	// (a key wired up, logs flowing, no monitor ever created) nor a site-only
 	// one is mistaken for a placeholder and deleted out from under its key.
 	if _, err := tx.Exec(ctx,
@@ -408,7 +409,8 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		    AND NOT EXISTS (SELECT 1 FROM project_seq ps
 		                     WHERE ps.project_id = p.id AND ps.next > 1)
 		    AND NOT EXISTS (SELECT 1 FROM events e
-		                     WHERE e.tenant_id = $1 AND e.project_id = p.id)`, s.TenantID); err != nil {
+		                     WHERE e.tenant_id = $1 AND e.project_id = p.id)
+		    AND NOT EXISTS (SELECT 1 FROM web_usage u WHERE u.tenant_id = $1)`, s.TenantID); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}

@@ -244,6 +244,13 @@ func (s *Store) OldestLine(ctx context.Context, tenantID, projectID int64) (time
 	return s.oldest(ctx, `SELECT min(ts) FROM logs WHERE tenant_id = $1 AND project_id = $2`, tenantID, projectID)
 }
 
+// OldestPageview is the same fact for the web door's page views, which
+// history-trim expires past the web depth.
+func (s *Store) OldestPageview(ctx context.Context, tenantID, projectID int64) (time.Time, bool, error) {
+	return s.oldest(ctx, `SELECT min(ts) FROM events WHERE tenant_id = $1 AND project_id = $2
+		AND name = 'uc.pageview' AND actor <> ''`, tenantID, projectID)
+}
+
 func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int64) (time.Time, bool, error) {
 	var at *time.Time
 	if err := s.pool.QueryRow(ctx, sql, tenantID, projectID).Scan(&at); err != nil {
@@ -256,8 +263,12 @@ func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int6
 }
 
 // TrimHistory drops rollup rows past the tenant's plan depth and answers how
-// many went; the web door's web_heat rows trim on the same join, keyed by
-// their UTC day. One statement per table, joined through the entitlement
+// many went; the web door's web_heat rows and page views trim on the same
+// join to the web depth, the plan's capped at webDays, web_heat keyed by its
+// UTC day, and a weekly bucket (older than a week, see CompactWeb) by its
+// Sunday, so a week straddling the edge stays whole. Every page view carries
+// an actor, and saying so lets the partial people index serve the trim.
+// One statement per table, joined through the entitlement
 // table so a limit moves without a redeploy; a NULL history_days trims
 // nothing, which is what makes Self-hosted unlimited. A frozen project's rows
 // up to the freeze are the snapshot and never trim, so an upgrade restores it
@@ -276,18 +287,31 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	trimmed := tag.RowsAffected()
-	tag, err = s.pool.Exec(ctx, `
+	for _, stmt := range []string{`
 		DELETE FROM web_heat w
 		 USING project pr, tenant t, plan_entitlement p
 		 WHERE pr.id = w.project_id AND pr.tenant_id = w.tenant_id
 		   AND t.id = pr.tenant_id AND p.plan = t.plan
 		   AND p.history_days IS NOT NULL
 		   AND (pr.frozen_at IS NULL OR w.day > pr.frozen_at::date)
-		   AND w.day < (now() AT TIME ZONE 'UTC')::date - p.history_days`)
-	if err != nil {
-		return trimmed, err
+		   AND CASE WHEN w.day < (now() AT TIME ZONE 'UTC')::date - 7 THEN w.day + 6 ELSE w.day END
+		       < (now() AT TIME ZONE 'UTC')::date - least(p.history_days, $1::int)`, `
+		DELETE FROM events e
+		 USING project pr, tenant t, plan_entitlement p
+		 WHERE pr.id = e.project_id AND pr.tenant_id = e.tenant_id
+		   AND t.id = pr.tenant_id AND p.plan = t.plan
+		   AND p.history_days IS NOT NULL
+		   AND (pr.frozen_at IS NULL OR e.ts > pr.frozen_at)
+		   AND e.name = 'uc.pageview' AND e.actor <> ''
+		   AND e.ts < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`,
+	} {
+		tag, err = s.pool.Exec(ctx, stmt, webDays)
+		if err != nil {
+			return trimmed, err
+		}
+		trimmed += tag.RowsAffected()
 	}
-	return trimmed + tag.RowsAffected(), nil
+	return trimmed, nil
 }
 
 // EventBuckets counts a named event into buckets of stepSeconds over

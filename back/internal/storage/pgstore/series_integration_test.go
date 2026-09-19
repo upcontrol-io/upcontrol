@@ -509,38 +509,60 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("seed rollup on %s: %v", plan, err)
 		}
+		// The web door's rows, 40 days old and fresh: web depth is the plan's
+		// capped at 31 days.
+		for _, ts := range []time.Time{now.AddDate(0, 0, -40), now.Add(-time.Hour)} {
+			if err := s.InsertPageview(ctx, tenantID, projectID, ts, map[string]string{"path": "/"}, "v"); err != nil {
+				t.Fatalf("seed page view on %s: %v", plan, err)
+			}
+			if err := s.AddHeat(ctx, tenantID, projectID, ts.Truncate(24*time.Hour), "/", "desktop",
+				[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
+				t.Fatalf("seed heat on %s: %v", plan, err)
+			}
+		}
 		return tenantID, projectID
 	}
 	free, freeProject := seed("Free")        // 1 day
-	agency, agencyProject := seed("Agency")  // 365 days
+	agency, agencyProject := seed("Agency")  // 365 days, 31 on the web
 	self, selfProject := seed("Self-hosted") // NULL = unlimited
+	// A weekly bucket whose Monday is 33 days old still holds days inside the
+	// 31: it goes once its last day does.
+	if err := s.AddHeat(ctx, agency, agencyProject, now.AddDate(0, 0, -33).Truncate(24*time.Hour), "/week", "desktop",
+		[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
+		t.Fatalf("seed Agency's straddling bucket: %v", err)
+	}
 
 	deleted, err := s.TrimHistory(ctx)
 	if err != nil {
 		t.Fatalf("trim history: %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("only the Free tenant's month-old row is past its depth; got %d deleted", deleted)
+	// Free's rollup row, and Free's and Agency's old page view and heat row.
+	if deleted != 5 {
+		t.Fatalf("got %d deleted, want 5", deleted)
 	}
-	left := func(tenantID, projectID int64) int64 {
+	left := func(table string, tenantID, projectID int64) int64 {
 		t.Helper()
 		var n int64
 		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM series_1h WHERE tenant_id = $1 AND project_id = $2`,
+			`SELECT count(*) FROM `+table+` WHERE tenant_id = $1 AND project_id = $2`,
 			tenantID, projectID).Scan(&n); err != nil {
-			t.Fatalf("count rollup rows: %v", err)
+			t.Fatalf("count %s rows: %v", table, err)
 		}
 		return n
 	}
-	if n := left(free, freeProject); n != 1 {
-		t.Fatalf("Free keeps the last day and nothing older; got %d rows", n)
-	}
-	if n := left(agency, agencyProject); n != 2 {
-		t.Fatalf("a month is well inside Agency's year; got %d rows", n)
-	}
-	// NULL trims nothing: that is what makes Self-hosted unlimited.
-	if n := left(self, selfProject); n != 2 {
-		t.Fatalf("a NULL depth keeps everything; got %d rows", n)
+	for _, tc := range []struct {
+		name                string
+		tenant, project     int64
+		rollup, views, heat int64
+	}{
+		{"Free keeps the last day and nothing older", free, freeProject, 1, 1, 1},
+		{"a month is inside Agency's year, not its 31 web days", agency, agencyProject, 2, 1, 2},
+		// NULL trims nothing: that is what makes Self-hosted unlimited.
+		{"a NULL depth keeps everything", self, selfProject, 2, 2, 2},
+	} {
+		if got := [3]int64{left("series_1h", tc.tenant, tc.project), left("events", tc.tenant, tc.project), left("web_heat", tc.tenant, tc.project)}; got != [3]int64{tc.rollup, tc.views, tc.heat} {
+			t.Errorf("%s: rollup, page views, heat = %v, want %v", tc.name, got, [3]int64{tc.rollup, tc.views, tc.heat})
+		}
 	}
 }
 

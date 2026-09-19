@@ -34,6 +34,16 @@ All notable changes to the self-hosted package. The format follows
   (the tag's `data-key`), which must belong to the token's project, so nobody's token draws
   on a page that is not theirs. It answers only to an origin listed on one of the project's
   public keys and is gated by the plan's history depth like every board read.
+- **Web data is bounded per workspace, whatever the traffic.** Two plan axes,
+  `web_visits_month` and `web_heat_pages` (NULL on Self-hosted, unlimited). A visit is one
+  visitor on one UTC day, counted per workspace and month in `web_usage`; past the month's
+  visits `POST /w` stores nothing and still answers 204, and one visitor's page views past 200
+  a day are not stored. Web data keeps the plan's history
+  depth up to 31 days. A daily compaction folds heat older than a week into weekly buckets,
+  keeps a completed day's hottest 300 click and 600 move cells per page, and keeps heatmaps
+  only for the workspace's `web_heat_pages` pages busiest yesterday. `GET /v1/plan` reports
+  `webVisits` and `webHeatPages`; `GET /w/heatmap` reports `heatPages`, and the overlay says
+  when a page is not among them.
 - **A project's secret key can mint its public key.** `POST /v1/keys` accepts an active
   secret key instead of a session (one in its rotation grace still ingests, but no longer
   mints) and then mints a public key only (403 `key_mints_secret` otherwise).

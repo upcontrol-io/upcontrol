@@ -171,9 +171,20 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	// the depth is sold in days and an hour of slack is invisible. NULL trims
 	// nothing, which is what makes Self-hosted unlimited. The statement lives
 	// in pgstore so the integration test runs the very code this job runs.
+	// The web compaction rides along once per UTC day; a restart runs it
+	// again, which its idempotent steps allow.
+	compacted := ""
 	go runWithLock(ctx, pool, d, "history-trim", time.Hour, func(ctx context.Context) {
 		if _, err := pgs.TrimHistory(ctx); err != nil {
 			d.Logger.Warn("history trim tick error", "err", err)
+		}
+		now := time.Now().UTC()
+		if day := now.Format(time.DateOnly); day != compacted {
+			if err := pgs.CompactWeb(ctx, now); err != nil {
+				d.Logger.Warn("web compaction tick error", "err", err)
+				return
+			}
+			compacted = day
 		}
 	})
 	jobs += "+history-trim"
@@ -301,9 +312,11 @@ func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
 	// holds, and data that has actually flowed through it:
 	//
 	//   - data: `project_seq.next > 1` (every project is born at 1 and only
-	//     LeaseSeqBlock, internal/ring/seq, moves it) or any events row. The
-	//     web door writes page views straight into events and leases no seq,
-	//     so a site-only install never moves the seq.
+	//     LeaseSeqBlock, internal/ring/seq, moves it), any events row, or a
+	//     web_usage row. The web door writes page views straight into events
+	//     and leases no seq, so a site-only install never moves the seq, and
+	//     history-trim expires its page views past the web depth (a day on
+	//     Free); web_usage keeps this month's visits and last month's.
 	//   - an api_key still on the project. A page RELEASED by a project
 	//     deletion has ingested plenty but its key died with the release
 	//     (releaseProject), so the seq alone would spare it forever; that is
@@ -317,7 +330,8 @@ func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
 		                      JOIN api_key ak    ON ak.project_id = p.id
 		                     WHERE p.tenant_id = t.id
 		                       AND (ps.next > 1 OR EXISTS (SELECT 1 FROM events e
-		                                                    WHERE e.tenant_id = t.id AND e.project_id = p.id)))
+		                                                    WHERE e.tenant_id = t.id AND e.project_id = p.id)
+		                            OR EXISTS (SELECT 1 FROM web_usage u WHERE u.tenant_id = t.id)))
 		    AND NOT EXISTS (SELECT 1 FROM status_page sp
 		                    JOIN probe_target pt ON pt.id = sp.root_target_id
 		                   WHERE sp.tenant_id = t.id AND sp.is_host_page

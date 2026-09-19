@@ -42,6 +42,7 @@ type webStore interface {
 	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, kind string, fromDay time.Time, limit int) ([]pgstore.HeatCell, error)
 	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device string, fromDay time.Time) ([21]int64, error)
 	HistoryRefusal(ctx context.Context, tenantID int64, days int) (msg, plan string, err error)
+	WebQuota(ctx context.Context, tenantID int64, now time.Time) (pgstore.WebQuota, error)
 }
 
 // webDoor is the /w handler pair. The day's visitor salt is cached per UTC
@@ -90,8 +91,6 @@ func NewWebDoor(ing *ingest.Ingester, pgs *pgstore.Store, pool *pg.Pool, describ
 const (
 	maxWebPath      = 1024
 	maxHeatSelector = 256
-	maxClickCells   = 300
-	maxMoveCells    = 600
 	maxHeatRead     = 2000
 	webBodyBytes    = 64 << 10
 )
@@ -239,6 +238,17 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 	}
 	device := deviceFor(min(b.W, 10000))
 	now := d.now().UTC()
+	// Past the plan's visits this month nothing is stored, and the answer is
+	// an accepted beacon's: the visitor's browser has nothing to be told.
+	quota, err := d.store.WebQuota(ctx, t.TenantID, now)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if quota.MaxVisits != nil && quota.Visits >= int64(*quota.MaxVisits) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	ip, ua := analytics.ClientIP(r), r.UserAgent()
 
 	if b.T == "view" {
@@ -289,7 +299,7 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		cells[cellKey{kind, sel, fx, fy}] += n
 	}
 	for i, entry := range b.C {
-		if i >= maxClickCells {
+		if i >= pgstore.MaxClickCells {
 			break
 		}
 		if len(entry) != 5 {
@@ -312,7 +322,7 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for i, entry := range b.M {
-		if i >= maxMoveCells {
+		if i >= pgstore.MaxMoveCells {
 			break
 		}
 		if len(entry) != 4 {
@@ -396,6 +406,8 @@ type heatOut struct {
 	Rage   []pgstore.HeatCell `json:"rage"`
 	Moves  []pgstore.HeatCell `json:"moves"`
 	Scroll []int64            `json:"scroll"`
+	// The plan's heatmap pages; absent when unlimited.
+	HeatPages *int32 `json:"heatPages,omitempty"`
 }
 
 // Heatmap is GET /w/heatmap: what the overlay draws. Authorised by the uch_
@@ -468,11 +480,22 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := deviceFor(width)
-	fromDay := d.now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -days)
+	now := d.now().UTC()
+	quota, err := d.store.WebQuota(ctx, tenantID, now)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	fromDay := now.Truncate(24*time.Hour).AddDate(0, 0, -days)
 	views, err := d.store.PageviewCount(ctx, tenantID, projectID, path, device, fromDay)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	// Past a week the heat is in weekly buckets on their Monday: a longer
+	// range reads from its first day's Monday, so the edge bucket counts whole.
+	if days > 7 {
+		fromDay = fromDay.AddDate(0, 0, -(int(fromDay.Weekday())+6)%7)
 	}
 	read := func(kind string) ([]pgstore.HeatCell, bool) {
 		cells, err := d.store.HeatCells(ctx, tenantID, projectID, path, device, kind, fromDay, maxHeatRead)
@@ -491,14 +514,15 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, heatOut{
-		Path:   path,
-		Device: device,
-		Range:  rng,
-		Views:  views,
-		Clicks: clicks,
-		Rage:   rage,
-		Moves:  moves,
-		Scroll: scroll[:],
+		Path:      path,
+		Device:    device,
+		Range:     rng,
+		Views:     views,
+		Clicks:    clicks,
+		Rage:      rage,
+		Moves:     moves,
+		Scroll:    scroll[:],
+		HeatPages: quota.HeatPages,
 	})
 }
 

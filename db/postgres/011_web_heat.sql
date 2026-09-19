@@ -11,7 +11,8 @@
 -- twentieths (0..20) and n the page views that stopped there. device is the
 -- viewport bucket (mobile | tablet | desktop), because the layout, and so the
 -- map, follows the width. ucworker's history-trim drops rows past the plan's
--- history_days, like series_1h.
+-- history_days capped at 31 days, and its daily compaction folds rows older
+-- than a week into their ISO week's Monday and caps the cells and the pages.
 CREATE TABLE web_heat (
   tenant_id     bigint NOT NULL,
   project_id    bigint NOT NULL,
@@ -48,10 +49,36 @@ CREATE TABLE web_salt (
 -- keeps that read off every page view the project ever received.
 CREATE INDEX events_people_app_by_actor ON events (tenant_id, project_id, actor, ts)
   WHERE actor <> '' AND name NOT LIKE 'uc.%';
+
+-- The web axes, NULL = unlimited (Self-hosted). web_visits_month is how many
+-- visits (one visitor on one UTC day) a workspace's pages record a month: past
+-- it POST /w stores nothing until the month turns. web_heat_pages is how many
+-- pages keep a heatmap, the workspace's busiest by views: the compaction drops
+-- the rest, which with the cell caps and the weekly buckets bounds web_heat
+-- whatever the traffic.
+ALTER TABLE plan_entitlement ADD COLUMN web_visits_month int;
+ALTER TABLE plan_entitlement ADD COLUMN web_heat_pages int;
+UPDATE plan_entitlement SET
+  web_visits_month = CASE plan
+    WHEN 'Free' THEN 3000 WHEN 'Indie' THEN 30000 WHEN 'Growth' THEN 150000 WHEN 'Agency' THEN 300000 END,
+  web_heat_pages = CASE plan
+    WHEN 'Free' THEN 5 WHEN 'Indie' THEN 20 WHEN 'Growth' THEN 50 WHEN 'Agency' THEN 100 END;
+
+-- A workspace's visits per UTC month, counted at POST /w on a visitor's first
+-- page view of the day in a project. The compaction drops months before last.
+CREATE TABLE web_usage (
+  tenant_id     bigint NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
+  month         date NOT NULL,
+  visits        int NOT NULL,
+  PRIMARY KEY (tenant_id, month)
+);
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
+DROP TABLE IF EXISTS web_usage;
+ALTER TABLE plan_entitlement DROP COLUMN IF EXISTS web_heat_pages;
+ALTER TABLE plan_entitlement DROP COLUMN IF EXISTS web_visits_month;
 DROP INDEX IF EXISTS events_people_app_by_actor;
 DROP TABLE IF EXISTS web_salt;
 DROP TABLE IF EXISTS heatmap_link;

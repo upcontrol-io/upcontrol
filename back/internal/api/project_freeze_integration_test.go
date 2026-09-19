@@ -614,3 +614,38 @@ func TestPlanReadNamesWhatThePlanHoldsBack(t *testing.T) {
 		t.Fatalf("projects after thaw = %+v, want used 2 and no frozen", projects)
 	}
 }
+
+// The web visits on the plan read: this UTC month's against Free's 3000; an
+// unlimited plan carries none.
+func TestPlanReadCarriesTheWebAxes(t *testing.T) {
+	f := newFreezeFixture(t)
+	ctx := context.Background()
+	read := func() *struct{ Used, Max int } {
+		t.Helper()
+		w := f.do(http.MethodGet, "/v1/plan", "")
+		var body struct {
+			WebVisits *struct{ Used, Max int } `json:"webVisits"`
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatalf("plan = %d (%s)", w.Code, w.Body.String())
+		}
+		return body.WebVisits
+	}
+	if visits := read(); visits == nil || visits.Used != 0 || visits.Max != 3000 {
+		t.Fatalf("Free's web visits = %+v; want 0 of 3000", visits)
+	}
+	if _, err := f.pool.Raw().Exec(ctx,
+		`INSERT INTO web_usage (tenant_id, month, visits) VALUES ($1, date_trunc('month', now() AT TIME ZONE 'UTC')::date, 42)`,
+		f.tenantID); err != nil {
+		t.Fatalf("seed visits: %v", err)
+	}
+	if visits := read(); visits == nil || visits.Used != 42 {
+		t.Fatalf("webVisits = %+v, want this month's 42 used", visits)
+	}
+	if _, err := f.pool.Raw().Exec(ctx, `UPDATE tenant SET plan = 'Self-hosted' WHERE id = $1`, f.tenantID); err != nil {
+		t.Fatalf("switch plan: %v", err)
+	}
+	if visits := read(); visits != nil {
+		t.Fatalf("an unlimited plan's web visits = %+v; want absent", visits)
+	}
+}

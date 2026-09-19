@@ -358,7 +358,11 @@
 
 		function updateStatus() {
 			if (!hm) return;
-			if (layers.scroll) {
+			var noHeat = !(hm.clicks || []).length && !(hm.rage || []).length &&
+				!(hm.moves || []).length && !(hm.scroll && hm.scroll[0]);
+			if (hm.heatPages != null && hm.views > 0 && noHeat) {
+				statusMain('This plan keeps heatmaps for its ' + hm.heatPages + ' busiest pages; this page is not among them.');
+			} else if (layers.scroll) {
 				statusMain(hm.scroll && hm.scroll[0]
 					? 'Scroll depth from ' + hm.scroll[0] + ' views'
 					: 'No scroll depth reported yet.');

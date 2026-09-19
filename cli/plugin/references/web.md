@@ -92,3 +92,6 @@ with `npx upcontrol board --add`.
 Page views, visitors (a daily-rotating hash, no cookie), referrers, UTM tags,
 countries, devices; heatmaps of clicks, rage clicks, mouse movement and scroll
 depth per page and device, opened from the Heatmap card onto the live site.
+A plan records a number of visits a month: past it the tag records nothing
+until the next month and the app says so. Heatmaps are kept for the plan's
+busiest pages.

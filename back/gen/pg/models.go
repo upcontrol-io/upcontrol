@@ -293,6 +293,8 @@ type PlanEntitlement struct {
 	CustomDomain       bool
 	TelegramRooms      bool
 	HistoryDays        *int32
+	WebVisitsMonth     *int32
+	WebHeatPages       *int32
 }
 
 type ProbeNode struct {
@@ -488,6 +490,12 @@ type WebHeat struct {
 type WebSalt struct {
 	Day  pgtype.Date
 	Salt []byte
+}
+
+type WebUsage struct {
+	TenantID int64
+	Month    pgtype.Date
+	Visits   int32
 }
 
 type WebVisitor struct {

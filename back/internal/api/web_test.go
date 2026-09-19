@@ -58,6 +58,12 @@ type fakeWebStore struct {
 	views     int64
 	cells     map[string][]pgstore.HeatCell
 	scroll    [21]int64
+	quota     pgstore.WebQuota
+	heatFrom  time.Time // the fromDay HeatCells was last asked for
+}
+
+func (f *fakeWebStore) WebQuota(context.Context, int64, time.Time) (pgstore.WebQuota, error) {
+	return f.quota, nil
 }
 
 func (f *fakeWebStore) InsertPageview(_ context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error {
@@ -107,7 +113,8 @@ func (f *fakeWebStore) PageviewCount(context.Context, int64, int64, string, stri
 }
 
 // HeatCells answers [] for a kind with no cells, never nil, as the real store does.
-func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, kind string, _ time.Time, _ int) ([]pgstore.HeatCell, error) {
+func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, kind string, fromDay time.Time, _ int) ([]pgstore.HeatCell, error) {
+	f.heatFrom = fromDay
 	return append([]pgstore.HeatCell{}, f.cells[kind]...), nil
 }
 
@@ -552,5 +559,63 @@ func TestHeatmapNoRangeTakesTheDeepestThePlanReaches(t *testing.T) {
 		if !strings.Contains(rr.Body.String(), `"range":"`+tc.want+`"`) {
 			t.Errorf("%d-day plan: body %s, want range %s", tc.days, rr.Body.String(), tc.want)
 		}
+	}
+}
+
+// Past the month's visits a beacon stores nothing, and the page's browser is
+// answered exactly as an accepted beacon is: a visitor has nothing to be told.
+func TestCollectOverTheVisitCapStoresNothingQuietly(t *testing.T) {
+	limit := int32(3000)
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, body := range []string{
+		`{"v":1,"t":"view","p":"/","w":1200}`,
+		`{"v":1,"t":"heat","p":"/","w":1200,"s":0.5,"c":[["a",1,2,1,0]]}`,
+	} {
+		store := &fakeWebStore{quota: pgstore.WebQuota{Visits: 3000, MaxVisits: &limit}}
+		rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, origin)
+		if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 {
+			t.Errorf("%s: %d %q, want the accepted beacon's bare 204", body, rr.Code, rr.Body.String())
+		}
+		if len(store.pageviews) != 0 || len(store.heatCalls) != 0 {
+			t.Errorf("%s: stored past the cap", body)
+		}
+	}
+	store := &fakeWebStore{quota: pgstore.WebQuota{Visits: 2999, MaxVisits: &limit}}
+	if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":1,"t":"view","p":"/","w":1200}`, origin); rr.Code != http.StatusNoContent || len(store.pageviews) != 1 {
+		t.Errorf("under the cap: %d, %d page views, want 204 and the view stored", rr.Code, len(store.pageviews))
+	}
+}
+
+// The read carries the plan's heatmap pages, absent when unlimited, and a
+// range past a week reads its heat from the first day's Monday, where the
+// compaction keeps that week's bucket. The door's clock is Saturday
+// 2026-09-19.
+func TestHeatmapCarriesHeatPagesAndSnapsToTheWeek(t *testing.T) {
+	pages := int32(20)
+	store := fakeReadStore()
+	store.quota.HeatPages = &pages
+	d := newTestDoor(publicWebTenant(), store, nil)
+	for _, tc := range []struct {
+		rng  string
+		want time.Time
+	}{
+		{"31d", time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)}, // Wednesday 08-19's Monday
+		{"7d", time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)},  // daily rows: no snap
+	} {
+		rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200&range="+tc.rng, nil)
+		var out heatOut
+		if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s: %d %s", tc.rng, rr.Code, rr.Body.String())
+		}
+		if !store.heatFrom.Equal(tc.want) {
+			t.Errorf("%s: heat read from %v, want %v", tc.rng, store.heatFrom, tc.want)
+		}
+		if out.HeatPages == nil || *out.HeatPages != 20 {
+			t.Errorf("%s: heatPages = %v, want the plan's 20", tc.rng, out.HeatPages)
+		}
+	}
+	store.quota.HeatPages = nil
+	if rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200", nil); strings.Contains(rr.Body.String(), "heatPages") {
+		t.Errorf("an unlimited plan's read = %s, want no heatPages", rr.Body.String())
 	}
 }
