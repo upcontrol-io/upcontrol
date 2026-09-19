@@ -3,6 +3,56 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-19 - upcontrol 0.3.0
+
+- **A new command, `npx upcontrol web <site> [site...]`: the script tag for the
+  site, out of the one install.** An agent that ran `init` can put web analytics
+  and heatmaps on the user's site by itself: the command reads the secret key
+  init placed, turns every site argument into origins by the app's website-card
+  rule (a bare host gets `http://` only for `localhost` and `127.*`, `https://`
+  otherwise; a real domain also gets its www/apex twin, port kept; anything
+  unreadable is refused with `not a site address: <arg>`, exit 2), mints the
+  public, origin-bound key via `POST /v1/keys` with the secret key in the
+  header, stores it in `.env` as `UPCONTROL_PUBLIC_KEY` and prints exactly one
+  payload: the tag `<script defer src="<endpoint>/uc.js"
+  data-key="uc_pub_..."></script>`. A rerun finds `UPCONTROL_PUBLIC_KEY` and
+  reuses it, no request. A reuse never widens the key (no endpoint adds an
+  origin to one), so the first run names every address, the local dev one
+  included: the reuse is said on stderr in every mode, and the JSON line
+  reports `origins` only for a key minted in that run, a `note` on how to
+  re-mint for a reused one. The secret key is never
+  printed, in any mode or error. Refusals are one line each: `key_limit` names
+  the revoke door in the app, `bad_origin` is `not a site address`, `bad_key`
+  says the key was revoked or is retiring after a rotation and names the way
+  out (drop `UPCONTROL_API_KEY`, rerun the install command); all of them exit 3. `init`'s "a key is
+  already set" note now names the `UPCONTROL_PUBLIC_KEY` line too, since a
+  public key of the old project would otherwise be reused.
+- **`verify` and `status` learn the web half, and `verify --web` is the
+  site-only pass.** `GET /v1/install/status` answers `web: { views }` (the
+  `uc.pageview` events of the last 15 minutes). Under `--web` a nonzero count
+  is data arriving in its own right: a site-only install, with no log lines and
+  no SDK anywhere, verifies green once a page is opened. Without the flag page
+  views never pass, so a visit to the site cannot hide an SDK that never
+  connected; the timeout says page views are arriving and names `--web`. The
+  human line says `page views arriving: N`, `--json` carries `web` while
+  `verified` stays the SDK marker, and `status` adds `webViews` when the answer
+  has it.
+- **A new skill topic, `web`**: when the repo holds a website or front-end, how
+  to find the production address (CNAME, deploy configs, framework site
+  settings, README, then one question), where the tag goes in twelve frameworks,
+  the rules (once, in the shared layout, never behind a consent gate that does
+  not exist - the script sets no cookies), and the offer that follows verify: a
+  `heatmap` card plus `uc.pageview` breakdowns through `npx upcontrol board
+  --add`. The goal table in SKILL.md gains its row, and rule 6 in both SKILL.md
+  and `rules.md` carries the one carve-out: the `uc_pub_` key inside the tag is
+  the one key that belongs in committed code, because it is public and bound to
+  the site's addresses; a `uc_live_` key never does. `dashboard.md` documents
+  the `heatmap` card (w 4, h 12, floor 3x6, its ref fixed to `uc.pageview` folded
+  by `path` counting events).
+- Needs the core release that answers `POST /v1/keys` with a presented secret
+  key and the `web` field on the install status; against an older core the mint
+  is refused and the command prints the refusal instead of the tag.
+
 ## 2026-09-18 — upcontrol 0.2.4
 
 - **A key already in place is never redeemed over.** `init --token` and `init --key` read the

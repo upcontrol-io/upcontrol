@@ -300,8 +300,10 @@ func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
 	// and it is recognised by BOTH halves of what it is — a key it still
 	// holds, and data that has actually flowed through it:
 	//
-	//   - `project_seq.next > 1` is the ingest marker: every project is born
-	//     at 1 and only LeaseSeqBlock (internal/ring/seq) moves it.
+	//   - data: `project_seq.next > 1` (every project is born at 1 and only
+	//     LeaseSeqBlock, internal/ring/seq, moves it) or any events row. The
+	//     web door writes page views straight into events and leases no seq,
+	//     so a site-only install never moves the seq.
 	//   - an api_key still on the project. A page RELEASED by a project
 	//     deletion has ingested plenty but its key died with the release
 	//     (releaseProject), so the seq alone would spare it forever; that is
@@ -311,9 +313,11 @@ func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
 		  WHERE t.claim_token_hash IS NOT NULL
 		    AND t.created_at < now() - interval '7 days'
 		    AND NOT EXISTS (SELECT 1 FROM project p
-		                      JOIN project_seq ps ON ps.project_id = p.id
+		                      LEFT JOIN project_seq ps ON ps.project_id = p.id
 		                      JOIN api_key ak    ON ak.project_id = p.id
-		                     WHERE p.tenant_id = t.id AND ps.next > 1)
+		                     WHERE p.tenant_id = t.id
+		                       AND (ps.next > 1 OR EXISTS (SELECT 1 FROM events e
+		                                                    WHERE e.tenant_id = t.id AND e.project_id = p.id)))
 		    AND NOT EXISTS (SELECT 1 FROM status_page sp
 		                    JOIN probe_target pt ON pt.id = sp.root_target_id
 		                   WHERE sp.tenant_id = t.id AND sp.is_host_page

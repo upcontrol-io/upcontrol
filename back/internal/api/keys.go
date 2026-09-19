@@ -21,6 +21,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -40,6 +41,30 @@ func NewKeys(p *pg.Pool, sm *session.Manager) *keys {
 }
 
 func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// `npx upcontrol web` mints the site's public key with nobody at a browser:
+	// the install prompt's agent holds the project's secret key in .env and no
+	// session. Narrow on purpose — a key never mints a secret key (issue refuses
+	// it), and a public key, a browser credential, mints nothing at all.
+	if r.URL.Path == "/v1/keys" && r.Method == http.MethodPost {
+		if key := presentedKey(r); key != "" {
+			tenant, err := pg.NewKeyResolver(h.pool, time.Now).Resolve(r.Context(), key)
+			// Rotation's grace keeps a retiring key ingesting for a day; it does
+			// not let that key mint. Only an active secret key does.
+			active := false
+			if err == nil && tenant.Kind != ingest.KeyKindPublic {
+				sum := sha256.Sum256([]byte(key))
+				err = h.pool.Raw().QueryRow(r.Context(),
+					`SELECT EXISTS (SELECT 1 FROM api_key WHERE project_id = $1 AND state = 'active' AND secret_hash = $2)`,
+					tenant.ProjectID, sum[:]).Scan(&active)
+			}
+			if err != nil || !active {
+				writeAPIErr(w, http.StatusUnauthorized, "bad_key")
+				return
+			}
+			h.issue(w, r, tenant.TenantID, tenant.ProjectID, true)
+			return
+		}
+	}
 	s, ok := requireSession(w, r, h.sess)
 	if !ok {
 		return
@@ -65,7 +90,7 @@ func (h *keys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeAPIErr(w, http.StatusForbidden, "notify_role")
 				return
 			}
-			h.issue(w, r, s.TenantID, projectID)
+			h.issue(w, r, s.TenantID, projectID, false)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -149,7 +174,7 @@ func (h *keys) get(w http.ResponseWriter, r *http.Request, projectID int64) {
 	})
 }
 
-func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID int64) {
+func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, publicOnly bool) {
 	ctx := r.Context()
 	name := ""
 	kind := keyKindSecret
@@ -180,6 +205,14 @@ func (h *keys) issue(w http.ResponseWriter, r *http.Request, tenantID, projectID
 				origins = append(origins, o)
 			}
 		}
+	}
+	// The key door mints a public key only: a credential that lives in .env on
+	// every deployed server must never mint another one. The bare-POST default
+	// is secret, so it refuses too.
+	if publicOnly && kind != keyKindPublic {
+		writeAPIErrMsg(w, http.StatusForbidden, "key_mints_secret",
+			"A key can mint a public key only. Secret keys come from the app or npx upcontrol init.")
+		return
 	}
 	// A public key with no origin is the unscoped key it exists to replace, so it is refused
 	// at the door rather than minted and quietly useless. Origins on a secret key are dropped:

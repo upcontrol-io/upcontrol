@@ -376,8 +376,20 @@ func TestClaimUnderTheLimitWithAnEmptyProjectAbsorbsIt(t *testing.T) {
 // LogKeyUsage and TouchAPIKeyLastUsed are generated but called from nowhere,
 // so both of those markers are always absent and the absorb would have
 // swallowed a live project. project_seq.next is written on the ingest path
-// itself (LeaseSeqBlock, internal/ring/seq).
+// itself (LeaseSeqBlock, internal/ring/seq). The web door leases no seq and
+// writes its page views straight into events, so an events row is the other
+// mark.
 func TestClaimDoesNotAbsorbAProjectThatHasIngested(t *testing.T) {
+	for name, mark := range map[string]string{
+		// What a leased seq block leaves behind: next moved off 1.
+		"a leased seq block": `INSERT INTO project_seq (project_id, next) VALUES ($1, 4097)`,
+		"a page view":        `INSERT INTO events (tenant_id, project_id, ts, name, labels, actor) SELECT tenant_id, id, now(), 'uc.pageview', '{}', 'v' FROM project WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) { claimOverAUsedProject(t, mark) })
+	}
+}
+
+func claimOverAUsedProject(t *testing.T, mark string) {
 	f := newClaimFixture(t)
 	ctx := context.Background()
 	var proj int64
@@ -392,10 +404,8 @@ func TestClaimDoesNotAbsorbAProjectThatHasIngested(t *testing.T) {
 		f.claimerID, proj, fmt.Sprintf("uc_live_u%d", time.Now().UnixNano()), usedKey[:]); err != nil {
 		t.Fatalf("claimer api_key: %v", err)
 	}
-	// What a leased seq block leaves behind: next moved off 1.
-	if _, err := f.pool.Raw().Exec(ctx,
-		`INSERT INTO project_seq (project_id, next) VALUES ($1, 4097)`, proj); err != nil {
-		t.Fatalf("project_seq: %v", err)
+	if _, err := f.pool.Raw().Exec(ctx, mark, proj); err != nil {
+		t.Fatalf("ingest mark: %v", err)
 	}
 
 	w := f.claim(t, `{"slug":"`+f.slug+`"}`)

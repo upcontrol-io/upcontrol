@@ -248,6 +248,16 @@ func (r *Recorder) CountInvalid(n int) {
 	r.invalid.Add(uint64(n))
 }
 
+// Describe reduces an address and a User-Agent to what a page view stores: the
+// country (empty without a GeoIP database), the operating system and the browser.
+func (r *Recorder) Describe(ip, ua string) (country, os, browser string) {
+	if r == nil {
+		return "", "", ""
+	}
+	p := parseUA(ua)
+	return r.geo.Country(ip), p.OS, p.Browser
+}
+
 // baseTrack reduces the request scope to what is stored: country from the raw
 // IP (used once here), the truncated IP hash, the parsed UA.
 func (r *Recorder) baseTrack(ctx context.Context) track {

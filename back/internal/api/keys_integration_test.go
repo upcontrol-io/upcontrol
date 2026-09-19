@@ -280,6 +280,46 @@ func TestRotationRetiresTheSecretKeysAndSparesThePublicOne(t *testing.T) {
 	}
 }
 
+// A secret key in its rotation grace still ingests for a day, but it no longer
+// mints: the key door takes an active secret key only.
+func TestARotatingKeyNoLongerMintsAPublicKey(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	old, err := issueKey(t.Context(), pool, tenantID, boardOf(t, pool, tenantID))
+	if err != nil {
+		t.Fatalf("mint the creation key: %v", err)
+	}
+	h := keysAPI(t, pool, tenantID)
+	mintWith := func(key string) (int, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/keys",
+			strings.NewReader(`{"kind":"public","origins":["https://example.com"]}`))
+		r.Header.Set("X-Upcontrol-Key", key)
+		h.ServeHTTP(w, r)
+		return w.Code, strings.TrimSpace(w.Body.String())
+	}
+
+	if code, body := mintWith(old); code != http.StatusCreated {
+		t.Fatalf("an active secret key mints a public key = %d %s, want 201", code, body)
+	}
+	code, body := callKeys(t, h, http.MethodPost, "/v1/keys/rotate", "")
+	if code != http.StatusOK {
+		t.Fatalf("rotate = %d %s", code, body)
+	}
+	var rotated struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(body), &rotated); err != nil || rotated.Value == "" {
+		t.Fatalf("rotate must answer the new key: %v (%s)", err, body)
+	}
+	if code, body := mintWith(old); code != http.StatusUnauthorized || !strings.Contains(body, "bad_key") {
+		t.Fatalf("the rotating key mints = %d %s, want 401 bad_key", code, body)
+	}
+	if code, body := mintWith(rotated.Value); code != http.StatusCreated {
+		t.Fatalf("the new active key mints = %d %s, want 201", code, body)
+	}
+}
+
 // A project holding only a public key has nothing to rotate, and says so rather
 // than answering 500 from an empty INSERT..SELECT.
 func TestRotationWithNoSecretKeyIsRefusedInWords(t *testing.T) {
