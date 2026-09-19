@@ -26,6 +26,7 @@ import (
 	"go.upcontrol.io/back/internal/source/webhook"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
+	"go.upcontrol.io/back/internal/web"
 	"go.upcontrol.io/back/internal/worker"
 
 	probev1connect "go.upcontrol.io/back/gen/rpc/probe/v1/probev1connect"
@@ -113,6 +114,13 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// path. Its drain is sequenced into the pg/ch teardown tasks above.
 	recorder = analytics.NewRecorder(analytics.PoolStore{Pool: pgPool}, pgs, d.Logger)
 	recorder.Start()
+
+	// The web door: the script tag, the beacon the script sends, the overlay's
+	// read, all on the recorder's visitor reducer and /i's public-key gates.
+	webDoor := api.NewWebDoor(ingester, pgs, pgPool, recorder.Describe, d.Config.ScrubOff)
+	mux.Handle("GET /uc.js", http.HandlerFunc(web.Script))
+	mux.Handle("POST /w", http.HandlerFunc(webDoor.Collect))
+	mux.Handle("GET /w/heatmap", http.HandlerFunc(webDoor.Heatmap))
 
 	// Instance-settable secrets: values are sealed under UC_SECRET_KEY_HEX
 	// before landing in Postgres; a UI-set value wins over the env one.
@@ -267,6 +275,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("GET /v1/logs", wa)
 	mux.Handle("GET /v1/dashboard/catalog", wa)
 	mux.Handle("POST /v1/series", wa)
+	// The overlay's token mint: session-authed like the series read, and
+	// registered beside it for the same reason every wa route is.
+	mux.Handle("POST /v1/heatmap/link", wa)
 	mux.Handle("GET /v1/dashboard", wa)
 	mux.Handle("PUT /v1/dashboard", wa)
 	// The agent's additive door and the session's two proposal doors. Every one

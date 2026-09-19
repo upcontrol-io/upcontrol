@@ -131,6 +131,13 @@ type Event struct {
 	Actor       string
 }
 
+type HeatmapLink struct {
+	TokenHash []byte
+	TenantID  int64
+	ProjectID int64
+	ExpiresAt pgtype.Timestamptz
+}
+
 type Incident struct {
 	ID                   int64
 	PublicID             pgtype.UUID
@@ -463,6 +470,24 @@ type WebEvent struct {
 	Os          *string
 	Browser     *string
 	Props       []byte
+}
+
+type WebHeat struct {
+	TenantID  int64
+	ProjectID int64
+	Day       pgtype.Date
+	Path      string
+	Device    string
+	Kind      string
+	Selector  string
+	Fx        int16
+	Fy        int16
+	N         int64
+}
+
+type WebSalt struct {
+	Day  pgtype.Date
+	Salt []byte
 }
 
 type WebVisitor struct {

@@ -156,7 +156,8 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Notify members read (GETs below); every mutation needs login. POST /v1/series
-	// is a read that travels as a POST for its body, so it stays open to them.
+	// is a read that travels as a POST for its body, so it stays open to them,
+	// and so does POST /v1/heatmap/link: minting a heatmap link is a read too.
 	// POST /v1/projects creates in the caller's OWN workspace, where they are
 	// the owner. The switch changes no project, only where this session
 	// stands, and the current scope is no gate on leaving it: a Member moves
@@ -165,7 +166,8 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// only a row the caller reaches.
 	newProject := r.URL.Path == "/v1/projects" && r.Method == http.MethodPost
 	switchScope := r.URL.Path == "/v1/project/switch" && r.Method == http.MethodPost
-	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && !newProject && !switchScope &&
+	if r.Method != http.MethodGet && r.URL.Path != "/v1/series" && r.URL.Path != "/v1/heatmap/link" &&
+		!newProject && !switchScope &&
 		!canManage(r.Context(), h.pool, s) {
 		writeAPIErr(w, http.StatusForbidden, "notify_role")
 		return
@@ -239,6 +241,10 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.getDashboardCatalog(w, r, tenantID)
 	case r.URL.Path == "/v1/series" && r.Method == http.MethodPost:
 		h.postSeries(w, r, tenantID)
+	// The heatmap overlay's one-hour read token; a read that travels as a
+	// POST, like /v1/series above.
+	case r.URL.Path == "/v1/heatmap/link" && r.Method == http.MethodPost:
+		h.postHeatmapLink(w, r, tenantID)
 	// The board itself: one stored layout per project, read by any member
 	// and replaced whole by a login member (the gate above). The proposal
 	// doors: a notify member may READ what the key offered; dropping it is a

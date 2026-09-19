@@ -268,6 +268,11 @@ func TestCatalogEventFields(t *testing.T) {
 		{Name: "purchase", TS: at, Labels: map[string]string{"plan": "pro", "region": "eu", "uc.variant": "A"}},
 		{Name: "purchase", TS: at.Add(time.Second), Labels: map[string]string{"plan": "free"}},
 		{Name: "signup", TS: at.Add(2 * time.Second), Labels: map[string]string{"source": "ads"}},
+		// Newer page views than everything else: they get their own scan, and
+		// must not eat the budget of the three rows above.
+		{Name: "uc.pageview", TS: at.Add(3 * time.Second), Labels: map[string]string{"path": "/"}, Actor: "v1"},
+		{Name: "uc.pageview", TS: at.Add(4 * time.Second), Labels: map[string]string{"path": "/a"}, Actor: "v2"},
+		{Name: "uc.pageview", TS: at.Add(5 * time.Second), Labels: map[string]string{"path": "/b"}, Actor: "v3"},
 	}
 	for i := range events {
 		events[i].TenantID, events[i].ProjectID = seriesTenant, catalogProject
@@ -276,7 +281,7 @@ func TestCatalogEventFields(t *testing.T) {
 		t.Fatalf("insert events: %v", err)
 	}
 
-	fields, err := s.CatalogEventFields(ctx, seriesTenant, catalogProject, at.Add(-time.Hour), 20000, 10)
+	fields, err := s.CatalogEventFields(ctx, seriesTenant, catalogProject, at.Add(-time.Hour), 3, 10)
 	if err != nil {
 		t.Fatalf("catalog event fields: %v", err)
 	}
@@ -285,6 +290,9 @@ func TestCatalogEventFields(t *testing.T) {
 	}
 	if got := fields["signup"]; len(got) != 1 || got[0] != "source" {
 		t.Fatalf("signup carries source alone; got %v", got)
+	}
+	if got := fields["uc.pageview"]; len(got) != 1 || got[0] != "path" {
+		t.Fatalf("page views keep their fields from their own scan; got %v", got)
 	}
 }
 

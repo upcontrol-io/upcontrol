@@ -6,6 +6,50 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-09-19
+
+### Added
+- **Web analytics and heatmaps from one script tag.** `GET /uc.js` serves the script behind
+  `<script defer src="…/uc.js" data-key="uc_pub_…">`. The tag sends what it records to a new
+  door, `POST /w`. The gates are `/i`'s: the exact Origin, bots dropped, the per-address
+  budget. A secret key there is a 401.
+  - It records a page view on load and on every SPA path change, as a `uc.pageview` event
+    with the path, the referrer host, UTM tags, the country, the device bucket (by window
+    width), the browser and the OS.
+  - The visitor is a hash of the address and the browser under a salt that changes every
+    day, so it works with no cookie, nothing stored on the device, and no way to follow
+    anyone to the next day.
+  - It also records clicks, rage clicks, mouse movement (on pointers that can hover) and
+    scroll depth. They are aggregated in the page, sent once per page view, and added into
+    per-day counts per path, device and element cell (`web_heat`, migration 011).
+  - None of it enters the log ring, so it never evicts a line of the project's logs.
+  - Page views stay out of the retention grid (the visitor changes every day) and out of an
+    incident's event timeline (a busy site's views would crowd the deploys out).
+  - A project that only receives page views counts as used: the reaper of anonymous
+    workspaces spares it, and a claim never absorbs it as an empty placeholder.
+- **The heatmap overlay.** `POST /v1/heatmap/link` mints a read-only link for one hour, for
+  any member of the project. The link opens the live page with its heatmap drawn over it:
+  clicks, rage clicks, moves and scroll depth, for the device bucket the window falls in.
+  The overlay reads `GET /w/heatmap` with the link's token and the page's own public key
+  (the tag's `data-key`), which must belong to the token's project, so nobody's token draws
+  on a page that is not theirs. It answers only to an origin listed on one of the project's
+  public keys and is gated by the plan's history depth like every board read.
+- **A project's secret key can mint its public key.** `POST /v1/keys` accepts an active
+  secret key instead of a session (one in its rotation grace still ingests, but no longer
+  mints) and then mints a public key only (403 `key_mints_secret` otherwise).
+  This is how `npx upcontrol web` puts the tag on a site with nobody opening the app.
+- **`GET /v1/install/status` reports `web`**, the page views of the last 15 minutes, so
+  `npx upcontrol verify --web` passes on a site that sends page views and nothing else.
+- The dashboard contract gains the `heatmap` widget kind: top pages by views, with a heatmap
+  link per row.
+
+### Changed
+- The catalog scans page views apart from the other events, so a busy site never pushes a
+  rarer event's fields out of the Breakdown field picker.
+- CLI 0.3.0: `npx upcontrol web <site> [<dev address>]` mints the site's public key with the
+  project key already in `.env` and prints the tag; `verify --web` passes on page views.
+  Needs this core: before it, `POST /v1/keys` took a session only.
+
 ## [0.33.0] — 2026-09-18
 
 ### Security

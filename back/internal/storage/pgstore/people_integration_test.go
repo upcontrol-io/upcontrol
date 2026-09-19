@@ -142,6 +142,9 @@ func TestPeopleRetentionAndExperiment(t *testing.T) {
 	seedEvent(t, pool, from.Add(2*24*time.Hour), "visit", "grace", nil)
 	// An event with nobody behind it, inside the window: an event, never a person.
 	seedEvent(t, pool, from.Add(3*24*time.Hour), "visit", "", nil)
+	// A page view's actor is a visitor hash that changes daily: never a person
+	// to retain, or every day's visitors would be a cohort that never returns.
+	seedEvent(t, pool, from.Add(3*24*time.Hour), "uc.pageview", "3f2a9c0d1e4b5a67", nil)
 
 	cohorts, err := s.RetentionCohorts(ctx, peopleTenant, peopleProject, from, to)
 	if err != nil {

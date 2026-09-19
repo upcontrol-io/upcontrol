@@ -2,7 +2,7 @@
 // env var and --endpoint exist for self-hosted stacks and local development.
 
 const DEFAULT_ENDPOINT = 'https://upcontrol.io';
-export const CLI_VERSION = '0.2.4';
+export const CLI_VERSION = '0.3.0';
 
 export function endpointFrom(env: NodeJS.ProcessEnv, flag?: string): string {
   return (flag || env.UPCONTROL_ENDPOINT || DEFAULT_ENDPOINT).replace(/\/+$/, '');
@@ -69,6 +69,7 @@ interface InstallStatus {
   verified?: boolean;
   verifiedAt?: string;
   lines?: number;
+  web?: { views: number; lastAt?: string };
   recent?: Array<{ name: string; count: number; lastAt: string }>;
   error?: string;
 }
@@ -82,6 +83,37 @@ export async function fetchInstallStatus(endpoint: string, key: string): Promise
     const body = parseJSON<Omit<InstallStatus, 'ok' | 'status' | 'error'>>(res.text);
     if (!body) return { ok: false, status: res.status, error: 'malformed' };
     return { ...body, ok: true };
+  } catch {
+    return { ok: false, error: 'unreachable' };
+  }
+}
+
+interface MintKeyResult {
+  ok: boolean;
+  status?: number;
+  value?: string;
+  code?: string;
+  error?: string;
+}
+
+// mintPublicKey issues the origin-bound PUBLIC web key with the SECRET key in
+// the header: that is how `npx upcontrol web` puts the tag on a site without
+// anyone opening the app. `value` is the full uc_pub_ key, the one place it
+// ever appears; a refusal carries its error code so the caller can word the fix.
+export async function mintPublicKey(endpoint: string, key: string, name: string, origins: string[]): Promise<MintKeyResult> {
+  try {
+    const res = await request(endpoint + '/v1/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Upcontrol-Key': key },
+      body: JSON.stringify({ name, kind: 'public', origins }),
+    });
+    if (!res.ok) {
+      const code = parseJSON<{ error?: { code?: string } }>(res.text)?.error?.code;
+      return { ok: false, status: res.status, code };
+    }
+    const body = parseJSON<{ value?: string }>(res.text);
+    if (!body?.value) return { ok: false, status: res.status };
+    return { ok: true, value: body.value };
   } catch {
     return { ok: false, error: 'unreachable' };
   }

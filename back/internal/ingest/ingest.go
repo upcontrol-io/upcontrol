@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"go.upcontrol.io/back/internal/ingest/cardinality"
 	"go.upcontrol.io/back/internal/ingest/decode"
@@ -149,34 +148,11 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A public key is the one credential that may live in a browser bundle, so
-	// it is the only one gated: an exact Origin match (never a wildcard), a
-	// rate limit per key+IP, and the CORS headers a browser needs to read the
-	// answer. A secret key never reaches this branch.
-	if tenant.Kind == KeyKindPublic {
-		origin := matchOrigin(r.Header.Get("Origin"), tenant.Origins)
-		if origin == "" {
-			writeJSON(w, http.StatusUnauthorized, receiptErr("bad_key"))
-			return
-		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Vary", "Origin")
-		// A browser beacon is sent with credentials mode "include", and the
-		// browser refuses an answer without this header even on a matched
-		// origin - every event lost, "true" returned to the page. /i reads no
-		// cookie, and the origin is an echoed match, never "*".
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		// A crawler on a public key is answered as if it had landed: a 4xx
-		// teaches it to retry, and its page views are not the customer's
-		// visitors. A nil detector filters nothing.
-		if h.d.IsBot != nil && h.d.IsBot(r.Header.Get("User-Agent")) {
-			writeJSON(w, http.StatusOK, Receipt{Warnings: []ReceiptW{{Code: "bot_dropped", Count: 1}}})
-			return
-		}
-		if !h.pubLimiter.allow(kw.key, clientIP(r), time.Now()) {
-			w.Header().Set("Retry-After", publicRetryAfter)
-			writeJSON(w, http.StatusTooManyRequests, receiptErr("rate_limited"))
-			return
-		}
+	// it is the only one gated (GatePublic): an exact Origin match (never a
+	// wildcard), a rate limit per key+IP, and the CORS headers a browser needs
+	// to read the answer. A secret key never reaches this branch.
+	if tenant.Kind == KeyKindPublic && !h.GatePublic(w, r, tenant, kw.key) {
+		return
 	}
 
 	// Overload check: a full-enough spool refuses with 503 + Retry-After.
@@ -260,14 +236,8 @@ func (h *Ingester) authenticate(r *http.Request, body []byte) (Tenant, keyFound,
 		kf.key = k
 		kf.inBody = true
 	}
-	if kf.key == "" || h.d.Keys == nil {
-		return Tenant{}, kf, ErrBadKey
-	}
-	t, err := h.d.Keys.Resolve(r.Context(), kf.key)
-	if err != nil {
-		return Tenant{}, kf, ErrBadKey
-	}
-	return t, kf, nil
+	t, err := h.ResolveKey(r.Context(), kf.key)
+	return t, kf, err
 }
 
 // keyFromBody extracts a top-level "key" string field if the body is a JSON

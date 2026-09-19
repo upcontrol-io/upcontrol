@@ -301,6 +301,9 @@ func TestEventsAroundPicksClosestAndReturnsTimeOrder(t *testing.T) {
 		{TenantID: 1, ProjectID: 2, TS: now.Add(-3 * time.Minute), Name: "deploy.sibling"},
 		// Outside the window entirely.
 		{TenantID: 1, ProjectID: 1, TS: now.Add(-30 * time.Minute), Name: "deploy.ancient"},
+		// A page view right on the pivot: never evidence, or a busy site's
+		// visitors would crowd the deploys out of the budget.
+		{TenantID: 1, ProjectID: 1, TS: now.Add(-2 * time.Minute), Name: "uc.pageview", Actor: "v1"},
 	}
 	if err := s.InsertEvents(ctx, rows); err != nil {
 		t.Fatalf("InsertEvents: %v", err)

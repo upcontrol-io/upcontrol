@@ -11,16 +11,28 @@ data.
 npx upcontrol verify            # polls up to 120s, prints progress
 npx upcontrol verify --timeout 300
 npx upcontrol verify --json     # one JSON line, for you to parse
+npx upcontrol verify --web      # a site-only install: page views pass too
 ```
 
-Exit codes: `0` verified (install_verified seen and lines arriving);
-`4` verification failed within the timeout; `2` no key found (nothing to
-verify with); `3` cannot reach the endpoint at all.
+Exit codes: `0` verified (install_verified seen, or with `--web` page views
+arriving); `4` verification failed within the timeout; `2` no key found
+(nothing to verify with); `3` cannot reach the endpoint at all. In `--json`,
+`verified` is the SDK marker alone and page views ride in `web.views`, so a
+`--web` pass on page views exits 0 with `verified: false`.
 
 The SDK emits `install_verified` automatically on its first successful
 connection - starting the app once with the key in place proves key validity,
 network reachability, transport and scrubber in one step. No real traffic
 needed.
+
+A web-only install has no SDK in the chain: the script tag is the whole
+install. It verifies with `npx upcontrol verify --web`, where `page views
+arriving: N` counts as data arriving and one opened page is enough to produce
+it. Ask the user to open the site once, then run it. The dev address counts
+only if it was passed to the web run that minted the key; otherwise the tag
+must be deployed before verify can see a view. Without `--web` page views never
+pass: they would hide an SDK that never connected, so verify times out and
+says that page views are arriving.
 
 ## The failure taxonomy - diagnose, do not shrug
 
