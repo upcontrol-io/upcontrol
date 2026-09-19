@@ -212,3 +212,61 @@ test('init --token redeems and writes .env; a spent token never falls back to mi
   rmSync(cwd, { recursive: true, force: true });
   rmSync(cwd2, { recursive: true, force: true });
 });
+
+test('init --token over a key already in .env never redeems and leaves the file alone', async () => {
+  let redeems = 0;
+  const server = createServer((req, res) => {
+    if (req.url === '/v1/install/redeem') redeems++;
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const cwd = mkdtempSync(join(tmpdir(), 'uc-have-'));
+  const before = `UPCONTROL_API_KEY=${KEY}\n`;
+  writeFileSync(join(cwd, '.env'), before);
+
+  const { stdout, code } = await runCliFail(cwd, ['init', '--token', 'uct_testtoken', '--endpoint', url]);
+  await new Promise((r) => server.close(r));
+
+  assert.ok(!stdout.includes(KEY), 'THE KEY MUST NEVER APPEAR IN OUTPUT');
+  const result = JSON.parse(stdout.trim().split('\n').pop()!);
+  // The redeem is one-time: spending it for a key writeDotenvKey refuses to
+  // write would leave the project sending under the old key, with exit 0.
+  assert.equal(redeems, 0, 'a key already in place must cost no redeem request');
+  assert.equal(code, 0, 'a key already in place is not a failed init');
+  assert.equal(result.success, true);
+  assert.equal(result.key.source, 'dotenv');
+  assert.match(result.key.note, /left as is/);
+  assert.equal(readFileSync(join(cwd, '.env'), 'utf8'), before, '.env must be byte-identical');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a throttled redeem is reported as a throttle, not as a dead token', async () => {
+  const server = createServer((req, res) => {
+    if (req.url === '/v1/install/redeem') {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'rate_limited' } }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const cwd = mkdtempSync(join(tmpdir(), 'uc-429-'));
+  const { stdout, code } = await runCliFail(cwd, ['init', '--token', 'uct_testtoken', '--endpoint', url]);
+  await new Promise((r) => server.close(r));
+
+  const result = JSON.parse(stdout.trim().split('\n').pop()!);
+  assert.equal(result.success, false);
+  assert.equal(code, 1, 'a throttled redeem is a failed init');
+  assert.match(result.key.note, /30s/);
+  assert.doesNotMatch(result.key.note, /expired/, 'the token was NOT burned - saying expired sends the reader for a new one');
+  assert.ok(!existsSync(join(cwd, '.env')), 'a throttled redeem writes nothing');
+
+  rmSync(cwd, { recursive: true, force: true });
+});

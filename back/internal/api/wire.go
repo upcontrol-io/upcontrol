@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/ingest/batcher"
 	"go.upcontrol.io/back/internal/ingest/cardinality"
@@ -252,6 +253,7 @@ func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, pgs *pgstore.St
 		Idem:  pg.NewIdempotency(pgPool),
 		Spool: &dirSpoolFiller{dir: spoolDir, max: 1 << 30},
 		Card:  cardinality.New(1000),
+		IsBot: analytics.IsBot,
 		// Self-host only; config refuses the switch on the hosted service.
 		ScrubOff: scrubOff,
 	})

@@ -88,6 +88,11 @@ type Deps struct {
 	Idem  Idempotency
 	Spool SpoolFiller
 	Card  *cardinality.Limiter // per-request is also fine; shared is normal
+	// IsBot reports an automated visitor from a User-Agent; nil means no
+	// check, so every existing Deps literal keeps its behaviour. Injected
+	// rather than imported: the detector lives in internal/analytics, which
+	// reaches storage/pg, which reaches this package (same cycle as clientIP).
+	IsBot func(string) bool
 	// ScrubOff disables the secret scrubber (UC_SCRUB=0, self-host only).
 	// Negative on purpose: the zero value must scrub, so a Deps literal that
 	// omits it redacts rather than stores tokens verbatim.
@@ -155,6 +160,18 @@ func (h *Ingester) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
+		// A browser beacon is sent with credentials mode "include", and the
+		// browser refuses an answer without this header even on a matched
+		// origin - every event lost, "true" returned to the page. /i reads no
+		// cookie, and the origin is an echoed match, never "*".
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		// A crawler on a public key is answered as if it had landed: a 4xx
+		// teaches it to retry, and its page views are not the customer's
+		// visitors. A nil detector filters nothing.
+		if h.d.IsBot != nil && h.d.IsBot(r.Header.Get("User-Agent")) {
+			writeJSON(w, http.StatusOK, Receipt{Warnings: []ReceiptW{{Code: "bot_dropped", Count: 1}}})
+			return
+		}
 		if !h.pubLimiter.allow(kw.key, clientIP(r), time.Now()) {
 			w.Header().Set("Retry-After", publicRetryAfter)
 			writeJSON(w, http.StatusTooManyRequests, receiptErr("rate_limited"))

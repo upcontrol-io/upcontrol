@@ -86,20 +86,61 @@ POST may carry many.
 
 ## From a browser
 
-A secret key must never reach a bundle: it writes anything, and a bundle is
-public. Ask the user to mint a PUBLIC key instead - prefix `uc_pub_`, listed
-against the origins it may be sent from. It writes named events only, refuses a
-plain log line, and is rate limited.
+Two rules hold whichever way the page sends.
 
-If the project has no public key yet, say so and stop rather than reaching for
-the secret one. Naming a `VITE_`-prefixed variable for a secret key ships it to
-every visitor of the site; that is a security incident, not a bad diff.
+**Never a secret key in a bundle.** It writes anything, and a bundle is public.
+Naming a `VITE_`-prefixed variable for a secret key ships it to every visitor
+of the site; that is a security incident, not a bad diff.
+
+**What money depends on is sent from the server, never from the page.** A
+payment, a signup, anything a decision rests on. A page can be closed
+mid-request, blocked by an extension, or edited by whoever is reading it.
+
+Then there are two ways a page can send. Take the first one that applies.
+
+**1. The project has a backend: relay, and no key in the page at all.** The
+page posts to the app's own route and the server sends the event.
 
 ```js
-navigator.sendBeacon('https://upcontrol.io/i?key=' + PUBLIC_KEY,
-  new Blob([JSON.stringify({msg:'page_view', 'uc.event':true, 'uc.actor':visitorId}) + '\n'],
-           {type:'application/x-ndjson'}));
+const ALLOWED = new Set(['page_view', 'buy_clicked']);   // the server names the events, not the page
+app.post('/api/track', (req, res) => {
+  res.sendStatus(204);                                   // answer first: telemetry never holds a page
+  const name = req.body?.name;
+  if (!ALLOWED.has(name)) return;
+  track(name, { 'uc.actor': 'u_' + req.session.userId });  // prefixed: a bare 13-19 digit id is scrubbed as a card
+});
 ```
+
+Why this one is preferred:
+
+- no key in the bundle at all;
+- ad blockers do not cut a same-origin request, and a cut beacon is silent loss;
+- no CORS, and no origin list to keep in step with the deployment;
+- the actor comes from the session, not from a body anyone can forge.
+
+Any language: the same route, and the wire above in place of `track()`.
+
+**2. A static site with no backend: a PUBLIC key.** Ask the user to mint a
+PUBLIC key for the site's origin (on upcontrol.io: the Connect page, "Add it to
+a website"). Prefix `uc_pub_`, listed against the origins it may be sent from.
+It is not a secret: it writes named events only, refuses a plain log line and
+is rate limited.
+
+```js
+fetch('https://upcontrol.io/i?key=' + PUBLIC_KEY, {
+  method: 'POST',
+  keepalive: true,
+  headers: {'Content-Type': 'application/x-ndjson'},
+  body: JSON.stringify({msg:'page_view', 'uc.event':true, 'uc.actor':visitorId}) + '\n',
+});
+```
+
+Not `navigator.sendBeacon`: it sends with credentials, and a core older than
+this release refuses the preflight they bring. The call still returns `true`
+and the event arrives nowhere.
+
+If the project has no public key yet, say so and stop rather than reaching for
+the secret one.
 
 ## Rules that still apply
 

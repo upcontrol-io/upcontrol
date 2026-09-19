@@ -90,9 +90,12 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 	}
 	go dw.Run(ctx)
 
-	// Purge expired ingest batches: every 5 minutes.
+	// Purge expired ingest batches: every 5 minutes. The install tokens nobody
+	// redeemed ride along: a handful of rows with a TTL and no other reaper, and
+	// the house style for a TTL purge is a job rather than a DELETE in a handler.
 	go runWithLock(ctx, pool, d, "purge-batches", 5*time.Minute, func(ctx context.Context) {
 		_ = pool.Queries().PurgeExpiredBatches(ctx)
+		_, _ = pool.Raw().Exec(ctx, `DELETE FROM install_token WHERE expires_at < now()`)
 	})
 
 	// Day partitions of logs: every hour. 001 made two and left the rolling to

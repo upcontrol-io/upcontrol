@@ -31,7 +31,7 @@ func publicTenant() Tenant {
 	}
 }
 
-func newPublicIngester(tn Tenant) (*Ingester, *fakeSink) {
+func newPublicIngester(tn Tenant, isBot func(string) bool) (*Ingester, *fakeSink) {
 	sink := &fakeSink{}
 	return New(Deps{
 		Keys:  &stubKeys{tenant: tn},
@@ -39,6 +39,7 @@ func newPublicIngester(tn Tenant) (*Ingester, *fakeSink) {
 		Sink:  sink,
 		Idem:  newFakeIdem(),
 		Spool: &fakeSpool{pct: 0},
+		IsBot: isBot,
 	}), sink
 }
 
@@ -88,6 +89,9 @@ func TestMatchOrigin(t *testing.T) {
 			t.Errorf("matchOrigin(%q) = %q, want \"\"", bad, got)
 		}
 	}
+	if got := matchOrigin("null", []string{"null"}); got != "" {
+		t.Errorf("a stored \"null\" origin must never match: got %q", got)
+	}
 	if got := matchOrigin("https://example.com", nil); got != "" {
 		t.Error("an empty origins list must be a refusal, never any")
 	}
@@ -134,7 +138,7 @@ func TestRateLimiterWindow(t *testing.T) {
 }
 
 func TestHandlePublicKeyOriginGate(t *testing.T) {
-	ing, _ := newPublicIngester(publicTenant())
+	ing, _ := newPublicIngester(publicTenant(), nil)
 
 	// Absent Origin and a stranger Origin are the same 401, never a hint.
 	for name, origin := range map[string]string{"absent": "", "stranger": "https://evil.com"} {
@@ -149,11 +153,14 @@ func TestHandlePublicKeyOriginGate(t *testing.T) {
 		if rr.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Errorf("%s origin: CORS header on a refusal", name)
 		}
+		if rr.Header().Get("Access-Control-Allow-Credentials") != "" {
+			t.Errorf("%s origin: credentials header on a refusal", name)
+		}
 	}
 }
 
 func TestHandlePublicKeyAcceptsEventsOnly(t *testing.T) {
-	ing, sink := newPublicIngester(publicTenant())
+	ing, sink := newPublicIngester(publicTenant(), nil)
 	body := "{\"msg\":\"signup\",\"uc.event\":true,\"uc.actor\":\" user@example.com \"}\n{\"msg\":\"just a log line\"}"
 	rr := post(t, ing, body, map[string]string{
 		"X-Upcontrol-Key": "uc_pub_abc",
@@ -167,6 +174,9 @@ func TestHandlePublicKeyAcceptsEventsOnly(t *testing.T) {
 	}
 	if rr.Header().Get("Vary") != "Origin" {
 		t.Error("missing Vary: Origin")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("ACAC = %q, want true on a matched answer", got)
 	}
 	var rec Receipt
 	if err := json.Unmarshal(rr.Body.Bytes(), &rec); err != nil {
@@ -200,7 +210,7 @@ func TestHandlePublicKeyAcceptsEventsOnly(t *testing.T) {
 }
 
 func TestHandlePublicKeyRateLimit(t *testing.T) {
-	ing, _ := newPublicIngester(publicTenant())
+	ing, _ := newPublicIngester(publicTenant(), nil)
 	headers := map[string]string{
 		"X-Upcontrol-Key": "uc_pub_abc",
 		"Origin":          "https://example.com",
@@ -221,7 +231,7 @@ func TestHandlePublicKeyRateLimit(t *testing.T) {
 }
 
 func TestHandlePreflight(t *testing.T) {
-	ing, _ := newPublicIngester(publicTenant())
+	ing, _ := newPublicIngester(publicTenant(), nil)
 
 	req := httptest.NewRequest(http.MethodOptions, "/i?key=uc_pub_abc", nil)
 	req.Header.Set("Origin", "https://example.com")
@@ -236,6 +246,9 @@ func TestHandlePreflight(t *testing.T) {
 	if rr.Header().Get("Access-Control-Allow-Headers") == "" || rr.Header().Get("Access-Control-Max-Age") == "" {
 		t.Error("preflight missing allow-headers or max-age")
 	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("ACAC = %q, want true: a beacon carries credentials and the browser refuses the preflight without it", got)
+	}
 
 	// No key on the query string: a bare 204 with no CORS headers, so the
 	// browser never fires the POST.
@@ -243,17 +256,91 @@ func TestHandlePreflight(t *testing.T) {
 	req.Header.Set("Origin", "https://example.com")
 	rr = httptest.NewRecorder()
 	ing.HandlePreflight(rr, req)
-	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" {
+	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" || rr.Header().Get("Access-Control-Allow-Credentials") != "" {
 		t.Errorf("no key: status %d ACAO %q, want a bare 204", rr.Code, rr.Header().Get("Access-Control-Allow-Origin"))
 	}
 
 	// A secret key needs no CORS and gets none.
-	secretIng, _ := newPublicIngester(Tenant{TenantID: 7, ProjectID: 9})
+	secretIng, _ := newPublicIngester(Tenant{TenantID: 7, ProjectID: 9}, nil)
 	req = httptest.NewRequest(http.MethodOptions, "/i?key=uc_live_xyz", nil)
 	req.Header.Set("Origin", "https://example.com")
 	rr = httptest.NewRecorder()
 	secretIng.HandlePreflight(rr, req)
-	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" {
+	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" || rr.Header().Get("Access-Control-Allow-Credentials") != "" {
 		t.Errorf("secret key: status %d ACAO %q, want a bare 204", rr.Code, rr.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+// stubIsBot stands in for analytics.IsBot: this package cannot import that one
+// (storage/pg imports this one), which is why the detector arrives through
+// Deps at all. The real marker list is table-tested in analytics/ua_test.go.
+func stubIsBot(userAgent string) bool {
+	s := strings.ToLower(userAgent)
+	return strings.Contains(s, "bot") || strings.Contains(s, "headless")
+}
+
+func TestHandlePublicKeyDropsBots(t *testing.T) {
+	const (
+		googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+		headless  = "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/126.0.0.0"
+		browser   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15"
+	)
+	headers := func(userAgent string) map[string]string {
+		return map[string]string{
+			"X-Upcontrol-Key": "uc_pub_abc",
+			"Origin":          "https://example.com",
+			"User-Agent":      userAgent,
+		}
+	}
+
+	for _, userAgent := range []string{googlebot, headless} {
+		ing, sink := newPublicIngester(publicTenant(), stubIsBot)
+		rr := post(t, ing, `{"msg":"signup","uc.event":true}`, headers(userAgent))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200 - a 4xx teaches a crawler to retry", userAgent, rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
+			t.Errorf("%s: ACAO = %q, want the matched origin", userAgent, got)
+		}
+		var rec Receipt
+		if err := json.Unmarshal(rr.Body.Bytes(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Accepted != 0 {
+			t.Errorf("%s: accepted %d, want 0", userAgent, rec.Accepted)
+		}
+		if len(rec.Warnings) != 1 || rec.Warnings[0].Code != "bot_dropped" {
+			t.Errorf("%s: warnings %+v, want one bot_dropped", userAgent, rec.Warnings)
+		}
+		if len(sink.rows) != 0 {
+			t.Errorf("%s: %d rows reached the sink", userAgent, len(sink.rows))
+		}
+	}
+
+	// An ordinary browser on the same key lands its event.
+	ing, sink := newPublicIngester(publicTenant(), stubIsBot)
+	if rr := post(t, ing, `{"msg":"signup","uc.event":true}`, headers(browser)); rr.Code != http.StatusOK {
+		t.Fatalf("browser: status %d", rr.Code)
+	}
+	if len(sink.rows) != 1 {
+		t.Errorf("browser: %d rows sank, want 1", len(sink.rows))
+	}
+
+	// A secret key is never filtered: a server is not a visitor.
+	secretIng, secretSink := newPublicIngester(Tenant{TenantID: 7, ProjectID: 9}, stubIsBot)
+	if rr := post(t, secretIng, `{"msg":"signup","uc.event":true}`, headers(googlebot)); rr.Code != http.StatusOK {
+		t.Fatalf("secret key: status %d", rr.Code)
+	}
+	if len(secretSink.rows) != 1 {
+		t.Errorf("secret key: %d rows sank, want the bot user agent accepted", len(secretSink.rows))
+	}
+
+	// A nil detector filters nothing.
+	offIng, offSink := newPublicIngester(publicTenant(), nil)
+	if rr := post(t, offIng, `{"msg":"signup","uc.event":true}`, headers(googlebot)); rr.Code != http.StatusOK {
+		t.Fatalf("nil detector: status %d", rr.Code)
+	}
+	if len(offSink.rows) != 1 {
+		t.Errorf("nil detector: %d rows sank, want 1", len(offSink.rows))
 	}
 }

@@ -28,6 +28,10 @@ func TestParseUA(t *testing.T) {
 		{"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "bot", "", ""},
 		{"Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/126.0.0.0", "bot", "", ""},
 		{"Mozilla/5.0 (compatible; bingbot/2.0)", "bot", "", ""},
+		{"Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", "bot", "", ""},
+		// "bot" inside a handset model is a visitor, not a crawler: this list gates
+		// customer ingest now, and a false positive drops a real person's events.
+		{"Mozilla/5.0 (Linux; Android 11; CUBOT NOTE 20) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36", "mobile", "android", "chrome"},
 		{"Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)", "bot", "", ""},
 		{"Mozilla/5.0 (Linux; Android 11) Chrome/90 Mobile Safari/537.36 Lighthouse", "bot", "", ""},
 		{"Datadog-Monitoring/1.0", "bot", "", ""},
@@ -38,6 +42,11 @@ func TestParseUA(t *testing.T) {
 		if got.Device != c.device || got.OS != c.os || got.Browser != c.brw {
 			t.Errorf("parseUA(%q) = {%s %s %s}, want {%s %s %s}",
 				c.ua, got.Device, got.OS, got.Browser, c.device, c.os, c.brw)
+		}
+		// IsBot is what the ingest door is wired to; its tests inject a stub, so
+		// this is the one place the real detector is pinned.
+		if IsBot(c.ua) != (c.device == "bot") {
+			t.Errorf("IsBot(%q) = %v, want %v", c.ua, IsBot(c.ua), c.device == "bot")
 		}
 	}
 }

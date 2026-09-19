@@ -493,6 +493,16 @@ func TestFrozenProjectKeysStayRevocable(t *testing.T) {
 		t.Fatalf("issue live: %v", err)
 	}
 	path := "/v1/projects/" + f.projectWireID(f.frozen) + "/keys/revoke"
+	// An unredeemed install token is one more key waiting to be minted: the
+	// lever must take it too, and leave the sibling project's alone.
+	for _, project := range []int64{f.frozen, f.live} {
+		if _, err := f.pool.Raw().Exec(ctx,
+			`INSERT INTO install_token (tenant_id, project_id, token_hash, expires_at)
+			 VALUES ($1, $2, sha256(convert_to($3, 'UTF8')), now() + interval '1 day')`,
+			f.tenantID, project, fmt.Sprintf("uct_revoke_%d_%d", project, time.Now().UnixNano())); err != nil {
+			t.Fatalf("seed install token: %v", err)
+		}
+	}
 
 	owner := f.cookie
 	guest := seedPerson(t, f.pool, fmt.Sprintf("keys-guest-%d@example.com", time.Now().UnixNano()))
@@ -522,6 +532,15 @@ func TestFrozenProjectKeysStayRevocable(t *testing.T) {
 	}
 	if revoked != 2 || live != 1 {
 		t.Fatalf("after revoke: frozen revoked rows = %d (want 2, kept), live active = %d (want 1)", revoked, live)
+	}
+	var frozenTokens, liveTokens int
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE project_id = $1), count(*) FILTER (WHERE project_id = $2)
+		   FROM install_token WHERE project_id IN ($1, $2)`, f.frozen, f.live).Scan(&frozenTokens, &liveTokens); err != nil {
+		t.Fatalf("read install tokens: %v", err)
+	}
+	if frozenTokens != 0 || liveTokens != 1 {
+		t.Fatalf("after revoke: install tokens frozen = %d (want 0), live = %d (want 1, a sibling keeps its own)", frozenTokens, liveTokens)
 	}
 }
 
