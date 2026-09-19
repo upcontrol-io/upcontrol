@@ -194,6 +194,7 @@ const (
 	DashboardWidgetKindDonut      DashboardWidgetKind = "donut"
 	DashboardWidgetKindExperiment DashboardWidgetKind = "experiment"
 	DashboardWidgetKindFunnel     DashboardWidgetKind = "funnel"
+	DashboardWidgetKindHeatmap    DashboardWidgetKind = "heatmap"
 	DashboardWidgetKindLine       DashboardWidgetKind = "line"
 	DashboardWidgetKindLogs       DashboardWidgetKind = "logs"
 	DashboardWidgetKindNetwork    DashboardWidgetKind = "network"
@@ -216,6 +217,8 @@ func (e DashboardWidgetKind) Valid() bool {
 	case DashboardWidgetKindExperiment:
 		return true
 	case DashboardWidgetKindFunnel:
+		return true
+	case DashboardWidgetKindHeatmap:
 		return true
 	case DashboardWidgetKindLine:
 		return true
@@ -321,6 +324,48 @@ func (e HealthStatus) Valid() bool {
 	case HealthStatusNodata:
 		return true
 	case HealthStatusOk:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for HeatmapDevice.
+const (
+	Desktop HeatmapDevice = "desktop"
+	Mobile  HeatmapDevice = "mobile"
+	Tablet  HeatmapDevice = "tablet"
+)
+
+// Valid indicates whether the value is a known member of the HeatmapDevice enum.
+func (e HeatmapDevice) Valid() bool {
+	switch e {
+	case Desktop:
+		return true
+	case Mobile:
+		return true
+	case Tablet:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for HeatmapRange.
+const (
+	HeatmapRangeN24h HeatmapRange = "24h"
+	HeatmapRangeN31d HeatmapRange = "31d"
+	HeatmapRangeN7d  HeatmapRange = "7d"
+)
+
+// Valid indicates whether the value is a known member of the HeatmapRange enum.
+func (e HeatmapRange) Valid() bool {
+	switch e {
+	case HeatmapRangeN24h:
+		return true
+	case HeatmapRangeN31d:
+		return true
+	case HeatmapRangeN7d:
 		return true
 	default:
 		return false
@@ -819,6 +864,24 @@ func (e WatchStatus) Valid() bool {
 	}
 }
 
+// Defines values for WebBeaconT.
+const (
+	Heat WebBeaconT = "heat"
+	View WebBeaconT = "view"
+)
+
+// Valid indicates whether the value is a known member of the WebBeaconT enum.
+func (e WebBeaconT) Valid() bool {
+	switch e {
+	case Heat:
+		return true
+	case View:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PostV1KeysJSONBodyKind.
 const (
 	PostV1KeysJSONBodyKindPublic PostV1KeysJSONBodyKind = "public"
@@ -882,6 +945,27 @@ func (e GetV1LogsParamsLevel) Valid() bool {
 	case GetV1LogsParamsLevelInfo:
 		return true
 	case GetV1LogsParamsLevelWarn:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetWHeatmapParamsRange.
+const (
+	GetWHeatmapParamsRangeN24h GetWHeatmapParamsRange = "24h"
+	GetWHeatmapParamsRangeN31d GetWHeatmapParamsRange = "31d"
+	GetWHeatmapParamsRangeN7d  GetWHeatmapParamsRange = "7d"
+)
+
+// Valid indicates whether the value is a known member of the GetWHeatmapParamsRange enum.
+func (e GetWHeatmapParamsRange) Valid() bool {
+	switch e {
+	case GetWHeatmapParamsRangeN24h:
+		return true
+	case GetWHeatmapParamsRangeN31d:
+		return true
+	case GetWHeatmapParamsRangeN7d:
 		return true
 	default:
 		return false
@@ -1209,6 +1293,57 @@ type HealthLine struct {
 
 // HealthStatus defines model for HealthStatus.
 type HealthStatus string
+
+// HeatCell defines model for HeatCell.
+type HeatCell struct {
+	N        int    `json:"n"`
+	Selector string `json:"selector"`
+
+	// X The position inside the element, in 64ths of its width.
+	X int `json:"x"`
+
+	// Y The same, in 64ths of its height.
+	Y int `json:"y"`
+}
+
+// Heatmap defines model for Heatmap.
+type Heatmap struct {
+	Clicks []HeatCell    `json:"clicks"`
+	Device HeatmapDevice `json:"device"`
+
+	// HeatPages How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them.
+	HeatPages *int         `json:"heatPages,omitempty"`
+	Moves     []HeatCell   `json:"moves"`
+	Path      string       `json:"path"`
+	Rage      []HeatCell   `json:"rage"`
+	Range     HeatmapRange `json:"range"`
+
+	// Scroll 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %.
+	Scroll []int `json:"scroll"`
+
+	// Views Page views of this path on this device in the range: what every other number is read against.
+	Views int `json:"views"`
+}
+
+// HeatmapDevice defines model for Heatmap.Device.
+type HeatmapDevice string
+
+// HeatmapRange defines model for Heatmap.Range.
+type HeatmapRange string
+
+// HeatmapLink defines model for HeatmapLink.
+type HeatmapLink struct {
+	ExpiresAt time.Time `json:"expiresAt"`
+
+	// Url The page with `#uc-heatmap=<token>` on it.
+	Url string `json:"url"`
+}
+
+// HeatmapLinkRequest defines model for HeatmapLinkRequest.
+type HeatmapLinkRequest struct {
+	// Path Starts with /, at most 256 bytes.
+	Path string `json:"path"`
+}
 
 // Incident defines model for Incident.
 type Incident struct {
@@ -1546,6 +1681,9 @@ type PlanResponse struct {
 
 	// TelegramRooms Whether Telegram groups and channels may connect as broadcast destinations (false on Free). The invite screen words its copy from this capability, never from the plan name; the enforcing wall is the bot's own refusal at redeem time.
 	TelegramRooms *bool `json:"telegramRooms,omitempty"`
+
+	// WebVisits The website tag's visits this UTC month, one visitor on one UTC day per project, counted across the workspace's projects, against the plan's plan_entitlement.web_visits_month. Past `max` POST /w stores nothing until the month turns and the visitor sees no error. Absent when the plan is unlimited (Self-hosted), like projects.
+	WebVisits *UsedMax `json:"webVisits,omitempty"`
 }
 
 // ProbeResult The raw outcome of the live request. Field names are snake_case here because that is the shape already on the wire; the rest of /v1 is camelCase.
@@ -2031,6 +2169,41 @@ type WatchRow struct {
 // WatchStatus defines model for WatchStatus.
 type WatchStatus string
 
+// WebBeacon One request from `uc.js`. `t: view` is a page view, sent on load and on
+// every path change. `t: heat` is everything one page view did,
+// aggregated in the page and sent once, when the tab hides or the path
+// changes. Selectors are CSS paths the script builds from ids and
+// `:nth-of-type`, never from class names, which a build re-hashes.
+type WebBeacon struct {
+	// C heat: at most 300 clicks as [selector, fx, fy, clicks, rage clicks]; fx and fy are the position inside the element in 64ths.
+	C *[][]interface{} `json:"c,omitempty"`
+
+	// M heat: at most 600 mouse cells as [selector, fx, fy, samples], sampled every 100 ms on a fine pointer that can hover.
+	M *[][]interface{} `json:"m,omitempty"`
+
+	// P location.pathname, at most 256 bytes.
+	P string `json:"p"`
+
+	// Q view: location.search. Only utm_source, utm_medium and utm_campaign are kept.
+	Q *string `json:"q,omitempty"`
+
+	// R view: document.referrer. Stored as its host; a referrer on the page's own host is dropped.
+	R *string `json:"r,omitempty"`
+
+	// S heat: the deepest reach, (scrollY + innerHeight) / document height, clamped to 0..1.
+	S *float32   `json:"s,omitempty"`
+	T WebBeaconT `json:"t"`
+
+	// V The beacon format, 1.
+	V int `json:"v"`
+
+	// W window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop.
+	W int `json:"w"`
+}
+
+// WebBeaconT defines model for WebBeacon.T.
+type WebBeaconT string
+
 // BadRequest defines model for BadRequest.
 type BadRequest = Error
 
@@ -2241,6 +2414,29 @@ type PostV1TelegramInvitesJSONBody struct {
 	PersonId *string `json:"personId,omitempty"`
 }
 
+// PostWParams defines parameters for PostW.
+type PostWParams struct {
+	Key string `form:"key" json:"key"`
+}
+
+// GetWHeatmapParams defines parameters for GetWHeatmap.
+type GetWHeatmapParams struct {
+	Token string `form:"token" json:"token"`
+
+	// Key The page's public key, the script tag's `data-key`. It must be a live public key of the token's project, or the read is a 401 `bad_token`: anyone may list a stranger's origin on a key of their own, and their token must not draw their data on the stranger's page.
+	Key  string `form:"key" json:"key"`
+	Path string `form:"path" json:"path"`
+
+	// W The viewer's window width, bucketed like a beacon's `w`.
+	W int `form:"w" json:"w"`
+
+	// Range Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used.
+	Range *GetWHeatmapParamsRange `form:"range,omitempty" json:"range,omitempty"`
+}
+
+// GetWHeatmapParamsRange defines parameters for GetWHeatmap.
+type GetWHeatmapParamsRange string
+
 // PostHooksProviderJSONRequestBody defines body for PostHooksProvider for application/json ContentType.
 type PostHooksProviderJSONRequestBody PostHooksProviderJSONBody
 
@@ -2289,6 +2485,9 @@ type PostV1EventJSONRequestBody PostV1EventJSONBody
 // PostV1EventTextRequestBody defines body for PostV1Event for text/plain ContentType.
 type PostV1EventTextRequestBody = PostV1EventTextBody
 
+// PostV1HeatmapLinkJSONRequestBody defines body for PostV1HeatmapLink for application/json ContentType.
+type PostV1HeatmapLinkJSONRequestBody = HeatmapLinkRequest
+
 // PostV1InstallRedeemJSONRequestBody defines body for PostV1InstallRedeem for application/json ContentType.
 type PostV1InstallRedeemJSONRequestBody PostV1InstallRedeemJSONBody
 
@@ -2336,3 +2535,6 @@ type PutV1StatusPageJSONRequestBody = StatusPageUpdate
 
 // PostV1TelegramInvitesJSONRequestBody defines body for PostV1TelegramInvites for application/json ContentType.
 type PostV1TelegramInvitesJSONRequestBody PostV1TelegramInvitesJSONBody
+
+// PostWTextRequestBody defines body for PostW for text/plain ContentType.
+type PostWTextRequestBody = WebBeacon

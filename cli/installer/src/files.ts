@@ -107,17 +107,24 @@ export function findKey(cwd: string, env: NodeJS.ProcessEnv = process.env): KeyS
   return 'none';
 }
 
-export function readDotenvKey(cwd: string): string | null {
+// readDotenv reads one variable from .env; null when it is absent or empty.
+// name is one of the two UPCONTROL_ constants below, never input.
+function readDotenv(cwd: string, name: string): string | null {
   const p = join(cwd, '.env');
   if (!existsSync(p)) return null;
+  const re = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*(.+?)\\s*$`);
   for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^\s*(?:export\s+)?UPCONTROL_API_KEY\s*=\s*(.+?)\s*$/);
+    const m = line.match(re);
     if (m) {
       const v = m[1].replace(/^["']|["']$/g, '');
       if (v) return v;
     }
   }
   return null;
+}
+
+export function readDotenvKey(cwd: string): string | null {
+  return readDotenv(cwd, 'UPCONTROL_API_KEY');
 }
 
 interface GitignoreResult {
@@ -143,16 +150,65 @@ export function ensureEnvIgnored(cwd: string): GitignoreResult {
   return { covered: true, fixed: true };
 }
 
-// writeDotenvKey appends (or creates) .env with the key. Call ONLY after
+// writeDotenv appends (or creates) .env with one variable. Call ONLY after
 // ensureEnvIgnored. The value is never printed by any caller.
-export function writeDotenvKey(cwd: string, key: string): void {
+function writeDotenv(cwd: string, name: string, value: string): void {
   const p = join(cwd, '.env');
   if (existsSync(p)) {
+    if (readDotenv(cwd, name)) return; // present already - never overwrite silently
     const raw = readFileSync(p, 'utf8');
-    if (readDotenvKey(cwd)) return; // present already - never overwrite silently
     const sep = raw.length === 0 || raw.endsWith('\n') ? '' : '\n';
-    appendFileSync(p, `${sep}UPCONTROL_API_KEY=${key}\n`);
+    appendFileSync(p, `${sep}${name}=${value}\n`);
     return;
   }
-  writeFileSync(p, `UPCONTROL_API_KEY=${key}\n`);
+  writeFileSync(p, `${name}=${value}\n`);
+}
+
+export function writeDotenvKey(cwd: string, key: string): void {
+  writeDotenv(cwd, 'UPCONTROL_API_KEY', key);
+}
+
+// The public web key rides the same .env (so a rerun reuses it) and the same
+// never-overwrite rule: a value already there is the one the site's tag carries.
+// .env stays ignored as a whole, public key included.
+export function readDotenvPublicKey(cwd: string): string | null {
+  return readDotenv(cwd, 'UPCONTROL_PUBLIC_KEY');
+}
+
+export function writeDotenvPublicKey(cwd: string, key: string): void {
+  writeDotenv(cwd, 'UPCONTROL_PUBLIC_KEY', key);
+}
+
+/** One site argument as the origins a public key is bound to, [] when the
+ *  argument is not a usable address. Ported from the app's website card so both
+ *  doors scope a key identically: a bare host gets `http://` only for localhost
+ *  and 127.*, `https://` otherwise; a real domain also gets its www/apex twin,
+ *  because a site answers on both and a key minted for one is silently refused
+ *  on the other. */
+export function siteOrigins(site: string): string[] {
+  const out: string[] = [];
+  try {
+    const typed = site.trim();
+    const withScheme =
+      typed.includes('://') ? typed : `${typed.startsWith('localhost') || typed.startsWith('127.') ? 'http' : 'https'}://${typed}`;
+    const url = new URL(withScheme);
+    // An opaque origin ("null") would be compared byte for byte by the server and
+    // match every sandboxed page in the world: exactly the unscoped key the kinds
+    // exist to prevent.
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return [];
+    // A browser never sends "*" in an Origin, so a wildcard host mints a key
+    // that authenticates nowhere and is printed back as if it were a scope.
+    if (!/^[a-z0-9.-]+$/.test(url.hostname) && !url.hostname.startsWith('[')) return [];
+    out.push(url.origin);
+    const host = url.hostname;
+    if (host !== 'localhost' && !/^[\d.]+$/.test(host) && !host.startsWith('[')) {
+      const twin = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
+      out.push(`${url.protocol}//${twin}${url.port ? `:${url.port}` : ''}`);
+    }
+  } catch {
+    // An address the parser cannot read is refused whole: guessing at it is how a key
+    // ends up scoped to an origin nobody meant.
+    return [];
+  }
+  return out;
 }

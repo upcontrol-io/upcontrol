@@ -793,7 +793,7 @@ components:
         id: { type: string, example: "w_1" }
         kind:
           type: string
-          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown]
+          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap]
         title: { type: string }
         metrics:
           type: array
@@ -1106,6 +1106,15 @@ components:
                     The workspace's frozen projects: snapshots past the plan's
                     projects limit, kept whole and thawed by a plan that carries
                     them. Absent when zero.
+        webVisits:
+          description: >
+            The website tag's visits this UTC month, one visitor on one UTC day
+            per project, counted across the workspace's projects, against the
+            plan's plan_entitlement.web_visits_month. Past `max` POST /w stores
+            nothing until the month turns and the visitor sees no error. Absent
+            when the plan is unlimited (Self-hosted), like projects.
+          allOf:
+            - $ref: "#/components/schemas/UsedMax"
         telegramRooms:
           type: boolean
           description: >
@@ -1629,6 +1638,74 @@ components:
             - sampling_raised
             - class_shed
         count: { type: integer }
+    # --- the web door -------------------------------------------------------
+    WebBeacon:
+      type: object
+      description: |
+        One request from `uc.js`. `t: view` is a page view, sent on load and on
+        every path change. `t: heat` is everything one page view did,
+        aggregated in the page and sent once, when the tab hides or the path
+        changes. Selectors are CSS paths the script builds from ids and
+        `:nth-of-type`, never from class names, which a build re-hashes.
+      required: [v, t, p, w]
+      properties:
+        v: { type: integer, description: "The beacon format, 1." }
+        t: { type: string, enum: [view, heat] }
+        p: { type: string, description: "location.pathname, at most 256 bytes." }
+        w: { type: integer, description: "window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop." }
+        r: { type: string, description: "view: document.referrer. Stored as its host; a referrer on the page's own host is dropped." }
+        q: { type: string, description: "view: location.search. Only utm_source, utm_medium and utm_campaign are kept." }
+        s: { type: number, description: "heat: the deepest reach, (scrollY + innerHeight) / document height, clamped to 0..1." }
+        c:
+          type: array
+          description: "heat: at most 300 clicks as [selector, fx, fy, clicks, rage clicks]; fx and fy are the position inside the element in 64ths."
+          items: { type: array, items: {} }
+        m:
+          type: array
+          description: "heat: at most 600 mouse cells as [selector, fx, fy, samples], sampled every 100 ms on a fine pointer that can hover."
+          items: { type: array, items: {} }
+    HeatCell:
+      type: object
+      required: [selector, x, y, n]
+      properties:
+        selector: { type: string }
+        x: { type: integer, minimum: 0, maximum: 63, description: "The position inside the element, in 64ths of its width." }
+        y: { type: integer, minimum: 0, maximum: 63, description: "The same, in 64ths of its height." }
+        n: { type: integer }
+    Heatmap:
+      type: object
+      required: [path, device, range, views, clicks, rage, moves, scroll]
+      properties:
+        path: { type: string }
+        device: { type: string, enum: [mobile, tablet, desktop] }
+        range: { type: string, enum: ["24h", "7d", "31d"] }
+        views:
+          type: integer
+          description: "Page views of this path on this device in the range: what every other number is read against."
+        clicks: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        rage: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        moves: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        scroll:
+          type: array
+          description: "21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %."
+          items: { type: integer }
+        heatPages:
+          type: integer
+          description: >
+            How many pages this plan keeps a heatmap for, its busiest by views.
+            Absent when unlimited. A page with views and no heat is one outside
+            them.
+    HeatmapLinkRequest:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string, description: "Starts with /, at most 256 bytes." }
+    HeatmapLink:
+      type: object
+      required: [url, expiresAt]
+      properties:
+        url: { type: string, description: "The page with `#uc-heatmap=<token>` on it." }
+        expiresAt: { type: string, format: date-time }
     IngestReceipt:
       type: object
       required: [accepted]
@@ -2253,12 +2330,21 @@ paths:
     post:
       tags: [sources]
       summary: Issue another key for the current project.
+      security:
+        - cookieAuth: []
+        - apiKey: []
       description: >
         The full key is in the answer and nowhere else, ever again. A project is
         capped at 5 keys that still work (active or rotating); revoked ones do
         not count, so the cap is on live credentials rather than on history. The
         cap is a fixed number and NOT a plan axis: there is no key row in
         Pricing, so there is no wall.
+
+        A project's own secret key may be presented instead of a session
+        (`X-Upcontrol-Key` or Bearer), and then it mints a PUBLIC key only: that
+        is how `npx upcontrol web` puts the script tag on a site without anyone
+        opening the app. A key never mints a secret key (403 `key_mints_secret`),
+        and a public key cannot mint at all (401).
       requestBody:
         required: false
         content:
@@ -2299,7 +2385,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: notify_role }
+        "403": { description: "`notify_role`, or `key_mints_secret`: a presented key asked for a secret key." }
         "409":
           description: >
             `key_limit`: the project already holds 5 keys that work. Revoke one
@@ -3463,6 +3549,9 @@ paths:
         which message names arrived in the last 15 minutes — enough to tell
         "key never worked" from "points placed in code that has not run" from
         "names drifted off the dictionary".
+        `web` counts the `uc.pageview` events of the same 15 minutes: a page
+        view never enters the log window, so without it a site carrying the
+        script tag would read as silent.
       responses:
         "200":
           description: OK
@@ -3475,6 +3564,12 @@ paths:
                   verified: { type: boolean }
                   verifiedAt: { type: string, format: date-time }
                   lines: { type: integer }
+                  web:
+                    type: object
+                    required: [views]
+                    properties:
+                      views: { type: integer }
+                      lastAt: { type: string, format: date-time }
                   recent:
                     type: array
                     items:
@@ -3485,6 +3580,34 @@ paths:
                         count: { type: integer }
                         lastAt: { type: string, format: date-time }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/heatmap/link:
+    post:
+      tags: [web]
+      summary: |
+        Mint a read-only link, good for one hour, that opens a page of the
+        site with its heatmap drawn over it. Any member of the current project
+        may. The page opens on an origin listed on one of the project's live
+        public keys, the first https one, newest key first: that is where the
+        script runs and the only place the overlay's read answers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HeatmapLinkRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HeatmapLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`no_public_key`: the project has no live public key, so no page carries the script."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/install/token:
     post:
@@ -3671,6 +3794,106 @@ paths:
           description: Spool full (always with Retry-After).
           headers:
             Retry-After: { schema: { type: string } }
+
+  # --- the web door: the script tag, what it sends, what the overlay reads --
+  /uc.js:
+    get:
+      tags: [web]
+      summary: |
+        The script behind `<script defer src="…/uc.js" data-key="uc_pub_…">`.
+        It records page views, clicks, scroll depth and mouse movement for the
+        public key in its `data-key` and sends them to `POST /w`. It sets no
+        cookie and stores nothing. Opened through a heatmap link
+        (`#uc-heatmap=<token>`) it records nothing and draws the page's heatmap
+        over the page instead.
+      security: []
+      x-hand-written: true
+      responses:
+        "200":
+          description: The script.
+          content:
+            text/javascript: { schema: { type: string } }
+
+  /w:
+    post:
+      tags: [web]
+      summary: |
+        What `uc.js` sends, one `WebBeacon` per request, as `text/plain` so a
+        browser posts it without a preflight. A public key only, in the query:
+        a secret key here is a 401, because it would be sitting in a page. The
+        gates are `/i`'s: the exact Origin, bots answered 200 `bot_dropped`
+        with nothing stored, and the per-key, per-address budget.
+
+        Nothing reaches the log ring. A view is a `uc.pageview` event with the
+        labels path, referrer, utm_source, utm_medium, utm_campaign, country,
+        device, browser and os; its actor is a hash of the address and the
+        browser under a salt that changes every day, so a visitor is counted
+        without a cookie and cannot be followed from one day to the next. Heat
+        is added into per-day counts per path, device and element cell. The
+        body is at most 64 KB; every list is capped and every number clamped
+        rather than refused.
+      security: []
+      x-hand-written: true
+      parameters:
+        - { name: key, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          text/plain: { schema: { $ref: "#/components/schemas/WebBeacon" } }
+      responses:
+        "204": { description: Stored. }
+        "200":
+          description: A known bot, answered as if it had landed; nothing stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { description: The body is over 64 KB. }
+        "429":
+          description: A public key past its per-key, per-address budget.
+          headers:
+            Retry-After: { schema: { type: string } }
+
+  /w/heatmap:
+    get:
+      tags: [web]
+      summary: |
+        What the overlay draws: one path, on the device bucket the viewer's
+        window falls in, over a range. Authorised by the `uch_` token a
+        heatmap link carries, sent in the query so the read is a plain GET
+        with no preflight, together with the page's own public key. The CORS
+        headers are present only for an Origin listed on one of the project's
+        live public keys. A range deeper than the plan's history is a 402.
+      security: []
+      x-hand-written: true
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+        - name: key
+          in: query
+          required: true
+          description: "The page's public key, the script tag's `data-key`. It must be a live public key of the token's project, or the read is a 401 `bad_token`: anyone may list a stranger's origin on a key of their own, and their token must not draw their data on the stranger's page."
+          schema: { type: string }
+        - { name: path, in: query, required: true, schema: { type: string } }
+        - name: w
+          in: query
+          required: true
+          description: "The viewer's window width, bucketed like a beacon's `w`."
+          schema: { type: integer }
+        - name: range
+          in: query
+          required: false
+          description: "Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used."
+          schema: { type: string, enum: ["24h", "7d", "31d"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Heatmap" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
 
   /hooks/{provider}:
     post:

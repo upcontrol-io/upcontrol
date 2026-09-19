@@ -64,6 +64,7 @@ smallest the board accepts, and a kind that is not ranged must carry no
 | `experiment` | control against its variants | 6 | 8 | 3 / 6 | yes | exactly one | `people` |
 | `retention` | weekly cohorts | 6 | 12 | 4 / 8 | no | exactly one | `people` |
 | `breakdown` | the top of one dimension | 4 | 12 | 3 / 6 | yes | exactly one | `people` |
+| `heatmap` | top pages, a Heatmap button per row | 4 | 12 | 3 / 6 | yes | exactly one | `people` |
 
 The last column is load-bearing and the validator does not check it: a card
 whose ref carries the wrong source draws nothing at all, silently. A `logs`
@@ -90,7 +91,7 @@ catalog no longer lists it; it changes nothing about what is drawn. What
 | `event` | the event name you passed to `track()` | none |
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
-| `people` | the event name, on a breakdown or an A/B test | none; `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
+| `people` | the event name, on a breakdown, an A/B test or the `heatmap` card | none; `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
 
 A `people` ref is the definition itself - the card is built from event names,
 with nothing declared elsewhere to keep in sync. It counts distinct people: an
@@ -103,6 +104,7 @@ reading:
 | `retention` | `{ "source": "people", "cohort": "week" }` - the whole project; there is nothing to name |
 | `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
 | `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows |
+| `heatmap` | `{ "source": "people", "name": "uc.pageview", "field": "path", "count": "events" }` - fixed: the web script's page views, nothing to pick |
 
 The board counts three levels, folding every other one into `info`; a `level`
 outside the three is not a filter and the card draws every level.

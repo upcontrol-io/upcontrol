@@ -113,18 +113,21 @@ func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, 
 // is any timestamp's week index and week w's Monday 00:00 UTC is
 // w·604800 − 259200. Only cohorts whose Monday falls inside [from, to)
 // answer: a cohort that began earlier would come back as a fraction of
-// itself, and the front already draws on that rule.
+// itself, and the front already draws on that rule. The server's own `uc.`
+// names stay out: a page view's actor is a visitor hash that changes every
+// day, so each day's visitors would join as a new cohort and never return.
 func (s *Store) RetentionCohorts(ctx context.Context, tenantID, projectID int64, from, to time.Time) ([]LabelSum, error) {
 	rows, err := s.pool.Query(ctx, `
 		WITH firsts AS (
 			SELECT actor, floor((extract(epoch from min(ts)) + 259200) / 604800)::bigint AS cohort
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> ''
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'
 			 GROUP BY actor
 		), active AS (
 			SELECT actor, floor((extract(epoch from ts) + 259200) / 604800)::bigint AS wk
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND ts >= $3 AND ts < $4
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'
+			   AND ts >= $3 AND ts < $4
 		)
 		SELECT f.cohort * 604800 - 259200 AS monday, active.wk - f.cohort AS week, `+peopleCount+`
 		  FROM active JOIN firsts f USING (actor)

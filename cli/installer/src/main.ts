@@ -13,8 +13,11 @@ import {
   installSkill,
   pinSdkDependency,
   readDotenvKey,
+  readDotenvPublicKey,
+  siteOrigins,
   skillFresh,
   writeDotenvKey,
+  writeDotenvPublicKey,
 } from './files.js';
 import {
   CLI_VERSION,
@@ -23,6 +26,7 @@ import {
   endpointFrom,
   fetchInstallStatus,
   mintAnonymousProject,
+  mintPublicKey,
   readBoard,
   redeemInstallToken,
 } from './net.js';
@@ -36,13 +40,14 @@ interface Flags {
   copilot: boolean;
   noKey: boolean;
   json: boolean;
+  web: boolean;
   timeout: number;
   help: boolean;
   version: boolean;
 }
 
 function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
-  const flags: Flags = { copilot: false, noKey: false, json: false, timeout: 120, help: false, version: false };
+  const flags: Flags = { copilot: false, noKey: false, json: false, web: false, timeout: 120, help: false, version: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -70,6 +75,9 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags 
         break;
       case '--json':
         flags.json = true;
+        break;
+      case '--web':
+        flags.web = true;
         break;
       case '--timeout':
         flags.timeout = Number(argv[++i]) || 120;
@@ -108,6 +116,7 @@ Usage:
   npx upcontrol verify     wait until data provably arrives (exit 4 on failure)
   npx upcontrol status     one JSON line: endpoint, key source, skill freshness
   npx upcontrol board      print the project's dashboard layout as JSON
+  npx upcontrol web <site> print the script tag for your site (web analytics + heatmaps)
 
 Init flags:
   --token <uct_...>    one-time token from your dashboard's Connect page - lands
@@ -119,6 +128,7 @@ Init flags:
 
 Verify flags:
   --timeout <sec>      how long to wait (default 120)
+  --web                page views pass too: a site-only install, the script tag and no SDK
   --json               machine-readable output
 
 Board flags:
@@ -157,7 +167,7 @@ async function cmdInit(det: Detection, flags: Flags): Promise<number> {
     const gi = keySource === 'dotenv' ? ensureEnvIgnored(cwd) : { fixed: false };
     if (flags.key !== (process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd))) {
       const what = flags.token ? 'the token was not used' : 'the key from --key was not written';
-      keyNote = `a key is already set in ${where} - left as is, and ${what}. Remove that line and rerun to install this project's key.`;
+      keyNote = `a key is already set in ${where} - left as is, and ${what}. Remove that line, and the UPCONTROL_PUBLIC_KEY line if there is one, and rerun to install this project's key.`;
     }
     if (gi.fixed) keyNote = (keyNote ? keyNote + ' ' : '') + '.gitignore did not cover .env - fixed.';
   } else if (flags.token) {
@@ -302,6 +312,7 @@ async function cmdStatus(flags: Flags): Promise<number> {
     if (st.ok) {
       result.verified = st.verified;
       result.lines = st.lines;
+      if (st.web) result.webViews = st.web.views;
     } else if (st.status === 401) {
       result.keyRejected = true;
     }
@@ -334,12 +345,18 @@ async function cmdVerify(det: Detection, flags: Flags): Promise<number> {
   let printedWaiting = false;
   for (;;) {
     last = await fetchInstallStatus(endpoint, key);
-    if (last.ok && last.verified) {
+    // Page views pass only when asked for (--web, a site-only install): any
+    // visit to the project's site would otherwise hide an SDK that never connected.
+    const webViews = last.ok ? (last.web?.views ?? 0) : 0;
+    if (last.ok && (last.verified || (flags.web && webViews > 0))) {
       const names = (last.recent ?? []).map((r) => `${r.name} x${r.count}`).join(', ');
       emit(
-        { verified: true, verifiedAt: last.verifiedAt, lines: last.lines, recent: last.recent },
-        `✓ install_verified - key ok, transport ok, scrubber ok\n` +
-          `  lines in window: ${last.lines}\n` +
+        { verified: last.verified === true, verifiedAt: last.verifiedAt, lines: last.lines, web: last.web, recent: last.recent },
+        (last.verified
+          ? `✓ install_verified - key ok, transport ok, scrubber ok\n`
+          : `✓ verified - page views arriving\n`) +
+          `  lines in window: ${last.lines ?? 0}\n` +
+          (webViews > 0 ? `  page views arriving: ${webViews}\n` : '') +
           (names ? `  arriving now: ${names}\n` : '') +
           `  Nothing else needed.`,
       );
@@ -370,20 +387,27 @@ async function cmdVerify(det: Detection, flags: Flags): Promise<number> {
   // Timed out: distinguish "nothing at all" from "lines but no marker" (the
   // marker may also have been displaced by the ring on an old install).
   const lines = last?.ok ? (last.lines ?? 0) : 0;
+  const views = last?.ok ? (last.web?.views ?? 0) : 0;
+  const webHint = views > 0
+    ? `page views are arriving (${views}); for a site-only install, with the script tag and no SDK, run \`npx upcontrol verify --web\``
+    : '';
+  const webFields = webHint ? { web: last?.web, hint: webHint } : {};
   if (lines > 0) {
     const names = (last?.recent ?? []).map((r) => r.name).join(', ');
     emit(
-      { verified: false, error: 'no_marker_but_lines', lines, recent: last?.recent },
+      { verified: false, error: 'no_marker_but_lines', lines, recent: last?.recent, ...webFields },
       `verify: ${lines} lines are arriving but no install_verified marker in the window.\n` +
         (names ? `  arriving: ${names}\n` : '') +
         `  If this is an old install, that is normal (the ring displaced it). For a fresh\n` +
-        `  install it means the app is running an SDK that never connected - restart it.`,
+        `  install it means the app is running an SDK that never connected - restart it.` +
+        (webHint ? `\n  ${webHint}.` : ''),
     );
     return 4;
   }
   emit(
-    { verified: false, error: 'timeout', waitedSec: flags.timeout },
-    `verify FAILED: nothing arrived in ${flags.timeout}s.\n` +
+    { verified: false, error: 'timeout', waitedSec: flags.timeout, ...webFields },
+    `verify FAILED: ${webHint ? 'no install_verified marker' : 'nothing arrived'} in ${flags.timeout}s.\n` +
+      (webHint ? `  ${webHint}.\n` : '') +
       `  - is the app running with the key in its environment? (dotenv loaded?)\n` +
       `  - did the code path with the SDK import actually execute?\n` +
       `  Run \`npx upcontrol status\` for where the key was found, and\n` +
@@ -473,6 +497,87 @@ async function cmdBoard(flags: Flags): Promise<number> {
   return 0;
 }
 
+// The web command's one job: turn the site addresses into the tag an agent
+// places once. The public key is printed ONLY inside the tag; the secret key
+// that minted it never reaches any output, in any mode or error.
+async function cmdWeb(det: Detection, flags: Flags, args: string[]): Promise<number> {
+  const cwd = process.cwd();
+  const endpoint = endpointFrom(process.env, flags.endpoint);
+  if (args.length === 0) {
+    err('usage: npx upcontrol web <site> [site...]');
+    return 2;
+  }
+  const key = process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd);
+  if (!key) {
+    err('no key: run npx upcontrol init first');
+    return 2;
+  }
+  const origins: string[] = [];
+  for (const site of args) {
+    const fromSite = siteOrigins(site);
+    if (fromSite.length === 0) {
+      err(`not a site address: ${site}`);
+      return 2;
+    }
+    origins.push(...fromSite);
+  }
+  const unique = [...new Set(origins)];
+
+  let publicKey = process.env.UPCONTROL_PUBLIC_KEY?.trim() || readDotenvPublicKey(cwd);
+  let state: 'minted' | 'reused';
+  if (publicKey) {
+    state = 'reused';
+  } else {
+    const mint = await mintPublicKey(endpoint, key, new URL(unique[0]).hostname, unique);
+    if (!mint.ok) {
+      if (mint.error === 'unreachable') {
+        err(`web: cannot reach ${endpoint} - is the endpoint right (UPCONTROL_ENDPOINT)?`);
+      } else if (mint.code === 'key_limit') {
+        err('the project already has 5 keys: revoke one in the app (Sources, Manage keys)');
+      } else if (mint.code === 'bad_origin') {
+        err(`not a site address: ${unique.join(', ')}`);
+      } else if (mint.code === 'bad_key') {
+        err('the project key was refused (revoked, or retiring after a rotation): remove UPCONTROL_API_KEY from .env or the environment, then rerun the install command from the app');
+      } else {
+        err(`web: refused (HTTP ${mint.status ?? '?'})`);
+      }
+      return 3;
+    }
+    publicKey = mint.value!;
+    ensureEnvIgnored(cwd);
+    writeDotenvPublicKey(cwd, publicKey);
+    state = 'minted';
+  }
+
+  const tag = `<script defer src="${endpoint}/uc.js" data-key="${publicKey}"></script>`;
+  // A reused key covers only the sites it was minted for, whatever this run
+  // named, and no endpoint widens it: every mode says so, and only a mint
+  // reports origins.
+  let note: string | undefined;
+  if (state === 'reused') {
+    const where = process.env.UPCONTROL_PUBLIC_KEY?.trim() ? 'the environment' : '.env';
+    note =
+      `the key in ${where} covers only the sites it was minted for; to add one, revoke it in the app ` +
+      `(Sources, Manage keys), remove UPCONTROL_PUBLIC_KEY from ${where} and rerun naming every address`;
+    err(`key: reused - ${note}`);
+  }
+  if (flags.json || det.mode !== 'interactive') {
+    out(
+      JSON.stringify({
+        ok: true,
+        tag,
+        ...(note ? { note } : { origins: unique }),
+        key: state,
+        next: 'put the tag inside <head> on every page: npx upcontrol skills web',
+      }),
+    );
+    return 0;
+  }
+  out(tag);
+  out('Put it inside <head> on every page. Where that is in your framework: npx upcontrol skills web');
+  return 0;
+}
+
 async function main(): Promise<number> {
   const { cmd, args, flags } = parseArgs(process.argv.slice(2));
   const det = detect();
@@ -495,6 +600,8 @@ async function main(): Promise<number> {
       return cmdStatus(flags);
     case 'board':
       return cmdBoard(flags);
+    case 'web':
+      return cmdWeb(det, flags, args);
     default:
       out(`unknown command "${cmd}"\n`);
       out(HELP);

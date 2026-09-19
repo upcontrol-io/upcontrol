@@ -120,6 +120,12 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		}
 		resp["projects"] = projects
 	}
+	// The web visits, absent when unlimited like projects: the
+	// workspace's this UTC month, across its projects.
+	if ent.WebVisitsMonth != nil {
+		web, _ := pgstore.New(h.pool.Raw()).WebQuota(ctx, tenantID, time.Now())
+		resp["webVisits"] = map[string]int{"used": int(web.Visits), "max": int(*ent.WebVisitsMonth)}
+	}
 	writeAPIJSON(w, http.StatusOK, resp)
 }
 

@@ -27,6 +27,9 @@ diff; treat it accordingly.
    Prefer `npx upcontrol init`, which does this for you and never shows the key.
    If you must handle the key: fix `.gitignore` first, say you fixed it, and
    never echo the key anywhere - not in chat, not in code, not in a commit.
+   The one key that belongs in code is the `uc_pub_` key inside the tag
+   `npx upcontrol web` prints: it is public and bound to the site's addresses,
+   so it goes into the page's HTML. A `uc_live_` key never does.
 
 7. **Nothing in hot loops.** A point inside a per-item loop is a thousand lines
    per request. Log the outcome of the operation, not its steps.

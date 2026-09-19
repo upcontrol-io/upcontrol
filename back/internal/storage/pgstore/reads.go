@@ -20,12 +20,15 @@ func (s *Store) Raw() *pgxpool.Pool { return s.pool }
 
 // EventsAround returns one project's events in [from, to] CLOSEST to `at`,
 // returned in time order; bounded by limit and window (this runs on the
-// card's read path). A sibling project's deploy is not this incident's evidence.
+// card's read path). A sibling project's deploy is not this incident's evidence,
+// and neither is a page view: the server's own `uc.` names would crowd the
+// deploys out of the budget.
 func (s *Store) EventsAround(ctx context.Context, tenantID, projectID int64, from, to, at time.Time, limit int) ([]EventRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT ts, name, labels, amount_minor, currency
 		  FROM events
 		 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND ts <= $4
+		   AND name NOT LIKE 'uc.%'
 		 ORDER BY abs(extract(epoch from ($5 - ts))) ASC, ts ASC
 		 LIMIT $6`, tenantID, projectID, from, to, at, limit)
 	if err != nil {

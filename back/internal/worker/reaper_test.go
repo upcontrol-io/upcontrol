@@ -234,6 +234,33 @@ func TestReapUnclaimedSparesAnAnonymousInstallThatIsIngesting(t *testing.T) {
 		install, fmt.Sprintf("uc_live_i%d", time.Now().UnixNano()), []byte("hash")); err != nil {
 		t.Fatalf("seed api_key: %v", err)
 	}
+	// A site-only install moves no seq: the web door writes its page views
+	// straight into events, and those rows are its ingest.
+	site := seedTenant(t, pool, "reaper-site-8d", true, "8 days", false)
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, kind)
+		 SELECT $1, id, $2, $3, 'public' FROM project WHERE tenant_id = $1`,
+		site, fmt.Sprintf("uc_pub_s%d", time.Now().UnixNano()), []byte("hash-site")); err != nil {
+		t.Fatalf("seed the site's api_key: %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		 SELECT $1, id, now(), 'uc.pageview', '{}', 'v' FROM project WHERE tenant_id = $1`, site); err != nil {
+		t.Fatalf("seed a page view: %v", err)
+	}
+	// Its page views expire past the web depth (a day on Free); the month's
+	// visits in web_usage still say it is in use.
+	trimmed := seedTenant(t, pool, "reaper-site-trimmed-8d", true, "8 days", false)
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, kind)
+		 SELECT $1, id, $2, $3, 'public' FROM project WHERE tenant_id = $1`,
+		trimmed, fmt.Sprintf("uc_pub_t%d", time.Now().UnixNano()), []byte("hash-trimmed")); err != nil {
+		t.Fatalf("seed the trimmed site's api_key: %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO web_usage (tenant_id, month, visits) VALUES ($1, date_trunc('month', now())::date, 3)`, trimmed); err != nil {
+		t.Fatalf("seed the month's visits: %v", err)
+	}
 
 	if err := reapUnclaimed(ctx, pool); err != nil {
 		t.Fatalf("reapUnclaimed: %v", err)
@@ -241,6 +268,12 @@ func TestReapUnclaimedSparesAnAnonymousInstallThatIsIngesting(t *testing.T) {
 
 	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, install); n != 1 {
 		t.Fatalf("an ingesting anonymous install was reaped (rows = %d, want 1)", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, site); n != 1 {
+		t.Fatalf("a site-only install was reaped (rows = %d, want 1)", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, trimmed); n != 1 {
+		t.Fatalf("a site-only install whose page views expired was reaped (rows = %d, want 1)", n)
 	}
 	// The neighbour proves the exclusion is real and not a dead statement:
 	// same age, same shape, nothing ever ingested.

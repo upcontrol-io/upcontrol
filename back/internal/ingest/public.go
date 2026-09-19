@@ -1,11 +1,13 @@
 // The public-key half of POST /i: a key that may live in a browser bundle is
 // gated on three axes a secret key never sees — an exact Origin match, a rate
-// limit per key+IP, and named events only. The gates themselves live in
-// Handle; this file holds the pieces they call.
+// limit per key+IP, and named events only. The gates are GatePublic (called
+// from Handle and the web door); this file holds them and the pieces they
+// call.
 
 package ingest
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -15,6 +17,49 @@ import (
 	"go.upcontrol.io/back/internal/ingest/decode"
 	"go.upcontrol.io/back/internal/ingest/normalize"
 )
+
+// GatePublic applies a public key's gates to a request: the exact Origin
+// match, the CORS headers a browser needs to read the answer, the bot drop and
+// the per-key, per-address budget. Returns false when it has already answered.
+func (h *Ingester) GatePublic(w http.ResponseWriter, r *http.Request, t Tenant, key string) bool {
+	origin := matchOrigin(r.Header.Get("Origin"), t.Origins)
+	if origin == "" {
+		writeJSON(w, http.StatusUnauthorized, receiptErr("bad_key"))
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Vary", "Origin")
+	// A browser beacon is sent with credentials mode "include", and the
+	// browser refuses an answer without this header even on a matched
+	// origin - every event lost, "true" returned to the page. /i reads no
+	// cookie, and the origin is an echoed match, never "*".
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	// A crawler on a public key is answered as if it had landed: a 4xx
+	// teaches it to retry, and its page views are not the customer's
+	// visitors. A nil detector filters nothing.
+	if h.d.IsBot != nil && h.d.IsBot(r.Header.Get("User-Agent")) {
+		writeJSON(w, http.StatusOK, Receipt{Warnings: []ReceiptW{{Code: "bot_dropped", Count: 1}}})
+		return false
+	}
+	if !h.pubLimiter.allow(key, clientIP(r), time.Now()) {
+		w.Header().Set("Retry-After", publicRetryAfter)
+		writeJSON(w, http.StatusTooManyRequests, receiptErr("rate_limited"))
+		return false
+	}
+	return true
+}
+
+// ResolveKey resolves a presented key to its tenant, ErrBadKey when there is none.
+func (h *Ingester) ResolveKey(ctx context.Context, key string) (Tenant, error) {
+	if key == "" || h.d.Keys == nil {
+		return Tenant{}, ErrBadKey
+	}
+	t, err := h.d.Keys.Resolve(ctx, key)
+	if err != nil {
+		return Tenant{}, ErrBadKey
+	}
+	return t, nil
+}
 
 // clientIP is the rate limiter's second key, beside the API key. Deliberately a copy of
 // analytics.ClientIP rather than an import: internal/analytics reaches storage/pg, which

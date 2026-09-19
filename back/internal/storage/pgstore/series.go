@@ -110,16 +110,25 @@ func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, si
 // multiplies rows by the field count, and the picker only needs the shape of
 // recent traffic. The `uc.` prefix is the wire's own namespace (`uc.variant`,
 // `uc.stat`), never a dimension somebody would rank people by, so those keys
-// are dropped.
+// are dropped. Page views get a small scan of their own: on a busy site they
+// would fill the whole `scan` and push every rarer event's fields out. Every
+// page view carries an actor, so the non-empty actor test filters nothing
+// there; it lets the people index serve that scan.
 func (s *Store) CatalogEventFields(ctx context.Context, tenantID, projectID int64,
 	since time.Time, scan, perEvent int) (map[string][]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT name, key FROM (
 			SELECT name, key, count(*) AS times,
 			       row_number() OVER (PARTITION BY name ORDER BY count(*) DESC) AS rn
-			  FROM (SELECT name, labels FROM events
-			         WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND labels IS NOT NULL
-			         ORDER BY ts DESC LIMIT $4) recent
+			  FROM ((SELECT name, labels FROM events
+			          WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND labels IS NOT NULL
+			            AND name <> 'uc.pageview'
+			          ORDER BY ts DESC LIMIT $4)
+			        UNION ALL
+			        (SELECT name, labels FROM events
+			          WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3 AND labels IS NOT NULL
+			            AND name = 'uc.pageview' AND actor <> ''
+			          ORDER BY ts DESC LIMIT 1000)) recent
 			    CROSS JOIN LATERAL jsonb_each_text(labels) AS pair(key, value)
 			   WHERE key NOT LIKE 'uc.%'
 			   GROUP BY name, key
@@ -235,6 +244,13 @@ func (s *Store) OldestLine(ctx context.Context, tenantID, projectID int64) (time
 	return s.oldest(ctx, `SELECT min(ts) FROM logs WHERE tenant_id = $1 AND project_id = $2`, tenantID, projectID)
 }
 
+// OldestPageview is the same fact for the web door's page views, which
+// history-trim expires past the web depth.
+func (s *Store) OldestPageview(ctx context.Context, tenantID, projectID int64) (time.Time, bool, error) {
+	return s.oldest(ctx, `SELECT min(ts) FROM events WHERE tenant_id = $1 AND project_id = $2
+		AND name = 'uc.pageview' AND actor <> ''`, tenantID, projectID)
+}
+
 func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int64) (time.Time, bool, error) {
 	var at *time.Time
 	if err := s.pool.QueryRow(ctx, sql, tenantID, projectID).Scan(&at); err != nil {
@@ -247,12 +263,17 @@ func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int6
 }
 
 // TrimHistory drops rollup rows past the tenant's plan depth and answers how
-// many went. One statement, joined through the entitlement table so a limit
-// moves without a redeploy; a NULL history_days trims nothing, which is what
-// makes Self-hosted unlimited. A frozen project's rows up to the freeze are
-// the snapshot and never trim, so an upgrade restores it as it stopped; a
-// frozen project keeps ingesting, and what it writes after the freeze trims
-// on the plan's depth like any other row.
+// many went; the web door's web_heat rows and page views trim on the same
+// join to the web depth, the plan's capped at webDays, web_heat keyed by its
+// UTC day, and a weekly bucket (older than a week, see CompactWeb) by its
+// Sunday, so a week straddling the edge stays whole. Every page view carries
+// an actor, and saying so lets the partial people index serve the trim.
+// One statement per table, joined through the entitlement
+// table so a limit moves without a redeploy; a NULL history_days trims
+// nothing, which is what makes Self-hosted unlimited. A frozen project's rows
+// up to the freeze are the snapshot and never trim, so an upgrade restores it
+// as it stopped; a frozen project keeps ingesting, and what it writes after
+// the freeze trims on the plan's depth like any other row.
 func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM series_1h s
@@ -265,7 +286,32 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	trimmed := tag.RowsAffected()
+	for _, stmt := range []string{`
+		DELETE FROM web_heat w
+		 USING project pr, tenant t, plan_entitlement p
+		 WHERE pr.id = w.project_id AND pr.tenant_id = w.tenant_id
+		   AND t.id = pr.tenant_id AND p.plan = t.plan
+		   AND p.history_days IS NOT NULL
+		   AND (pr.frozen_at IS NULL OR w.day > pr.frozen_at::date)
+		   AND CASE WHEN w.day < (now() AT TIME ZONE 'UTC')::date - 7 THEN w.day + 6 ELSE w.day END
+		       < (now() AT TIME ZONE 'UTC')::date - least(p.history_days, $1::int)`, `
+		DELETE FROM events e
+		 USING project pr, tenant t, plan_entitlement p
+		 WHERE pr.id = e.project_id AND pr.tenant_id = e.tenant_id
+		   AND t.id = pr.tenant_id AND p.plan = t.plan
+		   AND p.history_days IS NOT NULL
+		   AND (pr.frozen_at IS NULL OR e.ts > pr.frozen_at)
+		   AND e.name = 'uc.pageview' AND e.actor <> ''
+		   AND e.ts < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`,
+	} {
+		tag, err = s.pool.Exec(ctx, stmt, webDays)
+		if err != nil {
+			return trimmed, err
+		}
+		trimmed += tag.RowsAffected()
+	}
+	return trimmed, nil
 }
 
 // EventBuckets counts a named event into buckets of stepSeconds over

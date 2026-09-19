@@ -32,6 +32,7 @@ The user states a goal in plain language; you translate it to a topic:
 | "add an A/B test checkout CTA"     | `experiment` | declare the test, `expose()` where the arm is chosen, `convert()` where it converts |
 | "how many users come back"         | `retention` | declare it, `seen(userId)` where the app knows who it is |
 | "top pages" / "breakdown by country" | `breakdown` | declare the dimension, `value()` where the thing happens |
+| "add analytics" / "heatmap" / "where do users click" | `web` | put the script tag on the site |
 | "tell me when my app is down"      | `uptime`   | no code - point them at the app       |
 | "my cron / queue died silently"    | `jobs`     | job_* events + heartbeat              |
 | "catch errors / exceptions"        | `logs`     | SDK auto-captures; add request_failed points |
@@ -40,7 +41,8 @@ The user states a goal in plain language; you translate it to a topic:
 
 If the user has no specific goal, propose what you FOUND in their repo, not a
 generic list: Stripe in dependencies -> propose payments; a queue -> jobs; a
-mailer -> email events. Suggestions come from the repository, not a template.
+mailer -> email events; a website or front-end -> the script tag (topic `web`).
+Suggestions come from the repository, not a template.
 
 ## Hard rules (the full list is `npx upcontrol skills rules` - read it before editing)
 
@@ -60,6 +62,9 @@ mailer -> email events. Suggestions come from the repository, not a template.
    is gitignored** - fix `.gitignore` first if not, and say you fixed it. Never
    print the key into chat, code, logs or commit messages. `npx upcontrol init`
    handles key placement for you - prefer it over touching the key yourself.
+   The `uc_pub_` key inside the tag `npx upcontrol web` prints is the one key
+   that belongs in code, because it is public and bound to the site's
+   addresses; a `uc_live_` key never does.
 7. Do not declare success when the diff is applied. The install is finished when
    `npx upcontrol verify` reports data arriving - run it, and if it fails,
    follow its taxonomy (`npx upcontrol skills verify`).
@@ -73,11 +78,15 @@ mailer -> email events. Suggestions come from the repository, not a template.
 
 1. `npx upcontrol status` - if no skill/key/endpoint, `npx upcontrol init` first
    (it installs this skill, adds the pinned SDK dependency and provisions a key
-   into `.env` without showing it to you).
+   into `.env` without showing it to you). For a website the user wants
+   analytics or heatmaps on, `npx upcontrol web <site>` is that same one door:
+   it prints the script tag to place (topic `web`).
 2. Read the topic for the user's goal. Place log points per the rules.
 3. Show the diff, report the counter, let the user apply it.
 4. Ask the user to run the app (or wait for traffic).
-5. `npx upcontrol verify` - report its verdict verbatim.
+5. `npx upcontrol verify` - report its verdict verbatim. For a site-only
+   install (the script tag, no SDK) it is `npx upcontrol verify --web`, which
+   lets page views pass.
 6. Once verify reports data arriving, offer the board: ask whether to build or
    extend the dashboard for what was just instrumented, and name the cards you
    would put on it (topic `dashboard`). This is the moment you know exactly

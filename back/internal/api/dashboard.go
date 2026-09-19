@@ -25,6 +25,7 @@ import (
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/ring/query"
+	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
 )
 
@@ -115,18 +116,6 @@ func historyReason(days int, plan string) string {
 // what is read at all, so an entitlement read that broke is a 500, not a free
 // year of history.
 func (h *writeAPI) historyRefusal(ctx context.Context, tenantID int64, qs []seriesQuery) (msg, plan string, err error) {
-	tenantPlan, _ := h.pool.Queries().GetTenantPlan(ctx, tenantID)
-	if tenantPlan == "" {
-		tenantPlan = "Free"
-	}
-	ent, err := h.pool.Queries().GetPlanEntitlement(ctx, tenantPlan)
-	if err != nil {
-		return "", "", err
-	}
-	if ent.HistoryDays == nil {
-		return "", "", nil // NULL = unlimited
-	}
-	limit := int(*ent.HistoryDays)
 	// The widest query decides, so the one refusal names the plan that lifts
 	// the whole batch rather than the first rung on the way there.
 	days := 0
@@ -135,10 +124,27 @@ func (h *writeAPI) historyRefusal(ctx context.Context, tenantID int64, qs []seri
 			days = d
 		}
 	}
-	if days <= limit {
+	return historyRefusalDays(ctx, h.pool, tenantID, days)
+}
+
+// historyRefusalDays is that wall for a read reaching `days` back: the series
+// batch's widest query, or a heatmap range.
+func historyRefusalDays(ctx context.Context, pool *pg.Pool, tenantID int64, days int) (msg, plan string, err error) {
+	tenantPlan, _ := pool.Queries().GetTenantPlan(ctx, tenantID)
+	if tenantPlan == "" {
+		tenantPlan = "Free"
+	}
+	ent, err := pool.Queries().GetPlanEntitlement(ctx, tenantPlan)
+	if err != nil {
+		return "", "", err
+	}
+	if ent.HistoryDays == nil {
+		return "", "", nil // NULL = unlimited
+	}
+	if days <= int(*ent.HistoryDays) {
 		return "", "", nil
 	}
-	lift := cheapestPlan(ctx, h.pool, func(e sqlc.PlanEntitlement) bool {
+	lift := cheapestPlan(ctx, pool, func(e sqlc.PlanEntitlement) bool {
 		return e.HistoryDays == nil || int(*e.HistoryDays) >= days
 	})
 	if lift == "" {
@@ -817,17 +823,24 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	}
 	// Events have no depth floor: the table is never displaced, so it holds
 	// every event since the project's first, and an empty bucket is a measured 0.
-	points, total := countPoints(rows, r, from, nil)
+	// The web door's page views are the exception: history-trim expires them
+	// past the web depth, so they read like the rollup, floored at the oldest
+	// one kept.
+	var o *oldest
+	if q.Name == "uc.pageview" {
+		at, found, err := h.pgs.OldestPageview(ctx, tenantID, projectID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		o = &oldest{at: at, found: found}
+	}
+	points, total := countPoints(rows, r, from, o)
 	span := to.Sub(from)
 	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var previous int64
-	for _, b := range prevRows {
-		previous += b.Count
-	}
-	return points, total, previous, nil
+	return points, total, previousTotal(prevRows, from, span, o), nil
 }
 
 // checkNames is what the check source reads: the uptime share, the whole

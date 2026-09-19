@@ -20,7 +20,7 @@
 	# The API surface, exactly. `/i` is the ingest door, `/hooks/*` receives
 	# provider events, and the connect-go ProbeService rides the same upstream
 	# because it is mounted on the same port.
-	@api path /v1/* /public/* /i /hooks/* /health /upcontrol.probe.v1.ProbeService/*
+	@api path /v1/* /public/* /i /w /w/* /uc.js /hooks/* /health /upcontrol.probe.v1.ProbeService/*
 	handle @api {
 		reverse_proxy ucapi:8080 {
 			health_uri /health

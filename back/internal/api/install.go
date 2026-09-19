@@ -394,17 +394,23 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	// BEFORE the gate so the freed slot counts. The foreign keys do the rest:
 	// api_key, project_seq and status_page all cascade off project.
 	//
-	// `project_seq.next > 1` IS the ingest marker: every project is born at 1
-	// and only LeaseSeqBlock (internal/ring/seq) moves it, so an SDK-only
-	// account — a key wired up, logs flowing, no monitor ever created — is not
-	// mistaken for a placeholder and deleted out from under its own key.
+	// Ingest leaves two marks and either one is use: `project_seq.next > 1`
+	// (every project is born at 1 and only LeaseSeqBlock, internal/ring/seq,
+	// moves it) and any events or web_usage row, because the web door writes
+	// page views straight into events and leases no seq, and history-trim
+	// expires them past the web depth. So neither an SDK-only account
+	// (a key wired up, logs flowing, no monitor ever created) nor a site-only
+	// one is mistaken for a placeholder and deleted out from under its key.
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM project p
 		  WHERE p.tenant_id = $1
 		    AND (SELECT count(*) FROM project q WHERE q.tenant_id = $1) = 1
 		    AND NOT EXISTS (SELECT 1 FROM monitor m WHERE m.project_id = p.id)
 		    AND NOT EXISTS (SELECT 1 FROM project_seq ps
-		                     WHERE ps.project_id = p.id AND ps.next > 1)`, s.TenantID); err != nil {
+		                     WHERE ps.project_id = p.id AND ps.next > 1)
+		    AND NOT EXISTS (SELECT 1 FROM events e
+		                     WHERE e.tenant_id = $1 AND e.project_id = p.id)
+		    AND NOT EXISTS (SELECT 1 FROM web_usage u WHERE u.tenant_id = $1)`, s.TenantID); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -539,10 +545,27 @@ func (h *install) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A page view never enters the log window, so without this count a site
+	// carrying the tag reads as silent.
+	web := map[string]any{"views": 0}
+	if h.pgs != nil {
+		var views uint64
+		var last pgtype.Timestamptz
+		if err := h.pgs.Raw().QueryRow(ctx,
+			`SELECT count(*), max(ts) FROM events
+			  WHERE tenant_id = $1 AND project_id = $2 AND name = 'uc.pageview'
+			    AND actor <> '' AND ts >= now() - interval '15 minutes'`,
+			tenant.TenantID, sig.ProjectID).Scan(&views, &last); err == nil && views > 0 {
+			web["views"] = views
+			web["lastAt"] = last.Time.UTC().Format(time.RFC3339)
+		}
+	}
+
 	resp := map[string]any{
 		"verified": verified,
 		"lines":    lines,
 		"recent":   recent,
+		"web":      web,
 	}
 	if verified {
 		resp["verifiedAt"] = verifiedAt.UTC().Format(time.RFC3339)

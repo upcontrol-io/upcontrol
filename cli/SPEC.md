@@ -419,13 +419,50 @@ v3 §0.7), self-host is not shipped, and the `--endpoint` flag **does not exist*
 regression against the marketing site's promises, and it is recorded where it will be read: plan v3
 §10.
 
-### 7.5 A key in the repository — only one case
+### 7.5 A secret key in the repository - one case
 
 The daemon does not put the key into the repository: it lives in `/etc`. The only exception is the
 `docker-compose` installation method, where the service travels into the customer's file. Then and
 only then the `CLAUDE.md` rule applies: the key is written into `.env`, **only after checking that
 `.env` is in `.gitignore`**; if it is not, we stop, fix it, ask again. What goes into
 `docker-compose.yml` itself is `env_file`, not the value.
+
+### 7.6 The public web key - `npx upcontrol web`
+
+Web analytics and heatmaps are part of the one install, not a second product behind a second door:
+the same agent that ran `init` runs `npx upcontrol web <site> [site...]` and puts the tag on the
+site itself. The command reads the project's secret key (env or `.env`), turns every site argument
+into origins by the app's website-card rule (a bare host gets `http://` only for `localhost` and
+`127.*`, `https://` otherwise; a real domain also gets its www/apex twin, because a site answers on
+both and a key minted for one is silently refused on the other; anything unreadable is refused),
+mints the PUBLIC key with `POST /v1/keys` (the secret key in the header, `kind: "public"`, the
+origins as its scope), stores it as `UPCONTROL_PUBLIC_KEY` in `.env` for reuse, and prints exactly
+one payload: the tag
+
+```
+<script defer src="<endpoint>/uc.js" data-key="uc_pub_…"></script>
+```
+
+A rerun reuses the stored key without a request, and a reuse never widens it: no endpoint adds an
+origin to a minted key, so the first run names every address, the local dev one included. The
+reuse is said on stderr in every mode, and the JSON line reports `origins` only for a key minted in
+that run; a reused one carries a `note` instead (revoke it in the app, remove the line, rerun
+naming every address), because this run's arguments are not the key's scope.
+
+The tag records page views, clicks, rage clicks, mouse movement and scroll depth, with no cookies
+and no local storage; SPA route changes are recorded by the script itself. It goes inside `<head>`
+once, in the layout every page shares - the skill's `web` topic carries the per-framework table,
+and `verify` closes the loop: `GET /v1/install/status` answers `web.views` (the `uc.pageview` events
+of the last 15 minutes). A nonzero count passes only under `verify --web`, so a site-only install
+with no log lines verifies green once a page is opened, while page views never hide an SDK that did
+not connect: without the flag verify still waits for `install_verified`, and its timeout says that
+page views are arriving and names `--web`. The JSON `verified` stays the SDK marker; page views ride
+in `web`.
+
+The key carve-out gains its second case here, and it is the last: the `uc_pub_` key inside the tag
+belongs in committed page HTML, because it is public by construction and is accepted solely from an
+origin its owner listed. A `uc_live_` key never does, and the command never prints one, in any mode
+or error.
 
 ---
 
