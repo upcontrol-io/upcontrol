@@ -6,6 +6,24 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-09-20
+
+### Added
+- **The heatmap overlay is dragged by its header.** The panel opens in the top right corner
+  and the map is read against the page under it, so the corner it covers may be the part
+  worth looking at. It is kept inside the viewport, including while the window is narrowed
+  to reach the phone map.
+
+### Changed
+- The overlay closes with a cross in its header rather than a `Close` button in the row of
+  layers, which is where every other panel on the web puts it.
+
+### Fixed
+- **A widget bound to nothing is refused rather than stored.** `PUT /v1/dashboard` and the
+  key's append door took a widget with an empty `metrics`, but the app drops such a card on
+  the way in rather than drawing an empty one: it was stored, never drawn, and erased by the
+  next save. It is now a 400 naming the widget.
+
 ## [0.34.0] — 2026-09-19
 
 ### Added

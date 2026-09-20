@@ -343,6 +343,13 @@ func TestValidateLayout(t *testing.T) {
 				return b
 			}()},
 		}, false},
+		{"a widget bound to nothing", apigen.DashboardLayout{
+			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
+				b := widget("w_1")
+				b.Metrics = nil
+				return b
+			}()},
+		}, false},
 		{"a widget running past the grid", apigen.DashboardLayout{
 			Version: 1, Widgets: []apigen.DashboardWidget{func() apigen.DashboardWidget {
 				b := widget("w_1")
