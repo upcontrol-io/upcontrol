@@ -1361,6 +1361,10 @@ func validateLayout(doc apigen.DashboardLayout) string {
 			return fmt.Sprintf("widget %q has no size", wd.Id)
 		case wd.X+wd.W > dashboardColumns:
 			return fmt.Sprintf("widget %q runs past the %d columns", wd.Id, dashboardColumns)
+		// The app drops a widget bound to nothing rather than drawing an empty card, so one
+		// stored here is a card that vanishes on the next read and is erased by the next save.
+		case len(wd.Metrics) == 0:
+			return fmt.Sprintf("widget %q reads nothing", wd.Id)
 		}
 		seen[wd.Id] = true
 		for _, m := range wd.Metrics {

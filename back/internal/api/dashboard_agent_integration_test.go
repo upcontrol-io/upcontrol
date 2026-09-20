@@ -79,13 +79,13 @@ func dropProposal(t *testing.T, h *writeAPI, tenantID int64) (int, string) {
 
 // A board a human saved: two widgets at known coordinates, bottom at y = 4.
 const curatedBoard = `{"version":2,"widgets":[` +
-	`{"id":"a_1","kind":"stat","title":"Curated stat","metrics":[],"x":0,"y":0,"w":4,"h":4},` +
-	`{"id":"a_2","kind":"line","title":"Curated line","metrics":[],"x":4,"y":2,"w":4,"h":2}]}`
+	`{"id":"a_1","kind":"stat","title":"Curated stat","metrics":[{"source":"logs"}],"x":0,"y":0,"w":4,"h":4},` +
+	`{"id":"a_2","kind":"line","title":"Curated line","metrics":[{"source":"logs"}],"x":4,"y":2,"w":4,"h":2}]}`
 
 // The agent's offered block, deliberately reusing a_1: the collision is part
 // of what the append cases pin.
 const agentBlock = `{"widgets":[` +
-	`{"id":"a_1","kind":"stat","title":"Agent block","metrics":[],"x":2,"y":0,"w":6,"h":2}]}`
+	`{"id":"a_1","kind":"stat","title":"Agent block","metrics":[{"source":"logs"}],"x":2,"y":0,"w":6,"h":2}]}`
 
 // Provenance, not existence: the key writes the first board, replaces its own,
 // and may only propose over one a session saved. The proposal is read back and
@@ -259,7 +259,7 @@ func TestAppendRefusesABoardInTheOlderUnit(t *testing.T) {
 	key := seedAgentKey(t, pool, tenantID, projectID)
 
 	const oldUnitBoard = `{"version":1,"widgets":[` +
-		`{"id":"a_1","kind":"stat","title":"Old unit","metrics":[],"x":0,"y":0,"w":4,"h":2}]}`
+		`{"id":"a_1","kind":"stat","title":"Old unit","metrics":[{"source":"logs"}],"x":0,"y":0,"w":4,"h":2}]}`
 	if code, body := putBoard(t, h, tenantID, oldUnitBoard); code != http.StatusOK {
 		t.Fatalf("the old-unit board lands; got %d %s", code, body)
 	}

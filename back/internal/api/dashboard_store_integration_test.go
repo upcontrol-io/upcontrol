@@ -131,7 +131,7 @@ func TestDashboardRefusesABadEnvelope(t *testing.T) {
 	tenantID := seedPlanTenant(t, pool, "Free", 1)
 	h := planTenantAPI(t, pool, tenantID)
 	code, body := putBoard(t, h, tenantID,
-		`{"version":1,"widgets":[{"id":"w_1","kind":"line","title":"x","metrics":[],"x":7,"y":0,"w":6,"h":4}]}`)
+		`{"version":1,"widgets":[{"id":"w_1","kind":"line","title":"x","metrics":[{"source":"logs"}],"x":7,"y":0,"w":6,"h":4}]}`)
 	if code != http.StatusBadRequest || !strings.Contains(body, "bad_layout") {
 		t.Fatalf("a widget past the 12 columns is a 400 bad_layout; got %d %s", code, body)
 	}

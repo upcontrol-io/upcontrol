@@ -243,6 +243,19 @@ test("a heatmap link draws the overlay and collects nothing", async ({ page }) =
 	expect(await page.evaluate(() => location.hash)).not.toContain("uc-heatmap");
 	await page.getByRole("button", { name: "Scroll" }).click();
 	await page.getByRole("button", { name: "Moves" }).click();
+	// The panel is dragged by its header, and the map underneath is what it uncovers.
+	const bar = page.locator("[data-uc-heatmap] .bar");
+	const before = (await bar.boundingBox())!;
+	await page.mouse.move(before.x + 40, before.y + 10);
+	await page.mouse.down();
+	await page.mouse.move(before.x - 260, before.y + 180, { steps: 8 });
+	await page.mouse.up();
+	const after = (await bar.boundingBox())!;
+	expect(Math.round(after.x)).toBe(Math.round(before.x) - 300);
+	expect(Math.round(after.y)).toBe(Math.round(before.y) + 170);
+	// The cross is the only way out, and it takes the canvas with it.
+	await page.getByRole("button", { name: "Close" }).click();
+	await expect(page.locator("canvas")).toHaveCount(0);
 	await page.waitForTimeout(100);
 	expect(beacons).toEqual([]);
 	expect(errors).toEqual([]);

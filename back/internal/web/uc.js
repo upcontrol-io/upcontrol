@@ -278,6 +278,8 @@
 		var retry = 0;
 		var path = location.pathname;
 		var raf = false;
+		var pos = null; // where the header was dragged to, null while the panel sits in its corner
+		var drag = null;
 		var dpr = 1;
 
 		function forget() {
@@ -292,16 +294,19 @@
 			':host{all:initial}' +
 			'.bar{position:fixed;top:12px;right:12px;z-index:2147483647;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;max-width:340px;padding:10px 12px;background:#16181d;color:#f4f5f7;border-radius:8px;font:13px/1.45 system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.4)}' +
 			'.row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}' +
+			'.head{cursor:move;touch-action:none;user-select:none;flex-wrap:nowrap}' +
 			'.title{font-weight:600;white-space:nowrap}' +
-			'.path{color:#9aa1ad;font:12px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis}' +
+			'.path{color:#9aa1ad;font:12px ui-monospace,monospace;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
 			'.status{color:#c8cdd6;display:flex;flex-direction:column;gap:2px}' +
 			'.note{color:#e8b64d}' +
 			'button,select{box-sizing:border-box;font:inherit;color:inherit;background:#23262e;border:1px solid #343842;border-radius:6px;padding:3px 9px;cursor:pointer}' +
 			'button[aria-pressed="true"]{background:#e8e9ec;border-color:#e8e9ec;color:#16181d}' +
+			'.x{flex:none;padding:0 7px;font-size:16px;line-height:1.3}' +
 			'a{color:#7ab0ff}' +
 			'</style>' +
 			'<div class="bar">' +
-			'<div class="row"><span class="title">UpControl heatmap</span><span class="path"></span></div>' +
+			'<div class="row head"><span class="title">UpControl heatmap</span><span class="path"></span>' +
+			'<button name="close" class="x" aria-label="Close">&#215;</button></div>' +
 			'<div class="status"><div class="main"></div><div class="hint"></div></div>' +
 			'<div class="note" hidden></div>' +
 			'<div class="row">' +
@@ -310,7 +315,6 @@
 			'<button name="moves" aria-pressed="false">Moves</button>' +
 			'<button name="scroll" aria-pressed="false">Scroll</button>' +
 			'<select><option value="24h">1 day</option><option value="7d" selected>7 days</option><option value="31d">31 days</option></select>' +
-			'<button name="close">Close</button>' +
 			'</div>' +
 			'</div>';
 		var bar = shadow.querySelector('.bar');
@@ -319,6 +323,7 @@
 		var hintEl = shadow.querySelector('.hint');
 		var noteEl = shadow.querySelector('.note');
 		var select = shadow.querySelector('select');
+		var head = shadow.querySelector('.head');
 		pathEl.textContent = path;
 
 		var canvas = document.createElement('canvas');
@@ -573,6 +578,7 @@
 
 		function onResize() {
 			sizeCanvas();
+			if (pos) place(pos.x, pos.y);
 			if (hm && deviceFor(innerWidth) !== hm.device) { load(); return; }
 			schedule();
 		}
@@ -608,6 +614,30 @@
 				schedule();
 			}
 		});
+		// Dragged by its header: the map is read against the page under it, and the corner
+		// the panel opens in may be the part worth looking at. Kept inside the viewport, so
+		// narrowing the window to reach the phone map can never strand it off screen.
+		function place(x, y) {
+			pos = {
+				x: Math.max(0, Math.min(x, innerWidth - bar.offsetWidth)),
+				y: Math.max(0, Math.min(y, innerHeight - bar.offsetHeight))
+			};
+			bar.style.left = pos.x + 'px';
+			bar.style.top = pos.y + 'px';
+			bar.style.right = 'auto';
+		}
+		head.addEventListener('pointerdown', function (e) {
+			if (e.target.closest('button')) return;
+			var r = bar.getBoundingClientRect();
+			drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+			head.setPointerCapture(e.pointerId);
+			e.preventDefault();
+		});
+		head.addEventListener('pointermove', function (e) {
+			if (drag) place(e.clientX - drag.dx, e.clientY - drag.dy);
+		});
+		head.addEventListener('pointerup', function () { drag = null; });
+		head.addEventListener('pointercancel', function () { drag = null; });
 		select.addEventListener('change', function () {
 			range = select.value;
 			load();
