@@ -13,9 +13,12 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
@@ -422,7 +425,7 @@ func TestTheLegacyAliasKeepsAnsweringTheOldestBoard(t *testing.T) {
 		t.Fatalf("the second board's save = %d %s", code, body)
 	}
 	for _, read := range []func() (int, string){
-		func() (int, string) { return sessionCall(t, h, http.MethodGet, "/v1/dashboard", "") },
+		func() (int, string) { return getBoard(t, h) },
 		func() (int, string) { return keyCall(t, h, http.MethodGet, "/v1/dashboard", key, "") },
 	} {
 		if code, body := read(); code != http.StatusOK || !sameBoard(t, body, curatedBoard) {
@@ -537,6 +540,81 @@ func TestCreatingASecondBoardMaterialisesAnAppendableMain(t *testing.T) {
 	}
 }
 
+// Every door decides to lay the alias down from a read that found the project
+// empty, and a person's first Save may land in between. That Main is kept whole
+// and handed back; only a row an EARLIER tenant left behind is taken over
+// (TestDashboardFollowsTheProject).
+func TestLayingTheAliasKeepsAMainThisWorkspaceAlreadySaved(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+
+	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards",
+		`{"boards":[{"id":"main","layout":`+curatedBoard+`}]}`); code != http.StatusOK {
+		t.Fatalf("the person's first Save = %d %s", code, body)
+	}
+	// What createBoard, a key PUT and an append do after their stale read.
+	d := boardDoor{tenantID: tenantID, projectID: boardOf(t, pool, tenantID)}
+	b, laid, err := layAlias(t.Context(), pool.Queries(), d, emptyLayout, "key")
+	if err != nil || laid {
+		t.Fatalf("a Main this workspace holds is not laid again; laid %v, err %v", laid, err)
+	}
+	if b.writtenBy != "session" || !sameBoard(t, string(b.layout), curatedBoard) {
+		t.Fatalf("the stored Main is handed back; got %s written by %s", b.layout, b.writtenBy)
+	}
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, curatedBoard) {
+		t.Fatalf("the saved Main must be untouched; got %d %s", code, got)
+	}
+}
+
+// A rename submitted twice on the alias of a project with nothing stored lands
+// once, and both answers say so: a 500 beside a tab already carrying the name
+// would report a failure that did not happen.
+func TestARenameSubmittedTwiceLandsOnce(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	for i := range 10 {
+		tenantID := seedPlanTenant(t, pool, "Growth", 1)
+		h := planTenantAPI(t, pool, tenantID)
+		var codes [2]int
+		var bodies [2]string
+		var wg sync.WaitGroup
+		for j := range 2 {
+			wg.Go(func() {
+				codes[j], bodies[j] = sessionCall(t, h, http.MethodPatch, "/v1/dashboards/main", `{"name":"Ops"}`)
+			})
+		}
+		wg.Wait()
+		if codes != [2]int{http.StatusOK, http.StatusOK} {
+			t.Fatalf("round %d: both renames answer 200; got %v %v", i, codes, bodies)
+		}
+		if list := listing(t, h); len(list.Boards) != 1 || list.Boards[0].Name != "Ops" {
+			t.Fatalf("round %d: one board, named once; got %+v", i, list.Boards)
+		}
+	}
+}
+
+// A board door stands in the project of the session the role gate read, never
+// in one a second read finds: a project switch landing between the two would
+// put a write where the caller only reads.
+func TestTheBoardDoorStandsWhereTheGatesSessionDoes(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 2)
+	// The handler's own read of the session resolves the FIRST project...
+	h := planTenantAPI(t, pool, tenantID)
+	var owner, second int64
+	if err := pool.Raw().QueryRow(t.Context(),
+		`SELECT t.owner_person_id, max(p.id) FROM tenant t JOIN project p ON p.tenant_id = t.id
+		  WHERE t.id = $1 GROUP BY t.owner_person_id`, tenantID).Scan(&owner, &second); err != nil {
+		t.Fatalf("read the owner and the second project: %v", err)
+	}
+	// ...and the gate's copy stands in the second.
+	s := sqlc.Session{PersonID: owner, TenantID: tenantID, ProjectID: &second}
+	d := h.sessionBoards(httptest.NewRequest(http.MethodGet, "/v1/dashboards", nil), s)
+	if d.tenantID != tenantID || d.projectID != second || !d.session {
+		t.Fatalf("the door must stand where the gate's session does; got %+v, want project %d", d, second)
+	}
+}
+
 // A reader who reaches no project still reads a board — the front draws an
 // empty one rather than an error — but there is nowhere for a write to land.
 func TestBoardsWithoutAProject(t *testing.T) {
@@ -559,5 +637,41 @@ func TestBoardsWithoutAProject(t *testing.T) {
 		if code, body := sessionCall(t, h, door.method, door.path, door.body); code != http.StatusNotFound {
 			t.Fatalf("%s %s with no project = %d %s", door.method, door.path, code, body)
 		}
+	}
+}
+
+// The cap is a paid gate that counts rows, so it locks the row it counts
+// against: creates arriving together on a project one board short of the
+// plan's count land exactly one board, and every other one is the wall.
+func TestCreatesArrivingTogetherLandOneBoardPastTheLast(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	newBoard(t, h, "Second") // Main is laid down under it: two of Growth's three.
+
+	const racers = 8
+	codes := make([]int, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Go(func() {
+			codes[i], _ = sessionCall(t, h, http.MethodPost, "/v1/dashboards", `{"name":"Racer `+string(rune('A'+i))+`"}`)
+		})
+	}
+	wg.Wait()
+	created := 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusCreated:
+			created++
+		case http.StatusPaymentRequired:
+		default:
+			t.Fatalf("a racing create answers 201 or the wall; got %v", codes)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("exactly one create may take the last board; got %d of %v", created, codes)
+	}
+	if got := len(listing(t, h).Boards); got != 3 {
+		t.Fatalf("the project holds the plan's three boards, no more; got %d", got)
 	}
 }

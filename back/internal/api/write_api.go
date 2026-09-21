@@ -289,37 +289,38 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The board itself: one stored layout per project, read by any member
 	// and replaced whole by a login member (the gate above). The proposal
 	// doors: a notify member may READ what the key offered; dropping it is a
-	// write and rides the gate.
+	// write and rides the gate. Every board door is built from the session
+	// that gate read (sessionBoards), never from a second read of it.
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
-		h.getDashboard(w, r, tenantID)
+		h.getBoardLayout(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
-		h.putDashboard(w, r, tenantID)
+		h.putBoardLayout(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodGet:
-		h.getDashboardProposal(w, r, tenantID)
+		h.getBoardProposal(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodDelete:
-		h.clearDashboardProposal(w, r, tenantID)
+		h.clearBoardProposal(w, r, h.sessionBoards(r, s), mainBoard)
 
 	// The project's boards. The two sub-paths are matched BEFORE the {id}
 	// arms, like /resend above: an {id} arm would read "proposal" as a board
 	// id and answer 200 about the wrong thing.
 	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodGet:
-		h.listBoards(w, r, h.sessionBoards(r, tenantID))
+		h.listBoards(w, r, h.sessionBoards(r, s))
 	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodPost:
-		h.createBoard(w, r, h.sessionBoards(r, tenantID))
+		h.createBoard(w, r, h.sessionBoards(r, s))
 	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodPut:
-		h.saveBoards(w, r, tenantID)
+		h.saveBoards(w, r, h.sessionBoards(r, s))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/proposal") && r.Method == http.MethodGet:
-		h.getBoardProposal(w, r, h.sessionBoards(r, tenantID), boardPathID(r.URL.Path))
+		h.getBoardProposal(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/proposal") && r.Method == http.MethodDelete:
-		h.clearBoardProposal(w, r, h.sessionBoards(r, tenantID), boardPathID(r.URL.Path))
+		h.clearBoardProposal(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodGet:
-		h.getBoardLayout(w, r, h.sessionBoards(r, tenantID), boardPathID(r.URL.Path))
+		h.getBoardLayout(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodPut:
-		h.putBoardLayout(w, r, h.sessionBoards(r, tenantID), boardPathID(r.URL.Path))
+		h.putBoardLayout(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodPatch:
-		h.renameBoard(w, r, tenantID)
+		h.renameBoard(w, r, h.sessionBoards(r, s))
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodDelete:
-		h.deleteBoard(w, r, tenantID)
+		h.deleteBoard(w, r, h.sessionBoards(r, s))
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)

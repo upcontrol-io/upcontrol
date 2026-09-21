@@ -26,17 +26,25 @@ deploy is rolled back, a bad published version is on other people's machines).
 - **An old core and a wrong id stop reading the same.** Both used to print
   `board: refused (HTTP 404)`. A 404 whose body carries no error object is a
   server with no `/v1/dashboards` at all and says `this server keeps one board
-  per project`, naming the flags to drop; a 404 carrying `error.code =
-  unknown_board` is the server's own sentence about the id.
-- **The 202 names the board it parked on.** With a board addressed by id or by
-  name, the proposal line is `Open <endpoint>/app/dashboard?board=<id> and press
-  Review to apply it.`, read from the 202 body; the legacy answer carries no id
-  and keeps today's sentence.
+  per project`: after `--new` it points at `--add` (dropping `--new` would turn
+  a create into a replace), after `--list` or `--board` it names the flag to drop,
+  and on the bare command it stays `refused (HTTP 404)`. A 404 carrying
+  `error.code = unknown_board` is the server's own sentence about the id.
+- **The 202 names the board it parked on.** Against core 0.36.0 the proposal line
+  is `Open <endpoint>/app/dashboard?board=<id> and press Review to apply it.` on
+  every path, the bare command included, read from the 202 body; an older core's
+  202 carries no id and the line stays `.../app/dashboard`.
+- **A board is named the way the server stores it.** `--board` trims its value
+  and sends a 32-hex id lowercased; `--new` prints the trimmed name.
+- **A token `board` does not know is refused before any request.** `--board=<id>`
+  and `--new=<name>`, the `=` spelling, used to fall through to the first board
+  and exit 0; they now exit 1 naming the token. Flags take their value after a
+  space.
 - **A value flag whose value was forgotten is a usage error now**, exit 1 with
   `<cmd>: <flag> needs a value`. `board --apply` with no path used to equal
   `--apply` not being there at all, so it read the board instead of writing it.
   A lone `-` is still a value: it is the stdin spec.
-- Needs core <TAG>.
+- Needs core 0.36.0.
 
 ## 2026-09-19 - upcontrol 0.3.0
 

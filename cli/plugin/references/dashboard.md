@@ -34,8 +34,8 @@ Read `--list` first, every time you are about to write. It answers
 project, absent when the plan is unlimited; `frozen` on a board means the plan
 stopped carrying it, so it is kept whole but refuses every read and write until
 the plan carries it again; `proposed` means a layout is already waiting there
-for the user. Without `--board`, every command means the project's first board,
-the one the list calls `main`.
+for the user. Without `--board`, every command means the project's first board:
+the first entry of `--list` (its oldest), whatever it is called now.
 
 Name a board by its id rather than its name: the alias `main` outranks a board
 actually named `main`, and a rename leaves the id alone.

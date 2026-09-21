@@ -79,7 +79,9 @@ function mockBoard(opts: { boards?: boolean } = {}): Promise<BoardMock> {
       if (url === '/v1/dashboard' && req.method === 'GET') {
         res.end(JSON.stringify(LAYOUT));
       } else if (url === '/v1/dashboard' && req.method === 'PUT') {
-        if (putStatus === 202) res.writeHead(202).end(JSON.stringify({ status: 'proposed' }));
+        // A new core's alias names the board it parked on; an old core's 202 carries no id.
+        if (putStatus === 202)
+          res.writeHead(202).end(JSON.stringify(several ? { status: 'proposed', id: MAIN_ID, name: 'Main' } : { status: 'proposed' }));
         else if (putStatus === 400)
           res.writeHead(400).end(JSON.stringify({ error: { code: 'bad_layout', message: 'widget w1: x + w is 14, past the 12-column grid' } }));
         else res.writeHead(200).end(JSON.stringify(body));
@@ -172,7 +174,7 @@ test('board --apply on a 200 prints the stored line and exits 0', async () => {
 });
 
 test('board --apply on a 202 prints the proposal wording and still exits 0', async () => {
-  const srv = await mockBoard();
+  const srv = await mockBoard({ boards: false });
   srv.setPut(202);
   const cwd = boardCwd();
   const file = join(cwd, 'board.json');
@@ -181,8 +183,21 @@ test('board --apply on a 202 prints the proposal wording and still exits 0', asy
   await srv.close();
   assert.equal(code, 0, 'a proposal is a success, not a failure');
   assert.match(stdout, /proposal/);
-  assert.match(stdout, new RegExp(srv.url + '/app/dashboard'));
-  assert.match(stdout, /Review/);
+  assert.match(stdout, new RegExp(`${srv.url}/app/dashboard and press Review`), 'an old core names no board');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('the bare board --apply on a new core points the proposal at the first board by id', async () => {
+  const srv = await mockBoard();
+  srv.setPut(202);
+  const cwd = boardCwd();
+  const file = join(cwd, 'board.json');
+  writeFileSync(file, JSON.stringify(LAYOUT));
+  const { stdout, code } = await runBoard(cwd, ['board', '--apply', file, '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 0);
+  assert.equal(srv.seen[0].url, '/v1/dashboard');
+  assert.match(stdout, new RegExp(`${srv.url}/app/dashboard\\?board=${MAIN_ID} and press Review`));
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -405,6 +420,73 @@ test('a value flag with nothing after it names the flag instead of acting as if 
   assert.equal(code, 1);
   assert.equal(stderr.trim(), 'board: --new needs a value');
   assert.equal(srv.seen.length, 0, 'a usage error must not reach the server');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('an uppercase id is sent in the lowercase the server reads, with no list read', async () => {
+  const srv = await mockBoard();
+  const cwd = boardCwd();
+  const { stdout, code } = await runBoard(cwd, ['board', '--board', PAY_ID.toUpperCase(), '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 0);
+  assert.equal(stdout.trim(), JSON.stringify(LAYOUT));
+  assert.deepEqual(srv.seen.map((s) => s.url), [`/v1/dashboards/${PAY_ID}`]);
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a board name is trimmed as the server trims it, on --board and in the --new line', async () => {
+  const srv = await mockBoard();
+  const cwd = boardCwd();
+  const read = await runBoard(cwd, ['board', '--board', ' Payments ', '--endpoint', srv.url]);
+  const made = await runBoard(cwd, ['board', '--new', ' Website ', '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(read.code, 0);
+  assert.equal(srv.seen[1].url, `/v1/dashboards/${PAY_ID}`);
+  assert.equal(made.stdout.trim(), `created "Website" - board ${NEW_ID}.`);
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a token the board command does not know is refused before any request', async () => {
+  const srv = await mockBoard();
+  const cwd = boardCwd();
+  const file = join(cwd, 'board.json');
+  writeFileSync(file, JSON.stringify(LAYOUT));
+  for (const [argv, token] of [
+    [['--board=' + PAY_ID, '--add', file], '--board=' + PAY_ID],
+    [['--new=Website', '--apply', file], '--new=Website'],
+    [['list'], 'list'],
+  ] as const) {
+    const { stdout, stderr, code } = await runBoard(cwd, ['board', ...argv, '--endpoint', srv.url]);
+    assert.equal(code, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, new RegExp(`unexpected argument "${token}"`));
+  }
+  await srv.close();
+  assert.equal(srv.seen.length, 0, 'a dropped --board= must not write to the first board');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('--new on a one-board core points at --add, never at dropping --new', async () => {
+  const srv = await mockBoard({ boards: false });
+  const cwd = boardCwd();
+  const file = join(cwd, 'board.json');
+  writeFileSync(file, JSON.stringify(LAYOUT));
+  const { stderr, code } = await runBoard(cwd, ['board', '--new', 'Website', '--apply', file, '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 1);
+  assert.match(stderr, /--new cannot make another - put the cards on it with `npx upcontrol board --add <file>`/);
+  assert.equal(srv.seen.length, 1, 'only the refused create');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a bodyless 404 on the bare command is a plain refusal, not the one-board advice', async () => {
+  const srv = await mockBoard();
+  const cwd = boardCwd();
+  // Under a path prefix every call falls to the mock's bodyless 404, as on a host that is not upcontrol.
+  const { stderr, code } = await runBoard(cwd, ['board', '--endpoint', srv.url + '/elsewhere']);
+  await srv.close();
+  assert.equal(code, 1);
+  assert.equal(stderr.trim(), 'board: refused (HTTP 404)');
   rmSync(cwd, { recursive: true, force: true });
 });
 

@@ -1,19 +1,17 @@
 //go:build integration
 
 // The stored board: GET and PUT /v1/dashboard against a real database. The
-// handlers are driven directly over a fixed-identity session for the
+// requests go through ServeHTTP over a fixed-identity session for the
 // workspace's owner, which resolves to the single project each case seeds.
 // Run with -tags=integration and UC_TEST_POSTGRES set.
 
 package api
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,19 +46,14 @@ func boardOf(t *testing.T, pool *pg.Pool, tenantID int64) int64 {
 	return id
 }
 
-func getBoard(t *testing.T, h *writeAPI, tenantID int64) (int, string) {
+func getBoard(t *testing.T, h *writeAPI) (int, string) {
 	t.Helper()
-	w := httptest.NewRecorder()
-	h.getDashboard(w, httptest.NewRequest(http.MethodGet, "/v1/dashboard", nil), tenantID)
-	return w.Code, strings.TrimSpace(w.Body.String())
+	return sessionCall(t, h, http.MethodGet, "/v1/dashboard", "")
 }
 
-func putBoard(t *testing.T, h *writeAPI, tenantID int64, body string) (int, string) {
+func putBoard(t *testing.T, h *writeAPI, body string) (int, string) {
 	t.Helper()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/v1/dashboard", bytes.NewBufferString(body))
-	h.putDashboard(w, r, tenantID)
-	return w.Code, strings.TrimSpace(w.Body.String())
+	return sessionCall(t, h, http.MethodPut, "/v1/dashboard", body)
 }
 
 const oneWidgetBoard = `{"version":1,"widgets":[{"id":"w_1","kind":"line","title":"Errors by level",` +
@@ -74,24 +67,24 @@ func TestDashboardRoundTrip(t *testing.T) {
 
 	// A project that never saved a board answers the empty layout, not a 404:
 	// the front reads a 404 as "this core has no such endpoint".
-	if code, body := getBoard(t, h, tenantID); code != http.StatusOK || body != string(emptyLayout) {
+	if code, body := getBoard(t, h); code != http.StatusOK || body != string(emptyLayout) {
 		t.Fatalf("a board that was never saved reads as %d %s", code, body)
 	}
 
-	code, body := putBoard(t, h, tenantID, oneWidgetBoard)
+	code, body := putBoard(t, h, oneWidgetBoard)
 	if code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
 		t.Fatalf("PUT answers the layout as stored; got %d %s", code, body)
 	}
-	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
 		t.Fatalf("GET must hand back the document PUT stored; got %d %s", code, got)
 	}
 
 	// Last write wins, and it replaces rather than merges: the first board's
 	// widget may not survive a PUT that does not mention it.
-	if code, got := putBoard(t, h, tenantID, `{"version":2,"widgets":[]}`); code != http.StatusOK {
+	if code, got := putBoard(t, h, `{"version":2,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("the second PUT = %d %s", code, got)
 	}
-	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, string(emptyLayout)) {
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, string(emptyLayout)) {
 		t.Fatalf("the second PUT replaces the first; got %d %s", code, got)
 	}
 }
@@ -103,10 +96,10 @@ func TestDashboardWithoutAProject(t *testing.T) {
 	pool := openProjectsGateDB(t)
 	tenantID := seedPlanTenant(t, pool, "Free", 0)
 	h := planTenantAPI(t, pool, tenantID)
-	if code, body := getBoard(t, h, tenantID); code != http.StatusOK || body != string(emptyLayout) {
+	if code, body := getBoard(t, h); code != http.StatusOK || body != string(emptyLayout) {
 		t.Fatalf("a tenant with no project still reads an empty board; got %d %s", code, body)
 	}
-	if code, body := putBoard(t, h, tenantID, oneWidgetBoard); code != http.StatusNotFound {
+	if code, body := putBoard(t, h, oneWidgetBoard); code != http.StatusNotFound {
 		t.Fatalf("a board needs a project to belong to; got %d %s", code, body)
 	}
 }
@@ -116,11 +109,11 @@ func TestDashboardRefusesABodyPastTheCap(t *testing.T) {
 	tenantID := seedPlanTenant(t, pool, "Free", 1)
 	h := planTenantAPI(t, pool, tenantID)
 	big := `{"version":1,"widgets":[],"pad":"` + strings.Repeat("x", dashboardMaxBody) + `"}`
-	code, body := putBoard(t, h, tenantID, big)
+	code, body := putBoard(t, h, big)
 	if code != http.StatusBadRequest || !strings.Contains(body, "bad_body") {
 		t.Fatalf("a body past %d bytes is a 400 bad_body; got %d %s", dashboardMaxBody, code, body)
 	}
-	if code, got := getBoard(t, h, tenantID); got != string(emptyLayout) {
+	if code, got := getBoard(t, h); got != string(emptyLayout) {
 		t.Fatalf("a refused write stores nothing; got %d %s", code, got)
 	}
 }
@@ -129,7 +122,7 @@ func TestDashboardRefusesABadEnvelope(t *testing.T) {
 	pool := openProjectsGateDB(t)
 	tenantID := seedPlanTenant(t, pool, "Free", 1)
 	h := planTenantAPI(t, pool, tenantID)
-	code, body := putBoard(t, h, tenantID,
+	code, body := putBoard(t, h,
 		`{"version":1,"widgets":[{"id":"w_1","kind":"line","title":"x","metrics":[{"source":"logs"}],"x":7,"y":0,"w":6,"h":4}]}`)
 	if code != http.StatusBadRequest || !strings.Contains(body, "bad_layout") {
 		t.Fatalf("a widget past the 12 columns is a 400 bad_layout; got %d %s", code, body)
@@ -146,13 +139,13 @@ func TestDashboardIsScopedToItsTenant(t *testing.T) {
 	hA, hB := planTenantAPI(t, pool, tenantA), planTenantAPI(t, pool, tenantB)
 	projectA := boardOf(t, pool, tenantA)
 
-	if code, body := putBoard(t, hA, tenantA, oneWidgetBoard); code != http.StatusOK {
+	if code, body := putBoard(t, hA, oneWidgetBoard); code != http.StatusOK {
 		t.Fatalf("tenant A's PUT = %d %s", code, body)
 	}
-	if code, body := putBoard(t, hB, tenantB, `{"version":1,"widgets":[]}`); code != http.StatusOK {
+	if code, body := putBoard(t, hB, `{"version":1,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("tenant B's PUT = %d %s", code, body)
 	}
-	if code, body := getBoard(t, hA, tenantA); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
+	if code, body := getBoard(t, hA); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
 		t.Fatalf("tenant B's save lands on B's project, never A's; A now reads %d %s", code, body)
 	}
 	if _, found, err := resolveBoardQ(t.Context(), pool.Queries(), tenantB, projectA, mainBoard); err != nil || found {
@@ -170,7 +163,7 @@ func TestDashboardFollowsTheProject(t *testing.T) {
 	tenantB := seedPlanTenant(t, pool, "Free", 0)
 	hA, hB := planTenantAPI(t, pool, tenantA), planTenantAPI(t, pool, tenantB)
 	project := boardOf(t, pool, tenantA)
-	if code, body := putBoard(t, hA, tenantA, oneWidgetBoard); code != http.StatusOK {
+	if code, body := putBoard(t, hA, oneWidgetBoard); code != http.StatusOK {
 		t.Fatalf("tenant A's PUT = %d %s", code, body)
 	}
 
@@ -186,7 +179,7 @@ func TestDashboardFollowsTheProject(t *testing.T) {
 			t.Fatalf("move %s: %v", table, err)
 		}
 	}
-	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
+	if code, body := getBoard(t, hB); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
 		t.Fatalf("the board moves with the project; B reads %d %s", code, body)
 	}
 
@@ -195,13 +188,13 @@ func TestDashboardFollowsTheProject(t *testing.T) {
 		`UPDATE dashboard SET tenant_id = $1 WHERE project_id = $2`, tenantA, project); err != nil {
 		t.Fatalf("strand the row: %v", err)
 	}
-	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || body != string(emptyLayout) {
+	if code, body := getBoard(t, hB); code != http.StatusOK || body != string(emptyLayout) {
 		t.Fatalf("a stranded row reads as no board; B reads %d %s", code, body)
 	}
-	if code, body := putBoard(t, hB, tenantB, `{"version":2,"widgets":[]}`); code != http.StatusOK {
+	if code, body := putBoard(t, hB, `{"version":2,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("B's save over a stranded row = %d %s", code, body)
 	}
-	if code, body := getBoard(t, hB, tenantB); code != http.StatusOK || !sameBoard(t, body, string(emptyLayout)) {
+	if code, body := getBoard(t, hB); code != http.StatusOK || !sameBoard(t, body, string(emptyLayout)) {
 		t.Fatalf("B's save must take the row over; B reads %d %s", code, body)
 	}
 }
@@ -244,7 +237,7 @@ func TestFirstBoardThroughAnIngestKey(t *testing.T) {
 	if code, body := withKey(full, `{"version":1,"widgets":[]}`); code != http.StatusOK {
 		t.Fatalf("the key freely replaces the board the key itself wrote; got %d %s", code, body)
 	}
-	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, `{"version":1,"widgets":[]}`) {
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, `{"version":1,"widgets":[]}`) {
 		t.Fatalf("the second key write replaces the first; got %d %s", code, got)
 	}
 }

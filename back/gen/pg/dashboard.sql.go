@@ -319,6 +319,7 @@ ON CONFLICT (project_id, lower(name)) DO UPDATE
    SET tenant_id = EXCLUDED.tenant_id, layout = EXCLUDED.layout,
        written_by = EXCLUDED.written_by,
        proposed = NULL, proposed_at = NULL, updated_at = now()
+ WHERE dashboard.tenant_id <> EXCLUDED.tenant_id
 RETURNING id, public_id, name
 `
 
@@ -339,7 +340,9 @@ type UpsertBoardRow struct {
 // The alias's first write: it lays the row down, and a row of the same name
 // left behind by an earlier tenant of a released and re-claimed project is
 // taken over, tenant and all, rather than silently kept while the save answers
-// 200. That self-heal is the old PutDashboard's, kept whole.
+// 200. That self-heal is the old PutDashboard's, kept whole. A row of the SAME
+// tenant is a Main somebody laid down after the caller read the project as
+// empty: it answers no row, and the caller writes onto that board instead.
 func (q *Queries) UpsertBoard(ctx context.Context, arg UpsertBoardParams) (UpsertBoardRow, error) {
 	row := q.db.QueryRow(ctx, upsertBoard,
 		arg.TenantID,

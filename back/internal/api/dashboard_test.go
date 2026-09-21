@@ -476,6 +476,27 @@ func TestBoardPathID_ReadsTheBoardNotTheSubPath(t *testing.T) {
 	}
 }
 
+// A name is what a tab prints. A control character is refused as a bad name
+// here, where postgres would refuse a NUL with a 500 after the alias was laid.
+func TestBoardName_RefusesControlCharacters(t *testing.T) {
+	for raw, want := range map[string]string{
+		"  Sales  ":  "Sales",
+		"Ops · EU":   "Ops · EU",
+		"ops\x00":    "",
+		"o\nps":      "",
+		"ops\u0085x": "",
+	} {
+		w := httptest.NewRecorder()
+		got, ok := boardName(w, raw)
+		if got != want || ok != (want != "") {
+			t.Fatalf("boardName(%q) = %q, %v; want %q", raw, got, ok, want)
+		}
+		if !ok && (w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "bad_name")) {
+			t.Fatalf("boardName(%q) must answer 400 bad_name; got %d %s", raw, w.Code, w.Body.String())
+		}
+	}
+}
+
 // Which board paths the KEY door takes, and which it deliberately does not.
 // The handler tests drive the handlers, and routes_test reads the mux, so this
 // is the only place the dispatch itself is pinned: a key on a session-only
