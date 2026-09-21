@@ -130,22 +130,63 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The agent's three key-authenticated doors: replace-or-propose and the
-	// board read on /v1/dashboard, append on /v1/dashboard/widgets. Taken only
-	// when a key is actually presented, so a browser session, which sends no
-	// such header, never reaches any of them. The catalog is deliberately not
-	// among them: it reports what actually arrived, and the agent builds from
-	// what it declared.
+	// The agent's key-authenticated board doors: replace-or-propose and the
+	// board read on /v1/dashboard, append on /v1/dashboard/widgets, and the
+	// same three per board on /v1/dashboards plus the list and the create.
+	// Taken only when a key is actually presented, so a browser session, which
+	// sends no such header, never reaches any of them. The catalog is
+	// deliberately not among them: it reports what actually arrived, and the
+	// agent builds from what it declared. Renaming and deleting a board are
+	// not here either — they fall through to the session gate, which is the
+	// only door that may name a board.
 	if presentedKey(r) != "" {
 		switch {
 		case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
-			h.putAgentDashboard(w, r)
+			if d, ok := h.keyBoards(w, r); ok {
+				h.putBoardLayout(w, r, d, mainBoard)
+			}
 			return
 		case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
-			h.getAgentDashboard(w, r)
+			if d, ok := h.keyBoards(w, r); ok {
+				h.getBoardLayout(w, r, d, mainBoard)
+			}
 			return
 		case r.URL.Path == "/v1/dashboard/widgets" && r.Method == http.MethodPost:
-			h.appendDashboardWidgets(w, r)
+			if d, ok := h.keyBoards(w, r); ok {
+				h.appendBoardWidgets(w, r, d, mainBoard)
+			}
+			return
+		case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodGet:
+			if d, ok := h.keyBoards(w, r); ok {
+				h.listBoards(w, r, d)
+			}
+			return
+		case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodPost:
+			if d, ok := h.keyBoards(w, r); ok {
+				h.createBoard(w, r, d)
+			}
+			return
+		// A board's proposal is the reader's, never the agent's. The arm
+		// matches and answers nothing, so the request falls through to the
+		// session gate below and a key alone is refused there — without it the
+		// {id} arm would strip the suffix and hand the agent the board.
+		case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/proposal"):
+		// The /widgets suffix is matched BEFORE the {id} arms, exactly as
+		// /resend is below: an {id} arm would read "widgets" as a board id.
+		case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/widgets") && r.Method == http.MethodPost:
+			if d, ok := h.keyBoards(w, r); ok {
+				h.appendBoardWidgets(w, r, d, boardPathID(r.URL.Path))
+			}
+			return
+		case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodGet:
+			if d, ok := h.keyBoards(w, r); ok {
+				h.getBoardLayout(w, r, d, boardPathID(r.URL.Path))
+			}
+			return
+		case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodPut:
+			if d, ok := h.keyBoards(w, r); ok {
+				h.putBoardLayout(w, r, d, boardPathID(r.URL.Path))
+			}
 			return
 		}
 	}
@@ -248,15 +289,38 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The board itself: one stored layout per project, read by any member
 	// and replaced whole by a login member (the gate above). The proposal
 	// doors: a notify member may READ what the key offered; dropping it is a
-	// write and rides the gate.
+	// write and rides the gate. Every board door is built from the session
+	// that gate read (sessionBoards), never from a second read of it.
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodGet:
-		h.getDashboard(w, r, tenantID)
+		h.getBoardLayout(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard" && r.Method == http.MethodPut:
-		h.putDashboard(w, r, tenantID)
+		h.putBoardLayout(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodGet:
-		h.getDashboardProposal(w, r, tenantID)
+		h.getBoardProposal(w, r, h.sessionBoards(r, s), mainBoard)
 	case r.URL.Path == "/v1/dashboard/proposal" && r.Method == http.MethodDelete:
-		h.clearDashboardProposal(w, r, tenantID)
+		h.clearBoardProposal(w, r, h.sessionBoards(r, s), mainBoard)
+
+	// The project's boards. The two sub-paths are matched BEFORE the {id}
+	// arms, like /resend above: an {id} arm would read "proposal" as a board
+	// id and answer 200 about the wrong thing.
+	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodGet:
+		h.listBoards(w, r, h.sessionBoards(r, s))
+	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodPost:
+		h.createBoard(w, r, h.sessionBoards(r, s))
+	case r.URL.Path == "/v1/dashboards" && r.Method == http.MethodPut:
+		h.saveBoards(w, r, h.sessionBoards(r, s))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/proposal") && r.Method == http.MethodGet:
+		h.getBoardProposal(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && strings.HasSuffix(r.URL.Path, "/proposal") && r.Method == http.MethodDelete:
+		h.clearBoardProposal(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodGet:
+		h.getBoardLayout(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodPut:
+		h.putBoardLayout(w, r, h.sessionBoards(r, s), boardPathID(r.URL.Path))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodPatch:
+		h.renameBoard(w, r, h.sessionBoards(r, s))
+	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodDelete:
+		h.deleteBoard(w, r, h.sessionBoards(r, s))
 
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)

@@ -3,9 +3,8 @@
 // The agent's three key-authenticated board doors against a real database:
 // replace-or-propose, append below the board, and the board read, plus the
 // session's proposal doors. The key doors are driven through ServeHTTP with
-// the key header, the way a deployed agent calls them; the session doors are
-// driven directly over the owner's fixed identity, the way
-// dashboard_store_integration_test drives the board. Run with -tags=integration
+// the key header, the way a deployed agent calls them; the session doors go
+// through it too, over the owner's fixed identity. Run with -tags=integration
 // and UC_TEST_POSTGRES set.
 
 package api
@@ -20,6 +19,7 @@ import (
 
 	apigen "go.upcontrol.io/back/gen/api"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -63,18 +63,9 @@ func boardProvenance(t *testing.T, pool *pg.Pool, tenantID, projectID int64) str
 	return writtenBy
 }
 
-func getProposal(t *testing.T, h *writeAPI, tenantID int64) (int, string) {
+func getProposal(t *testing.T, h *writeAPI) (int, string) {
 	t.Helper()
-	w := httptest.NewRecorder()
-	h.getDashboardProposal(w, httptest.NewRequest(http.MethodGet, "/v1/dashboard/proposal", nil), tenantID)
-	return w.Code, strings.TrimSpace(w.Body.String())
-}
-
-func dropProposal(t *testing.T, h *writeAPI, tenantID int64) (int, string) {
-	t.Helper()
-	w := httptest.NewRecorder()
-	h.clearDashboardProposal(w, httptest.NewRequest(http.MethodDelete, "/v1/dashboard/proposal", nil), tenantID)
-	return w.Code, strings.TrimSpace(w.Body.String())
+	return sessionCall(t, h, http.MethodGet, "/v1/dashboard/proposal", "")
 }
 
 // A board a human saved: two widgets at known coordinates, bottom at y = 4.
@@ -112,7 +103,7 @@ func TestTheKeyReplacesItsOwnBoardAndProposesOntoACuratedOne(t *testing.T) {
 		t.Fatalf("a board the key replaced is still the key's; got %q", got)
 	}
 	// A session save flips the row to 'session': a human curated this board.
-	if code, body := putBoard(t, h, tenantID, oneWidgetBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, oneWidgetBoard); code != http.StatusOK {
 		t.Fatalf("the session save = %d %s", code, body)
 	}
 	if got := boardProvenance(t, pool, tenantID, projectID); got != "session" {
@@ -122,20 +113,20 @@ func TestTheKeyReplacesItsOwnBoardAndProposesOntoACuratedOne(t *testing.T) {
 	if code, body := keyCall(t, h, http.MethodPut, "/v1/dashboard", key, curatedBoard); code != http.StatusAccepted || !strings.Contains(body, "proposed") {
 		t.Fatalf("a key writing over a curated board answers 202 proposed; got %d %s", code, body)
 	}
-	if code, got := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
 		t.Fatalf("the proposal must not have touched the board; got %d %s", code, got)
 	}
 	if got := boardProvenance(t, pool, tenantID, projectID); got != "session" {
 		t.Fatalf("a proposed-to board keeps its provenance; got %q", got)
 	}
 	// The session reads the proposal, then drops it.
-	if code, got := getProposal(t, h, tenantID); code != http.StatusOK || !sameBoard(t, got, curatedBoard) {
+	if code, got := getProposal(t, h); code != http.StatusOK || !sameBoard(t, got, curatedBoard) {
 		t.Fatalf("GET /v1/dashboard/proposal answers the offered layout; got %d %s", code, got)
 	}
-	if code, body := dropProposal(t, h, tenantID); code != http.StatusNoContent {
+	if code, body := sessionCall(t, h, http.MethodDelete, "/v1/dashboard/proposal", ""); code != http.StatusNoContent {
 		t.Fatalf("DELETE /v1/dashboard/proposal = %d %s", code, body)
 	}
-	if code, got := getProposal(t, h, tenantID); code != http.StatusNotFound || !strings.Contains(got, "no_proposal") {
+	if code, got := getProposal(t, h); code != http.StatusNotFound || !strings.Contains(got, "no_proposal") {
 		t.Fatalf("a dropped proposal reads as 404 no_proposal; got %d %s", code, got)
 	}
 }
@@ -149,16 +140,16 @@ func TestASessionSaveClearsAPendingProposal(t *testing.T) {
 	projectID := boardOf(t, pool, tenantID)
 	key := seedAgentKey(t, pool, tenantID, projectID)
 
-	if code, body := putBoard(t, h, tenantID, oneWidgetBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, oneWidgetBoard); code != http.StatusOK {
 		t.Fatalf("the curated board lands; got %d %s", code, body)
 	}
 	if code, body := keyCall(t, h, http.MethodPut, "/v1/dashboard", key, curatedBoard); code != http.StatusAccepted {
 		t.Fatalf("the key's offer over a curated board = %d %s", code, body)
 	}
-	if code, body := putBoard(t, h, tenantID, curatedBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, curatedBoard); code != http.StatusOK {
 		t.Fatalf("the session's own save = %d %s", code, body)
 	}
-	if code, got := getProposal(t, h, tenantID); code != http.StatusNotFound {
+	if code, got := getProposal(t, h); code != http.StatusNotFound {
 		t.Fatalf("the save resolved the proposal; got %d %s", code, got)
 	}
 	if got := boardProvenance(t, pool, tenantID, projectID); got != "session" {
@@ -176,7 +167,7 @@ func TestAppendLandsBelowTheCuratedBoardAndMintsCollidingIds(t *testing.T) {
 	projectID := boardOf(t, pool, tenantID)
 	key := seedAgentKey(t, pool, tenantID, projectID)
 
-	if code, body := putBoard(t, h, tenantID, curatedBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, curatedBoard); code != http.StatusOK {
 		t.Fatalf("the curated board lands; got %d %s", code, body)
 	}
 	code, body := keyCall(t, h, http.MethodPost, "/v1/dashboard/widgets", key, agentBlock)
@@ -218,7 +209,7 @@ func TestAppendLandsBelowTheCuratedBoardAndMintsCollidingIds(t *testing.T) {
 	if agent.Y != 4 {
 		t.Fatalf("the block lands at y = the board's bottom (4); got %+v", *agent)
 	}
-	if code, stored := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, stored, body) {
+	if code, stored := getBoard(t, h); code != http.StatusOK || !sameBoard(t, stored, body) {
 		t.Fatalf("what append answered is what got stored; got %d %s", code, stored)
 	}
 	if wb := boardProvenance(t, pool, tenantID, projectID); wb != "session" {
@@ -260,14 +251,14 @@ func TestAppendRefusesABoardInTheOlderUnit(t *testing.T) {
 
 	const oldUnitBoard = `{"version":1,"widgets":[` +
 		`{"id":"a_1","kind":"stat","title":"Old unit","metrics":[{"source":"logs"}],"x":0,"y":0,"w":4,"h":2}]}`
-	if code, body := putBoard(t, h, tenantID, oldUnitBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, oldUnitBoard); code != http.StatusOK {
 		t.Fatalf("the old-unit board lands; got %d %s", code, body)
 	}
 	code, body := keyCall(t, h, http.MethodPost, "/v1/dashboard/widgets", key, agentBlock)
 	if code != http.StatusBadRequest || !strings.Contains(body, "older row unit") {
 		t.Fatalf("the older unit is refused in words, never silently doubled; got %d %s", code, body)
 	}
-	if code, stored := getBoard(t, h, tenantID); code != http.StatusOK || !sameBoard(t, stored, oldUnitBoard) {
+	if code, stored := getBoard(t, h); code != http.StatusOK || !sameBoard(t, stored, oldUnitBoard) {
 		t.Fatalf("the refused append must not have touched the board; got %d %s", code, stored)
 	}
 }
@@ -282,7 +273,7 @@ func TestAppendLeavesAPendingProposalAlone(t *testing.T) {
 	projectID := boardOf(t, pool, tenantID)
 	key := seedAgentKey(t, pool, tenantID, projectID)
 
-	if code, body := putBoard(t, h, tenantID, curatedBoard); code != http.StatusOK {
+	if code, body := putBoard(t, h, curatedBoard); code != http.StatusOK {
 		t.Fatalf("the curated board lands; got %d %s", code, body)
 	}
 	if code, body := keyCall(t, h, http.MethodPut, "/v1/dashboard", key, oneWidgetBoard); code != http.StatusAccepted {
@@ -291,10 +282,37 @@ func TestAppendLeavesAPendingProposalAlone(t *testing.T) {
 	if code, body := keyCall(t, h, http.MethodPost, "/v1/dashboard/widgets", key, agentBlock); code != http.StatusOK {
 		t.Fatalf("append onto a curated board = %d %s", code, body)
 	}
-	if code, body := getProposal(t, h, tenantID); code != http.StatusOK {
+	if code, body := getProposal(t, h); code != http.StatusOK {
 		t.Fatalf("the append must not resolve the reader's pending offer; got %d %s", code, body)
 	}
 	if wb := boardProvenance(t, pool, tenantID, projectID); wb != "session" {
 		t.Fatalf("appending keeps the board curated; got %q", wb)
+	}
+}
+
+// A public key lives in a page's source, so it reaches no board door: not the
+// read (titles, service names, check ids), not the replace, not the append.
+func TestAPublicKeyReachesNoBoardDoor(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	projectID := boardOf(t, pool, tenantID)
+	_, public, err := issueKeyOfKind(t.Context(), pool, tenantID, projectID, "site", ingest.KeyKindPublic, []string{"https://example.com"})
+	if err != nil {
+		t.Fatalf("mint a public key: %v", err)
+	}
+	for _, door := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/dashboard", ""},
+		{http.MethodPut, "/v1/dashboard", oneWidgetBoard},
+		{http.MethodPost, "/v1/dashboard/widgets", agentBlock},
+	} {
+		if code, body := keyCall(t, h, door.method, door.path, public, door.body); code != http.StatusUnauthorized {
+			t.Fatalf("%s %s with a public key is a 401; got %d %s", door.method, door.path, code, body)
+		}
+	}
+	var boards int
+	if err := pool.Raw().QueryRow(t.Context(),
+		`SELECT count(*) FROM dashboard WHERE project_id = $1`, projectID).Scan(&boards); err != nil || boards != 0 {
+		t.Fatalf("a refused public key writes no board; got %d, %v", boards, err)
 	}
 }

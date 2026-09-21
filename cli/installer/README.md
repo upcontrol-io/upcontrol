@@ -43,7 +43,9 @@ upcontrol for me" works as a single prompt too.
 - `npx upcontrol status` - endpoint, key source, skill freshness, one JSON line
 - `npx upcontrol board` - read, replace (`--apply`) or extend (`--add`) the
   project's dashboard as JSON, so the agent can build or grow it from the
-  events it just wired up
+  events it just wired up. A project can hold several named boards:
+  `--list` shows them, `--new <name>` makes one and `--board <id|name>` picks
+  which one a read or a write means
 - Your code never leaves your machine: the CLI talks only to the upcontrol
   API, the intelligence is your own agent, and the SDK sends only what the
   reviewed log points emit - scrubbed client-side first. What leaves is the

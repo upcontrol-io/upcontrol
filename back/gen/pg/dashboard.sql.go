@@ -7,133 +7,351 @@ package pg
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const appendDashboardLayout = `-- name: AppendDashboardLayout :exec
+const appendBoardLayout = `-- name: AppendBoardLayout :execrows
 UPDATE dashboard SET layout = $3, updated_at = now()
- WHERE tenant_id = $1 AND project_id = $2
+ WHERE id = $1 AND tenant_id = $2
 `
 
-type AppendDashboardLayoutParams struct {
-	TenantID  int64
-	ProjectID int64
-	Layout    []byte
+type AppendBoardLayoutParams struct {
+	ID       int64
+	TenantID int64
+	Layout   []byte
 }
 
 // The append path's write: the layout alone. Provenance is NOT touched, because
 // appending to a curated board keeps it curated, and the pending proposal is NOT
-// cleared, because only the reader resolves an offer the agent made them. The
-// tenant rides in the predicate.
-func (q *Queries) AppendDashboardLayout(ctx context.Context, arg AppendDashboardLayoutParams) error {
-	_, err := q.db.Exec(ctx, appendDashboardLayout, arg.TenantID, arg.ProjectID, arg.Layout)
-	return err
+// cleared, because only the reader resolves an offer the agent made them.
+func (q *Queries) AppendBoardLayout(ctx context.Context, arg AppendBoardLayoutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, appendBoardLayout, arg.ID, arg.TenantID, arg.Layout)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const clearDashboardProposal = `-- name: ClearDashboardProposal :exec
+const clearBoardProposal = `-- name: ClearBoardProposal :execrows
 UPDATE dashboard SET proposed = NULL, proposed_at = NULL
- WHERE tenant_id = $1 AND project_id = $2
+ WHERE id = $1 AND tenant_id = $2
 `
 
-type ClearDashboardProposalParams struct {
+type ClearBoardProposalParams struct {
+	ID       int64
+	TenantID int64
+}
+
+// Drop the proposal without applying it.
+func (q *Queries) ClearBoardProposal(ctx context.Context, arg ClearBoardProposalParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearBoardProposal, arg.ID, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const countBoards = `-- name: CountBoards :one
+SELECT count(*) FROM dashboard WHERE tenant_id = $1 AND project_id = $2
+`
+
+type CountBoardsParams struct {
 	TenantID  int64
 	ProjectID int64
 }
 
-// Drop the proposal without applying it. The tenant rides in the predicate.
-func (q *Queries) ClearDashboardProposal(ctx context.Context, arg ClearDashboardProposalParams) error {
-	_, err := q.db.Exec(ctx, clearDashboardProposal, arg.TenantID, arg.ProjectID)
-	return err
+func (q *Queries) CountBoards(ctx context.Context, arg CountBoardsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countBoards, arg.TenantID, arg.ProjectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
-const getDashboard = `-- name: GetDashboard :one
-
-SELECT layout, written_by FROM dashboard WHERE tenant_id = $1 AND project_id = $2
+const createBoard = `-- name: CreateBoard :one
+INSERT INTO dashboard (tenant_id, project_id, name, layout, written_by)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (project_id, lower(name)) DO NOTHING
+RETURNING id, public_id, name
 `
 
-type GetDashboardParams struct {
+type CreateBoardParams struct {
 	TenantID  int64
 	ProjectID int64
-}
-
-type GetDashboardRow struct {
+	Name      string
 	Layout    []byte
 	WrittenBy string
 }
 
-// Dashboard queries: the one stored board per project, read and replaced whole.
-// The tenant rides in the predicate even though project_id is the key: a
-// project id from another tenant must read as "no board", never as theirs.
-func (q *Queries) GetDashboard(ctx context.Context, arg GetDashboardParams) (GetDashboardRow, error) {
-	row := q.db.QueryRow(ctx, getDashboard, arg.TenantID, arg.ProjectID)
-	var i GetDashboardRow
-	err := row.Scan(&i.Layout, &i.WrittenBy)
-	return i, err
+type CreateBoardRow struct {
+	ID       int64
+	PublicID pgtype.UUID
+	Name     string
 }
 
-const getDashboardProposal = `-- name: GetDashboardProposal :one
-SELECT proposed FROM dashboard WHERE tenant_id = $1 AND project_id = $2
-`
-
-type GetDashboardProposalParams struct {
-	TenantID  int64
-	ProjectID int64
-}
-
-// The pending proposal, NULL when there is none. The tenant rides in the
-// predicate.
-func (q *Queries) GetDashboardProposal(ctx context.Context, arg GetDashboardProposalParams) ([]byte, error) {
-	row := q.db.QueryRow(ctx, getDashboardProposal, arg.TenantID, arg.ProjectID)
-	var proposed []byte
-	err := row.Scan(&proposed)
-	return proposed, err
-}
-
-const proposeDashboard = `-- name: ProposeDashboard :exec
-UPDATE dashboard SET proposed = $3, proposed_at = now()
- WHERE tenant_id = $1 AND project_id = $2
-`
-
-type ProposeDashboardParams struct {
-	TenantID  int64
-	ProjectID int64
-	Proposed  []byte
-}
-
-// The key's answer to a curated board: keep the offered layout beside it,
-// never over it. The tenant rides in the predicate.
-func (q *Queries) ProposeDashboard(ctx context.Context, arg ProposeDashboardParams) error {
-	_, err := q.db.Exec(ctx, proposeDashboard, arg.TenantID, arg.ProjectID, arg.Proposed)
-	return err
-}
-
-const putDashboard = `-- name: PutDashboard :exec
-INSERT INTO dashboard (tenant_id, project_id, layout, written_by)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (project_id) DO UPDATE
-   SET tenant_id = EXCLUDED.tenant_id, layout = EXCLUDED.layout,
-       written_by = EXCLUDED.written_by,
-       proposed = NULL, proposed_at = NULL, updated_at = now()
-`
-
-type PutDashboardParams struct {
-	TenantID  int64
-	ProjectID int64
-	Layout    []byte
-	WrittenBy string
-}
-
-// Replace the board wholesale. The project id is already the caller's own
-// (currentProject resolves it inside the tenant), so the row simply follows
-// the project: a board left behind by an earlier tenant of a released and
-// re-claimed project is overwritten, tenant and all, rather than silently
-// kept while the save answers 200. A real write also resolves any pending
-// proposal: the proposal was about the board that just changed.
-func (q *Queries) PutDashboard(ctx context.Context, arg PutDashboardParams) error {
-	_, err := q.db.Exec(ctx, putDashboard,
+// A new board. A name the project already holds (case-insensitively) conflicts
+// and the insert answers no row at all, which the door turns into 409
+// name_taken: a create must never quietly become a write onto somebody's board.
+func (q *Queries) CreateBoard(ctx context.Context, arg CreateBoardParams) (CreateBoardRow, error) {
+	row := q.db.QueryRow(ctx, createBoard,
 		arg.TenantID,
 		arg.ProjectID,
+		arg.Name,
 		arg.Layout,
 		arg.WrittenBy,
 	)
-	return err
+	var i CreateBoardRow
+	err := row.Scan(&i.ID, &i.PublicID, &i.Name)
+	return i, err
+}
+
+const deleteBoard = `-- name: DeleteBoard :execrows
+DELETE FROM dashboard WHERE id = $1 AND tenant_id = $2
+`
+
+type DeleteBoardParams struct {
+	ID       int64
+	TenantID int64
+}
+
+func (q *Queries) DeleteBoard(ctx context.Context, arg DeleteBoardParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBoard, arg.ID, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listBoards = `-- name: ListBoards :many
+
+SELECT id, public_id, name, written_by,
+       (proposed IS NOT NULL)::bool AS proposed,
+       -- A nil widget slice marshals as ` + "`" + `null` + "`" + `, and jsonb_array_length raises
+       -- on a scalar: a board stored from a document that named no widgets
+       -- would take the whole list down with it.
+       COALESCE(jsonb_array_length(
+         CASE WHEN jsonb_typeof(layout -> 'widgets') = 'array' THEN layout -> 'widgets' END), 0)::int AS widgets,
+       row_number() OVER (ORDER BY created_at, id) AS rank
+  FROM dashboard WHERE tenant_id = $1 AND project_id = $2
+ ORDER BY created_at, id
+`
+
+type ListBoardsParams struct {
+	TenantID  int64
+	ProjectID int64
+}
+
+type ListBoardsRow struct {
+	ID        int64
+	PublicID  pgtype.UUID
+	Name      string
+	WrittenBy string
+	Proposed  bool
+	Widgets   int32
+	Rank      int64
+}
+
+// Dashboard queries: a project's named boards, each read and replaced whole.
+// Every one of them carries the tenant in its predicate even though the id is
+// the key: an id from another tenant, or from a sibling project of the same
+// tenant, must read as "no board" rather than as somebody's board.
+// The project's boards in creation order, which is also the order the freeze
+// counts in: rank 1 is the alias, and every rank past the plan's `dashboards`
+// is frozen. The widget count travels instead of the document — a list of five
+// boards must not carry five layouts.
+func (q *Queries) ListBoards(ctx context.Context, arg ListBoardsParams) ([]ListBoardsRow, error) {
+	rows, err := q.db.Query(ctx, listBoards, arg.TenantID, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBoardsRow
+	for rows.Next() {
+		var i ListBoardsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PublicID,
+			&i.Name,
+			&i.WrittenBy,
+			&i.Proposed,
+			&i.Widgets,
+			&i.Rank,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const proposeBoard = `-- name: ProposeBoard :execrows
+UPDATE dashboard SET proposed = $3, proposed_at = now()
+ WHERE id = $1 AND tenant_id = $2
+`
+
+type ProposeBoardParams struct {
+	ID       int64
+	TenantID int64
+	Proposed []byte
+}
+
+// The key's answer to a curated board: keep the offered layout beside it,
+// never over it.
+func (q *Queries) ProposeBoard(ctx context.Context, arg ProposeBoardParams) (int64, error) {
+	result, err := q.db.Exec(ctx, proposeBoard, arg.ID, arg.TenantID, arg.Proposed)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const putBoardLayout = `-- name: PutBoardLayout :execrows
+UPDATE dashboard
+   SET layout = $3, written_by = $4, proposed = NULL, proposed_at = NULL, updated_at = now()
+ WHERE id = $1 AND tenant_id = $2
+`
+
+type PutBoardLayoutParams struct {
+	ID        int64
+	TenantID  int64
+	Layout    []byte
+	WrittenBy string
+}
+
+// Replace one board. By id, and :execrows rather than :exec: a write that
+// matched no row must not answer 200 for a board the caller never reached. A
+// real write also resolves any pending proposal — the proposal was about the
+// board that just changed.
+func (q *Queries) PutBoardLayout(ctx context.Context, arg PutBoardLayoutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, putBoardLayout,
+		arg.ID,
+		arg.TenantID,
+		arg.Layout,
+		arg.WrittenBy,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renameBoard = `-- name: RenameBoard :execrows
+UPDATE dashboard SET name = $3, updated_at = now()
+ WHERE id = $1 AND tenant_id = $2
+`
+
+type RenameBoardParams struct {
+	ID       int64
+	TenantID int64
+	Name     string
+}
+
+// A name is not part of the layout, so a rename never touches provenance. A
+// name the project already holds trips the unique index; the door reads that
+// as 409 name_taken.
+func (q *Queries) RenameBoard(ctx context.Context, arg RenameBoardParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renameBoard, arg.ID, arg.TenantID, arg.Name)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const resolveBoard = `-- name: ResolveBoard :one
+SELECT id, public_id, name, written_by, layout, proposed, rank FROM (
+  SELECT id, public_id, name, written_by, layout, proposed,
+         row_number() OVER (ORDER BY created_at, id) AS rank
+    FROM dashboard
+   WHERE tenant_id = $1 AND project_id = $2
+) b
+ WHERE ($3::bool AND rank = 1)
+    OR (NOT $3::bool AND public_id = $4)
+`
+
+type ResolveBoardParams struct {
+	TenantID  int64
+	ProjectID int64
+	Alias     bool
+	PublicID  pgtype.UUID
+}
+
+type ResolveBoardRow struct {
+	ID        int64
+	PublicID  pgtype.UUID
+	Name      string
+	WrittenBy string
+	Layout    []byte
+	Proposed  []byte
+	Rank      int64
+}
+
+// One board by public id, or by the alias (the oldest), with everything the
+// doors need in one round trip: the document, the offer waiting on it and the
+// rank the freeze counts in. An id that resolves inside the caller's tenant
+// AND project is the only id that resolves at all.
+func (q *Queries) ResolveBoard(ctx context.Context, arg ResolveBoardParams) (ResolveBoardRow, error) {
+	row := q.db.QueryRow(ctx, resolveBoard,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.Alias,
+		arg.PublicID,
+	)
+	var i ResolveBoardRow
+	err := row.Scan(
+		&i.ID,
+		&i.PublicID,
+		&i.Name,
+		&i.WrittenBy,
+		&i.Layout,
+		&i.Proposed,
+		&i.Rank,
+	)
+	return i, err
+}
+
+const upsertBoard = `-- name: UpsertBoard :one
+INSERT INTO dashboard (tenant_id, project_id, name, layout, written_by)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (project_id, lower(name)) DO UPDATE
+   SET tenant_id = EXCLUDED.tenant_id, layout = EXCLUDED.layout,
+       written_by = EXCLUDED.written_by,
+       proposed = NULL, proposed_at = NULL, updated_at = now()
+ WHERE dashboard.tenant_id <> EXCLUDED.tenant_id
+RETURNING id, public_id, name
+`
+
+type UpsertBoardParams struct {
+	TenantID  int64
+	ProjectID int64
+	Name      string
+	Layout    []byte
+	WrittenBy string
+}
+
+type UpsertBoardRow struct {
+	ID       int64
+	PublicID pgtype.UUID
+	Name     string
+}
+
+// The alias's first write: it lays the row down, and a row of the same name
+// left behind by an earlier tenant of a released and re-claimed project is
+// taken over, tenant and all, rather than silently kept while the save answers
+// 200. That self-heal is the old PutDashboard's, kept whole. A row of the SAME
+// tenant is a Main somebody laid down after the caller read the project as
+// empty: it answers no row, and the caller writes onto that board instead.
+func (q *Queries) UpsertBoard(ctx context.Context, arg UpsertBoardParams) (UpsertBoardRow, error) {
+	row := q.db.QueryRow(ctx, upsertBoard,
+		arg.TenantID,
+		arg.ProjectID,
+		arg.Name,
+		arg.Layout,
+		arg.WrittenBy,
+	)
+	var i UpsertBoardRow
+	err := row.Scan(&i.ID, &i.PublicID, &i.Name)
+	return i, err
 }

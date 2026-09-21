@@ -11,6 +11,17 @@ SELECT (SELECT count(*) FROM project x WHERE x.tenant_id = sqlc.arg(tenant_id) A
           JOIN project p ON p.id = m.project_id AND p.frozen_at IS NULL
          WHERE m.tenant_id = sqlc.arg(tenant_id) AND m.paused_by = 'plan')::int AS paused_by_plan;
 
+-- name: BoardsHeld :one
+-- The boards axis for the Plan screen: the most any ONE project of the
+-- workspace holds — what a downgrade confirmation compares with the target
+-- plan's cell — and how many are locked across them all. Both are counted from
+-- the stored rows the same way every board read counts them, so the sentence
+-- on the screen and the 402 on the board can never disagree.
+SELECT COALESCE(max(n), 0)::int AS peak,
+       COALESCE(sum(GREATEST(n - sqlc.arg(max_boards)::int, 0)), 0)::int AS frozen
+  FROM (SELECT count(*)::int AS n FROM dashboard
+         WHERE tenant_id = sqlc.arg(tenant_id) GROUP BY project_id) b;
+
 -- name: ListChannelsByTenant :many
 -- Every channel in the workspace, whichever project owns it: the export is
 -- tenant-wide, the Alerts screen reads ListChannelsByProject instead.

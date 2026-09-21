@@ -120,6 +120,26 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		}
 		resp["projects"] = projects
 	}
+	// Boards per project, absent when unlimited like the rest. A per-project
+	// axis has no workspace-wide remainder to draw, so `max` is a sentence
+	// rather than a bar: `peak` is what a downgrade confirmation compares
+	// against, `frozen` what a plan already holds back.
+	if ent.Dashboards != nil {
+		boards, _ := h.pool.Queries().BoardsHeld(ctx, sqlc.BoardsHeldParams{
+			TenantID: tenantID, MaxBoards: *ent.Dashboards,
+		})
+		// A project that never saved a board still holds one, the synthetic
+		// alias, so the peak is never below a single board.
+		peak := int(boards.Peak)
+		if peak < 1 {
+			peak = 1
+		}
+		dashboards := map[string]int{"max": int(*ent.Dashboards), "peak": peak}
+		if boards.Frozen > 0 {
+			dashboards["frozen"] = int(boards.Frozen)
+		}
+		resp["dashboards"] = dashboards
+	}
 	// The web visits, absent when unlimited like projects: the
 	// workspace's this UTC month, across its projects.
 	if ent.WebVisitsMonth != nil {

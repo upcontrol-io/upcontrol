@@ -839,6 +839,79 @@ components:
         status:
           type: string
           enum: [stored, proposed]
+        id:
+          type: string
+          description: "The board the proposal waits on, so a caller that addressed it by alias or by name can point a human at it. Absent from a core older than several boards per project."
+        name: { type: string }
+    DashboardBoard:
+      type: object
+      description: "One board of a project, without its layout."
+      required: [id, name, frozen, writtenBy, widgets, proposed]
+      properties:
+        id:
+          type: string
+          description: "32 hex characters, undashed. A project that never saved a board lists one synthetic entry whose id is the alias `main`."
+        name: { type: string, minLength: 1, maxLength: 40 }
+        frozen:
+          type: boolean
+          description: >
+            Past the plan's `plan_entitlement.dashboards`, counted in creation
+            order. A frozen board is kept whole and answers 402 to every read and
+            write on both doors; deleting it stays open, and a plan that carries
+            it brings it back.
+        writtenBy:
+          type: string
+          enum: [session, key]
+          description: >
+            Whether a human curated this board. `key` also covers a board nobody
+            has put a widget on yet, whichever door created it: a key replaces
+            such a board freely, and a `session` board takes a key's replacement
+            as a proposal.
+        widgets: { type: integer, description: "How many widgets the stored layout holds. 0 on a frozen board is a real count, not a redaction." }
+        proposed: { type: boolean, description: "A key's replacement is waiting on this board." }
+    DashboardList:
+      type: object
+      required: [boards]
+      properties:
+        boards:
+          type: array
+          description: "Creation order, which is also the order the freeze counts in. Never empty: a project with no stored board lists the synthetic `main`."
+          items: { $ref: "#/components/schemas/DashboardBoard" }
+        max:
+          type: integer
+          description: "Boards this project may hold (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted)."
+    DashboardCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40, description: "Trimmed; unique inside the project, case-insensitively." }
+        layout: { $ref: "#/components/schemas/DashboardLayout" }
+    DashboardCreated:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    DashboardRename:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 40 }
+    DashboardBatch:
+      type: object
+      description: "Every board one Save changed, written in one transaction: a widget moved between two boards is two documents, and saving one without the other would duplicate it or lose it."
+      required: [boards]
+      properties:
+        boards:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            required: [id, layout]
+            properties:
+              id: { type: string, description: "A board id, or the alias `main`." }
+              layout: { $ref: "#/components/schemas/DashboardLayout" }
     DashboardCatalog:
       type: object
       description: "What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure."
@@ -1091,6 +1164,28 @@ components:
             A depth, not a consumption: the client renders it as a sentence,
             and it counts from the day a plan is switched, since what an
             earlier plan did not keep cannot be sold back.
+        dashboards:
+          type: object
+          description: >
+            Boards per project (plan_entitlement.dashboards). Absent when the
+            plan is unlimited (Self-hosted). A per-project axis, so it has no
+            workspace-wide remainder to draw: the client renders `max` as a
+            sentence, never a bar.
+          required: [max, peak]
+          properties:
+            max: { type: integer, description: "Boards ONE project may hold." }
+            peak:
+              type: integer
+              description: >
+                The largest number of boards any one project of the workspace
+                holds. What a downgrade confirmation compares with the target
+                plan's cell: above it, that many boards lock.
+            frozen:
+              type: integer
+              description: >
+                Boards locked across the workspace's projects because the plan
+                carries fewer than those projects hold. Kept whole; a plan that
+                carries them brings them back. Absent when zero.
         projects:
           description: >
             Absent when the plan is unlimited (Self-hosted): a usage bar needs
@@ -2964,9 +3059,10 @@ paths:
       x-hand-written: true
       summary: The stored board of the session's current project.
       description: >
-        One layout per project, whatever the board last saved. A project that
-        never saved one answers an empty layout, never a 404: the front reads a
-        404 as a core without this endpoint and keeps the layout in the browser.
+        The project's oldest board, the one `/v1/dashboards/main` names: this
+        path and its two sub-paths are that alias, kept for every CLI that
+        shipped before a project could hold several. A project that never saved
+        a board answers an empty layout, never a 404.
         With an ingest key the answer is the board document and nothing else:
         the key reads the board, never the catalog.
       responses:
@@ -3096,6 +3192,277 @@ paths:
         "204": { description: The proposal is gone. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: notify_role }
+
+  /v1/dashboards:
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+        - apiKey: []
+      x-hand-written: true
+      summary: The boards of the current project, without their layouts.
+      description: >
+        A project holds several named boards, as many as
+        plan_entitlement.dashboards carries. `/v1/dashboard` and its two
+        sub-paths stay, for good, as the alias of the oldest one: a CLI
+        already on somebody's machine knows no other path. Every `{id}` below
+        accepts the literal `main` for that same oldest board, and the alias
+        outranks a board that happens to be named `main`. With an ingest key
+        the project is the key's; a PUBLIC key is refused on every board door,
+        because it is printed in a page's source.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardList" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+        - apiKey: []
+      x-hand-written: true
+      summary: Create a board, with or without a first layout.
+      description: >
+        Both doors create freely up to the plan's count; past it the answer is
+        the 402, whose `upgrade.plan` names the cheapest plan with room for one
+        more and is absent at the top of the ladder. A board created with no
+        layout is nobody's curation yet (`writtenBy: key`) whichever door made
+        it, so an agent asked to fill a board a person just named writes it
+        rather than parking a proposal on an empty board; a session that sends
+        widgets with the create stamps `session`.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardCreate" } },
+          }
+      responses:
+        "201":
+          description: Created.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardCreated" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { description: notify_role }
+        "404": { description: The caller reaches no project. }
+        "409": { description: name_taken }
+    put:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: Save several boards in one transaction.
+      description: >
+        Session only. Every board is stamped `session` and its pending proposal
+        is resolved, exactly as the single save does; one refused board refuses
+        them all. At most 16 boards a request, and each layout is held to the
+        same 64 KB a single board is: a `bad_layout` names the board it is about.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardBatch" } },
+          }
+      responses:
+        "200":
+          description: The boards as stored.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardBatch" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { description: notify_role }
+        "404": { description: unknown_board }
+
+  /v1/dashboards/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: A board id, or the alias `main`.
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+        - apiKey: []
+      x-hand-written: true
+      summary: One board's layout.
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+        - apiKey: []
+      x-hand-written: true
+      summary: Replace one board; with a key, replace the key's own or propose onto a curated one.
+      description: >
+        The provenance rule of `/v1/dashboard`, per board. The 202 carries the
+        board's `id` and `name`, so a caller that addressed it by alias or by
+        name can point a human at it.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+          }
+      responses:
+        "200":
+          description: The layout as stored.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "202":
+          description: Key-authenticated only, kept as a proposal.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardWriteResult" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { description: notify_role }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: Rename a board.
+      description: Session only. A name is not part of the layout, so a rename never touches provenance.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardRename" } },
+          }
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardCreated" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { description: notify_role }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: name_taken }
+    delete:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: Delete a board.
+      description: >
+        Session only, and open on a frozen board: the owner chooses what to
+        keep, and deleting a live board thaws the oldest frozen one. A
+        project's last board stays (409 `last_board`).
+      responses:
+        "204": { description: Gone. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: notify_role }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: last_board }
+
+  /v1/dashboards/{id}/widgets:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [dashboard]
+      security:
+        - apiKey: []
+      x-hand-written: true
+      summary: Append a block of widgets below one board, with an ingest key.
+      description: The merge of `/v1/dashboard/widgets`, onto the board named.
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              { schema: { $ref: "#/components/schemas/DashboardWidgets" } },
+          }
+      responses:
+        "200":
+          description: The merged layout as stored.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/dashboards/{id}/proposal:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: The layout an ingest key offered for this board.
+      responses:
+        "200":
+          description: The proposed layout.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardLayout" } },
+            }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "404": { description: no_proposal, or unknown_board }
+    delete:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: Drop this board's pending proposal without applying it.
+      responses:
+        "204": { description: The proposal is gone. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { description: notify_role }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/dashboard/catalog:
     get:

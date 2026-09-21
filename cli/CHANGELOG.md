@@ -3,6 +3,49 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-09-21 - upcontrol 0.4.0
+
+- **A project holds several named boards, and `board` can see all of them.**
+  `npx upcontrol board --list` prints `GET /v1/dashboards` as JSON: every board
+  with its id, name, `frozen`, `writtenBy`, widget count and whether a proposal
+  waits on it, plus `max`, how many the plan carries per project (absent means
+  unlimited). `--board <id|name>` picks which board the read, `--apply` and
+  `--add` mean; 32 hex characters and the alias `main` ride as they are, any
+  other word costs one list read and is matched lowercased, with `board: no
+  dashboard named "<x>" - run npx upcontrol board --list` when nothing carries
+  it. `--new <name>` creates one, printing the new id, and with `--apply <file>`
+  the first layout rides along in the same request. Past the plan's count the
+  create is a 402 whose sentence names what lifts it, printed as the server
+  wrote it. `--list` takes no other board flag, and `--new` takes neither
+  `--board` nor `--add`.
+- **The bare command is untouched**, on purpose: with no `--board` every call
+  still goes to `/v1/dashboard`, the alias of the project's first board, which
+  is the only path a core from before this release answers. A CLI already on
+  somebody's machine keeps working, and so does this one against an older
+  server.
+- **An old core and a wrong id stop reading the same.** Both used to print
+  `board: refused (HTTP 404)`. A 404 whose body carries no error object is a
+  server with no `/v1/dashboards` at all and says `this server keeps one board
+  per project`: after `--new` it points at `--add` (dropping `--new` would turn
+  a create into a replace), after `--list` or `--board` it names the flag to drop,
+  and on the bare command it stays `refused (HTTP 404)`. A 404 carrying
+  `error.code = unknown_board` is the server's own sentence about the id.
+- **The 202 names the board it parked on.** Against core 0.36.0 the proposal line
+  is `Open <endpoint>/app/dashboard?board=<id> and press Review to apply it.` on
+  every path, the bare command included, read from the 202 body; an older core's
+  202 carries no id and the line stays `.../app/dashboard`.
+- **A board is named the way the server stores it.** `--board` trims its value
+  and sends a 32-hex id lowercased; `--new` prints the trimmed name.
+- **A token `board` does not know is refused before any request.** `--board=<id>`
+  and `--new=<name>`, the `=` spelling, used to fall through to the first board
+  and exit 0; they now exit 1 naming the token. Flags take their value after a
+  space.
+- **A value flag whose value was forgotten is a usage error now**, exit 1 with
+  `<cmd>: <flag> needs a value`. `board --apply` with no path used to equal
+  `--apply` not being there at all, so it read the board instead of writing it.
+  A lone `-` is still a value: it is the stdin spec.
+- Needs core 0.36.0.
+
 ## 2026-09-19 - upcontrol 0.3.0
 
 - **A new command, `npx upcontrol web <site> [site...]`: the script tag for the

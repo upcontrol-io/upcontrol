@@ -6,6 +6,69 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-09-21
+
+A project holds several named dashboards. Migration 012 gives `dashboard` an id and a name of
+its own and adds `plan_entitlement.dashboards`, which is NULL on Self-hosted: a self-hosted
+project holds as many boards as you create. Every existing board is kept whole, provenance
+included, and becomes its project's `Main`. Rolling 012 back keeps only each project's oldest
+board.
+
+### Added
+- **The board doors.** `GET /v1/dashboards` lists a project's boards (id, name, `frozen`,
+  `writtenBy`, widget count, whether a proposal waits on it) and `max`, the plan's count per
+  project, absent when unlimited. `POST /v1/dashboards` `{name, layout?}` creates one: 201
+  `{id, name}`, 400 `bad_name` outside 1 to 40 characters, 409 `name_taken` for a name the
+  project already holds in any case. `GET`, `PUT`, `PATCH` (rename) and `DELETE
+  /v1/dashboards/{id}` act on one board, `POST /v1/dashboards/{id}/widgets` appends to it, and
+  `GET` and `DELETE /v1/dashboards/{id}/proposal` read and drop the layout an agent offered
+  it. An id is the 32-hex id the list answers, and `main` always names the project's oldest
+  board. A project keeps its last board: deleting it is 409 `last_board`.
+- **One save for several boards.** `PUT /v1/dashboards` `{boards: [{id, layout}]}` writes up
+  to 16 boards in one transaction, each held to the 64 KB a single board is. One refused board
+  refuses the whole save, and the error starts with that board's id, so a widget moved from
+  one board to another is stored on both or on neither. Signed-in sessions only.
+- **The ingest key works by id.** A secret key lists, reads, replaces and appends to any board
+  of its project, and creates boards up to the plan's count. Renaming, deleting, the batch
+  save and the proposal doors stay with a signed-in session.
+- **A board id that is not yours is a 404 with a message, whatever the verb.** A board of
+  another workspace, of another project in yours, and one that never existed all answer 404
+  `unknown_board` with `this project has no such dashboard`, and a write that matched no row
+  never answers 200. The message is how a client tells a wrong id from a core older than
+  this one, whose unrouted `/v1/dashboards` answers a plain-text 404.
+- **`GET /v1/plan` carries `dashboards`** when the plan counts boards: `max` per project,
+  `peak` (the most boards any one project of the workspace holds) and `frozen` (boards locked
+  across the workspace, present only above 0). On Self-hosted the block is absent.
+- The CLI's `board` command learns `--list`, `--board <id|name>` and `--new <name>`
+  (upcontrol 0.4.0, which needs this core for those three flags).
+
+### Changed
+- **`/v1/dashboard`, `/v1/dashboard/widgets` and `/v1/dashboard/proposal` answer for the
+  project's oldest board**, and keep doing so for good: every CLI already installed calls
+  them. A project with nothing stored still reads the empty board there and lists one board,
+  `main`; the first write stores it as `Main`. A board later named `main` does not take the
+  alias over.
+- **Provenance is per board, and an empty board is nobody's yet.** A board created without
+  widgets, by either door, is the key's to write, so an agent asked to fill a board a person
+  just named fills it. A key's replace onto a board a person saved is still a proposal, now
+  answered 202 `{"status": "proposed", "id", "name"}` so the caller can say which board it
+  waits on. Each board holds its own proposal.
+- **Past the plan's count a board is frozen, never deleted.** Boards are ranked by creation on
+  every read, and one past the count answers 402 on every read and write through either door.
+  Deleting a board stays open, deleting a live one unfreezes the oldest frozen one, and a
+  plan that carries them brings them all back; no job touches a row. The 402 on a frozen
+  board names the cheapest plan that carries every board the project holds, the 402 on a
+  create the cheapest with room for one more, and at the top of the ladder no plan is named
+  and the sentence says what the plan carries. Self-hosted never freezes a board.
+
+### Security
+- **A public key reaches no board door.** Every board door, the alias paths and the new ones,
+  answers 401 `bad_key` to a `uc_pub_` key, the same answer a key that is not yours gets.
+  Before this release a public key, which sits in a page's source by design, could read the
+  board (titles, service names, check ids, event names), replace a board no person had saved,
+  park a proposal on one a person had, and append to any. A public key still does what it is
+  for: named events, and the site tag's page views and heat, from the origins listed on it.
+
 ## [0.35.0] — 2026-09-20
 
 ### Added

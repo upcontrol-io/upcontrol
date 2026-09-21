@@ -108,6 +108,24 @@ func (e ChannelKind) Valid() bool {
 	}
 }
 
+// Defines values for DashboardBoardWrittenBy.
+const (
+	Key     DashboardBoardWrittenBy = "key"
+	Session DashboardBoardWrittenBy = "session"
+)
+
+// Valid indicates whether the value is a known member of the DashboardBoardWrittenBy enum.
+func (e DashboardBoardWrittenBy) Valid() bool {
+	switch e {
+	case Key:
+		return true
+	case Session:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DashboardLayoutVersion.
 const (
 	N1 DashboardLayoutVersion = 1
@@ -1163,6 +1181,39 @@ type ConnectableSource struct {
 	SetupTime string `json:"setupTime"`
 }
 
+// DashboardBatch Every board one Save changed, written in one transaction: a widget moved between two boards is two documents, and saving one without the other would duplicate it or lose it.
+type DashboardBatch struct {
+	Boards []struct {
+		// Id A board id, or the alias `main`.
+		Id string `json:"id"`
+
+		// Layout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
+		Layout DashboardLayout `json:"layout"`
+	} `json:"boards"`
+}
+
+// DashboardBoard One board of a project, without its layout.
+type DashboardBoard struct {
+	// Frozen Past the plan's `plan_entitlement.dashboards`, counted in creation order. A frozen board is kept whole and answers 402 to every read and write on both doors; deleting it stays open, and a plan that carries it brings it back.
+	Frozen bool `json:"frozen"`
+
+	// Id 32 hex characters, undashed. A project that never saved a board lists one synthetic entry whose id is the alias `main`.
+	Id   string `json:"id"`
+	Name string `json:"name"`
+
+	// Proposed A key's replacement is waiting on this board.
+	Proposed bool `json:"proposed"`
+
+	// Widgets How many widgets the stored layout holds. 0 on a frozen board is a real count, not a redaction.
+	Widgets int `json:"widgets"`
+
+	// WrittenBy Whether a human curated this board. `key` also covers a board nobody has put a widget on yet, whichever door created it: a key replaces such a board freely, and a `session` board takes a key's replacement as a proposal.
+	WrittenBy DashboardBoardWrittenBy `json:"writtenBy"`
+}
+
+// DashboardBoardWrittenBy Whether a human curated this board. `key` also covers a board nobody has put a widget on yet, whichever door created it: a key replaces such a board freely, and a `session` board takes a key's replacement as a proposal.
+type DashboardBoardWrittenBy string
+
 // DashboardCatalog What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure.
 type DashboardCatalog struct {
 	Attrs    []CatalogAttr   `json:"attrs"`
@@ -1171,6 +1222,21 @@ type DashboardCatalog struct {
 	Groups   []CatalogGroup  `json:"groups"`
 	Metrics  []CatalogMetric `json:"metrics"`
 	Services []LogService    `json:"services"`
+}
+
+// DashboardCreate defines model for DashboardCreate.
+type DashboardCreate struct {
+	// Layout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
+	Layout *DashboardLayout `json:"layout,omitempty"`
+
+	// Name Trimmed; unique inside the project, case-insensitively.
+	Name string `json:"name"`
+}
+
+// DashboardCreated defines model for DashboardCreated.
+type DashboardCreated struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // DashboardLayout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
@@ -1182,6 +1248,15 @@ type DashboardLayout struct {
 
 // DashboardLayoutVersion The unit `h` is counted in. Version 2 halved the row so a card can be tuned in finer steps, which doubled every height: a version 1 board is read by doubling each `h`, and is rewritten as 2. Both are stored as given; the server never converts one into the other, because `h` is a drawing decision and the front is what draws.
 type DashboardLayoutVersion int
+
+// DashboardList defines model for DashboardList.
+type DashboardList struct {
+	// Boards Creation order, which is also the order the freeze counts in. Never empty: a project with no stored board lists the synthetic `main`.
+	Boards []DashboardBoard `json:"boards"`
+
+	// Max Boards this project may hold (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted).
+	Max *int `json:"max,omitempty"`
+}
 
 // DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry.
 type DashboardMetricRef struct {
@@ -1207,6 +1282,11 @@ type DashboardMetricRefCount string
 
 // DashboardMetricRefSource defines model for DashboardMetricRef.Source.
 type DashboardMetricRefSource string
+
+// DashboardRename defines model for DashboardRename.
+type DashboardRename struct {
+	Name string `json:"name"`
+}
 
 // DashboardWidget defines model for DashboardWidget.
 type DashboardWidget struct {
@@ -1238,6 +1318,9 @@ type DashboardWidgets struct {
 
 // DashboardWriteResult What a key-authenticated board write did: stored it, or kept it as a proposal because a human curates this board.
 type DashboardWriteResult struct {
+	// Id The board the proposal waits on, so a caller that addressed it by alias or by name can point a human at it. Absent from a core older than several boards per project.
+	Id     *string                    `json:"id,omitempty"`
+	Name   *string                    `json:"name,omitempty"`
 	Status DashboardWriteResultStatus `json:"status"`
 }
 
@@ -1646,6 +1729,18 @@ type Plan string
 
 // PlanResponse defines model for PlanResponse.
 type PlanResponse struct {
+	// Dashboards Boards per project (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted). A per-project axis, so it has no workspace-wide remainder to draw: the client renders `max` as a sentence, never a bar.
+	Dashboards *struct {
+		// Frozen Boards locked across the workspace's projects because the plan carries fewer than those projects hold. Kept whole; a plan that carries them brings them back. Absent when zero.
+		Frozen *int `json:"frozen,omitempty"`
+
+		// Max Boards ONE project may hold.
+		Max int `json:"max"`
+
+		// Peak The largest number of boards any one project of the workspace holds. What a downgrade confirmation compares with the target plan's cell: above it, that many boards lock.
+		Peak int `json:"peak"`
+	} `json:"dashboards,omitempty"`
+
 	// HistoryDays How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back.
 	HistoryDays *int `json:"historyDays,omitempty"`
 
@@ -2478,6 +2573,21 @@ type PutV1DashboardJSONRequestBody = DashboardLayout
 
 // PostV1DashboardWidgetsJSONRequestBody defines body for PostV1DashboardWidgets for application/json ContentType.
 type PostV1DashboardWidgetsJSONRequestBody = DashboardWidgets
+
+// PostV1DashboardsJSONRequestBody defines body for PostV1Dashboards for application/json ContentType.
+type PostV1DashboardsJSONRequestBody = DashboardCreate
+
+// PutV1DashboardsJSONRequestBody defines body for PutV1Dashboards for application/json ContentType.
+type PutV1DashboardsJSONRequestBody = DashboardBatch
+
+// PatchV1DashboardsIdJSONRequestBody defines body for PatchV1DashboardsId for application/json ContentType.
+type PatchV1DashboardsIdJSONRequestBody = DashboardRename
+
+// PutV1DashboardsIdJSONRequestBody defines body for PutV1DashboardsId for application/json ContentType.
+type PutV1DashboardsIdJSONRequestBody = DashboardLayout
+
+// PostV1DashboardsIdWidgetsJSONRequestBody defines body for PostV1DashboardsIdWidgets for application/json ContentType.
+type PostV1DashboardsIdWidgetsJSONRequestBody = DashboardWidgets
 
 // PostV1EventJSONRequestBody defines body for PostV1Event for application/json ContentType.
 type PostV1EventJSONRequestBody PostV1EventJSONBody

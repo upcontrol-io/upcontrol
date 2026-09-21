@@ -23,8 +23,11 @@ import {
   CLI_VERSION,
   appendBoard,
   applyBoard,
+  boardsFrom,
+  createBoard,
   endpointFrom,
   fetchInstallStatus,
+  listBoards,
   mintAnonymousProject,
   mintPublicKey,
   readBoard,
@@ -37,35 +40,58 @@ interface Flags {
   endpoint?: string;
   apply?: string;
   add?: string;
+  board?: string;
+  new?: string;
   copilot: boolean;
   noKey: boolean;
   json: boolean;
   web: boolean;
+  list: boolean;
   timeout: number;
   help: boolean;
   version: boolean;
 }
 
-function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
-  const flags: Flags = { copilot: false, noKey: false, json: false, web: false, timeout: 120, help: false, version: false };
+function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags; needsValue?: string } {
+  const flags: Flags = { copilot: false, noKey: false, json: false, web: false, list: false, timeout: 120, help: false, version: false };
   const rest: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
+  let needsValue: string | undefined;
+  let i = 0;
+  // A value flag whose value was forgotten used to equal the flag being absent:
+  // `board --apply` with no path read the board instead of writing it. A lone
+  // `-` is a value, it is the stdin spec.
+  const value = (flag: string): string | undefined => {
+    const v = argv[i + 1];
+    if (v === undefined || (v.startsWith('-') && v !== '-')) {
+      needsValue ??= flag;
+      return undefined;
+    }
+    i++;
+    return v;
+  };
+  for (; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
       case '--key':
-        flags.key = argv[++i];
+        flags.key = value(a);
         break;
       case '--token':
-        flags.token = argv[++i];
+        flags.token = value(a);
         break;
       case '--endpoint':
-        flags.endpoint = argv[++i];
+        flags.endpoint = value(a);
         break;
       case '--apply':
-        flags.apply = argv[++i];
+        flags.apply = value(a);
         break;
       case '--add':
-        flags.add = argv[++i];
+        flags.add = value(a);
+        break;
+      case '--board':
+        flags.board = value(a);
+        break;
+      case '--new':
+        flags.new = value(a);
         break;
       case '--copilot':
         flags.copilot = true;
@@ -79,8 +105,11 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags 
       case '--web':
         flags.web = true;
         break;
+      case '--list':
+        flags.list = true;
+        break;
       case '--timeout':
-        flags.timeout = Number(argv[++i]) || 120;
+        flags.timeout = Number(value(a)) || 120;
         break;
       case '--help':
       case '-h':
@@ -95,15 +124,15 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags 
     }
   }
   const cmd = rest[0] ?? 'init';
-  return { cmd, args: rest.slice(1), flags };
+  return { cmd, args: rest.slice(1), flags, needsValue };
 }
 
 function out(line: string): void {
   process.stdout.write(line + '\n');
 }
 
-// Board failures go to stderr: the plain read's stdout is piped JSON, and an
-// error line in it would ride into whatever consumed the pipe.
+// Failures and usage errors go to stderr: the board read's stdout is piped
+// JSON, and an error line in it would ride into whatever consumed the pipe.
 function err(line: string): void {
   process.stderr.write(line + '\n');
 }
@@ -132,6 +161,9 @@ Verify flags:
   --json               machine-readable output
 
 Board flags:
+  --list               every board of the project as JSON (id, name, frozen, widgets)
+  --board <id|name>    which board to read or write (default: the project's first)
+  --new <name>         create a board; with --apply, its first layout rides along
   --apply <file|->     replace the board with the layout in that file
   --add <file|->       append the widgets in that file to the board
 
@@ -427,20 +459,67 @@ function readBoardInput(spec: string): string | null {
 
 // One failure path for every board call: unreachable keeps verify's exit 3,
 // a refused write prints the server's own sentence (what is wrong with the
-// layout) instead of a bare status.
-function boardFail(endpoint: string, r: { error?: string; status?: number; message?: string }): number {
+// layout, or what a plan lifts) instead of a bare status.
+function boardFail(
+  endpoint: string,
+  r: { error?: string; status?: number; code?: string; message?: string },
+  flags: Flags,
+): number {
   if (r.error === 'unreachable') {
     err(`board: cannot reach ${endpoint} - is the endpoint right (UPCONTROL_ENDPOINT)?`);
     return 3;
   }
-  err(r.message ?? `board: refused (HTTP ${r.status ?? '?'})`);
+  // A 404 with no error object from /v1/dashboards is not a missing board: it
+  // is a core that has no such path, where the unrouted path answers plain text.
+  // Only these three flags go there; the bare command's 404 is some other server.
+  // Dropping --new from `--new X --apply f` would replace the one board, so
+  // --new is pointed at --add instead.
+  const oldCore = r.status === 404 && !r.code;
+  if (oldCore && flags.new !== undefined) {
+    err('board: this server keeps one board per project, so --new cannot make another - put the cards on it with `npx upcontrol board --add <file>`');
+  } else if (oldCore && (flags.list || flags.board !== undefined)) {
+    err('board: this server keeps one board per project - run `npx upcontrol board` without --list or --board');
+  } else {
+    err(r.message ?? `board: refused (HTTP ${r.status ?? '?'})`);
+  }
   return 1;
 }
 
-async function cmdBoard(flags: Flags): Promise<number> {
+// --board takes an id or a name. 32 hex characters is an id and the alias
+// `main` is one too, so both ride without a lookup; a name costs one list read,
+// because the server addresses a board by id alone. The server stores names
+// trimmed and reads ids in lowercase only, so the flag is normalised the same way.
+async function resolveBoard(endpoint: string, key: string, flags: Flags): Promise<{ id?: string; exit?: number }> {
+  const raw = flags.board!.trim();
+  if (raw === 'main' || /^[0-9a-f]{32}$/i.test(raw)) return { id: raw.toLowerCase() };
+  const r = await listBoards(endpoint, key);
+  if (!r.ok) return { exit: boardFail(endpoint, r, flags) };
+  const hit = boardsFrom(r.text).find((b) => b.name.toLowerCase() === raw.toLowerCase());
+  if (!hit) {
+    err(`board: no dashboard named "${raw}" - run npx upcontrol board --list`);
+    return { exit: 1 };
+  }
+  return { id: hit.id };
+}
+
+async function cmdBoard(flags: Flags, args: string[]): Promise<number> {
   const endpoint = endpointFrom(process.env, flags.endpoint);
+  // An unrecognised token here is usually `--board=B`: dropped, it would send
+  // the write to the first board and still report success.
+  if (args.length > 0) {
+    err(`board: unexpected argument "${args[0]}" - flags take their value after a space (--board <id>)`);
+    return 1;
+  }
+  if (flags.list && (flags.board !== undefined || flags.new !== undefined || flags.apply !== undefined || flags.add !== undefined)) {
+    err('board: --list takes no other board flag - it only lists');
+    return 1;
+  }
   if (flags.apply !== undefined && flags.add !== undefined) {
     err('board: --apply and --add are mutually exclusive - pick one');
+    return 1;
+  }
+  if (flags.new !== undefined && (flags.board !== undefined || flags.add !== undefined)) {
+    err('board: --new makes its own board, so it takes neither --board nor --add');
     return 1;
   }
   const key = process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(process.cwd());
@@ -449,38 +528,59 @@ async function cmdBoard(flags: Flags): Promise<number> {
     return 2;
   }
 
-  if (flags.apply === undefined && flags.add === undefined) {
-    const r = await readBoard(endpoint, key);
-    if (!r.ok) return boardFail(endpoint, r);
+  if (flags.list) {
+    const r = await listBoards(endpoint, key);
+    if (!r.ok) return boardFail(endpoint, r, flags);
     out((r.text ?? '').trim());
     return 0;
   }
 
-  const spec = (flags.apply ?? flags.add)!;
-  const raw = readBoardInput(spec);
-  if (raw === null) {
-    err(`board: cannot read ${spec}`);
-    return 1;
+  let board: string | undefined;
+  if (flags.board !== undefined) {
+    const resolved = await resolveBoard(endpoint, key, flags);
+    if (resolved.exit !== undefined) return resolved.exit;
+    board = resolved.id;
   }
+
+  const spec = flags.apply ?? flags.add;
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    err(`board: ${spec} is not JSON`);
-    return 1;
+  if (spec !== undefined) {
+    const raw = readBoardInput(spec);
+    if (raw === null) {
+      err(`board: cannot read ${spec}`);
+      return 1;
+    }
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      err(`board: ${spec} is not JSON`);
+      return 1;
+    }
+  }
+
+  if (flags.new !== undefined) {
+    const r = await createBoard(endpoint, key, flags.new, parsed);
+    if (!r.ok) return boardFail(endpoint, r, flags);
+    out(`created "${flags.new.trim()}" - board ${r.board}${parsed === undefined ? '' : `, ${widgetCount(parsed)} widgets`}.`);
+    return 0;
+  }
+
+  if (spec === undefined) {
+    const r = await readBoard(endpoint, key, board);
+    if (!r.ok) return boardFail(endpoint, r, flags);
+    out((r.text ?? '').trim());
+    return 0;
   }
 
   if (flags.apply !== undefined) {
-    const r = await applyBoard(endpoint, key, parsed);
-    if (!r.ok) return boardFail(endpoint, r);
-    const widgets = (parsed as { widgets?: unknown[] }).widgets;
-    const n = Array.isArray(widgets) ? widgets.length : 0;
+    const r = await applyBoard(endpoint, key, parsed, board);
+    if (!r.ok) return boardFail(endpoint, r, flags);
     if (r.status === 202) {
       out('The board was edited in the app, so this layout is waiting there as a proposal.');
-      out(`Open ${endpoint}/app/dashboard and press Review to apply it.`);
+      out(`Open ${endpoint}/app/dashboard${r.board ? `?board=${r.board}` : ''} and press Review to apply it.`);
       return 0;
     }
-    out(`stored - ${n} widgets.`);
+    out(`stored - ${widgetCount(parsed)} widgets.`);
     return 0;
   }
 
@@ -491,10 +591,15 @@ async function cmdBoard(flags: Flags): Promise<number> {
     err(`board: ${spec} holds no widgets array`);
     return 1;
   }
-  const r = await appendBoard(endpoint, key, widgets);
-  if (!r.ok) return boardFail(endpoint, r);
+  const r = await appendBoard(endpoint, key, widgets, board);
+  if (!r.ok) return boardFail(endpoint, r, flags);
   out(`added ${widgets.length} widgets - the board now has ${r.total}.`);
   return 0;
+}
+
+function widgetCount(layout: unknown): number {
+  const widgets = (layout as { widgets?: unknown[] })?.widgets;
+  return Array.isArray(widgets) ? widgets.length : 0;
 }
 
 // The web command's one job: turn the site addresses into the tag an agent
@@ -579,7 +684,7 @@ async function cmdWeb(det: Detection, flags: Flags, args: string[]): Promise<num
 }
 
 async function main(): Promise<number> {
-  const { cmd, args, flags } = parseArgs(process.argv.slice(2));
+  const { cmd, args, flags, needsValue } = parseArgs(process.argv.slice(2));
   const det = detect();
   if (flags.version) {
     out(CLI_VERSION);
@@ -588,6 +693,10 @@ async function main(): Promise<number> {
   if (flags.help || cmd === 'help') {
     out(HELP);
     return 0;
+  }
+  if (needsValue) {
+    err(`${cmd}: ${needsValue} needs a value`);
+    return 1;
   }
   switch (cmd) {
     case 'init':
@@ -599,7 +708,7 @@ async function main(): Promise<number> {
     case 'status':
       return cmdStatus(flags);
     case 'board':
-      return cmdBoard(flags);
+      return cmdBoard(flags, args);
     case 'web':
       return cmdWeb(det, flags, args);
     default:

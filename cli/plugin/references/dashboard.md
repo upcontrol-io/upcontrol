@@ -18,6 +18,35 @@ whenever the request is additive - it lands its block below what is already
 there and never disturbs what the user arranged, while `--apply` overwrites the
 layout whole.
 
+## Several boards
+
+A project can hold more than one board, as many as its plan carries, and each
+command above can name which one it means:
+
+```
+npx upcontrol board --list                     # every board: id, name, frozen, widgets
+npx upcontrol board --board <id> --add <file>  # the three commands, on one board
+npx upcontrol board --new "Payments"           # a new board (--apply gives it a layout)
+```
+
+Read `--list` first, every time you are about to write. It answers
+`{ "boards": [...], "max": 3 }`: `max` is how many boards this plan carries per
+project, absent when the plan is unlimited; `frozen` on a board means the plan
+stopped carrying it, so it is kept whole but refuses every read and write until
+the plan carries it again; `proposed` means a layout is already waiting there
+for the user. Without `--board`, every command means the project's first board:
+the first entry of `--list` (its oldest), whatever it is called now.
+
+Name a board by its id rather than its name: the alias `main` outranks a board
+actually named `main`, and a rename leaves the id alone.
+
+Create a board only for an audience or a topic the user named ("a board for the
+payments team", "one for the website"), and add to an existing board otherwise.
+Never create a board to get around a proposal: a 202 means the user curates that
+board, and a second board nobody asked for hides your cards instead of showing
+them. Past the plan's count the create comes back as a refusal whose sentence
+names what lifts it - give the user that sentence as it is, and do not retry.
+
 ## The document
 
 The board is one JSON object:

@@ -86,6 +86,10 @@ type Dashboard struct {
 	WrittenBy  string
 	Proposed   []byte
 	ProposedAt pgtype.Timestamptz
+	ID         int64
+	PublicID   pgtype.UUID
+	Name       string
+	CreatedAt  pgtype.Timestamptz
 }
 
 type DeliveryAttempt struct {
@@ -295,6 +299,7 @@ type PlanEntitlement struct {
 	HistoryDays        *int32
 	WebVisitsMonth     *int32
 	WebHeatPages       *int32
+	Dashboards         *int32
 }
 
 type ProbeNode struct {
