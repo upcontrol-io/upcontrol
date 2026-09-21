@@ -1064,7 +1064,10 @@ func (h *writeAPI) resolveAgentKey(w http.ResponseWriter, r *http.Request) (inge
 		return ingest.Tenant{}, false
 	}
 	tenant, err := h.keys.Resolve(r.Context(), presentedKey(r))
-	if err != nil {
+	// A public key is printed in a page's source: it may name events on /i and
+	// nothing else. The same answer as a key that is not ours, so the door
+	// tells a stranger holding one nothing about it.
+	if err != nil || tenant.Kind == ingest.KeyKindPublic {
 		writeAPIErr(w, http.StatusUnauthorized, "bad_key")
 		return ingest.Tenant{}, false
 	}

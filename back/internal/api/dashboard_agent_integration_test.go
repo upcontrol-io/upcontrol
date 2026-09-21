@@ -20,6 +20,7 @@ import (
 
 	apigen "go.upcontrol.io/back/gen/api"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/ingest"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -296,5 +297,32 @@ func TestAppendLeavesAPendingProposalAlone(t *testing.T) {
 	}
 	if wb := boardProvenance(t, pool, tenantID, projectID); wb != "session" {
 		t.Fatalf("appending keeps the board curated; got %q", wb)
+	}
+}
+
+// A public key lives in a page's source, so it reaches no board door: not the
+// read (titles, service names, check ids), not the replace, not the append.
+func TestAPublicKeyReachesNoBoardDoor(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	projectID := boardOf(t, pool, tenantID)
+	_, public, err := issueKeyOfKind(t.Context(), pool, tenantID, projectID, "site", ingest.KeyKindPublic, []string{"https://example.com"})
+	if err != nil {
+		t.Fatalf("mint a public key: %v", err)
+	}
+	for _, door := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/dashboard", ""},
+		{http.MethodPut, "/v1/dashboard", oneWidgetBoard},
+		{http.MethodPost, "/v1/dashboard/widgets", agentBlock},
+	} {
+		if code, body := keyCall(t, h, door.method, door.path, public, door.body); code != http.StatusUnauthorized {
+			t.Fatalf("%s %s with a public key is a 401; got %d %s", door.method, door.path, code, body)
+		}
+	}
+	var boards int
+	if err := pool.Raw().QueryRow(t.Context(),
+		`SELECT count(*) FROM dashboard WHERE project_id = $1`, projectID).Scan(&boards); err != nil || boards != 0 {
+		t.Fatalf("a refused public key writes no board; got %d, %v", boards, err)
 	}
 }
