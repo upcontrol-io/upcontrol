@@ -2,7 +2,7 @@
 // env var and --endpoint exist for self-hosted stacks and local development.
 
 const DEFAULT_ENDPOINT = 'https://upcontrol.io';
-export const CLI_VERSION = '0.3.0';
+export const CLI_VERSION = '0.4.0';
 
 export function endpointFrom(env: NodeJS.ProcessEnv, flag?: string): string {
   return (flag || env.UPCONTROL_ENDPOINT || DEFAULT_ENDPOINT).replace(/\/+$/, '');
@@ -120,19 +120,25 @@ export async function mintPublicKey(endpoint: string, key: string, name: string,
 }
 
 // The board's error body names exactly what is wrong with a layout
-// (`bad_layout` and a sentence); the status alone would cost a round trip.
-function boardMessage(text: string): string | undefined {
-  return parseJSON<{ error?: { message?: string } }>(text)?.error?.message;
+// (`bad_layout` and a sentence); the status alone would cost a round trip. The
+// code comes back too: a 404 that carries one is a board this core does not
+// have, while a 404 with no error object at all is a core that has no
+// /v1/dashboards to answer with.
+function boardError(text: string): { code?: string; message?: string } {
+  return parseJSON<{ error?: { code?: string; message?: string } }>(text)?.error ?? {};
 }
 
-/** One shape for all three board doors: they differ by one field each, not by kind.
- *  `status` separates 200 stored from 202 proposed; `text` is the read's body and
- *  `total` the widget count after an append. */
+/** One shape for every board door: they differ by one field each, not by kind.
+ *  `status` separates 200 stored from 202 proposed; `text` is the read's body,
+ *  `total` the widget count after an append and `board` the id a create or a
+ *  proposal named. */
 interface BoardResult {
   ok: boolean;
   status?: number;
   text?: string;
   total?: number;
+  board?: string;
+  code?: string;
   message?: string;
   error?: string;
 }
@@ -144,26 +150,57 @@ async function boardCall(url: string, key: string, init?: RequestInit): Promise<
   if (init?.body) headers['Content-Type'] = 'application/json';
   try {
     const res = await request(url, { ...init, headers });
-    if (!res.ok) return { ok: false, status: res.status, message: boardMessage(res.text) };
+    if (!res.ok) return { ok: false, status: res.status, ...boardError(res.text) };
     return { ok: true, status: res.status, text: res.text };
   } catch {
     return { ok: false, error: 'unreachable' };
   }
 }
 
-export function readBoard(endpoint: string, key: string): Promise<BoardResult> {
-  return boardCall(endpoint + '/v1/dashboard', key);
+// Without a board named, the legacy path: it is the one a core older than
+// several boards answers, and on a new core it is the alias of the first board.
+function boardPath(board: string | undefined, suffix = ''): string {
+  return board ? `/v1/dashboards/${encodeURIComponent(board)}${suffix}` : `/v1/dashboard${suffix}`;
 }
 
-export function applyBoard(endpoint: string, key: string, layout: unknown): Promise<BoardResult> {
-  return boardCall(endpoint + '/v1/dashboard', key, {
+export function listBoards(endpoint: string, key: string): Promise<BoardResult> {
+  return boardCall(endpoint + '/v1/dashboards', key);
+}
+
+// The list read is the only way a NAME becomes an id; a body that is not a list
+// is an empty list, and the caller says the name was not found.
+export function boardsFrom(text: string | undefined): Array<{ id: string; name: string }> {
+  return parseJSON<{ boards?: Array<{ id: string; name: string }> }>(text ?? '')?.boards ?? [];
+}
+
+export async function createBoard(endpoint: string, key: string, name: string, layout?: unknown): Promise<BoardResult> {
+  const r = await boardCall(endpoint + '/v1/dashboards', key, {
+    method: 'POST',
+    body: JSON.stringify(layout === undefined ? { name } : { name, layout }),
+  });
+  if (!r.ok) return r;
+  const body = parseJSON<{ id?: string }>(r.text ?? '');
+  if (!body?.id) return { ok: false, status: r.status, error: 'malformed' };
+  return { ...r, board: body.id };
+}
+
+export function readBoard(endpoint: string, key: string, board?: string): Promise<BoardResult> {
+  return boardCall(endpoint + boardPath(board), key);
+}
+
+export async function applyBoard(endpoint: string, key: string, layout: unknown, board?: string): Promise<BoardResult> {
+  const r = await boardCall(endpoint + boardPath(board), key, {
     method: 'PUT',
     body: JSON.stringify(layout),
   });
+  // A proposal names the board it waits on, which a caller that addressed the
+  // alias does not otherwise know; a core older than several boards sends none.
+  if (r.ok && r.status === 202) return { ...r, board: parseJSON<{ id?: string }>(r.text ?? '')?.id };
+  return r;
 }
 
-export async function appendBoard(endpoint: string, key: string, widgets: unknown[]): Promise<BoardResult> {
-  const r = await boardCall(endpoint + '/v1/dashboard/widgets', key, {
+export async function appendBoard(endpoint: string, key: string, widgets: unknown[], board?: string): Promise<BoardResult> {
+  const r = await boardCall(endpoint + boardPath(board, '/widgets'), key, {
     method: 'POST',
     body: JSON.stringify({ widgets }),
   });

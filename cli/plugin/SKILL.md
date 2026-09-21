@@ -72,7 +72,10 @@ Suggestions come from the repository, not a template.
    this conversation: the arrangement is the user's own work, and `--apply`
    overwrites it whole. Adding cards is not replacing - `npx upcontrol board
    --add` is the tool for it. For a rebuild, show what the board holds now and
-   what you propose before you apply anything.
+   what you propose before you apply anything. A project can hold several
+   boards: run `npx upcontrol board --list` first, say which one you write with
+   `--board <id>`, and create one with `--new` only for an audience or a topic
+   the user named (topic `dashboard`).
 
 ## Standard flow
 

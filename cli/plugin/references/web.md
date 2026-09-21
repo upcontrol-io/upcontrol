@@ -85,7 +85,10 @@ so a visit to the site never hides an SDK that did not connect (topic `verify`).
 
 Topic `dashboard`: a `heatmap` card (top pages, a Heatmap button per row) plus
 `breakdown` cards of `uc.pageview` by `referrer`, `country` and `device`. Apply
-with `npx upcontrol board --add`.
+with `npx upcontrol board --add`. If the user wants the site on a board of its
+own, `npx upcontrol board --new "Website"` makes one and prints its id: name
+that id with `--board <id>` on every later write, or the cards land on the
+project's first board instead.
 
 ## What the owner gets
 
