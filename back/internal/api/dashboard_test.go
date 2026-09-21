@@ -435,6 +435,82 @@ func TestEmptyLayoutIsTheDocumentedEmptyBoard(t *testing.T) {
 	}
 }
 
+// The board walls' copy, which the front spells identically. Both sentences are
+// built from the entitlement rows, so a limit that moves in a migration moves
+// here without a code edit — the numbers below are the arguments, not the table.
+func TestBoardsReason_IsTheCopyTheFrontSpells(t *testing.T) {
+	if got := boardsReason("Free", 1, "Growth", 3); got != "Your plan carries 1 dashboard per project. Growth carries 3." {
+		t.Fatalf("the create wall's copy drifted; got %q", got)
+	}
+	// Plural once the reader's own plan carries more than one.
+	if got := boardsReason("Growth", 3, "Agency", 5); got != "Your plan carries 3 dashboards per project. Agency carries 5." {
+		t.Fatalf("the create wall must count in the plural; got %q", got)
+	}
+	// The top of the ladder has nothing to sell: a sentence, and the front
+	// shows it instead of a modal whose every card would say Downgrade.
+	if got := boardsReason("Agency", 5, "", 0); got != "Agency carries 5 dashboards per project." {
+		t.Fatalf("the top rung must not offer a rung above it; got %q", got)
+	}
+	if got := frozenReason("Growth", 3); got != "This dashboard is kept, not running. Growth carries 3 per project." {
+		t.Fatalf("the frozen wall's copy drifted; got %q", got)
+	}
+	// Kept is kept, whether or not there is a plan that would run it.
+	if got := frozenReason("", 0); got != "This dashboard is kept, not running." {
+		t.Fatalf("a frozen board with nothing to buy still says it is kept; got %q", got)
+	}
+}
+
+// The {id} of a per-board path, with the sub-path taken off first. Reading the
+// last segment would make /v1/dashboards/{id}/proposal a board called
+// "proposal", which resolves to nothing and 404s a door that exists.
+func TestBoardPathID_ReadsTheBoardNotTheSubPath(t *testing.T) {
+	for path, want := range map[string]string{
+		"/v1/dashboards/main":          "main",
+		"/v1/dashboards/ab12":          "ab12",
+		"/v1/dashboards/ab12/proposal": "ab12",
+		"/v1/dashboards/ab12/widgets":  "ab12",
+	} {
+		if got := boardPathID(path); got != want {
+			t.Fatalf("boardPathID(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// Which board paths the KEY door takes, and which it deliberately does not.
+// The handler tests drive the handlers, and routes_test reads the mux, so this
+// is the only place the dispatch itself is pinned: a key on a session-only
+// path must fall through to the session gate rather than be served, and an
+// {id} arm that swallowed a sub-path would hand the agent the board instead of
+// refusing it. With no resolver wired, reaching the key door IS the 401
+// bad_key; everything that falls through is the session's own no_session.
+func TestTheKeyDoorTakesTheBoardPathsItOwnsAndNoOthers(t *testing.T) {
+	h := &writeAPI{}
+	for _, door := range []struct{ method, path, want string }{
+		{http.MethodGet, "/v1/dashboard", "bad_key"},
+		{http.MethodPut, "/v1/dashboard", "bad_key"},
+		{http.MethodPost, "/v1/dashboard/widgets", "bad_key"},
+		{http.MethodGet, "/v1/dashboards", "bad_key"},
+		{http.MethodPost, "/v1/dashboards", "bad_key"},
+		{http.MethodGet, "/v1/dashboards/ab12", "bad_key"},
+		{http.MethodPut, "/v1/dashboards/ab12", "bad_key"},
+		{http.MethodPost, "/v1/dashboards/ab12/widgets", "bad_key"},
+		// A key names no board, saves no batch and reads no proposal.
+		{http.MethodPatch, "/v1/dashboards/ab12", "no_session"},
+		{http.MethodDelete, "/v1/dashboards/ab12", "no_session"},
+		{http.MethodPut, "/v1/dashboards", "no_session"},
+		{http.MethodGet, "/v1/dashboards/ab12/proposal", "no_session"},
+		{http.MethodDelete, "/v1/dashboards/ab12/proposal", "no_session"},
+	} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(door.method, door.path, strings.NewReader("{}"))
+		r.Header.Set("X-Upcontrol-Key", "uc_live_deadbeefdeadbeefdeadbeefdeadbeef")
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), door.want) {
+			t.Fatalf("%s %s with a key = %d %s, want 401 %s", door.method, door.path, w.Code, w.Body.String(), door.want)
+		}
+	}
+}
+
 // A board is STORED as DashboardMetricRef and the write decodes it strictly, so a field a card
 // can carry but the schema does not list is a 400 on a document the server itself just served.
 // That is not hypothetical: the people source shipped with the reads and not with this schema,

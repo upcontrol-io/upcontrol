@@ -287,6 +287,19 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/dashboard/widgets", wa)
 	mux.Handle("GET /v1/dashboard/proposal", wa)
 	mux.Handle("DELETE /v1/dashboard/proposal", wa)
+	// The same doors per board, now that a project holds several. A sub-path
+	// is its own pattern, so /v1/dashboards/{id} matches neither the /widgets
+	// nor the /proposal line below it.
+	mux.Handle("GET /v1/dashboards", wa)
+	mux.Handle("POST /v1/dashboards", wa)
+	mux.Handle("PUT /v1/dashboards", wa)
+	mux.Handle("GET /v1/dashboards/{id}", wa)
+	mux.Handle("PUT /v1/dashboards/{id}", wa)
+	mux.Handle("PATCH /v1/dashboards/{id}", wa)
+	mux.Handle("DELETE /v1/dashboards/{id}", wa)
+	mux.Handle("POST /v1/dashboards/{id}/widgets", wa)
+	mux.Handle("GET /v1/dashboards/{id}/proposal", wa)
+	mux.Handle("DELETE /v1/dashboards/{id}/proposal", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)

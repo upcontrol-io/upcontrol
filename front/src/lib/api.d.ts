@@ -2078,7 +2078,7 @@ export interface paths {
         };
         /**
          * The stored board of the session's current project.
-         * @description One layout per project, whatever the board last saved. A project that never saved one answers an empty layout, never a 404: the front reads a 404 as a core without this endpoint and keeps the layout in the browser. With an ingest key the answer is the board document and nothing else: the key reads the board, never the catalog.
+         * @description The project's oldest board, the one `/v1/dashboards/main` names: this path and its two sub-paths are that alias, kept for every CLI that shipped before a project could hold several. A project that never saved a board answers an empty layout, never a 404. With an ingest key the answer is the board document and nothing else: the key reads the board, never the catalog.
          */
         get: {
             parameters: {
@@ -2277,6 +2277,454 @@ export interface paths {
                     };
                     content?: never;
                 };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The boards of the current project, without their layouts.
+         * @description A project holds several named boards, as many as plan_entitlement.dashboards carries. `/v1/dashboard` and its two sub-paths stay, for good, as the alias of the oldest one: a CLI already on somebody's machine knows no other path. Every `{id}` below accepts the literal `main` for that same oldest board, and the alias outranks a board that happens to be named `main`. With an ingest key the project is the key's; a PUBLIC key is refused on every board door, because it is printed in a page's source.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardList"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Save several boards in one transaction.
+         * @description Session only. Every board is stamped `session` and its pending proposal is resolved, exactly as the single save does; one refused board refuses them all. At most 16 boards a request, and each layout is held to the same 64 KB a single board is: a `bad_layout` names the board it is about.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardBatch"];
+                };
+            };
+            responses: {
+                /** @description The boards as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardBatch"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description unknown_board */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        /**
+         * Create a board, with or without a first layout.
+         * @description Both doors create freely up to the plan's count; past it the answer is the 402, whose `upgrade.plan` names the cheapest plan with room for one more and is absent at the top of the ladder. A board created with no layout is nobody's curation yet (`writtenBy: key`) whichever door made it, so an agent asked to fill a board a person just named writes it rather than parking a proposal on an empty board; a session that sends widgets with the create stamps `session`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardCreate"];
+                };
+            };
+            responses: {
+                /** @description Created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardCreated"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description The caller reaches no project. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description name_taken */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A board id, or the alias `main`. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One board's layout. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description A board id, or the alias `main`. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /**
+         * Replace one board; with a key, replace the key's own or propose onto a curated one.
+         * @description The provenance rule of `/v1/dashboard`, per board. The 202 carries the board's `id` and `name`, so a caller that addressed it by alias or by name can point a human at it.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description A board id, or the alias `main`. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardLayout"];
+                };
+            };
+            responses: {
+                /** @description The layout as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                /** @description Key-authenticated only, kept as a proposal. */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardWriteResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /**
+         * Delete a board.
+         * @description Session only, and open on a frozen board: the owner chooses what to keep, and deleting a live board thaws the oldest frozen one. A project's last board stays (409 `last_board`).
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description A board id, or the alias `main`. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Gone. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description last_board */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Rename a board.
+         * @description Session only. A name is not part of the layout, so a rename never touches provenance.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description A board id, or the alias `main`. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardRename"];
+                };
+            };
+            responses: {
+                /** @description Renamed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardCreated"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description name_taken */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/v1/dashboards/{id}/widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append a block of widgets below one board, with an ingest key.
+         * @description The merge of `/v1/dashboard/widgets`, onto the board named.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DashboardWidgets"];
+                };
+            };
+            responses: {
+                /** @description The merged layout as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboards/{id}/proposal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The layout an ingest key offered for this board. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The proposed layout. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardLayout"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description no_proposal */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Drop this board's pending proposal without applying it. */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The proposal is gone. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description notify_role */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
             };
         };
         options?: never;
@@ -4147,6 +4595,52 @@ export interface components {
         DashboardWriteResult: {
             /** @enum {string} */
             status: "stored" | "proposed";
+            /** @description The board the proposal waits on, so a caller that addressed it by alias or by name can point a human at it. Absent from a core older than several boards per project. */
+            id?: string;
+            name?: string;
+        };
+        /** @description One board of a project, without its layout. */
+        DashboardBoard: {
+            /** @description 32 hex characters, undashed. A project that never saved a board lists one synthetic entry whose id is the alias `main`. */
+            id: string;
+            name: string;
+            /** @description Past the plan's `plan_entitlement.dashboards`, counted in creation order. A frozen board is kept whole and answers 402 to every read and write on both doors; deleting it stays open, and a plan that carries it brings it back. */
+            frozen: boolean;
+            /**
+             * @description Whether a human curated this board. `key` also covers a board nobody has put a widget on yet, whichever door created it: a key replaces such a board freely, and a `session` board takes a key's replacement as a proposal.
+             * @enum {string}
+             */
+            writtenBy: "session" | "key";
+            /** @description How many widgets the stored layout holds. 0 on a frozen board is a real count, not a redaction. */
+            widgets: number;
+            /** @description A key's replacement is waiting on this board. */
+            proposed: boolean;
+        };
+        DashboardList: {
+            /** @description Creation order, which is also the order the freeze counts in. Never empty: a project with no stored board lists the synthetic `main`. */
+            boards: components["schemas"]["DashboardBoard"][];
+            /** @description Boards this project may hold (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted). */
+            max?: number;
+        };
+        DashboardCreate: {
+            /** @description Trimmed; unique inside the project, case-insensitively. */
+            name: string;
+            layout?: components["schemas"]["DashboardLayout"];
+        };
+        DashboardCreated: {
+            id: string;
+            name: string;
+        };
+        DashboardRename: {
+            name: string;
+        };
+        /** @description Every board one Save changed, written in one transaction: a widget moved between two boards is two documents, and saving one without the other would duplicate it or lose it. */
+        DashboardBatch: {
+            boards: {
+                /** @description A board id, or the alias `main`. */
+                id: string;
+                layout: components["schemas"]["DashboardLayout"];
+            }[];
         };
         /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */
         DashboardCatalog: {
@@ -4289,6 +4783,15 @@ export interface components {
             incidentHistoryDays: number;
             /** @description How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back. */
             historyDays?: number;
+            /** @description Boards per project (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted). A per-project axis, so it has no workspace-wide remainder to draw: the client renders `max` as a sentence, never a bar. */
+            dashboards?: {
+                /** @description Boards ONE project may hold. */
+                max: number;
+                /** @description The largest number of boards any one project of the workspace holds. What a downgrade confirmation compares with the target plan's cell: above it, that many boards lock. */
+                peak: number;
+                /** @description Boards locked across the workspace's projects because the plan carries fewer than those projects hold. Kept whole; a plan that carries them brings them back. Absent when zero. */
+                frozen?: number;
+            };
             /** @description Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. `used` counts LIVE projects only, because live projects are what a plan buys. */
             projects?: components["schemas"]["UsedMax"] & {
                 /** @description The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero. */

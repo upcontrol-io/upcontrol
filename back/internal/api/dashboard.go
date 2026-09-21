@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	apigen "go.upcontrol.io/back/gen/api"
 	sqlc "go.upcontrol.io/back/gen/pg"
@@ -984,25 +986,47 @@ func (h *writeAPI) metricSeries(ctx context.Context, tenantID, projectID int64, 
 }
 
 // ---------------------------------------------------------------------------
-// The board itself: one stored layout per project, read by any member and
-// replaced whole by a login member (the writeAPI's own non-GET gate), plus
-// the agent's key-authenticated doors and the proposal a key leaves behind.
+// The boards: a project holds several named ones, each a layout stored whole,
+// read by any member and replaced by a login member (the writeAPI's own
+// non-GET gate), plus the agent's key-authenticated doors and the proposal a
+// key leaves behind. /v1/dashboard and its two sub-paths stay for good as the
+// alias of the oldest board: a CLI already on somebody's machine knows no
+// other path.
 
 // dashboardColumns is the grid the front lays widgets on; a widget that runs
 // past it would be drawn clipped or wrapped, so it never gets stored.
 const dashboardColumns = 12
 
-// dashboardMaxBody caps the document. The board is a layout, not a data store,
-// and 64 KB is far more than a screenful of widgets needs.
+// dashboardMaxBody caps ONE board's document. The board is a layout, not a
+// data store, and 64 KB is far more than a screenful of widgets needs.
 const dashboardMaxBody = 64 << 10
 
-// emptyLayout answers a project that never saved a board. An empty board is a
-// real answer and never a 404: the front reads a 404 as "this core does not
-// have the endpoint yet" and falls back to the browser's own copy. The version
-// is the CURRENT one, because it is the only thing this document says: it has
-// no heights to be in one unit or the other, and an agent that reads an empty
-// board, fills it and sends it back would otherwise return version-2 sizes
-// under a version-1 label, which the front draws at twice the height asked for.
+// mainBoard is the alias every {id} position accepts: the project's oldest
+// board. The alias outranks a board that happens to be NAMED main, or a
+// rename would take the agent's one handle away from the board it has been
+// writing since before a project could hold two.
+const mainBoard = "main"
+
+// firstBoardName is what that oldest board is called when nothing named it:
+// the migration's default, and the name the alias materialises under.
+const firstBoardName = "Main"
+
+// maxBoardName is the contract's own ceiling, in runes: a name is a tab's
+// label, not a document.
+const maxBoardName = 40
+
+// maxSaveBoards bounds one atomic save. A person saves the boards they
+// changed, and a widget dragged from one board onto another is the whole
+// reason a save ever carries more than one.
+const maxSaveBoards = 16
+
+// emptyLayout answers a board that was never stored. An empty board is a real
+// answer and never a 404 on the alias: the front reads a 404 there as "this
+// core does not have the endpoint yet". The version is the CURRENT one,
+// because it is the only thing this document says: it has no heights to be in
+// one unit or the other, and an agent that reads an empty board, fills it and
+// sends it back would otherwise return version-2 sizes under a version-1
+// label, which the front draws at twice the height asked for.
 var emptyLayout = []byte(`{"version":2,"widgets":[]}`)
 
 // writeLayout hands the stored bytes back unchanged. The column is jsonb, so
@@ -1015,31 +1039,701 @@ func writeLayout(w http.ResponseWriter, layout []byte) {
 	_, _ = w.Write(layout)
 }
 
-// writeStoredBoard answers whichever board that tenant's project holds; both
-// doors that read one — the session's and the key's — differ only in how they
-// resolved the project, never in what an answer looks like.
-func (h *writeAPI) writeStoredBoard(w http.ResponseWriter, ctx context.Context, tenantID, projectID int64) {
-	row, err := h.pool.Queries().GetDashboard(ctx, sqlc.GetDashboardParams{
+// board is one stored board as every door needs it: its identity, who curated
+// it, the document, the offer waiting on it, and the rank the freeze counts
+// in (1 is the alias, and the alias is never frozen).
+type board struct {
+	id        int64
+	publicID  pgtype.UUID
+	name      string
+	writtenBy string
+	layout    []byte
+	proposed  []byte
+	rank      int64
+}
+
+// boardDoor is what a board request acts on: the caller's tenant and project,
+// and which door they came through. Provenance follows the door, three of the
+// acts are a session's alone, and everything else the two doors do is the
+// same code answering the same way.
+type boardDoor struct {
+	tenantID  int64
+	projectID int64
+	session   bool
+}
+
+// sessionBoards is the session door: the current project of the caller's
+// workspace. 0 means they reach no project here, which the reads render as an
+// empty board and every write as a 404.
+func (h *writeAPI) sessionBoards(r *http.Request, tenantID int64) boardDoor {
+	return boardDoor{tenantID: tenantID, projectID: h.currentProject(r.Context(), r, tenantID), session: true}
+}
+
+// keyBoards is the agent's door: the project is the key's own. It answers the
+// request itself (401) when the presented key is not one that may reach a
+// board at all.
+func (h *writeAPI) keyBoards(w http.ResponseWriter, r *http.Request) (boardDoor, bool) {
+	tenant, ok := h.resolveAgentKey(w, r)
+	if !ok {
+		return boardDoor{}, false
+	}
+	return boardDoor{tenantID: tenant.TenantID, projectID: tenant.ProjectID}, true
+}
+
+// resolveBoardQ is the one way a board id becomes a row, and it cannot lie:
+// the lookup carries the caller's tenant AND project, so an id from another
+// workspace, or from a sibling project of the same workspace, resolves to
+// nothing exactly like an id that never existed. false means "no such board
+// here" — every door turns that into a 404, except on the alias, which is
+// allowed not to exist yet. q so a caller inside a transaction resolves what
+// it has already written (the atomic save).
+func resolveBoardQ(ctx context.Context, q *sqlc.Queries, tenantID, projectID int64, raw string) (board, bool, error) {
+	row, err := q.ResolveBoard(ctx, sqlc.ResolveBoardParams{
 		TenantID: tenantID, ProjectID: projectID,
+		Alias: raw == mainBoard, PublicID: parseUUID(raw),
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		writeLayout(w, emptyLayout)
+		return board{}, false, nil
 	case err != nil:
-		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
-	default:
-		writeLayout(w, row.Layout)
+		return board{}, false, err
 	}
+	return board{
+		id: row.ID, publicID: row.PublicID, name: row.Name, writtenBy: row.WrittenBy,
+		layout: row.Layout, proposed: row.Proposed, rank: row.Rank,
+	}, true, nil
 }
 
-func (h *writeAPI) getDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+func (h *writeAPI) resolveBoard(ctx context.Context, d boardDoor, raw string) (board, bool, error) {
+	return resolveBoardQ(ctx, h.pool.Queries(), d.tenantID, d.projectID, raw)
+}
+
+// boardPlan answers the workspace's plan and how many boards ONE of its
+// projects may hold. nil is unlimited (Self-hosted), the contract every axis
+// in the entitlement table carries; a missing tenant plan reads as Free, like
+// every other wall here.
+func boardPlan(ctx context.Context, pool *pg.Pool, tenantID int64) (string, *int, error) {
+	plan, _ := pool.Queries().GetTenantPlan(ctx, tenantID)
+	if plan == "" {
+		plan = "Free"
+	}
+	ent, err := pool.Queries().GetPlanEntitlement(ctx, plan)
+	if err != nil {
+		return plan, nil, err
+	}
+	if ent.Dashboards == nil {
+		return plan, nil, nil
+	}
+	limit := int(*ent.Dashboards)
+	return plan, &limit, nil
+}
+
+// boardsReason is the create wall's copy, and the front spells it identically.
+// The sentence is built from the entitlement rows rather than typed as a
+// literal, the way historyReason is: `lift` is the cheapest plan that answers
+// the ask, "" when the ladder holds nothing above the caller.
+func boardsReason(plan string, carries int, lift string, liftMax int) string {
+	if lift == "" {
+		return plan + " carries " + strconv.Itoa(carries) + " dashboards per project."
+	}
+	noun := " dashboards"
+	if carries == 1 {
+		noun = " dashboard"
+	}
+	return "Your plan carries " + strconv.Itoa(carries) + noun + " per project. " +
+		lift + " carries " + strconv.Itoa(liftMax) + "."
+}
+
+// frozenReason is the frozen wall's copy. The board is kept either way; with
+// nothing above the caller to buy, saying that IS the whole sentence.
+func frozenReason(lift string, liftMax int) string {
+	if lift == "" {
+		return "This dashboard is kept, not running."
+	}
+	return "This dashboard is kept, not running. " + lift + " carries " +
+		strconv.Itoa(liftMax) + " per project."
+}
+
+// boardsLift names the cheapest ladder plan whose board count satisfies fits,
+// and how many that plan carries — read off the row cheapestPlan accepted, so
+// the answer costs one query rather than two. The two walls ask different
+// questions of the same table, so the predicate belongs to the caller.
+func boardsLift(ctx context.Context, pool *pg.Pool, fits func(max int) bool) (string, int) {
+	liftMax := 0
+	lift := cheapestPlan(ctx, pool, func(e sqlc.PlanEntitlement) bool {
+		if e.Dashboards == nil || !fits(int(*e.Dashboards)) {
+			return false
+		}
+		liftMax = int(*e.Dashboards)
+		return true
+	})
+	return lift, liftMax
+}
+
+// writeBoardWall answers the create wall: the cheapest plan with room for one
+// MORE board. The projects axis learned this distinction first — the create
+// wall asks for room, the frozen wall asks for a plan that carries what is
+// already there. Two numbers, because after a downgrade they differ: room is
+// measured against what the project HOLDS, the sentence states what the plan
+// CARRIES, and printing the first as the second quotes Free as carrying three.
+func writeBoardWall(ctx context.Context, w http.ResponseWriter, pool *pg.Pool, plan string, carries, have int) {
+	lift, liftMax := boardsLift(ctx, pool, func(max int) bool { return max > have })
+	writeUpgradeRequired(w, boardsReason(plan, carries, lift, liftMax), strings.ToLower(lift))
+}
+
+// writeFrozenBoard answers the frozen wall, modelled on writeFrozen: the plan
+// it names CARRIES every board the project holds (>=, not room for one more),
+// because the ask is to run what is there.
+func writeFrozenBoard(ctx context.Context, w http.ResponseWriter, pool *pg.Pool, have int) {
+	lift, liftMax := boardsLift(ctx, pool, func(max int) bool { return max >= have })
+	writeUpgradeRequired(w, frozenReason(lift, liftMax), strings.ToLower(lift))
+}
+
+// frozenWall counts what the project holds and words the 402 about it; a count
+// that broke is the 500 instead. Either way the request has been answered when
+// it returns. q, so the atomic save counts inside its own transaction.
+func (h *writeAPI) frozenWall(ctx context.Context, w http.ResponseWriter, q *sqlc.Queries, d boardDoor) {
+	have, err := q.CountBoards(ctx, sqlc.CountBoardsParams{
+		TenantID: d.tenantID, ProjectID: d.projectID,
+	})
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	writeFrozenBoard(ctx, w, h.pool, int(have))
+}
+
+// boardRuns answers the frozen wall itself and reports false when it did. A
+// board past the plan's count is kept whole and reached by nobody — on either
+// door, reading or writing — until a plan carries it again. Deleting one
+// stays open: the owner chooses what to keep.
+func (h *writeAPI) boardRuns(ctx context.Context, w http.ResponseWriter, d boardDoor, b board) bool {
+	_, limit, err := boardPlan(ctx, h.pool, d.tenantID)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return false
+	}
+	if limit == nil || b.rank <= int64(*limit) {
+		return true
+	}
+	h.frozenWall(ctx, w, h.pool.Queries(), d)
+	return false
+}
+
+// unknownBoard is the one answer an id nobody reaches gets, whatever the verb:
+// a stranger's board, a sibling project's and one that never existed all read
+// alike, so the door confirms nothing about which ids exist.
+func unknownBoard(w http.ResponseWriter) {
+	writeAPIErrMsg(w, http.StatusNotFound, "unknown_board", "this project has no such dashboard")
+}
+
+// knownBoard is the preamble every by-id door shares: the board resolved, the
+// 500 on a read that broke, and the 404 an id nobody reaches gets. ok false
+// means the request has been answered. found false means the ALIAS is not
+// stored yet, which is allowed and which every door words for itself.
+func (h *writeAPI) knownBoard(ctx context.Context, w http.ResponseWriter, d boardDoor, raw string) (board, bool, bool) {
+	b, found, err := h.resolveBoard(ctx, d, raw)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return board{}, false, false
+	}
+	if !found && raw != mainBoard {
+		unknownBoard(w)
+		return board{}, false, false
+	}
+	return b, found, true
+}
+
+// liveBoard is that preamble plus the frozen wall, which is what every door
+// but one wants. deleteBoard is the exception and stays on knownBoard: the
+// owner chooses what to keep.
+func (h *writeAPI) liveBoard(ctx context.Context, w http.ResponseWriter, d boardDoor, raw string) (board, bool, bool) {
+	b, found, ok := h.knownBoard(ctx, w, d, raw)
+	if !ok || !found {
+		return b, found, ok
+	}
+	if !h.boardRuns(ctx, w, d, b) {
+		return board{}, false, false
+	}
+	return b, true, true
+}
+
+// layAlias materialises the alias: the project's own Main, laid down by
+// whichever door got there first, taking over a row of that name an earlier
+// tenant of a released and re-claimed project left behind. q, so the atomic
+// save lays it down inside its own transaction.
+func layAlias(ctx context.Context, q *sqlc.Queries, d boardDoor, layout []byte, writtenBy string) (sqlc.UpsertBoardRow, error) {
+	return q.UpsertBoard(ctx, sqlc.UpsertBoardParams{
+		TenantID: d.tenantID, ProjectID: d.projectID, Name: firstBoardName,
+		Layout: layout, WrittenBy: writtenBy,
+	})
+}
+
+// boardPathID is the {id} of a per-board path, with the sub-path taken off
+// first: the last segment of /v1/dashboards/{id}/proposal is the sub-path,
+// never the board.
+func boardPathID(path string) string {
+	return pathLast(strings.TrimSuffix(strings.TrimSuffix(path, "/proposal"), "/widgets"))
+}
+
+// boardName trims and checks a name the caller typed. "" means the door has
+// already answered.
+func boardName(w http.ResponseWriter, raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	if name == "" || len([]rune(name)) > maxBoardName {
+		writeAPIErrMsg(w, http.StatusBadRequest, "bad_name",
+			fmt.Sprintf("a dashboard's name is 1 to %d characters", maxBoardName))
+		return "", false
+	}
+	return name, true
+}
+
+// listBoards answers GET /v1/dashboards on both doors: what the project holds,
+// without the layouts. A project that never saved one still lists a board —
+// the synthetic `main` — because the alias always names something, and a
+// front with no tab to draw would have nowhere to put the `+`.
+func (h *writeAPI) listBoards(w http.ResponseWriter, r *http.Request, d boardDoor) {
 	ctx := r.Context()
-	projectID := h.currentProject(ctx, r, tenantID)
-	if projectID == 0 {
+	_, limit, err := boardPlan(ctx, h.pool, d.tenantID)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	var rows []sqlc.ListBoardsRow
+	if d.projectID != 0 {
+		rows, err = h.pool.Queries().ListBoards(ctx, sqlc.ListBoardsParams{
+			TenantID: d.tenantID, ProjectID: d.projectID,
+		})
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+			return
+		}
+	}
+	boards := make([]map[string]any, 0, len(rows)+1)
+	for _, row := range rows {
+		boards = append(boards, map[string]any{
+			"id":        uuidStr(row.PublicID),
+			"name":      row.Name,
+			"frozen":    limit != nil && row.Rank > int64(*limit),
+			"writtenBy": row.WrittenBy,
+			"widgets":   int(row.Widgets),
+			"proposed":  row.Proposed,
+		})
+	}
+	if len(boards) == 0 {
+		// Nothing stored yet. The alias is a board all the same, and it is
+		// nobody's curation until somebody saves it, so the key may write it.
+		boards = append(boards, map[string]any{
+			"id": mainBoard, "name": firstBoardName, "frozen": false,
+			"writtenBy": "key", "widgets": 0, "proposed": false,
+		})
+	}
+	resp := map[string]any{"boards": boards}
+	// Absent when the plan is unlimited: what nothing caps is not a number to
+	// print, the same silence every other axis keeps.
+	if limit != nil {
+		resp["max"] = *limit
+	}
+	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+// createBoard answers POST /v1/dashboards on both doors. Both create freely up
+// to the plan's count; past it the answer is the 402. No lock stands behind
+// the count: two creates arriving together can land one board too many, and
+// that board is frozen by the same rank rule a downgrade uses, which is
+// exactly what computing the freeze on read is for.
+func (h *writeAPI) createBoard(w http.ResponseWriter, r *http.Request, d boardDoor) {
+	// The first layout may ride in this body, so the board's own cap is the
+	// one that applies, exactly as it does on a replace.
+	r.Body = http.MaxBytesReader(w, r.Body, dashboardMaxBody)
+	var req struct {
+		Name   string                  `json:"name"`
+		Layout *apigen.DashboardLayout `json:"layout"`
+	}
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	name, ok := boardName(w, req.Name)
+	if !ok {
+		return
+	}
+	layout := emptyLayout
+	if req.Layout != nil {
+		if reason := validateLayout(*req.Layout); reason != "" {
+			writeAPIErrMsg(w, http.StatusBadRequest, "bad_layout", reason)
+			return
+		}
+		stored, err := json.Marshal(*req.Layout)
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		layout = stored
+	}
+	if d.projectID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	ctx := r.Context()
+	plan, limit, err := boardPlan(ctx, h.pool, d.tenantID)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	count, err := h.pool.Queries().CountBoards(ctx, sqlc.CountBoardsParams{
+		TenantID: d.tenantID, ProjectID: d.projectID,
+	})
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	// A project with nothing stored still holds one board, the alias, so the
+	// cap counts what the reader sees rather than what the table holds.
+	have := int(count)
+	if have < 1 {
+		have = 1
+	}
+	if limit != nil && have >= *limit {
+		writeBoardWall(ctx, w, h.pool, plan, *limit, have)
+		return
+	}
+	// The alias is the project's OLDEST board, so laying down a board somebody
+	// just named would hand `main` to it and the CLI would write there from
+	// then on. Materialising Main first keeps the alias where every caller
+	// left it, in the current unit so the append door accepts what the server
+	// itself just made.
+	if count == 0 {
+		if _, err := layAlias(ctx, h.pool.Queries(), d, emptyLayout, "key"); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+	}
+	// A board nobody has put a widget on is nobody's curation, whichever door
+	// made it: the agent asked to fill a board a person just named writes it
+	// rather than parking a proposal on an empty board. A session that sends
+	// widgets with the create IS curating.
+	writtenBy := "key"
+	if d.session && req.Layout != nil {
+		writtenBy = "session"
+	}
+	row, err := h.pool.Queries().CreateBoard(ctx, sqlc.CreateBoardParams{
+		TenantID: d.tenantID, ProjectID: d.projectID, Name: name,
+		Layout: layout, WrittenBy: writtenBy,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeAPIErrMsg(w, http.StatusConflict, "name_taken",
+			"this project already has a dashboard called "+name)
+		return
+	case err != nil:
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	writeAPIJSON(w, http.StatusCreated, map[string]any{
+		"id": uuidStr(row.PublicID), "name": row.Name,
+	})
+}
+
+// getBoardLayout answers one board's document on both doors. The alias is
+// allowed not to exist: a project that never saved a board reads the empty
+// layout, never a 404, because the front reads a 404 there as a core without
+// this endpoint.
+func (h *writeAPI) getBoardLayout(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
+	b, found, ok := h.liveBoard(r.Context(), w, d, raw)
+	if !ok {
+		return
+	}
+	if !found {
 		writeLayout(w, emptyLayout)
 		return
 	}
-	h.writeStoredBoard(w, ctx, tenantID, projectID)
+	writeLayout(w, b.layout)
+}
+
+// putBoardLayout replaces one board, on both doors. The narrowness the key
+// keeps is not "a board exists" but "a human made this board": it may freely
+// replace what the key itself wrote and what nobody has curated, and a curated
+// board is never overwritten by a credential that lives in `.env` on every
+// deployed server. Writing over a curated board is not a refusal — the offered
+// layout is kept as a proposal (202) that one click in the app applies or
+// drops.
+func (h *writeAPI) putBoardLayout(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
+	ctx := r.Context()
+	// The board is resolved before the body is read: an unknown or a frozen
+	// board is that whatever the document would have been.
+	b, found, ok := h.liveBoard(ctx, w, d, raw)
+	if !ok {
+		return
+	}
+	if !found && d.projectID == 0 {
+		// The alias names a board in a project, and this caller reaches none.
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	doc, ok := readLayout(w, r)
+	if !ok {
+		return
+	}
+	stored, err := json.Marshal(doc)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if found && !d.session && b.writtenBy == "session" {
+		rows, err := h.pool.Queries().ProposeBoard(ctx, sqlc.ProposeBoardParams{
+			ID: b.id, TenantID: d.tenantID, Proposed: stored,
+		})
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		if rows == 0 {
+			unknownBoard(w)
+			return
+		}
+		// The id and the name so a caller that addressed the board by alias or
+		// by name can point a human at the right tab.
+		writeAPIJSON(w, http.StatusAccepted, map[string]any{
+			"status": "proposed", "id": uuidStr(b.publicID), "name": b.name,
+		})
+		return
+	}
+	// Provenance follows the door: what a key writes stays the key's, and what
+	// a session writes is a human's curation.
+	writtenBy := "key"
+	if d.session {
+		writtenBy = "session"
+	}
+	if !found {
+		// The alias materialises on its first write rather than answering 200
+		// beside a row that is already there.
+		if _, err := layAlias(ctx, h.pool.Queries(), d, stored, writtenBy); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		writeLayout(w, stored)
+		return
+	}
+	rows, err := h.pool.Queries().PutBoardLayout(ctx, sqlc.PutBoardLayoutParams{
+		ID: b.id, TenantID: d.tenantID, Layout: stored, WrittenBy: writtenBy,
+	})
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if rows == 0 {
+		unknownBoard(w)
+		return
+	}
+	writeLayout(w, stored)
+}
+
+// saveBoards answers PUT /v1/dashboards: every board one Save changed, in one
+// transaction. A widget moved between two boards is two documents, and saving
+// one without the other would duplicate it or lose it; one refused board
+// refuses them all, which is what the rollback is for. Session only, so every
+// board it writes is a human's curation.
+func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	// decodeStrict's own 1 MB limit bounds the request; each board's stored
+	// document is then held to the same 64 KB a single save is, below, so the
+	// rule that refuses is the per-board one and its message names the board.
+	var req struct {
+		Boards []struct {
+			ID     string                 `json:"id"`
+			Layout apigen.DashboardLayout `json:"layout"`
+		} `json:"boards"`
+	}
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	if len(req.Boards) == 0 || len(req.Boards) > maxSaveBoards {
+		writeAPIErrMsg(w, http.StatusBadRequest, "bad_request",
+			fmt.Sprintf("a save carries 1 to %d boards, got %d", maxSaveBoards, len(req.Boards)))
+		return
+	}
+	d := h.sessionBoards(r, tenantID)
+	if d.projectID == 0 {
+		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	ctx := r.Context()
+	_, limit, err := boardPlan(ctx, h.pool, tenantID)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	tx, err := h.pool.Raw().Begin(ctx)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := h.pool.Queries().WithTx(tx)
+	saved := make([]map[string]any, 0, len(req.Boards))
+	for _, entry := range req.Boards {
+		b, found, err := resolveBoardQ(ctx, q, d.tenantID, d.projectID, entry.ID)
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+			return
+		}
+		if !found && entry.ID != mainBoard {
+			unknownBoard(w)
+			return
+		}
+		if found && limit != nil && b.rank > int64(*limit) {
+			h.frozenWall(ctx, w, q, d)
+			return
+		}
+		if reason := validateLayout(entry.Layout); reason != "" {
+			writeAPIErrMsg(w, http.StatusBadRequest, "bad_layout", entry.ID+": "+reason)
+			return
+		}
+		stored, err := json.Marshal(entry.Layout)
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		if len(stored) > dashboardMaxBody {
+			writeAPIErrMsg(w, http.StatusBadRequest, "bad_layout",
+				fmt.Sprintf("%s: the board would pass the %d-byte cap", entry.ID, dashboardMaxBody))
+			return
+		}
+		var id string
+		if !found {
+			row, err := layAlias(ctx, q, d, stored, "session")
+			if err != nil {
+				writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+				return
+			}
+			id = uuidStr(row.PublicID)
+		} else {
+			rows, err := q.PutBoardLayout(ctx, sqlc.PutBoardLayoutParams{
+				ID: b.id, TenantID: d.tenantID, Layout: stored, WrittenBy: "session",
+			})
+			if err != nil {
+				writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+				return
+			}
+			if rows == 0 {
+				unknownBoard(w)
+				return
+			}
+			id = uuidStr(b.publicID)
+		}
+		saved = append(saved, map[string]any{"id": id, "layout": json.RawMessage(stored)})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{"boards": saved})
+}
+
+// renameBoard answers PATCH /v1/dashboards/{id}. Session only: a key writes
+// boards, it does not name them. A name is not part of the layout, so this
+// never touches provenance.
+func (h *writeAPI) renameBoard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	name, ok := boardName(w, req.Name)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	d := h.sessionBoards(r, tenantID)
+	b, found, ok := h.liveBoard(ctx, w, d, boardPathID(r.URL.Path))
+	if !ok {
+		return
+	}
+	if !found {
+		// Naming the alias of a project that never stored a board is simply
+		// creating that board under the name: it is the same board either way,
+		// and refusing would leave the first tab unrenameable.
+		if d.projectID == 0 {
+			unknownBoard(w)
+			return
+		}
+		row, err := h.pool.Queries().CreateBoard(ctx, sqlc.CreateBoardParams{
+			TenantID: d.tenantID, ProjectID: d.projectID, Name: name,
+			Layout: emptyLayout, WrittenBy: "key",
+		})
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, map[string]any{"id": uuidStr(row.PublicID), "name": row.Name})
+		return
+	}
+	rows, err := h.pool.Queries().RenameBoard(ctx, sqlc.RenameBoardParams{
+		ID: b.id, TenantID: d.tenantID, Name: name,
+	})
+	if err != nil {
+		// The project already holds that name: the unique index is what
+		// arbitrates, so two renames racing cannot both win.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeAPIErrMsg(w, http.StatusConflict, "name_taken",
+				"this project already has a dashboard called "+name)
+			return
+		}
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if rows == 0 {
+		unknownBoard(w)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]any{"id": uuidStr(b.publicID), "name": name})
+}
+
+// deleteBoard answers DELETE /v1/dashboards/{id}. Session only, and open on a
+// frozen board: the owner chooses what to keep, and deleting a live one thaws
+// the oldest frozen one on the next read. A project keeps its last board —
+// there is always somewhere for the alias to point.
+func (h *writeAPI) deleteBoard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	ctx := r.Context()
+	d := h.sessionBoards(r, tenantID)
+	b, found, ok := h.knownBoard(ctx, w, d, boardPathID(r.URL.Path))
+	if !ok {
+		return
+	}
+	if !found {
+		// The alias of a project with nothing stored is the project's one
+		// board: there is nothing to delete, and it would be the last anyway.
+		if d.projectID != 0 {
+			writeAPIErrMsg(w, http.StatusConflict, "last_board",
+				"a project keeps at least one dashboard")
+			return
+		}
+		unknownBoard(w)
+		return
+	}
+	have, err := h.pool.Queries().CountBoards(ctx, sqlc.CountBoardsParams{
+		TenantID: d.tenantID, ProjectID: d.projectID,
+	})
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
+	if have <= 1 {
+		writeAPIErrMsg(w, http.StatusConflict, "last_board",
+			"a project keeps at least one dashboard")
+		return
+	}
+	rows, err := h.pool.Queries().DeleteBoard(ctx, sqlc.DeleteBoardParams{ID: b.id, TenantID: d.tenantID})
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if rows == 0 {
+		unknownBoard(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // presentedKey reads an ingest key off the request. Header or bearer only: a key in a
@@ -1074,74 +1768,13 @@ func (h *writeAPI) resolveAgentKey(w http.ResponseWriter, r *http.Request) (inge
 	return tenant, true
 }
 
-// putAgentDashboard is the key's replace door. The narrowness it keeps is no
-// longer "a board exists" but "a human made this board": the key may freely
-// replace what the key itself wrote, and a curated board is never overwritten
-// by a credential that lives in `.env` on every deployed server. Writing over
-// a curated board is not a refusal — the offered layout is kept as a proposal
-// (202) that one click in the app applies or drops.
-func (h *writeAPI) putAgentDashboard(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := h.resolveAgentKey(w, r)
-	if !ok {
-		return
-	}
-	doc, ok := readLayout(w, r)
-	if !ok {
-		return
-	}
-	ctx := r.Context()
-	stored, err := json.Marshal(doc)
-	if err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
-		return
-	}
-	row, err := h.pool.Queries().GetDashboard(ctx, sqlc.GetDashboardParams{
-		TenantID: tenant.TenantID, ProjectID: tenant.ProjectID,
-	})
-	switch {
-	case errors.Is(err, pgx.ErrNoRows), err == nil && row.WrittenBy == "key":
-		// No board yet, or the key's own: either way this write replaces it.
-	case err != nil:
-		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
-		return
-	default:
-		// A human curated this board. The layout is kept as a proposal, not
-		// refused: one click in the app applies it.
-		if err := h.pool.Queries().ProposeDashboard(ctx, sqlc.ProposeDashboardParams{
-			TenantID: tenant.TenantID, ProjectID: tenant.ProjectID, Proposed: stored,
-		}); err != nil {
-			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
-			return
-		}
-		writeAPIJSON(w, http.StatusAccepted, map[string]any{"status": "proposed"})
-		return
-	}
-	if err := h.pool.Queries().PutDashboard(ctx, sqlc.PutDashboardParams{
-		TenantID: tenant.TenantID, ProjectID: tenant.ProjectID, Layout: stored, WrittenBy: "key",
-	}); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
-		return
-	}
-	writeLayout(w, stored)
-}
-
-// getAgentDashboard is the key's one read: the board document and nothing
-// else. The catalog stays session-only — it reports what actually arrived,
-// including attribute values, and the agent builds from what it declared.
-func (h *writeAPI) getAgentDashboard(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := h.resolveAgentKey(w, r)
-	if !ok {
-		return
-	}
-	h.writeStoredBoard(w, r.Context(), tenant.TenantID, tenant.ProjectID)
-}
-
-// appendDashboardWidgets is the key's additive door. Append is deliberately
+// appendBoardWidgets is the key's additive door. Append is deliberately
 // allowed on a curated board: it removes nothing, and an unwanted card is one
 // click away — that is why it needs no confirmation where a replace becomes a
 // proposal. Appending keeps the board's provenance exactly as it was.
-func (h *writeAPI) appendDashboardWidgets(w http.ResponseWriter, r *http.Request) {
-	tenant, ok := h.resolveAgentKey(w, r)
+func (h *writeAPI) appendBoardWidgets(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
+	ctx := r.Context()
+	b, found, ok := h.liveBoard(ctx, w, d, raw)
 	if !ok {
 		return
 	}
@@ -1155,26 +1788,16 @@ func (h *writeAPI) appendDashboardWidgets(w http.ResponseWriter, r *http.Request
 	if !decodeStrict(w, r, &req) {
 		return
 	}
-	ctx := r.Context()
-	row, err := h.pool.Queries().GetDashboard(ctx, sqlc.GetDashboardParams{
-		TenantID: tenant.TenantID, ProjectID: tenant.ProjectID,
-	})
 	var doc apigen.DashboardLayout
-	hadRow := false
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// No board yet: the incoming widgets become the whole board, in the
-		// current unit the front saves in.
-		doc = apigen.DashboardLayout{Version: apigen.N2}
-	case err != nil:
-		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
-		return
-	default:
-		if err := json.Unmarshal(row.Layout, &doc); err != nil {
+	if found {
+		if err := json.Unmarshal(b.layout, &doc); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "read_failed")
 			return
 		}
-		hadRow = true
+	} else {
+		// No board yet: the incoming widgets become the whole board, in the
+		// current unit the front saves in.
+		doc = apigen.DashboardLayout{Version: apigen.N2}
 	}
 	// The agent writes in the current unit, so appending onto a board still
 	// stored in the older one would silently draw its cards at twice the
@@ -1226,19 +1849,24 @@ func (h *writeAPI) appendDashboardWidgets(w http.ResponseWriter, r *http.Request
 	// board takes the layout alone: appending keeps its provenance, and it does
 	// NOT resolve a pending proposal — only the reader resolves an offer the
 	// agent made them, and a second agent run must not delete the first one's
-	// unseen. A project with no board is this key laying one down.
-	var writeErr error
-	if hadRow {
-		writeErr = h.pool.Queries().AppendDashboardLayout(ctx, sqlc.AppendDashboardLayoutParams{
-			TenantID: tenant.TenantID, ProjectID: tenant.ProjectID, Layout: stored,
-		})
-	} else {
-		writeErr = h.pool.Queries().PutDashboard(ctx, sqlc.PutDashboardParams{
-			TenantID: tenant.TenantID, ProjectID: tenant.ProjectID, Layout: stored, WrittenBy: "key",
-		})
+	// unseen. A board that is not there yet is this key laying the alias down.
+	if !found {
+		if _, err := layAlias(ctx, h.pool.Queries(), d, stored, "key"); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+			return
+		}
+		writeLayout(w, stored)
+		return
 	}
-	if writeErr != nil {
+	rows, err := h.pool.Queries().AppendBoardLayout(ctx, sqlc.AppendBoardLayoutParams{
+		ID: b.id, TenantID: d.tenantID, Layout: stored,
+	})
+	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
+		return
+	}
+	if rows == 0 {
+		unknownBoard(w)
 		return
 	}
 	writeLayout(w, stored)
@@ -1254,42 +1882,68 @@ func mintWidgetID(occupied map[string]bool) string {
 	}
 }
 
-// getDashboardProposal answers the one pending proposal, if any. A notify
-// member may read it, like every other GET.
-func (h *writeAPI) getDashboardProposal(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	ctx := r.Context()
-	projectID := h.currentProject(ctx, r, tenantID)
-	if projectID == 0 {
-		writeAPIErr(w, http.StatusNotFound, "no_proposal")
+// getBoardProposal answers the one proposal pending on a board, if any. A
+// notify member may read it, like every other GET.
+func (h *writeAPI) getBoardProposal(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
+	b, found, ok := h.liveBoard(r.Context(), w, d, raw)
+	if !ok {
 		return
 	}
-	proposed, err := h.pool.Queries().GetDashboardProposal(ctx, sqlc.GetDashboardProposalParams{
-		TenantID: tenantID, ProjectID: projectID,
-	})
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+	if !found {
+		writeAPIErr(w, http.StatusNotFound, "no_proposal")
 		return
 	}
 	// The column is nullable and a NULL arrives as a nil slice: that is "no
 	// proposal", which is not the same fact as an empty one.
-	if len(proposed) == 0 {
+	if len(b.proposed) == 0 {
 		writeAPIErr(w, http.StatusNotFound, "no_proposal")
 		return
 	}
-	writeLayout(w, proposed)
+	writeLayout(w, b.proposed)
 }
 
-// clearDashboardProposal drops the pending proposal without applying it. A
-// write, so it rides the same login gate every other mutation does.
-func (h *writeAPI) clearDashboardProposal(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// clearBoardProposal drops the pending proposal without applying it. A write,
+// so it rides the same login gate every other mutation does.
+func (h *writeAPI) clearBoardProposal(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
 	ctx := r.Context()
-	if err := h.pool.Queries().ClearDashboardProposal(ctx, sqlc.ClearDashboardProposalParams{
-		TenantID: tenantID, ProjectID: h.currentProject(ctx, r, tenantID),
+	// The read of a frozen board's proposal is walled, so the drop is too: an
+	// offer nobody may look at is not one to throw away unseen.
+	b, found, ok := h.liveBoard(ctx, w, d, raw)
+	if !ok {
+		return
+	}
+	if !found {
+		// No board, so no offer waiting on it: the caller asked for it gone
+		// and it is gone.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if _, err := h.pool.Queries().ClearBoardProposal(ctx, sqlc.ClearBoardProposalParams{
+		ID: b.id, TenantID: d.tenantID,
 	}); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// The session's own doors on the alias: /v1/dashboard and its two sub-paths,
+// which every front and every shipped CLI still call.
+
+func (h *writeAPI) getDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	h.getBoardLayout(w, r, h.sessionBoards(r, tenantID), mainBoard)
+}
+
+func (h *writeAPI) putDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	h.putBoardLayout(w, r, h.sessionBoards(r, tenantID), mainBoard)
+}
+
+func (h *writeAPI) getDashboardProposal(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	h.getBoardProposal(w, r, h.sessionBoards(r, tenantID), mainBoard)
+}
+
+func (h *writeAPI) clearDashboardProposal(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	h.clearBoardProposal(w, r, h.sessionBoards(r, tenantID), mainBoard)
 }
 
 // readLayout is the one way a layout enters this server, whichever door it came
@@ -1308,34 +1962,6 @@ func readLayout(w http.ResponseWriter, r *http.Request) (apigen.DashboardLayout,
 		return doc, false
 	}
 	return doc, true
-}
-
-func (h *writeAPI) putDashboard(w http.ResponseWriter, r *http.Request, tenantID int64) {
-	doc, ok := readLayout(w, r)
-	if !ok {
-		return
-	}
-	ctx := r.Context()
-	projectID := h.currentProject(ctx, r, tenantID)
-	if projectID == 0 {
-		writeAPIErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	stored, err := json.Marshal(doc)
-	if err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
-		return
-	}
-	// A session save is a human's curation by definition: provenance follows
-	// the door, and this is the door that makes the key treat the board as
-	// curated from here on.
-	if err := h.pool.Queries().PutDashboard(ctx, sqlc.PutDashboardParams{
-		TenantID: tenantID, ProjectID: projectID, Layout: stored, WrittenBy: "session",
-	}); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
-		return
-	}
-	writeLayout(w, stored)
 }
 
 // validateLayout checks the envelope and nothing inside it: a widget's refs

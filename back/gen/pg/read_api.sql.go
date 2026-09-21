@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const boardsHeld = `-- name: BoardsHeld :one
+SELECT COALESCE(max(n), 0)::int AS peak,
+       COALESCE(sum(GREATEST(n - $1::int, 0)), 0)::int AS frozen
+  FROM (SELECT count(*)::int AS n FROM dashboard
+         WHERE tenant_id = $2 GROUP BY project_id) b
+`
+
+type BoardsHeldParams struct {
+	MaxBoards int32
+	TenantID  int64
+}
+
+type BoardsHeldRow struct {
+	Peak   int32
+	Frozen int32
+}
+
+// The boards axis for the Plan screen: the most any ONE project of the
+// workspace holds — what a downgrade confirmation compares with the target
+// plan's cell — and how many are locked across them all. Both are counted from
+// the stored rows the same way every board read counts them, so the sentence
+// on the screen and the 402 on the board can never disagree.
+func (q *Queries) BoardsHeld(ctx context.Context, arg BoardsHeldParams) (BoardsHeldRow, error) {
+	row := q.db.QueryRow(ctx, boardsHeld, arg.MaxBoards, arg.TenantID)
+	var i BoardsHeldRow
+	err := row.Scan(&i.Peak, &i.Frozen)
+	return i, err
+}
+
 const getAPIKeyForProject = `-- name: GetAPIKeyForProject :one
 SELECT id, prefix, name, state, created_at, last_used_at, revoked_at, kind, origins
   FROM api_key WHERE project_id = $1 AND state != 'revoked' ORDER BY created_at DESC LIMIT 1
@@ -46,7 +75,7 @@ func (q *Queries) GetAPIKeyForProject(ctx context.Context, projectID int64) (Get
 }
 
 const getPlanEntitlement = `-- name: GetPlanEntitlement :one
-SELECT plan, http_checks, window_lines, window_hours, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms, history_days, web_visits_month, web_heat_pages FROM plan_entitlement WHERE plan = $1
+SELECT plan, http_checks, window_lines, window_hours, incident_days, min_interval_sec, telegram_recipients, projects, custom_domain, telegram_rooms, history_days, web_visits_month, web_heat_pages, dashboards FROM plan_entitlement WHERE plan = $1
 `
 
 func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEntitlement, error) {
@@ -66,6 +95,7 @@ func (q *Queries) GetPlanEntitlement(ctx context.Context, plan string) (PlanEnti
 		&i.HistoryDays,
 		&i.WebVisitsMonth,
 		&i.WebHeatPages,
+		&i.Dashboards,
 	)
 	return i, err
 }

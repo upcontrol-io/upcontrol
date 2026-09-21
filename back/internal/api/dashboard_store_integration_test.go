@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	apigen "go.upcontrol.io/back/gen/api"
-	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/storage/pg"
 )
 
@@ -156,10 +155,8 @@ func TestDashboardIsScopedToItsTenant(t *testing.T) {
 	if code, body := getBoard(t, hA, tenantA); code != http.StatusOK || !sameBoard(t, body, oneWidgetBoard) {
 		t.Fatalf("tenant B's save lands on B's project, never A's; A now reads %d %s", code, body)
 	}
-	if _, err := pool.Queries().GetDashboard(t.Context(), sqlc.GetDashboardParams{
-		TenantID: tenantB, ProjectID: projectA,
-	}); err == nil {
-		t.Fatal("tenant B reading tenant A's project id must find no row")
+	if _, found, err := resolveBoardQ(t.Context(), pool.Queries(), tenantB, projectA, mainBoard); err != nil || found {
+		t.Fatalf("tenant B reading tenant A's project id must find no board; found %v, err %v", found, err)
 	}
 }
 
@@ -231,13 +228,11 @@ func TestFirstBoardThroughAnIngestKey(t *testing.T) {
 		t.Fatalf("seed api_key: %v", err)
 	}
 
+	// Through ServeHTTP with the key header, the way a deployed agent calls it:
+	// the key door is taken on a presented key alone.
 	withKey := func(key, body string) (int, string) {
 		t.Helper()
-		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPut, "/v1/dashboard", bytes.NewBufferString(body))
-		r.Header.Set("X-Upcontrol-Key", key)
-		h.putAgentDashboard(w, r)
-		return w.Code, strings.TrimSpace(w.Body.String())
+		return keyCall(t, h, http.MethodPut, "/v1/dashboard", key, body)
 	}
 
 	if code, body := withKey(pg.KeyScheme+"deadbeefdeadbeefdeadbeefdeadbeef", oneWidgetBoard); code != http.StatusUnauthorized {
