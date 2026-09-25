@@ -1,9 +1,7 @@
 //go:build integration
 
-// The owner's status-page settings after part 4: indexOptIn persists into
-// the column the gate reads, the verification token is issued on read and
-// stays stable until verified, verificationRecord is composed server-side,
-// the answer carries rootPageUrl - and a removed page refuses release
+// The owner's status-page settings after part 4: the answer carries
+// rootPageUrl and the page keeps its address - and a removed page refuses release
 // (releaseProject) and the project delete (409 page_removed). Needs
 // Postgres: -tags=integration, UC_TEST_POSTGRES.
 package api
@@ -43,12 +41,10 @@ func putStatus(t *testing.T, h http.Handler, cookie http.Cookie, body string) in
 	return w.Code
 }
 
-// indexOptIn persists through PUT - into the COLUMN the gate reads, not
-// just the config blob - and returns on both reads; the verification token
-// is issued on read while unverified, stays STABLE across reads, the answer
-// carries rootPageUrl, and verificationRecord is composed server-side from
-// the PROJECT's domain with the same eTLD+1 the worker resolves.
-func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
+// The settings answer carries rootPageUrl, and a page first saved while its
+// project had no domain keeps its prj-N address for good: a later save
+// updates it and never mints a second page under the domain's slug.
+func TestStatusPageSettingsKeepTheirAddress(t *testing.T) {
 	pool, _, cookie := newSettingsWorld(t)
 	ctx := context.Background()
 	sm := session.New(pool, session.DefaultTTL, nil)
@@ -57,16 +53,11 @@ func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 	mux.Handle("PUT /v1/status-page", wa)
 	mux.Handle("GET /v1/status-page", wa)
 
-	if code := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":true}`); code != http.StatusOK {
-		t.Fatalf("PUT with indexOptIn = %d, want 200", code)
+	if code := putStatus(t, mux, cookie, `{"title":"Mine"}`); code != http.StatusOK {
+		t.Fatalf("PUT = %d, want 200", code)
 	}
 	var projectID int64
 	_ = pool.Raw().QueryRow(ctx, `SELECT id FROM project LIMIT 1`).Scan(&projectID)
-	// The switch is real where the gate reads it: the COLUMN, never only the
-	// config blob (indexCandidates reads status_page.index_opt_in).
-	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND index_opt_in`, projectID); n != 1 {
-		t.Fatal("PUT {indexOptIn:true} did not write the status_page.index_opt_in column the gate reads")
-	}
 	r := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
 	r.AddCookie(&cookie)
 	w := httptest.NewRecorder()
@@ -78,93 +69,18 @@ func TestStatusPageSettingsCarryTheIndexFacts(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp["indexOptIn"] != true {
-		t.Fatalf("indexOptIn = %v, want true", resp["indexOptIn"])
-	}
-	token, _ := resp["verificationToken"].(string)
-	if len(token) != 32 {
-		t.Fatalf("verificationToken = %q, want 32 hex chars", token)
-	}
 	if resp["rootPageUrl"] == nil {
 		t.Fatal("the answer carries no rootPageUrl")
 	}
-	// verificationRecord is composed server-side from the PROJECT's domain
-	// (the host the worker's dns-tokens job reduces), with the www label
-	// folded away by the same eTLD+1 helper.
 	if _, err := pool.Raw().Exec(ctx,
 		`UPDATE project SET domain = 'www.example.com' WHERE id = $1`, projectID); err != nil {
 		t.Fatal(err)
 	}
-	read := func() map[string]any {
-		rr := httptest.NewRequest(http.MethodGet, "/v1/status-page", nil)
-		rr.AddCookie(&cookie)
-		ww := httptest.NewRecorder()
-		mux.ServeHTTP(ww, rr)
-		var body map[string]any
-		if err := json.Unmarshal(ww.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		return body
+	if code := putStatus(t, mux, cookie, `{"title":"Mine again"}`); code != http.StatusOK {
+		t.Fatalf("re-PUT = %d, want 200", code)
 	}
-	if got := read()["verificationRecord"]; got != "_upcontrol-verify.example.com" {
-		t.Fatalf("verificationRecord = %v, want _upcontrol-verify.example.com", got)
-	}
-	// A project domain the eTLD+1 helper cannot reduce omits the field:
-	// there is no record to publish.
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE project SET domain = 'localhost' WHERE id = $1`, projectID); err != nil {
-		t.Fatal(err)
-	}
-	if got := read()["verificationRecord"]; got != nil {
-		t.Fatalf("verificationRecord on an unregistrable domain = %v, want omitted", got)
-	}
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE project SET domain = 'www.example.com' WHERE id = $1`, projectID); err != nil {
-		t.Fatal(err)
-	}
-	// The token is idempotent until verified: the same token on re-read.
-	resp2 := read()
-	if resp2["verificationToken"] != token {
-		t.Fatalf("verificationToken changed on re-read: %v, want the same %q", resp2["verificationToken"], token)
-	}
-	// Verified clears the token, stops the record and reports the stamp.
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET host_verified_at = now(), verification_token = NULL WHERE project_id = $1`, projectID); err != nil {
-		t.Fatal(err)
-	}
-	resp3 := read()
-	if resp3["verificationToken"] != nil {
-		t.Fatalf("a verified page still offers a token: %v", resp3["verificationToken"])
-	}
-	if resp3["verificationRecord"] != nil {
-		t.Fatalf("a verified page still offers the record: %v", resp3["verificationRecord"])
-	}
-	if resp3["hostVerifiedAt"] == nil {
-		t.Fatal("a verified page reports no hostVerifiedAt")
-	}
-	// Turning the switch OFF writes the column too: the gate must see the
-	// owner's NO, not a stale blob. And an already indexed page leaves at
-	// once: the gate stops reading a page that is no longer opted in, so its
-	// stamp would otherwise keep the robots meta and the sitemap saying yes.
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET indexed_at = now() WHERE project_id = $1`, projectID); err != nil {
-		t.Fatal(err)
-	}
-	if code := putStatus(t, mux, cookie, `{"title":"Mine","indexOptIn":false}`); code != http.StatusOK {
-		t.Fatalf("PUT indexOptIn off = %d, want 200", code)
-	}
-	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND NOT index_opt_in`, projectID); n != 1 {
-		t.Fatal("PUT {indexOptIn:false} did not clear the column the gate reads")
-	}
-	// The page was first saved while the project had no domain, so it is
-	// stored as prj-N; the project has gained one since. That address is
-	// the page's for good: a later save updates it and never mints a
-	// second page under the domain's slug.
 	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1`, projectID); n != 1 {
 		t.Fatalf("the project holds %d status pages after a re-save, want 1", n)
-	}
-	if n := oneInt(t, pool, `SELECT count(*) FROM status_page WHERE project_id = $1 AND indexed_at IS NOT NULL`, projectID); n != 0 {
-		t.Fatal("PUT {indexOptIn:false} left the page's index stamp: it stays in the sitemap and says index, follow")
 	}
 }
 

@@ -1301,34 +1301,6 @@ components:
             only on a self-hosted instance, where the AGPL copy is the
             operator's own to brand. The hosted service always publishes it:
             a plan buys the page's address, never the branding.
-        indexOptIn:
-          type: boolean
-          description: >-
-            "List in search engines": one half of a claimed page's index
-            qualification; the DNS TXT proof (hostVerifiedAt) is the other.
-        hostVerifiedAt:
-          type: string
-          format: date-time
-          nullable: true
-          description: >-
-            When the DNS TXT proof of control of the host landed. Null until
-            verified.
-        verificationToken:
-          type: string
-          nullable: true
-          description: >-
-            The TXT string to publish for host verification. Issued on read
-            while it can still be used, stable until the record lands, then
-            null.
-        verificationRecord:
-          type: string
-          nullable: true
-          description: >-
-            The full DNS record NAME the worker resolves for verification
-            (_upcontrol-verify.<registrable domain>), composed server-side:
-            a project on a deeper subdomain must publish on the registrable
-            domain, and the front cannot compute one without the public
-            suffix list. Null on hosts the suffix list cannot fold.
         removalToken:
           type: string
           nullable: true
@@ -1380,11 +1352,6 @@ components:
             only on a self-hosted instance, where the AGPL copy is the
             operator's own to brand. The hosted service always publishes it:
             a plan buys the page's address, never the branding.
-        indexOptIn:
-          type: boolean
-          description: >-
-            "List in search engines". Stored with the settings; honoured only
-            on a claimed, host-verified page.
     PublicIncident:
       type: object
       required: [title, since, ongoing]
@@ -1466,21 +1433,32 @@ components:
             asOf:
               type: string
               description: The clock time of the newest check, "15:04 UTC".
+        faq:
+          description: >
+            Host pages with a measured state only: the questions people search
+            for about the host ("Is Datrade down right now?", "Why is datrade.io
+            not working?", "down for everyone or just me"), each answered from
+            this page's own measurements. The crawler's HTML page prints the
+            same list, so a search engine and a reader see one text.
+          type: array
+          items:
+            type: object
+            required: [q, a]
+            properties:
+              q: { type: string }
+              a: { type: string }
         indexable:
           description: >
-            Whether search engines may list this page: the index gate's stamp
-            AND the kill switch off. Mirrors the HTML door's robots meta.
+            Whether search engines may list this page: every live page with an
+            address of its own (a host page or a project's own page), from the
+            moment it exists. False for a suffixed copy of a host page, the
+            prj-N fallback, and every page while the operator's
+            UC_INDEX_DISABLED is on. Mirrors the HTML door's robots meta.
           type: boolean
         hostPage:
           description: >
             Whether this is the host's first page (the bare slug). Suffixed
             pages carry false.
-          type: boolean
-        unverifiedClaim:
-          description: >
-            True when the page is claimed but the host was never proven by
-            DNS TXT: the page stays out of the index and keeps its
-            not-affiliated line.
           type: boolean
 
     # --- landing watch ------------------------------------------------------
@@ -3677,7 +3655,7 @@ paths:
       summary: Every status page the directory lists, newest first.
       description: >
         The same pages the HTML directory at /status and the sitemap list:
-        stamped by the index gate and not removed, newest first. The kill
+        every live host page and project page, newest first. The kill
         switch empties it. A browser's /status reads this; a crawler gets
         the HTML directory built from the same list.
       responses:

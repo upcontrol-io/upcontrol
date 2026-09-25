@@ -218,7 +218,7 @@ func (s *ProbeService) SubmitResults(
 		}
 
 		// The first ok stamps first_ok_at once; the reaper's host-page
-		// exemption and the index gate read it.
+		// exemption reads it.
 		if res.Ok {
 			_ = s.pool.Queries().SetTargetFirstOk(ctx, targetID)
 		}

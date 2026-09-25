@@ -6,7 +6,7 @@
 // Everything here renders from the SAME shared assembly as the JSON door
 // (writeAPI.publicStatusData), so the sentence a crawler reads is the one
 // the JSON door serves; the parity is pinned by test. The React page reads
-// the same response but prints the components, not the sentence.
+// the same response and prints the components and the same FAQ.
 
 package api
 
@@ -19,8 +19,110 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
+
 	"go.upcontrol.io/back/internal/ogrender"
 )
+
+// faqItem is one question a host page answers, worded the way people search
+// for somebody else's site ("is X down", "X not working", "down for everyone
+// or just me") and answered from this page's own measurements, never from
+// copy written for a scanner. Both the crawler's HTML and the React page
+// print the same list, so a search engine and a reader see one text.
+type faqItem struct {
+	Q string `json:"q"`
+	A string `json:"a"`
+}
+
+// brandOf is the name people type without the TLD: datrade.io and
+// app.datrade.io both read Datrade. A host the suffix list cannot fold, or a
+// punycoded label, stays as it is.
+func brandOf(host string) string {
+	reg, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return host
+	}
+	label, _, _ := strings.Cut(reg, ".")
+	if label == "" || strings.HasPrefix(label, "xn--") {
+		return host
+	}
+	return strings.ToUpper(label[:1]) + label[1:]
+}
+
+// statusFAQ builds a host page's questions from its measured state, its
+// components and its published incidents. claimed decides the alerts
+// question: only a page nobody owns offers Get alerts to a stranger.
+func statusFAQ(host string, state map[string]any, comps, incidents []map[string]any, claimed bool) []faqItem {
+	kind, _ := state["kind"].(string)
+	sentence, _ := state["sentence"].(string)
+	asOf, _ := state["asOf"].(string)
+	name := brandOf(host)
+	var faq []faqItem
+	add := func(q, a string) { faq = append(faq, faqItem{Q: q, A: a}) }
+
+	switch kind {
+	case "ok":
+		add("Is "+name+" down right now?", "No. "+sentence)
+		add("Why is "+host+" not working or not loading for me?",
+			"Our check from outside reached "+host+" at "+asOf+" and it answered normally, so the site itself is up. "+
+				"If it still fails for you, the cause is likely between you and the site: reload the page, try another "+
+				"browser or network, turn off a VPN or ad blocker, or clear your DNS cache.")
+		add("Is "+name+" down for everyone or just me?",
+			"Not for everyone: "+host+" answered our check from outside at "+asOf+". If it fails for you, the problem is "+
+				"likely on your side or your network's.")
+	case "down":
+		add("Is "+name+" down right now?", "Yes. "+sentence)
+		add("Why is "+host+" not working?",
+			"It fails from outside too, so the cause is on "+name+"'s side, not yours. "+sentence)
+		add("Is "+name+" down for everyone or just me?",
+			"Not just you: "+host+" fails our check from outside as well.")
+	default: // could_not_measure, nodata: the sentence says why there is no verdict
+		add("Is "+name+" down right now?", sentence)
+	}
+
+	var ongoing, last map[string]any
+	for _, i := range incidents {
+		if on, _ := i["ongoing"].(bool); on && ongoing == nil {
+			ongoing = i
+		}
+		if last == nil {
+			last = i
+		}
+	}
+	incidentLine := func(i map[string]any) string {
+		title, _ := i["title"].(string)
+		since, _ := i["since"].(string)
+		return title + ", since " + since
+	}
+	switch {
+	case ongoing != nil:
+		add("Is there a "+name+" outage?", "Yes, one is ongoing: "+incidentLine(ongoing)+".")
+	case kind == "down":
+		add("Is there a "+name+" outage?", "Our latest check failed and the outage is being confirmed. "+sentence)
+	case last != nil:
+		add("Is there a "+name+" outage?", "Not now. The last one: "+incidentLine(last)+", resolved.")
+	default:
+		add("Is there a "+name+" outage?", "No outage has been recorded on "+host+" since we started checking it.")
+	}
+
+	if len(comps) > 0 {
+		c := comps[0]
+		uptime, _ := c["uptime"].(string)
+		bars, _ := c["bars"].([]string)
+		span, _ := c["barSpanSec"].(int)
+		if uptime != "" && uptime != "—" && len(bars) > 0 {
+			add("What is "+name+"'s uptime?",
+				uptime+" over the last "+stripWindowLabel(time.Duration(span)*time.Second, len(bars))+
+					", measured from outside by UpControl.")
+		}
+	}
+
+	if !claimed {
+		add("How do I get alerted when "+host+" goes down?",
+			"Press Get alerts on this page. UpControl messages you the moment "+host+" stops answering our check.")
+	}
+	return faq
+}
 
 // statusPages is the HTML door handler: the write API it borrows carries
 // the pool, the knobs and the shared assembly.
@@ -43,6 +145,8 @@ func (h *statusPages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.directoryJSON(w, r)
 	case strings.HasPrefix(r.URL.Path, "/status/"):
 		h.slugPage(w, r)
+	case r.URL.Path == "/hosted-status":
+		h.hostedPage(w, r)
 	case r.URL.Path == "/sitemap-status.xml":
 		h.sitemap(w, r)
 	case strings.HasPrefix(r.URL.Path, "/public/status/") && strings.HasSuffix(r.URL.Path, "/og.png"):
@@ -99,24 +203,27 @@ type incidentLine struct {
 
 // slugPageData is everything the slug template renders.
 type slugPageData struct {
-	Title      string
-	Robots     string
-	Canonical  string
-	OGTitle    string
-	OGDesc     string
-	OGURL      string
-	OGImage    string
-	JSONLD     template.JS
-	Host       string
-	Slug       string
-	Claimed    bool
-	HasState   bool
-	Sentence   string
-	AsOf       string
-	Components []componentLine
-	Incidents  []incidentLine
-	CheckHref  string
-	ClaimHref  string
+	Title       string
+	Robots      string
+	Description string
+	Canonical   string
+	OGTitle     string
+	OGDesc      string
+	OGURL       string
+	OGImage     string
+	JSONLD      template.JS
+	Host        string
+	Slug        string
+	Claimed     bool
+	Hosted      bool
+	Origin      string
+	HasState    bool
+	Sentence    string
+	Components  []componentLine
+	Incidents   []incidentLine
+	FAQ         []faqItem
+	CheckHref   string
+	ClaimHref   string
 }
 
 // noDataUptime is what the HTML door prints where the JSON answer carries
@@ -157,22 +264,38 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 		removedPage(w)
 		return
 	}
+	h.renderPage(w, ctx, projectID, claimed, "")
+}
+
+// hostedPage is the same page on a customer's own verified domain: the edge
+// rewrites a crawler's request there to /hosted-status, and the Host header
+// names the page, exactly as the JSON door's slug-less read resolves it.
+func (h *statusPages) hostedPage(w http.ResponseWriter, r *http.Request) {
+	projectID, claimed, removedAt, ok := h.wa.pageByHost(r.Context(), r.Host)
+	if !ok {
+		notFoundPage(w)
+		return
+	}
+	if removedAt != nil {
+		removedPage(w)
+		return
+	}
+	h.renderPage(w, r.Context(), projectID, claimed, strings.ToLower(bareHost(r.Host)))
+}
+
+// renderPage writes one page's HTML. hosted is the customer's own host when
+// the page is read there: the page is then theirs, worded plainly, with
+// every address on their host and no doors of ours but the credit line.
+func (h *statusPages) renderPage(w http.ResponseWriter, ctx context.Context, projectID int64, claimed bool, hosted string) {
 	resp, meta := h.wa.publicStatusData(ctx, projectID, claimed)
 
-	// The robots meta mirrors the JSON door's indexable exactly: a stamp
-	// plus the switch off means index; an unstamped host page is qualified
-	// but quiet; everything else (prj-N, suffixed) is out entirely.
-	indexable := meta.indexedAt != nil && !h.wa.statusKnobs.IndexDisabled
+	// The robots meta mirrors the JSON door's indexable exactly.
 	robots := "noindex, nofollow"
-	if meta.isHostPage {
-		if indexable {
-			robots = "index, follow"
-		} else {
-			robots = "noindex, follow"
-		}
+	if meta.indexable {
+		robots = "index, follow"
 	}
 
-	origin := h.wa.statusKnobs.StatusOrigin
+	origin := strings.TrimRight(h.wa.statusKnobs.StatusOrigin, "/")
 	host := meta.host
 	if host == "" {
 		if t, _ := resp["title"].(string); t != "" {
@@ -181,34 +304,53 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 			host = "this site"
 		}
 	}
+	name := brandOf(host)
+	pageURL, assetOrigin := origin+"/status/"+meta.slug, origin
+	if hosted != "" {
+		pageURL, assetOrigin = "https://"+hosted+"/", "https://"+hosted
+	}
 	data := slugPageData{
-		Title:     host + " status: is " + host + " answering right now?",
-		Robots:    robots,
+		Title:  "Is " + name + " down? " + host + " status right now",
+		Robots: robots,
+		Description: "Is " + host + " down or not working? Live " + name +
+			" status, outages and uptime, checked from outside by UpControl.",
 		OGTitle:   host + " status",
 		OGDesc:    "The status of " + host + ", measured by UpControl.",
-		OGURL:     origin + "/status/" + meta.slug,
-		OGImage:   origin + "/public/status/" + meta.slug + "/og.png",
+		OGURL:     pageURL,
+		OGImage:   assetOrigin + "/public/status/" + meta.slug + "/og.png",
 		Host:      host,
 		Slug:      meta.slug,
 		Claimed:   claimed,
+		Hosted:    hosted != "",
+		Origin:    origin,
 		CheckHref: "/?check=" + template.URLQueryEscaper(host),
 		ClaimHref: "/status/" + meta.slug + "#claim",
 	}
-	// A canonical link belongs to host pages only (plan part 4): a suffixed
-	// page with noindex and a canonical would drag its noindex onto the host.
-	if meta.isHostPage {
-		data.Canonical = data.OGURL
+	if hosted != "" {
+		data.Title = host + " status"
+		data.Description = "Live status, uptime and recent incidents for " + host + ", measured from outside."
+	}
+	// A canonical link belongs to listed pages only (plan part 4): a
+	// suffixed page with noindex and a canonical would drag its noindex onto
+	// the host. A page with a verified domain of its own names THAT address
+	// on both of its URLs: the plan buys the customer's address, and two
+	// copies of one page must not split its ranking.
+	if meta.indexable {
+		data.Canonical = pageURL
+		if meta.customURL != "" {
+			data.Canonical = meta.customURL
+		}
+		data.OGURL = data.Canonical
 	}
 	if state, ok := resp["state"].(map[string]any); ok {
 		data.HasState = true
 		if s, ok := state["sentence"].(string); ok {
 			data.Sentence = s
 			data.OGDesc = s
-		}
-		if asOf, ok := state["asOf"].(string); ok {
-			data.AsOf = asOf
+			data.Description += " " + s
 		}
 	}
+	data.FAQ, _ = resp["faq"].([]faqItem)
 	if comps, ok := resp["components"].([]map[string]any); ok {
 		for _, c := range comps {
 			name, _ := c["name"].(string)
@@ -243,13 +385,24 @@ func (h *statusPages) slugPage(w http.ResponseWriter, r *http.Request) {
 			data.Incidents = append(data.Incidents, incidentLine{Title: title, Since: since, State: state})
 		}
 	}
-	ld, _ := json.Marshal(map[string]any{
-		"@context":    "https://schema.org",
+	graph := []map[string]any{{
 		"@type":       "WebPage",
 		"name":        data.Title,
 		"url":         data.OGURL,
 		"description": data.OGDesc,
-	})
+	}}
+	if len(data.FAQ) > 0 {
+		questions := make([]map[string]any, 0, len(data.FAQ))
+		for _, f := range data.FAQ {
+			questions = append(questions, map[string]any{
+				"@type":          "Question",
+				"name":           f.Q,
+				"acceptedAnswer": map[string]any{"@type": "Answer", "text": f.A},
+			})
+		}
+		graph = append(graph, map[string]any{"@type": "FAQPage", "mainEntity": questions})
+	}
+	ld, _ := json.Marshal(map[string]any{"@context": "https://schema.org", "@graph": graph})
 	data.JSONLD = template.JS(ld)
 
 	htmlHeaders(w)
@@ -268,21 +421,28 @@ type directoryRow struct {
 
 // directoryData is everything the directory template renders.
 type directoryData struct {
-	Rows   []directoryRow
-	JSONLD template.JS
+	Rows      []directoryRow
+	Canonical string
+	JSONLD    template.JS
 }
 
-// indexedList reads the sitemap's predicate: pages with a stamp, live, the
-// index gate's own ordering (newest first). The kill switch empties it.
+// listedPagesSQL is writeAPI.indexable in SQL: the one predicate the
+// directory and the sitemap share, so a listed page is always one whose own
+// robots meta says index.
+const listedPagesSQL = `sp.removed_at IS NULL AND (sp.is_host_page OR sp.root_target_id IS NULL)`
+
+// indexedList reads the listed pages, newest first. The kill switch empties it.
+// ponytail: one state read per row, uncached; page the list if it outgrows
+// a few thousand pages.
 func (h *statusPages) indexedList(ctx context.Context) []directoryRow {
 	if h.wa.statusKnobs.IndexDisabled {
 		return nil
 	}
 	rows, err := h.wa.pool.Raw().Query(ctx,
-		`SELECT sp.slug, p.domain, sp.root_target_id
+		`SELECT sp.slug, COALESCE(NULLIF(p.domain, ''), sp.title, sp.slug), sp.root_target_id
 		   FROM status_page sp JOIN project p ON p.id = sp.project_id
-		  WHERE sp.indexed_at IS NOT NULL AND sp.removed_at IS NULL
-		  ORDER BY sp.indexed_at DESC`)
+		  WHERE `+listedPagesSQL+`
+		  ORDER BY sp.created_at DESC`)
 	if err != nil {
 		return nil
 	}
@@ -308,11 +468,11 @@ func (h *statusPages) indexedList(ctx context.Context) []directoryRow {
 
 func (h *statusPages) directory(w http.ResponseWriter, r *http.Request) {
 	rows := h.indexedList(r.Context())
-	data := directoryData{Rows: rows}
+	origin := strings.TrimRight(h.wa.statusKnobs.StatusOrigin, "/")
+	data := directoryData{Rows: rows, Canonical: origin + "/status"}
 	// ItemList structured data for the rows actually shown; an empty
 	// directory has nothing to list and gets none.
 	if len(rows) > 0 {
-		origin := strings.TrimRight(h.wa.statusKnobs.StatusOrigin, "/")
 		items := make([]map[string]any, 0, len(rows))
 		for i, row := range rows {
 			items = append(items, map[string]any{
@@ -354,8 +514,8 @@ func (h *statusPages) sitemap(w http.ResponseWriter, r *http.Request) {
 		rows, err := h.wa.pool.Raw().Query(r.Context(),
 			`SELECT sp.slug, (SELECT max(ts) FROM checks c WHERE c.target_id = sp.root_target_id)
 			   FROM status_page sp
-			  WHERE sp.indexed_at IS NOT NULL AND sp.removed_at IS NULL
-			  ORDER BY sp.indexed_at DESC`)
+			  WHERE `+listedPagesSQL+`
+			  ORDER BY sp.created_at DESC`)
 		if err == nil {
 			defer rows.Close()
 			origin := strings.TrimRight(h.wa.statusKnobs.StatusOrigin, "/")
@@ -447,11 +607,13 @@ const slugTmpl = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="{{.Robots}}">
 {{- if .Canonical}}
 <link rel="canonical" href="{{.Canonical}}">
 {{- end}}
 <title>{{.Title}}</title>
+<meta name="description" content="{{.Description}}">
 <meta property="og:title" content="{{.OGTitle}}">
 <meta property="og:description" content="{{.OGDesc}}">
 <meta property="og:url" content="{{.OGURL}}">
@@ -469,7 +631,6 @@ main, footer { max-width: 720px; margin: 0 auto; padding: 0 20px; }
 a { color: #111; }
 h2 { font-size: 19px; margin: 28px 0 8px; }
 .state { font-size: 17px; margin: 4px 0 8px; }
-.asof { color: #666; font-size: 14px; margin: 0; }
 .components { list-style: none; margin: 8px 0; padding: 0; }
 .components li { padding: 10px 0; border-bottom: 1px solid #eee; }
 .components .name { font-weight: 600; }
@@ -477,6 +638,8 @@ h2 { font-size: 19px; margin: 28px 0 8px; }
 .incidents { list-style: none; margin: 8px 0; padding: 0; }
 .incidents li { padding: 8px 0; border-bottom: 1px solid #eee; }
 .incidents .ongoing { font-weight: 600; }
+.faq h3 { font-size: 16px; margin: 18px 0 4px; }
+.faq p { margin: 0; color: #333; }
 footer { padding: 24px 20px 40px; color: #444; font-size: 14px; }
 footer nav a { margin-right: 14px; }
 </style>
@@ -509,20 +672,26 @@ footer nav a { margin-right: 14px; }
 {{- end}}
 </ul>
 {{- end}}
-{{- if .HasState}}
-<h3>Is {{.Host}} answering right now?</h3>
-<p class="state">{{.Sentence}}</p>
-<p class="asof">as of {{.AsOf}}</p>
+{{- if .FAQ}}
+<section class="faq">
+<h2>Questions about {{.Host}}</h2>
+{{- range .FAQ}}
+<h3>{{.Q}}</h3>
+<p>{{.A}}</p>
+{{- end}}
+</section>
 {{- end}}
 </main>
 <footer>
-<p>Powered by UpControl</p>
+<p>Powered by <a href="{{.Origin}}/">UpControl</a></p>
 <p>Measured from one location outside {{.Host}} by UpControl.</p>
+{{- if not .Hosted}}
 <nav>
 <a href="{{.ClaimHref}}">Site owner? Claim this page.</a>
 <a href="/status">Status directory</a>
 <a href="{{.CheckHref}}">Check your own site</a>
 </nav>
+{{- end}}
 </footer>
 </body>
 </html>`
@@ -532,9 +701,10 @@ const directoryTmpl = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, follow">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="{{.Canonical}}">
 <title>Status pages directory | UpControl</title>
-<meta name="description" content="Every public status page UpControl measures, in one index.">
+<meta name="description" content="Is a site down? Every public status page UpControl measures, with each site's live state, in one index.">
 {{- if .JSONLD}}
 <script type="application/ld+json">{{.JSONLD}}</script>
 {{- end}}

@@ -345,6 +345,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	statusHTML := api.NewStatusPages(wa)
 	mux.Handle("GET /status/{slug}", statusHTML)
 	mux.Handle("GET /status", statusHTML)
+	// The same page on a customer's own domain, for a crawler: the edge rewrites
+	// its request there to this path and the Host header names the page.
+	mux.Handle("GET /hosted-status", statusHTML)
 	mux.Handle("GET /public/status-directory", statusHTML)
 	mux.Handle("GET /sitemap-status.xml", statusHTML)
 	mux.Handle("GET /public/status/{slug}/og.png", statusHTML)

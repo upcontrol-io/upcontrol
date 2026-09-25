@@ -37,7 +37,6 @@ import (
 	notifysettings "go.upcontrol.io/back/internal/channel/notify"
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/discover"
-	"go.upcontrol.io/back/internal/dnstokens"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/platform/config"
 	"go.upcontrol.io/back/internal/probe/executor"
@@ -1226,7 +1225,6 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 		Shown         map[string]bool `json:"shown"`
 		ShowNetwork   *bool           `json:"showNetwork"`
 		ShowPoweredBy *bool           `json:"showPoweredBy"`
-		IndexOptIn    *bool           `json:"indexOptIn"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAPIErr(w, http.StatusBadRequest, "bad_body")
@@ -1248,12 +1246,6 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	}
 	if req.ShowPoweredBy != nil {
 		cfg.ShowPoweredBy = *req.ShowPoweredBy
-	}
-	// "List in search engines" (plan part 4): stored with the config blob; it
-	// is one half of a CLAIMED page's index qualification, the other being the
-	// DNS TXT proof the worker verifies.
-	if req.IndexOptIn != nil {
-		cfg.IndexOptIn = *req.IndexOptIn
 	}
 	cfg.Title = req.Title
 	// PAID ONLY: the domain is the one setting a plan pays for. Only a CHANGE
@@ -1296,23 +1288,16 @@ func (h *writeAPI) putStatusPage(w http.ResponseWriter, r *http.Request, tenantI
 	if domain != "" {
 		domainVal = domain
 	}
-	// index_opt_in is written to the COLUMN as well as the config blob: the
-	// index gate reads the column (indexCandidates), so a switch that only
-	// lived in the blob was dead for every page it exists for. Switching it
-	// off takes the stamp off too: a page that is no longer opted in drops
-	// out of the gate's candidates, so hysteresis would never unlist it.
 	if _, err := h.pool.Raw().Exec(ctx,
-		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config, index_opt_in)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO status_page (tenant_id, project_id, slug, title, domain, config)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (slug) DO UPDATE SET
 		   title = EXCLUDED.title,
 		   domain = EXCLUDED.domain,
 		   domain_verified_at = CASE WHEN EXCLUDED.domain = status_page.domain
 		                             THEN status_page.domain_verified_at END,
-		   config = EXCLUDED.config,
-		   index_opt_in = EXCLUDED.index_opt_in,
-		   indexed_at = CASE WHEN EXCLUDED.index_opt_in THEN status_page.indexed_at END`,
-		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw, cfg.IndexOptIn); err != nil {
+		   config = EXCLUDED.config`,
+		tenantID, projectID, cfg.Slug, cfg.Title, domainVal, raw); err != nil {
 		// The slug conflict is arbitrated above, so a unique violation here is
 		// the domain: another page already rides that host.
 		var pgErr *pgconn.PgError
@@ -1347,26 +1332,20 @@ type statusPageConfig struct {
 	// there the plan buys the page's address and nothing about the branding
 	// (owner decision, 2026-08-29). poweredBy() is the one reader.
 	ShowPoweredBy bool `json:"showPoweredBy"`
-	// "List in search engines" (plan part 4): one half of the index
-	// qualification for a claimed page, the TXT verification is the other.
-	IndexOptIn bool `json:"indexOptIn"`
 }
 
 // statusPageRow carries the page's own columns beyond the config blob: the
 // part-2 state the owner API reports and the public door renders from. The
 // zero value means "no page row" (prj-N pages have none yet).
 type statusPageRow struct {
-	ID                int64
-	RootTargetID      *int64
-	IsHostPage        bool
-	RemovedAt         *time.Time
-	IndexedAt         *time.Time
-	HostVerifiedAt    *time.Time
-	LastSeenAt        *time.Time
-	VerificationToken *string
-	RemovalToken      *string
-	DomainLapsedAt    *time.Time
-	Slug              string
+	ID             int64
+	RootTargetID   *int64
+	IsHostPage     bool
+	RemovedAt      *time.Time
+	LastSeenAt     *time.Time
+	RemovalToken   *string
+	DomainLapsedAt *time.Time
+	Slug           string
 }
 
 // poweredBy answers whether the credit line is published. On the cloud it is
@@ -1389,15 +1368,13 @@ func (h *writeAPI) statusConfig(ctx context.Context, projectID int64) (statusPag
 	var page statusPageRow
 	_ = h.pool.Raw().QueryRow(ctx,
 		`SELECT p.id, s.slug, s.title, s.domain, s.domain_verified_at, s.config,
-		        s.id, s.root_target_id, s.is_host_page, s.removed_at, s.indexed_at,
-		        s.host_verified_at, s.last_seen_at, s.verification_token, s.removal_token,
-		        s.domain_lapsed_at
+		        s.id, s.root_target_id, s.is_host_page, s.removed_at,
+		        s.last_seen_at, s.removal_token, s.domain_lapsed_at
 		   FROM project p LEFT JOIN status_page s ON s.project_id = p.id
 		  WHERE p.id = $1`, projectID).Scan(
 		&projectID, &slug, &title, &domain, &verifiedAt, &raw,
-		&page.ID, &page.RootTargetID, &page.IsHostPage, &page.RemovedAt, &page.IndexedAt,
-		&page.HostVerifiedAt, &page.LastSeenAt, &page.VerificationToken, &page.RemovalToken,
-		&page.DomainLapsedAt)
+		&page.ID, &page.RootTargetID, &page.IsHostPage, &page.RemovedAt,
+		&page.LastSeenAt, &page.RemovalToken, &page.DomainLapsedAt)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &cfg)
 	}
@@ -1435,48 +1412,15 @@ func (h *writeAPI) statusPageResponse(ctx context.Context, projectID int64, cfg 
 		"updatedAt":      now.Format(time.RFC3339),
 		"showNetwork":    cfg.ShowNetwork,
 		"showPoweredBy":  h.poweredBy(cfg),
-		// The index door's owner-facing facts (plan part 4): the switch, the
-		// DNS proof of control, the tokens, and the live page's address (the
-		// zero-monitors note links it).
-		"indexOptIn":  cfg.IndexOptIn,
+		// The owner-facing page facts (plan part 4): the removal token and the
+		// live page's address (the zero-monitors note links it).
 		"hostPage":    page.IsHostPage,
 		"rootPageUrl": "/status/" + cfg.Slug,
-	}
-	if page.HostVerifiedAt != nil {
-		resp["hostVerifiedAt"] = page.HostVerifiedAt.UTC().Format(time.RFC3339)
 	}
 	// The plan stopped carrying custom domains: the grace clock runs and the
 	// domain sweep unbinds the domain at this moment.
 	if page.DomainLapsedAt != nil {
 		resp["domainLapsesAt"] = page.DomainLapsedAt.Add(pgstore.DomainGraceDays * 24 * time.Hour).UTC().Format(time.RFC3339)
-	}
-	// The verification token is issued on read while it can still be used:
-	// generated once, stored, returned every time until the TXT record lands
-	// and the worker stamps host_verified_at (then the token is cleared and
-	// this door stops offering one).
-	if page.HostVerifiedAt == nil {
-		if page.VerificationToken != nil {
-			resp["verificationToken"] = *page.VerificationToken
-		} else if page.ID != 0 {
-			token := randomHex()
-			if _, err := h.pool.Raw().Exec(ctx,
-				`UPDATE status_page SET verification_token = $2 WHERE id = $1 AND verification_token IS NULL`,
-				page.ID, token); err == nil {
-				resp["verificationToken"] = token
-			}
-		}
-		// The record the owner publishes, composed server-side with the same
-		// eTLD+1 reduction the worker's dns-tokens job resolves (it reduces the
-		// PROJECT's domain, not the page's custom one): the front renders this
-		// string instead of rebuilding the rule. Omitted when the domain is not
-		// registrable - there is no record to publish.
-		var projectDomain string
-		if err := h.pool.Raw().QueryRow(ctx,
-			`SELECT domain FROM project WHERE id = $1`, projectID).Scan(&projectDomain); err == nil && projectDomain != "" {
-			if registrable, rerr := publicsuffix.EffectiveTLDPlusOne(projectDomain); rerr == nil {
-				resp["verificationRecord"] = dnstokens.VerifyRecord + registrable
-			}
-		}
 	}
 	// The removal token is only ECHOED here: the door that issues it belongs
 	// to the page itself (Group 3's surface), never to the owner's settings.
@@ -3636,10 +3580,12 @@ func monitorName(host, target string) string {
 	return u.Host
 }
 
-// canonicalAliasSlug folds a www-shaped slug to the host page's canonical
-// slug (www.example.com and example.com are one host, one page): "" when
-// the slug is no page's alias. Every slug-miss door runs it - the JSON
-// door's fold and the HTML door's - so the two can never drift.
+// canonicalAliasSlug folds a www-shaped slug, or the host itself typed as an
+// address (/status/example.com, /status/www.example.com), to the host page's
+// canonical slug: one host, one page, and a link written either way keeps
+// its ranking through the 301. "" when the slug is no page's alias. Every
+// slug-miss door runs it - the JSON door's fold and the HTML door's - so the
+// two can never drift.
 func (h *writeAPI) canonicalAliasSlug(ctx context.Context, slug string) string {
 	var canon string
 	if err := h.pool.Raw().QueryRow(ctx,
@@ -3647,11 +3593,25 @@ func (h *writeAPI) canonicalAliasSlug(ctx context.Context, slug string) string {
 		   FROM status_page sp
 		   JOIN project p ON p.id = sp.project_id
 		  WHERE p.domain <> '' AND sp.is_host_page AND sp.removed_at IS NULL
-		    AND trim(both '-' FROM regexp_replace(lower('www.' || p.domain), '[^a-z0-9]+', '-', 'g')) = $1
-		  LIMIT 1`, slug).Scan(&canon); err != nil {
+		    AND (p.domain = $2
+		         OR trim(both '-' FROM regexp_replace(lower('www.' || p.domain), '[^a-z0-9]+', '-', 'g')) = $1)
+		  LIMIT 1`, slug, strings.TrimPrefix(strings.ToLower(slug), "www.")).Scan(&canon); err != nil {
 		return ""
 	}
 	return canon
+}
+
+// pageByHost resolves a page from a customer's own domain: the Host header
+// (lowercased, port stripped) is the address, and only a domain we have
+// verified answers. Both custom-domain doors read through it, the JSON one
+// and the crawler's HTML one.
+func (h *writeAPI) pageByHost(ctx context.Context, rawHost string) (projectID int64, claimed bool, removedAt *time.Time, ok bool) {
+	host := strings.ToLower(bareHost(rawHost))
+	err := h.pool.Raw().QueryRow(ctx,
+		`SELECT sp.project_id, (t.claim_token_hash IS NULL), sp.removed_at
+		   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
+		  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&projectID, &claimed, &removedAt)
+	return projectID, claimed, removedAt, err == nil
 }
 
 func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
@@ -3664,15 +3624,8 @@ func (h *writeAPI) publicStatus(w http.ResponseWriter, r *http.Request) {
 	// header (lowercased, port stripped) is the address, and only a domain we
 	// have verified answers — an unverified row must render nothing.
 	if r.URL.Path == "/public/status" {
-		host := strings.ToLower(r.Host)
-		if bare, _, err := net.SplitHostPort(host); err == nil {
-			host = bare
-		}
-		var removedAt *time.Time
-		if err := h.pool.Raw().QueryRow(ctx,
-			`SELECT sp.tenant_id, sp.project_id, (t.claim_token_hash IS NULL), sp.removed_at
-			   FROM status_page sp JOIN tenant t ON t.id = sp.tenant_id
-			  WHERE sp.domain = $1 AND sp.domain_verified_at IS NOT NULL`, host).Scan(&tenantID, &projectID, &claimed, &removedAt); err != nil {
+		projectID, claimed, removedAt, ok := h.pageByHost(ctx, r.Host)
+		if !ok {
 			writeAPIErr(w, http.StatusNotFound, "no_such_page")
 			return
 		}
@@ -3756,8 +3709,8 @@ func (h *writeAPI) renderPublicStatus(w http.ResponseWriter, r *http.Request, pr
 // (plan part 4): the slug (already the canonical one - an alias slug is
 // folded to it with a 301 before any assembly runs, and the claim door's
 // URL shape is /status/{slug}#claim, derivable from it), the host the page
-// words its title and sentences from, the host-page marker that decides the
-// robots meta and the canonical link, and the index gate's stamp.
+// words its title and sentences from, the host-page marker, and whether
+// search engines may list the page (the robots meta and the canonical link).
 type statusPageMeta struct {
 	slug         string
 	host         string
@@ -3765,7 +3718,19 @@ type statusPageMeta struct {
 	storedDomain string
 	rootTargetID int64 // 0 when the page carries no root reference
 	removedAt    *time.Time
-	indexedAt    *time.Time
+	indexable    bool
+	customURL    string // the page's own verified domain, "" without one
+}
+
+// indexable is the one answer to "may a search engine list this page"
+// (owner decision, 2026-09-25: every page, at once, no gate): any live page
+// with an address of its own, a host page or a project's own page. Out: the
+// prj-N fallback (no row, and its address changes on the first save), a
+// suffixed page (a second copy of a host page), and everything while the
+// operator's kill switch is on.
+func (h *writeAPI) indexable(page statusPageRow) bool {
+	return !h.statusKnobs.IndexDisabled && page.ID != 0 && page.RemovedAt == nil &&
+		(page.IsHostPage || page.RootTargetID == nil)
 }
 
 // publicStatusData is the ONE assembly every public surface of a page
@@ -3776,14 +3741,17 @@ type statusPageMeta struct {
 func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claimed bool) (map[string]any, statusPageMeta) {
 	// The page's OWN project decides what is rendered: a signed-in viewer's
 	// session must not bend somebody else's page toward their current project.
-	cfg, storedDomain, _, page := h.statusConfig(ctx, projectID)
+	cfg, storedDomain, verified, page := h.statusConfig(ctx, projectID)
 	meta := statusPageMeta{
 		slug:         cfg.Slug,
 		host:         projectDomainOf(ctx, h.pool, projectID),
 		isHostPage:   page.IsHostPage,
 		storedDomain: storedDomain,
 		removedAt:    page.RemovedAt,
-		indexedAt:    page.IndexedAt,
+		indexable:    h.indexable(page),
+	}
+	if verified && storedDomain != "" {
+		meta.customURL = "https://" + storedDomain + "/"
 	}
 	if page.RootTargetID != nil {
 		meta.rootTargetID = *page.RootTargetID
@@ -3797,18 +3765,9 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 		"updatedAt":  now.Format(time.RFC3339),
 		"claimed":    claimed,
 		"poweredBy":  h.poweredBy(cfg),
-		// The gate's public face (plan part 4): a page is indexable only with a
-		// stamp AND the kill switch off. Suffixed and unhosted pages carry no
-		// hostPage; the front words its banners from these three facts.
-		"hostPage": page.IsHostPage,
+		"hostPage":   page.IsHostPage,
+		"indexable":  meta.indexable,
 	}
-	if page.HostVerifiedAt == nil {
-		resp["unverifiedClaim"] = claimed
-	} else {
-		resp["unverifiedClaim"] = false
-	}
-	indexable := page.IndexedAt != nil && !h.statusKnobs.IndexDisabled
-	resp["indexable"] = indexable
 	// The host page's measured state sentence (plan part 3): worded from the
 	// probe's point of view, exactly the four forms the plan fixes.
 	if page.IsHostPage && page.RootTargetID != nil {
@@ -3816,8 +3775,8 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 			resp["state"] = state
 		}
 		// Best-effort liveness stamp, throttled to one an hour: it feeds the
-		// index gate's origin rule and the unclaimed-page slowdown, and must
-		// never delay or fail the response.
+		// unclaimed-page slowdown, and must never delay or fail the response.
+		// A crawler's visit counts, so a page search engines read stays fast.
 		go func(id int64) {
 			bctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -3865,6 +3824,10 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 		rows.Close()
 	}
 	resp["incidents"] = incidents
+	if state, ok := resp["state"].(map[string]any); ok {
+		comps, _ := resp["components"].([]map[string]any)
+		resp["faq"] = statusFAQ(meta.host, state, comps, incidents, claimed)
+	}
 	return resp, meta
 }
 

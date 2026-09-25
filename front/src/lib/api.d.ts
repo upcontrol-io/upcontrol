@@ -3064,7 +3064,7 @@ export interface paths {
         };
         /**
          * Every status page the directory lists, newest first.
-         * @description The same pages the HTML directory at /status and the sitemap list: stamped by the index gate and not removed, newest first. The kill switch empties it. A browser's /status reads this; a crawler gets the HTML directory built from the same list.
+         * @description The same pages the HTML directory at /status and the sitemap list: every live host page and project page, newest first. The kill switch empties it. A browser's /status reads this; a crawler gets the HTML directory built from the same list.
          */
         get: {
             parameters: {
@@ -4840,17 +4840,6 @@ export interface components {
             showNetwork: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy: boolean;
-            /** @description "List in search engines": one half of a claimed page's index qualification; the DNS TXT proof (hostVerifiedAt) is the other. */
-            indexOptIn?: boolean;
-            /**
-             * Format: date-time
-             * @description When the DNS TXT proof of control of the host landed. Null until verified.
-             */
-            hostVerifiedAt?: string | null;
-            /** @description The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null. */
-            verificationToken?: string | null;
-            /** @description The full DNS record NAME the worker resolves for verification (_upcontrol-verify.<registrable domain>), composed server-side: a project on a deeper subdomain must publish on the registrable domain, and the front cannot compute one without the public suffix list. Null on hosts the suffix list cannot fold. */
-            verificationRecord?: string | null;
             /** @description Echo of the removal token when one was already issued through the page's own door. Never minted here. */
             removalToken?: string | null;
             /** @description The host's public page address on our link, when this project rides one (host pages and their suffixed siblings). */
@@ -4877,8 +4866,6 @@ export interface components {
             showNetwork?: boolean;
             /** @description Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding. */
             showPoweredBy?: boolean;
-            /** @description "List in search engines". Stored with the settings; honoured only on a claimed, host-verified page. */
-            indexOptIn?: boolean;
         };
         PublicIncident: {
             title: string;
@@ -4924,12 +4911,15 @@ export interface components {
                 /** @description The clock time of the newest check, "15:04 UTC". */
                 asOf?: string;
             };
-            /** @description Whether search engines may list this page: the index gate's stamp AND the kill switch off. Mirrors the HTML door's robots meta. */
+            /** @description Host pages with a measured state only: the questions people search for about the host ("Is Datrade down right now?", "Why is datrade.io not working?", "down for everyone or just me"), each answered from this page's own measurements. The crawler's HTML page prints the same list, so a search engine and a reader see one text. */
+            faq?: {
+                q: string;
+                a: string;
+            }[];
+            /** @description Whether search engines may list this page: every live page with an address of its own (a host page or a project's own page), from the moment it exists. False for a suffixed copy of a host page, the prj-N fallback, and every page while the operator's UC_INDEX_DISABLED is on. Mirrors the HTML door's robots meta. */
             indexable?: boolean;
             /** @description Whether this is the host's first page (the bare slug). Suffixed pages carry false. */
             hostPage?: boolean;
-            /** @description True when the page is claimed but the host was never proven by DNS TXT: the page stays out of the index and keeps its not-affiliated line. */
-            unverifiedClaim?: boolean;
         };
         /** @enum {string} */
         WatchStatus: "ok" | "check" | "down" | "nodata";

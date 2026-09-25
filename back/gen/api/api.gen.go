@@ -1873,6 +1873,12 @@ type PublicStatusResponse struct {
 	Claimed    *bool             `json:"claimed,omitempty"`
 	Components []PublicComponent `json:"components"`
 
+	// Faq Host pages with a measured state only: the questions people search for about the host ("Is Datrade down right now?", "Why is datrade.io not working?", "down for everyone or just me"), each answered from this page's own measurements. The crawler's HTML page prints the same list, so a search engine and a reader see one text.
+	Faq *[]struct {
+		A string `json:"a"`
+		Q string `json:"q"`
+	} `json:"faq,omitempty"`
+
 	// HasCustomDomain Present and true only for the OWNER (same rule as `mine`), when this page already has a custom domain stored, verified or not. It exists so the owner's own view of the page on our link can stop offering an address they have already bought. A boolean rather than the domain itself: nothing on a public page needs to print that address, and a field that carries it invites a caller to.
 	HasCustomDomain *bool `json:"hasCustomDomain,omitempty"`
 
@@ -1880,7 +1886,7 @@ type PublicStatusResponse struct {
 	HostPage  *bool            `json:"hostPage,omitempty"`
 	Incidents []PublicIncident `json:"incidents"`
 
-	// Indexable Whether search engines may list this page: the index gate's stamp AND the kill switch off. Mirrors the HTML door's robots meta.
+	// Indexable Whether search engines may list this page: every live page with an address of its own (a host page or a project's own page), from the moment it exists. False for a suffixed copy of a host page, the prj-N fallback, and every page while the operator's UC_INDEX_DISABLED is on. Mirrors the HTML door's robots meta.
 	Indexable *bool `json:"indexable,omitempty"`
 
 	// Mine Present and true only when the viewer's session belongs to the page's tenant; absent = not the viewer's page.
@@ -1899,11 +1905,8 @@ type PublicStatusResponse struct {
 		Kind     PublicStatusResponseStateKind `json:"kind"`
 		Sentence string                        `json:"sentence"`
 	} `json:"state,omitempty"`
-	Title *string `json:"title,omitempty"`
-
-	// UnverifiedClaim True when the page is claimed but the host was never proven by DNS TXT: the page stays out of the index and keeps its not-affiliated line.
-	UnverifiedClaim *bool     `json:"unverifiedClaim,omitempty"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	Title     *string   `json:"title,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // PublicStatusResponseStateKind defines model for PublicStatusResponse.State.Kind.
@@ -2090,14 +2093,8 @@ type StatusPageResponse struct {
 	DomainLapsesAt *time.Time `json:"domainLapsesAt,omitempty"`
 
 	// DomainVerified Whether the stored domain's DNS has been proven to point where we do. A domain that just changed starts false and is re-proven by POST /v1/status-page/domain/verify.
-	DomainVerified *bool `json:"domainVerified,omitempty"`
-
-	// HostVerifiedAt When the DNS TXT proof of control of the host landed. Null until verified.
-	HostVerifiedAt *time.Time `json:"hostVerifiedAt,omitempty"`
-
-	// IndexOptIn "List in search engines": one half of a claimed page's index qualification; the DNS TXT proof (hostVerifiedAt) is the other.
-	IndexOptIn *bool          `json:"indexOptIn,omitempty"`
-	Network    *[]NetworkTile `json:"network,omitempty"`
+	DomainVerified *bool          `json:"domainVerified,omitempty"`
+	Network        *[]NetworkTile `json:"network,omitempty"`
 
 	// RemovalToken Echo of the removal token when one was already issued through the page's own door. Never minted here.
 	RemovalToken *string `json:"removalToken,omitempty"`
@@ -2115,22 +2112,13 @@ type StatusPageResponse struct {
 
 	// UpdatedAt The server clock the bars were bucketed against, the same field the public page carries: the owner's preview anchors its bar tooltips to it rather than to the browser's own clock.
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
-
-	// VerificationRecord The full DNS record NAME the worker resolves for verification (_upcontrol-verify.<registrable domain>), composed server-side: a project on a deeper subdomain must publish on the registrable domain, and the front cannot compute one without the public suffix list. Null on hosts the suffix list cannot fold.
-	VerificationRecord *string `json:"verificationRecord,omitempty"`
-
-	// VerificationToken The TXT string to publish for host verification. Issued on read while it can still be used, stable until the record lands, then null.
-	VerificationToken *string `json:"verificationToken,omitempty"`
 }
 
 // StatusPageUpdate defines model for StatusPageUpdate.
 type StatusPageUpdate struct {
 	// Domain The host to serve the page on. Normalized server-side (scheme, path and port dropped); must be a subdomain — at least three labels — and not our own host. Empty clears it. Changing it re-locks verification; 402 when the plan carries no custom domains, 409 when another page already rides that host.
-	Domain *string `json:"domain,omitempty"`
-
-	// IndexOptIn "List in search engines". Stored with the settings; honoured only on a claimed, host-verified page.
-	IndexOptIn  *bool `json:"indexOptIn,omitempty"`
-	ShowNetwork *bool `json:"showNetwork,omitempty"`
+	Domain      *string `json:"domain,omitempty"`
+	ShowNetwork *bool   `json:"showNetwork,omitempty"`
 
 	// ShowPoweredBy Whether the "Powered by UpControl" credit is published. Honoured only on a self-hosted instance, where the AGPL copy is the operator's own to brand. The hosted service always publishes it: a plan buys the page's address, never the branding.
 	ShowPoweredBy *bool `json:"showPoweredBy,omitempty"`
