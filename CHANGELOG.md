@@ -6,6 +6,15 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.36.1] — 2026-09-25
+
+### Fixed
+- **Crawlers that render JavaScript without a "bot" token counted as visitors.** GoogleOther,
+  Google-InspectionTool, Dataprovider.com and a scraper that clips Chrome's `Safari/537.36`
+  to `Safari/537.3` ran the web analytics beacon and the site tag and were stored as people;
+  on one site they were most of its single-page visits. They are `device = bot` now, so web
+  analytics skips them and a public key's batch from one is dropped like any other crawler's.
+
 ## [0.36.0] — 2026-09-21
 
 A project holds several named dashboards. Migration 012 gives `dashboard` an id and a name of

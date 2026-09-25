@@ -36,6 +36,13 @@ func TestParseUA(t *testing.T) {
 		{"Mozilla/5.0 (Linux; Android 11) Chrome/90 Mobile Safari/537.36 Lighthouse", "bot", "", ""},
 		{"Datadog-Monitoring/1.0", "bot", "", ""},
 		{"Mozilla/5.0 (compatible; SemrushBot/7~bl; +http://www.semrush.com/bot.html)", "bot", "", ""},
+		// JavaScript-rendering crawlers with no "bot" token, seen in a real access log.
+		{"Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.52 Mobile Safari/537.36 (compatible; GoogleOther)", "bot", "", ""},
+		{"Mozilla/5.0 (compatible; Google-InspectionTool/1.0;)", "bot", "", ""},
+		{"Mozilla/5.0 (compatible; Dataprovider.com)", "bot", "", ""},
+		{"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3", "bot", "", ""},
+		// The clipped Safari token is a suffix test: the real one still reads as a browser.
+		{"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36", "desktop", "linux", "chrome"},
 	}
 	for _, c := range cases {
 		got := parseUA(c.ua)
