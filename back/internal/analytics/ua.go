@@ -12,7 +12,11 @@ type ua struct {
 
 // botSubstrings are the automated-visitor markers; a match is device=bot
 // regardless of the rest of the string.
-var botSubstrings = []string{"crawl", "spider", "slurp", "headless", "lighthouse", "monitoring"}
+// The last three name crawlers that render JavaScript and carry no "bot" token, found in a
+// week of our own access log (2026-09): GoogleOther on a Nexus 5X, Google-InspectionTool,
+// and Dataprovider.com.
+var botSubstrings = []string{"crawl", "spider", "slurp", "headless", "lighthouse", "monitoring",
+	"googleother", "google-inspectiontool", "dataprovider"}
 
 // hasBotToken finds "bot" as a product token (Googlebot/2.1, Slackbot-Link…, "+…/bot.html"),
 // not as letters inside a word: Android puts the handset model in its User-Agent, and a
@@ -44,6 +48,11 @@ func parseUA(raw string) ua {
 		if strings.Contains(s, m) {
 			return ua{Device: "bot"}
 		}
+	}
+	// A scraper clips Chrome's "Safari/537.36" to "Safari/537.3": no browser ships that
+	// ending, so it is never a person. A suffix test, because the real token contains it.
+	if strings.HasSuffix(s, "safari/537.3") {
+		return ua{Device: "bot"}
 	}
 	return ua{Device: deviceOf(s), OS: osOf(s), Browser: browserOf(s)}
 }
