@@ -7,9 +7,6 @@ package worker
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -124,21 +121,9 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		rollCheckPartitions(ctx, pool, d)
 	})
 
-	// The index gate and its ramp (plan part 4): qualify, stamp at most
-	// cfg.IndexRampPerDay a day, and leave with hysteresis. Every 10 minutes;
-	// the DNS probes are cached per host per run.
-	gate := newIndexGate(d.Config.StatusPageKnobs)
-	go runWithLock(ctx, pool, d, "index-gate", 10*time.Minute, func(ctx context.Context) {
-		gate.tick(ctx, pool, d.Logger)
-	})
-
-	// DNS TXT tokens: host verification (claimed pages proving control) and
-	// self-serve removal. Every 10 minutes against the real resolver; tests
-	// inject lookupTXT.
+	// DNS TXT tokens: self-serve removal. Every 10 minutes against the real
+	// resolver; tests inject lookupTXT.
 	go runWithLock(ctx, pool, d, "dns-tokens", 10*time.Minute, func(ctx context.Context) {
-		if err := verifyHostTokens(ctx, pool, d.Logger); err != nil {
-			d.Logger.Warn("dns-tokens verify tick error", "err", err)
-		}
 		if err := removeByToken(ctx, pool, d.Logger); err != nil {
 			d.Logger.Warn("dns-tokens remove tick error", "err", err)
 		}
@@ -400,357 +385,8 @@ func rollLogPartitions(ctx context.Context, pool *pg.Pool, d app.Deps) {
 	}
 }
 
-// lookupHost is the gate's DNS probe, a package var so tests can inject one
-// (real DNS is untestable).
-var lookupHost = net.LookupHost
-
-// gatePage is one candidate row of the index gate.
-type gatePage struct {
-	ID           int64
-	ProjectID    int64
-	Domain       string
-	RootTargetID int64
-	MintedSource *string
-	LastSeenAt   *time.Time
-	IndexedAt    *time.Time
-	ReindexHold  bool
-	Claimed      bool
-}
-
-// indexGate is the part-4 job: qualification, ramp and hysteresis. The knob
-// set is read once per process (a knob change is a restart); the per-run DNS
-// cache lives in tick.
-type indexGate struct {
-	cfg config.StatusPageKnobs
-	// lastLogDay tracks the daily log line: once per calendar day, the run
-	// that first crosses midnight reports.
-	lastLogDay string
-}
-
-func newIndexGate(cfg config.StatusPageKnobs) *indexGate { return &indexGate{cfg: cfg} }
-
-// indexCandidates is the one candidate set: pages with removed_at NULL.
-// An UNCLAIMED host page qualifies on continuity alone (nobody exists to
-// ask for proof); a CLAIMED page - ANY page, host page included - only when
-// opted in AND DNS-verified (review decision 16). A root target is required
-// - continuity is measured on it.
-func indexCandidates(ctx context.Context, pool *pg.Pool) ([]gatePage, error) {
-	// ORDER BY created_at: the oldest page first for the ramp (the mint's
-	// own timestamp, backfilled from the tenant for pre-009 pages).
-	rows, err := pool.Raw().Query(ctx,
-		`SELECT sp.id, sp.project_id, p.domain, sp.root_target_id, sp.minted_source,
-		       sp.last_seen_at, sp.indexed_at, sp.reindex_hold,
-		       (t.claim_token_hash IS NULL) AS claimed
-		  FROM status_page sp
-		  JOIN project p ON p.id = sp.project_id
-		  JOIN tenant t ON t.id = sp.tenant_id
-		 WHERE sp.removed_at IS NULL AND sp.root_target_id IS NOT NULL
-		   AND ((sp.is_host_page AND t.claim_token_hash IS NOT NULL)
-		        OR (t.claim_token_hash IS NULL AND sp.index_opt_in AND sp.host_verified_at IS NOT NULL))
-		 ORDER BY sp.created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []gatePage
-	for rows.Next() {
-		var g gatePage
-		if err := rows.Scan(&g.ID, &g.ProjectID, &g.Domain, &g.RootTargetID, &g.MintedSource,
-			&g.LastSeenAt, &g.IndexedAt, &g.ReindexHold, &g.Claimed); err != nil {
-			return nil, err
-		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
-
-// continuity is the measured half of qualification over one window.
-type continuity struct {
-	measured, ok, total uint64
-	expected            float64
-	lastOK              *time.Time
-	firstTS             *time.Time
-	cadence             int32
-}
-
-// continuityOver reads the target's measurements in the window and computes
-// the ratio inputs: measured (not unmeasured) readings, ok among them, the
-// expected count from the cadence of the newest row, and the newest ok's
-// age. expected counts only the time the target has actually existed for
-// (first reading to now), so a young target is judged on its own window.
-func continuityOver(ctx context.Context, pool *pg.Pool, targetID int64, window time.Duration) (continuity, error) {
-	var c continuity
-	var lastOK, firstTS *time.Time
-	err := pool.Raw().QueryRow(ctx, fmt.Sprintf(`
-		SELECT count(*),
-		       count(*) FILTER (WHERE %s),
-		       count(*) FILTER (WHERE ok),
-		       max(ts) FILTER (WHERE ok),
-		       min(ts),
-		       (SELECT interval_sec FROM checks WHERE target_id = $1 ORDER BY ts DESC LIMIT 1)
-		  FROM checks
-		 WHERE target_id = $1 AND ts >= now() - make_interval(secs => $2::double precision)`,
-		pgstore.MeasurableSQL), targetID, window.Seconds()).Scan(
-		&c.total, &c.measured, &c.ok, &lastOK, &firstTS, &c.cadence)
-	c.lastOK, c.firstTS = lastOK, firstTS
-	if err != nil {
-		return c, err
-	}
-	if c.cadence <= 0 {
-		return c, nil
-	}
-	elapsed := window
-	if firstTS != nil {
-		if age := time.Since(*firstTS); age < elapsed {
-			elapsed = age
-		}
-	}
-	c.expected = elapsed.Seconds() / float64(c.cadence)
-	return c, nil
-}
-
-// qualifies is the continuity bar over 72 h: at least 90% of the expected
-// checks measured, at least 95% of those ok, and the newest ok under an hour
-// old.
-func (c continuity) qualifies(now time.Time) bool {
-	if c.expected <= 0 || c.measured == 0 {
-		return false
-	}
-	if float64(c.measured)/c.expected < 0.9 {
-		return false
-	}
-	if float64(c.ok)/float64(c.measured) < 0.95 {
-		return false
-	}
-	if c.lastOK == nil || now.Sub(*c.lastOK) > time.Hour {
-		return false
-	}
-	return true
-}
-
-// tick is the gate's run: qualify the candidates, stamp within the day's
-// ramp and the instance ceiling, apply hysteresis to indexed pages, and log
-// one line a day.
-func (g *indexGate) tick(ctx context.Context, pool *pg.Pool, log *slog.Logger) {
-	if g.cfg.IndexDisabled {
-		return
-	}
-	now := time.Now().UTC()
-	candidates, err := indexCandidates(ctx, pool)
-	if err != nil {
-		log.Warn("index-gate: candidate read failed", "err", err)
-		return
-	}
-	// Wildcard-DNS cache, per host per run: one lookup per host, not per page.
-	wildcard := map[string]bool{}
-	wildcardHit := func(host string) bool {
-		if v, ok := wildcard[host]; ok {
-			return v
-		}
-		b := make([]byte, 4)
-		_, _ = rand.Read(b)
-		_, err := lookupHost(hex.EncodeToString(b) + "." + host)
-		w := err == nil
-		wildcard[host] = w
-		return w
-	}
-	refusals := map[string]int{}
-	refuse := func(reason string) { refusals[reason]++ }
-	qualified := 0
-	var qualifiedUnindexed []gatePage
-	for _, p := range candidates {
-		// Hysteresis first: an indexed page whose continuity has been broken
-		// for 7 consecutive days, or whose host went NXDOMAIN, leaves the
-		// index with a hold only the operator clears.
-		if p.IndexedAt != nil {
-			g.hysteresis(ctx, pool, log, p)
-		}
-		if p.IndexedAt != nil || p.ReindexHold {
-			continue
-		}
-		c, cerr := continuityOver(ctx, pool, p.RootTargetID, 72*time.Hour)
-		if cerr != nil || !c.qualifies(now) {
-			refuse("continuity")
-			continue
-		}
-		if p.Domain != "" && wildcardHit(p.Domain) {
-			// A wildcard host answers anything: the page would rank for typos
-			// and parked domains.
-			refuse("wildcard_dns")
-			continue
-		}
-		// Origin (review decision 17): a page a human asked for on the landing
-		// qualifies on continuity alone; a seeded page only once a human has
-		// interacted with it or a state change was recorded on its host.
-		if src := ptrString(p.MintedSource); src == "seed" {
-			if !seedInteraction(ctx, pool, p) {
-				refuse("seed_no_interaction")
-				continue
-			}
-		}
-		qualified++
-		qualifiedUnindexed = append(qualifiedUnindexed, p)
-	}
-
-	// The ramp: oldest qualified first, at most cfg.IndexRampPerDay stamps
-	// today, never more than cfg.IndexMaxPages indexed at once.
-	stampedToday := countQuery(ctx, pool,
-		`SELECT count(*) FROM status_page WHERE indexed_at >= date_trunc('day', now() AT TIME ZONE 'utc')`)
-	totalIndexed := countQuery(ctx, pool,
-		`SELECT count(*) FROM status_page WHERE indexed_at IS NOT NULL`)
-	for _, p := range qualifiedUnindexed {
-		if stampedToday >= g.rampPerDay() || totalIndexed >= g.indexMax() {
-			refuse("ramp_full")
-			break
-		}
-		tag, err := pool.Raw().Exec(ctx,
-			`UPDATE status_page SET indexed_at = now() WHERE id = $1 AND indexed_at IS NULL`, p.ID)
-		if err != nil {
-			continue
-		}
-		if tag.RowsAffected() > 0 {
-			stampedToday++
-			totalIndexed++
-		}
-	}
-
-	// One line a day: qualified, stamped today, total indexed, and the most
-	// common refusal reason (the operator's window into the gate).
-	if day := now.Format("2006-01-02"); day != g.lastLogDay {
-		g.lastLogDay = day
-		top, topN := "", 0
-		for reason, n := range refusals {
-			if n > topN {
-				top, topN = reason, n
-			}
-		}
-		log.Info("index gate",
-			"qualified", qualified,
-			"stamped_today", stampedToday,
-			"total_indexed", totalIndexed,
-			"top_refusal", top)
-	}
-}
-
-// rampPerDay and indexMax guard zero-valued knobs (a Config built by hand in
-// a test): the defaults are the config package's.
-func (g *indexGate) rampPerDay() int {
-	return g.cfg.WithDefaults().IndexRampPerDay
-}
-
-func (g *indexGate) indexMax() int {
-	return g.cfg.WithDefaults().IndexMaxPages
-}
-
-// hysteresis takes an indexed page OUT of the index: continuity broken for
-// 7 consecutive days (no day in the last 7 met the bar), or NXDOMAIN. Both
-// set reindex_hold - re-entry needs the operator to clear it, and then the
-// ramp again, so the robots meta cannot flap.
-func (g *indexGate) hysteresis(ctx context.Context, pool *pg.Pool, log *slog.Logger, p gatePage) {
-	if p.Domain == "" {
-		return
-	}
-	gone := false
-	if _, err := lookupHost(p.Domain); err != nil {
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			gone = true // NXDOMAIN: the host itself is gone
-		}
-	}
-	if !gone && !anyDayMetBar(ctx, pool, p.RootTargetID, 7) {
-		gone = true
-	}
-	if !gone {
-		return
-	}
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET indexed_at = NULL, reindex_hold = true WHERE id = $1`, p.ID); err == nil {
-		log.Info("index gate: page left the index", "page", p.ID, "domain", p.Domain)
-	}
-}
-
-// anyDayMetBar answers whether any of the last `days` UTC days met the
-// continuity bar on the target (the same ratios as qualification, evaluated
-// per day; a day with no measurements at all is below the bar). A page
-// leaves only when every one of them was below - seven consecutive broken
-// days, not one bad Wednesday.
-func anyDayMetBar(ctx context.Context, pool *pg.Pool, targetID int64, days int) bool {
-	var cadence int32
-	if err := pool.Raw().QueryRow(ctx,
-		`SELECT interval_sec FROM checks WHERE target_id = $1 ORDER BY ts DESC LIMIT 1`, targetID).Scan(&cadence); err != nil || cadence <= 0 {
-		return false // nothing measured at all: below the bar
-	}
-	rows, err := pool.Raw().Query(ctx, fmt.Sprintf(`
-		SELECT date_trunc('day', ts AT TIME ZONE 'utc') AS day,
-		       count(*) FILTER (WHERE %s) AS measured,
-		       count(*) FILTER (WHERE ok) AS ok
-		  FROM checks
-		 WHERE target_id = $1 AND ts >= date_trunc('day', now() AT TIME ZONE 'utc') - make_interval(days => $2::int)
-		 GROUP BY day ORDER BY day`, pgstore.MeasurableSQL), targetID, days)
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	now := time.Now().UTC()
-	for rows.Next() {
-		var day time.Time
-		var measured, ok uint64
-		if rows.Scan(&day, &measured, &ok) != nil {
-			continue
-		}
-		// How much of this day has elapsed: a partial day is judged on the
-		// time it has had, capped at the full 24 h so yesterday counts whole.
-		end := day.Add(24 * time.Hour)
-		elapsed := 24 * time.Hour
-		if end.After(now) {
-			elapsed = now.Sub(day)
-		}
-		if elapsed <= 0 {
-			continue
-		}
-		expected := elapsed.Seconds() / float64(cadence)
-		if expected <= 0 || measured == 0 {
-			continue
-		}
-		if float64(measured)/expected >= 0.9 && float64(ok)/float64(measured) >= 0.95 {
-			return true
-		}
-	}
-	return false
-}
-
-// seedInteraction answers whether a seeded page has been touched by a human
-// or has recorded a state change: claimed, or a monitor on the same root
-// target from ANOTHER project, or a visit (last_seen_at), or an incident in
-// the page's project.
-func seedInteraction(ctx context.Context, pool *pg.Pool, p gatePage) bool {
-	if p.Claimed || p.LastSeenAt != nil {
-		return true
-	}
-	var ok bool
-	_ = pool.Raw().QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM monitor m
-		                WHERE m.target_id = $1 AND m.project_id <> $2)
-		    OR EXISTS (SELECT 1 FROM incident i WHERE i.project_id = $2)`,
-		p.RootTargetID, p.ProjectID).Scan(&ok)
-	return ok
-}
-
-func countQuery(ctx context.Context, pool *pg.Pool, q string) int {
-	var n int
-	_ = pool.Raw().QueryRow(ctx, q).Scan(&n)
-	return n
-}
-
-func ptrString(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-// lookupTXT is the resolver the verification and removal arms share, a
-// package var so tests can inject one (real DNS is untestable). The pattern
+// lookupTXT is the removal arm's resolver, a package var so tests can inject
+// one (real DNS is untestable). The pattern
 // is verifyStatusDomain's: the default resolver, a short-lived context.
 var lookupTXT = func(ctx context.Context, name string) ([]string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -758,13 +394,11 @@ var lookupTXT = func(ctx context.Context, name string) ([]string, error) {
 	return net.DefaultResolver.LookupTXT(cctx, name)
 }
 
-// sweepTokenPages is the loop both DNS-token arms run: query the pages
-// with an outstanding token, reduce each host to its eTLD+1, look the arm's
-// TXT record up, and apply the arm's action on the pages whose record
-// carries the token. tokenCol and pendingCol are the two columns that tell
-// the arms apart (verification_token/host_verified_at vs
-// removal_token/removed_at); record is the full record label (dot included,
-// from internal/dnstokens - the one home of both names).
+// sweepTokenPages is the DNS-token loop: query the pages with an
+// outstanding token, reduce each host to its eTLD+1, look the TXT record up,
+// and apply the action on the pages whose record carries the token.
+// tokenCol and pendingCol are removal_token/removed_at; record is the full
+// record label (dot included, from internal/dnstokens).
 func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, record string,
 	apply func(ctx context.Context, page int64, domain string) error) error {
 	rows, err := pool.Raw().Query(ctx, fmt.Sprintf(
@@ -816,25 +450,6 @@ func sweepTokenPages(ctx context.Context, pool *pg.Pool, tokenCol, pendingCol, r
 		}
 	}
 	return nil
-}
-
-// verifyHostTokens stamps host_verified_at on claimed pages whose DNS TXT
-// proof has landed: _upcontrol-verify.<eTLD+1> containing the issued token.
-// The token is cleared on success, so the door stops offering one.
-func verifyHostTokens(ctx context.Context, pool *pg.Pool, log *slog.Logger) error {
-	return sweepTokenPages(ctx, pool, "verification_token", "host_verified_at", dnstokens.VerifyRecord,
-		func(ctx context.Context, page int64, domain string) error {
-			if _, err := pool.Raw().Exec(ctx,
-				`UPDATE status_page SET host_verified_at = now(), verification_token = NULL
-			  WHERE id = $1 AND host_verified_at IS NULL`, page); err != nil {
-				return err
-			}
-			// The worker has no analytics recorder: the event is logged here, and
-			// the page_verified server event lands when the wiring does (noted in
-			// the Group 2 receipt).
-			log.Info("page_verified", "page", page, "domain", domain)
-			return nil
-		})
 }
 
 // removeByToken is the self-serve removal: _upcontrol-remove.<eTLD+1>

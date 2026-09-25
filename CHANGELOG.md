@@ -6,6 +6,41 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-09-25
+
+Every status page is in search from the moment it exists, and it answers the questions people
+search for. No migration: the index gate's columns stay, unread.
+
+### Added
+- **A host page answers what people search for.** The crawler HTML's title reads
+  `Is Datrade down? datrade.io status right now`, it carries a meta description, and an FAQ
+  ("Is Datrade down right now?", "Why is datrade.io not working or not loading for me?",
+  "down for everyone or just me", outages, uptime) answered from the page's own
+  measurements, with `FAQPage` structured data. The same list rides `GET /public/status/{slug}`
+  as `faq`, so the React page prints what the crawler reads.
+- **`GET /hosted-status`**: the crawler HTML of a page on its own verified domain, read from
+  the Host header, with every address on that domain. The `/status/{slug}` copy of such a
+  page names the domain as its canonical.
+
+### Changed
+- **Every live page with an address of its own is listed, at once**: a host page, claimed
+  or not, seeded or watched, and a project's own page answer `index, follow` and ride the
+  directory and the sitemap from the moment they exist. Suffixed pages and the `prj-N`
+  fallback stay out; `UC_INDEX_DISABLED=1` still empties the index. The directory
+  `/status` is `index, follow` with a canonical.
+- **Any spelling of a host reaches its page**: `/status/example.com` and
+  `/status/www.example.com` answer 301 to the host page's slug.
+
+### Removed
+- **The index gate**: the 72-hour continuity bar, the wildcard-DNS test, the seed rule, the
+  daily ramp and its ceiling (`UC_INDEX_RAMP_PER_DAY`, `UC_INDEX_MAX_PAGES` are no longer
+  read), and the hysteresis with its `reindex_hold`. The `indexed_at`, `index_opt_in`,
+  `reindex_hold`, `host_verified_at` and `verification_token` columns stay, unread.
+- **"List in search engines" and the DNS TXT host proof**: `indexOptIn`, `hostVerifiedAt`,
+  `verificationToken` and `verificationRecord` leave the settings door, `unverifiedClaim`
+  leaves the public one, and the worker no longer resolves `_upcontrol-verify`. Self-serve
+  removal by `_upcontrol-remove` is unchanged.
+
 ## [0.36.1] — 2026-09-25
 
 ### Fixed

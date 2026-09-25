@@ -70,6 +70,7 @@ func newSurfacesWorld(t *testing.T) (*pg.Pool, http.Handler, *writeAPI) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /status/{slug}", sh)
 	mux.Handle("GET /status", sh)
+	mux.Handle("GET /hosted-status", sh)
 	mux.Handle("GET /public/status-directory", sh)
 	mux.Handle("GET /sitemap-status.xml", sh)
 	mux.Handle("GET /public/status/{slug}/og.png", sh)
@@ -180,9 +181,12 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 	if !strings.Contains(html, js.State.Sentence) {
 		t.Fatalf("the HTML door does not carry the JSON door's sentence %q", js.State.Sentence)
 	}
-	wantTitle := "<title>" + host + " status: is " + host + " answering right now?</title>"
+	wantTitle := "<title>Is Example down? " + host + " status right now</title>"
 	if !strings.Contains(html, wantTitle) {
 		t.Fatalf("title not in the pinned format; want %q", wantTitle)
+	}
+	if !strings.Contains(html, `<meta name="description" content="Is `+host+` down or not working?`) {
+		t.Fatal("the meta description is missing or not worded for search")
 	}
 	if strings.Contains(html, "—") {
 		t.Fatal("the HTML door's copy contains an em-dash")
@@ -191,9 +195,17 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 	if strings.Contains(html, "Not affiliated") || strings.Contains(html, "Created automatically") {
 		t.Fatal("the HTML door still carries the removed disclaimer")
 	}
-	// The measured-answer section repeats the sentence under its own heading.
-	if !strings.Contains(html, "<h3>Is "+host+" answering right now?</h3>") {
-		t.Fatal("the measured-answer heading is missing")
+	// The FAQ answers from the same measurement, and its structured data
+	// carries the same questions.
+	for _, want := range []string{
+		"<h2>Questions about " + host + "</h2>",
+		"<h3>Is Example down right now?</h3>",
+		"<p>No. " + js.State.Sentence + "</p>",
+		`"@type":"FAQPage"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("the FAQ is missing %q", want)
+		}
 	}
 	// The footer's fixed sentences and doors.
 	for _, want := range []string{
@@ -201,7 +213,7 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 		`href="/status/` + slug + `#claim"`,
 		`href="/status"`,
 		`href="/?check=` + host,
-		"Powered by UpControl",
+		`Powered by <a href="https://upcontrol.io/">UpControl</a>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("the page is missing %q", want)
@@ -225,7 +237,7 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 }
 
 // TestHTMLDoorRobotsPerClass: the robots meta mirrors the JSON door's
-// indexable for every page class, and the canonical link belongs to host
+// indexable for every page class, and the canonical link belongs to listed
 // pages only.
 func TestHTMLDoorRobotsPerClass(t *testing.T) {
 	pool, mux, wa := newSurfacesWorld(t)
@@ -233,33 +245,46 @@ func TestHTMLDoorRobotsPerClass(t *testing.T) {
 	slug := seedHostPage(t, mux, host)
 	ctx := context.Background()
 
-	// An unstamped host page: qualified but quiet. Its canonical points at
-	// ITSELF (never at another page), so the pair cannot propagate anything.
+	// A host page minted a moment ago is listed at once (owner decision,
+	// 2026-09-25: no gate), with a canonical pointing at itself.
 	w := get(t, mux, "/status/"+slug)
-	if w.Code != http.StatusOK || !strings.Contains(robotsLine(w.Body.String()), "noindex, follow") {
-		t.Fatalf("unstamped host page robots = %q", robotsLine(w.Body.String()))
-	}
-
-	// Stamped: index, follow, and the canonical appears.
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET indexed_at = now() WHERE slug = $1`, slug); err != nil {
-		t.Fatal(err)
-	}
-	w = get(t, mux, "/status/"+slug)
-	if w.Code != http.StatusOK || !strings.Contains(robotsLine(w.Body.String()), "index, follow") {
-		t.Fatalf("stamped host page robots = %q", robotsLine(w.Body.String()))
+	if w.Code != http.StatusOK || robotsLine(w.Body.String()) != `<meta name="robots" content="index, follow">` {
+		t.Fatalf("fresh host page robots = %q", robotsLine(w.Body.String()))
 	}
 	if !strings.Contains(w.Body.String(), `<link rel="canonical" href="https://upcontrol.io/status/`+slug+`">`) {
 		t.Fatal("the host page's canonical link is missing")
 	}
 
-	// The kill switch outranks the stamp.
+	// The operator's kill switch takes everything out.
 	wa.statusKnobs.IndexDisabled = true
 	w = get(t, mux, "/status/"+slug)
-	if !strings.Contains(robotsLine(w.Body.String()), "noindex, follow") {
+	if !strings.Contains(robotsLine(w.Body.String()), "noindex") {
 		t.Fatalf("kill-switched host page robots = %q", robotsLine(w.Body.String()))
 	}
 	wa.statusKnobs.IndexDisabled = false
+
+	// A project's own page (no root target, not a host page) is listed too.
+	var ownTenant, ownProject int64
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO tenant (public_id, name) VALUES (gen_random_uuid(), 'own') RETURNING id`).Scan(&ownTenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Raw().QueryRow(ctx,
+		`INSERT INTO project (public_id, tenant_id, domain) VALUES (gen_random_uuid(), $1, 'own.example.com') RETURNING id`,
+		ownTenant).Scan(&ownProject); err != nil {
+		t.Fatal(err)
+	}
+	ownSlug := fmt.Sprintf("own-%d", time.Now().UnixNano())
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO status_page (tenant_id, project_id, slug, title) VALUES ($1, $2, $3, 'Own')`,
+		ownTenant, ownProject, ownSlug); err != nil {
+		t.Fatal(err)
+	}
+	w = get(t, mux, "/status/"+ownSlug)
+	if w.Code != http.StatusOK || !strings.Contains(robotsLine(w.Body.String()), "index, follow") ||
+		strings.Contains(robotsLine(w.Body.String()), "noindex") {
+		t.Fatalf("a project's own page robots = %q (code %d)", robotsLine(w.Body.String()), w.Code)
+	}
 
 	// A suffixed (non-host) page: out entirely, never a canonical.
 	sib := slug + "-999"
@@ -292,6 +317,50 @@ func TestHTMLDoorRobotsPerClass(t *testing.T) {
 	}
 }
 
+// TestHostedDoorOwnsItsAddress: a page with a verified domain of its own is
+// the same page on two URLs, and both name the customer's address as the
+// canonical one; on their host the page carries none of our doors.
+func TestHostedDoorOwnsItsAddress(t *testing.T) {
+	pool, mux, _ := newSurfacesWorld(t)
+	host := fmt.Sprintf("hosted-%d.example.com", time.Now().UnixNano())
+	slug := seedHostPage(t, mux, host)
+	seedOkChecks(t, pool, rootTargetOf(t, pool, slug), 150)
+	custom := "status." + host
+	if _, err := pool.Raw().Exec(context.Background(),
+		`UPDATE status_page SET domain = $2, domain_verified_at = now() WHERE slug = $1`, slug, custom); err != nil {
+		t.Fatal(err)
+	}
+	canonical := `<link rel="canonical" href="https://` + custom + `/">`
+
+	r := httptest.NewRequest(http.MethodGet, "/hosted-status", nil)
+	r.Host = custom
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("hosted door = %d %s", w.Code, w.Body.String())
+	}
+	html := w.Body.String()
+	for _, want := range []string{canonical, "<title>" + host + " status</title>", "https://" + custom + "/public/status/" + slug + "/og.png"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("the hosted page is missing %q", want)
+		}
+	}
+	if strings.Contains(html, `href="/status"`) || strings.Contains(html, "Claim this page") {
+		t.Fatal("the hosted page carries our doors on the customer's host")
+	}
+	if !strings.Contains(get(t, mux, "/status/"+slug).Body.String(), canonical) {
+		t.Fatal("our URL of a page with its own domain does not name that domain as canonical")
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/hosted-status", nil)
+	r.Host = "unknown-" + custom
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("an unverified host = %d, want 404", w.Code)
+	}
+}
+
 // TestHTMLDoorAnswers404410301: unknown slug, removed page, and the alias
 // fold, each in the door's own dress.
 func TestHTMLDoorAnswers404410301(t *testing.T) {
@@ -311,6 +380,13 @@ func TestHTMLDoorAnswers404410301(t *testing.T) {
 	if w.Code != http.StatusMovedPermanently || w.Header().Get("Location") != "/status/"+slug {
 		t.Fatalf("alias = %d %q, want 301 %q", w.Code, w.Header().Get("Location"), "/status/"+slug)
 	}
+	// So does the host typed as an address, with or without www.
+	for _, typed := range []string{host, "www." + host} {
+		w = get(t, mux, "/status/"+typed)
+		if w.Code != http.StatusMovedPermanently || w.Header().Get("Location") != "/status/"+slug {
+			t.Fatalf("typed host %s = %d %q, want 301 %q", typed, w.Code, w.Header().Get("Location"), "/status/"+slug)
+		}
+	}
 
 	if _, err := pool.Raw().Exec(context.Background(),
 		`UPDATE status_page SET removed_at = now() WHERE slug = $1`, slug); err != nil {
@@ -326,8 +402,8 @@ func TestHTMLDoorAnswers404410301(t *testing.T) {
 }
 
 // TestDirectoryAndSitemapListIndexedPagesOnly: the directory and the
-// sitemap share one predicate (indexed_at set, live), and the kill switch
-// empties both.
+// sitemap share one predicate (a live host page or a project's own page;
+// never a suffixed copy or a removed page), and the kill switch empties both.
 func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 	pool, mux, wa := newSurfacesWorld(t)
 	host := fmt.Sprintf("listed-%d.example.com", time.Now().UnixNano())
@@ -335,8 +411,14 @@ func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 	unlisted := seedHostPage(t, mux, fmt.Sprintf("unlisted-%d.example.com", time.Now().UnixNano()))
 	ctx := context.Background()
 	seedOkChecks(t, pool, rootTargetOf(t, pool, slug), 180)
+	// Out of the list: a suffixed copy (not the host page) and a removed page.
 	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET indexed_at = now() WHERE slug = $1`, slug); err != nil {
+		`UPDATE status_page SET is_host_page = false WHERE slug = $1`, unlisted); err != nil {
+		t.Fatal(err)
+	}
+	gone := seedHostPage(t, mux, fmt.Sprintf("gone-%d.example.com", time.Now().UnixNano()))
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE status_page SET removed_at = now() WHERE slug = $1`, gone); err != nil {
 		t.Fatal(err)
 	}
 
@@ -347,8 +429,13 @@ func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `href="/status/`+slug+`"`) {
 		t.Fatal("the indexed page is not listed")
 	}
-	if strings.Contains(w.Body.String(), unlisted) {
-		t.Fatal("the unindexed page is listed")
+	if strings.Contains(w.Body.String(), unlisted) || strings.Contains(w.Body.String(), gone) {
+		t.Fatal("a suffixed or removed page is listed")
+	}
+	// The directory is listed itself: it is the one page linking every other.
+	if robotsLine(w.Body.String()) != `<meta name="robots" content="index, follow">` ||
+		!strings.Contains(w.Body.String(), `<link rel="canonical" href="https://upcontrol.io/status">`) {
+		t.Fatalf("directory robots = %q or its canonical is missing", robotsLine(w.Body.String()))
 	}
 
 	// The browser's copy of the same list: one predicate, two renderings.
@@ -370,8 +457,8 @@ func TestDirectoryAndSitemapListIndexedPagesOnly(t *testing.T) {
 	if !strings.Contains(sm.Body.String(), "<loc>https://upcontrol.io/status/"+slug+"</loc>") {
 		t.Fatal("the sitemap misses the indexed page")
 	}
-	if strings.Contains(sm.Body.String(), unlisted) {
-		t.Fatal("the sitemap lists an unindexed page")
+	if strings.Contains(sm.Body.String(), unlisted) || strings.Contains(sm.Body.String(), gone) {
+		t.Fatal("the sitemap lists a suffixed or removed page")
 	}
 	if !strings.Contains(sm.Body.String(), "<lastmod>"+time.Now().UTC().Format("2006-01-02")+"</lastmod>") {
 		t.Fatal("the sitemap's lastmod is not the day of the newest check")

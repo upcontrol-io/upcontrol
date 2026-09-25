@@ -403,12 +403,11 @@ func TestWatchOnAnIPLiteralIsUnmintable(t *testing.T) {
 	}
 }
 
-// UC_INDEX_DISABLED=1 empties the index without touching the stamps: pages
-// keep indexed_at, and the public page's indexable flag reads false (the
+// A watched page is indexable the moment it is minted (owner decision,
+// 2026-09-25: no gate), and UC_INDEX_DISABLED=1 flips the flag off (the
 // sitemap and the robots meta read the same flag).
-func TestIndexDisabledHidesTheStampButKeepsIt(t *testing.T) {
+func TestIndexableAtOnceUnlessKillSwitched(t *testing.T) {
 	pool, route, _ := newHostWorld(t)
-	ctx := context.Background()
 	uniq := time.Now().UnixNano() % 100000
 	host := fmt.Sprintf("indexed-%d.example.com", uniq)
 
@@ -417,50 +416,34 @@ func TestIndexDisabledHidesTheStampButKeepsIt(t *testing.T) {
 		t.Fatalf("watch = %d (%s)", w.Code, w.Body.String())
 	}
 	slug := watchBody(t, w)["slug"].(string)
-	if _, err := pool.Raw().Exec(ctx,
-		`UPDATE status_page SET indexed_at = now() WHERE slug = $1`, slug); err != nil {
-		t.Fatal(err)
-	}
 
-	// The normal door: a stamped page reads indexable.
-	page := func() map[string]any {
-		r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
-		pw := httptest.NewRecorder()
-		route.ServeHTTP(pw, r)
-		if pw.Code != http.StatusOK {
-			t.Fatalf("public status = %d (%s)", pw.Code, pw.Body.String())
-		}
-		var body map[string]any
-		if err := json.Unmarshal(pw.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		return body
-	}
-	if got := page()["indexable"]; got != true {
-		t.Fatalf("indexable on a stamped page = %v, want true", got)
-	}
-
-	// The kill switch: the stamp stays, the flag flips.
-	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false, "")
-	wa.statusKnobs.IndexDisabled = true
 	r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
 	pw := httptest.NewRecorder()
-	wa.public(pw, r)
+	route.ServeHTTP(pw, r)
 	if pw.Code != http.StatusOK {
-		t.Fatalf("public status under the kill switch = %d", pw.Code)
+		t.Fatalf("public status = %d (%s)", pw.Code, pw.Body.String())
 	}
 	var body map[string]any
 	if err := json.Unmarshal(pw.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
+	if body["indexable"] != true {
+		t.Fatalf("indexable on a fresh host page = %v, want true", body["indexable"])
+	}
+
+	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false, "")
+	wa.statusKnobs.IndexDisabled = true
+	pw = httptest.NewRecorder()
+	wa.public(pw, httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil))
+	if pw.Code != http.StatusOK {
+		t.Fatalf("public status under the kill switch = %d", pw.Code)
+	}
+	body = nil
+	if err := json.Unmarshal(pw.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
 	if body["indexable"] != false {
 		t.Fatalf("indexable under UC_INDEX_DISABLED = %v, want false", body["indexable"])
-	}
-	var stamped int
-	_ = pool.Raw().QueryRow(ctx,
-		`SELECT count(*) FROM status_page WHERE slug = $1 AND indexed_at IS NOT NULL`, slug).Scan(&stamped)
-	if stamped != 1 {
-		t.Fatal("the kill switch cleared the stamps: re-enabling would not restore the index")
 	}
 }
 

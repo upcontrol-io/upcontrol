@@ -12,7 +12,7 @@ import (
 )
 
 func TestRollCheckPartitionsHorizon(t *testing.T) {
-	pool := newGateWorld(t)
+	pool := newWorkerDB(t)
 	ctx := context.Background()
 	deps := app.Deps{Logger: quietLogger}
 
