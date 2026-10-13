@@ -1851,9 +1851,24 @@ type PublicComponent struct {
 	Bars []HealthStatus `json:"bars"`
 
 	// Key The monitor's public id — a component IS a check.
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	Shown bool   `json:"shown"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
+
+	// Recent The component's latest checks, one bar per check: the strip a status page opens on, beside the deeper `bars`. Absent when no check ran in the last 7 days; the page then draws `bars` alone.
+	Recent *struct {
+		// At When each bar's check ran, in Unix seconds, index for index with `bars`. A gap bar carries the moment the first missing check was due.
+		At []int64 `json:"at"`
+
+		// Bars One status per check, oldest first, the newest 180 of the last 7 days: `ok` for a check that answered, `down` for one that failed, `nodata` for one that could not be measured (HTTP 401, 403, 429 or a bot challenge). The count is the bound and the window follows the cadence: three hours at a 60 s check, fifteen at 300 s, forty-five at 900 s; so a page must label the strip from `at`, never from a fixed span, and must date a bar once the strip reaches past a day. A stretch with no check in it is ONE extra `nodata` bar, between two checks or after the newest one, once it outlasts three intervals of the check before it (and what one lost probe lease explains, five minutes plus two intervals). No bar follows a check that could not be measured: the probe backs off on purpose. So the newest bar is `nodata` whenever the check has stopped running, and a page may read the component's current state off it.
+		Bars []HealthStatus `json:"bars"`
+
+		// IntervalSec The cadence the newest check was taken at, in seconds: what a page's "checked every N" is read from. 0 when the strip ends on a `nodata` bar (the check stopped, or a refusal put it into backoff): no cadence is being kept, and a page prints none.
+		//
+		//
+		// Example: 60
+		IntervalSec int `json:"intervalSec"`
+	} `json:"recent,omitempty"`
+	Shown bool `json:"shown"`
 
 	// Uptime Example: 99.99%
 	Uptime string `json:"uptime"`

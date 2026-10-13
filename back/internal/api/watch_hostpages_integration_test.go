@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -572,5 +573,153 @@ func TestPlatformSuffixHostsAreUnmintable(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "unmintable_host") {
 		t.Fatalf("refusal body = %s, want unmintable_host", w.Body.String())
+	}
+}
+
+// The latest-checks read against a real schema, which the unit tests of
+// recentBars cannot reach: one bar per row of checks, oldest first, with each
+// row's own time and the cadence beside them. The first row is the one that
+// matters most: checks.ok and error_class are nullable, and a row pgx cannot
+// scan closes the result, cutting the strip short with no error anyone sees.
+// A NULL verdict has to draw as nodata and leave the rows after it standing.
+func TestPublicStatusCarriesTheLatestChecks(t *testing.T) {
+	pool, _, sm := newHostWorld(t)
+	ctx := context.Background()
+	// newHostWorld's own handler has no checks store, so it never runs the
+	// strip reads; this one does.
+	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), sm, false, nil, nil, false, "")
+	route := http.NewServeMux()
+	route.Handle("POST /public/watch", wa)
+	route.Handle("GET /public/status/{slug}", wa)
+
+	host := fmt.Sprintf("latest-%d.example.com", time.Now().UnixNano()%100000)
+	w := watch(t, route, host, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("watch = %d (%s)", w.Code, w.Body.String())
+	}
+	slug := watchBody(t, w)["slug"].(string)
+	targetID := oneInt(t, pool, `SELECT root_target_id FROM status_page WHERE slug = $1`, slug)
+	// With a checks store wired, the watch door has already stored its guard
+	// probe as the target's first row (recordMintProbe), and what that probe
+	// of a made-up host answered is the network's business, not this test's.
+	if _, err := pool.Raw().Exec(ctx, `DELETE FROM checks WHERE target_id = $1`, targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Five minutes apart at a 300 s cadence, the newest a minute old: no gap
+	// bar anywhere, so the strip is exactly these four rows.
+	for _, row := range []struct {
+		ageMinutes int
+		ok         any
+		code       any
+		class      any
+	}{
+		{16, nil, nil, nil},        // a NULL verdict: nodata, and the scan survives it
+		{11, false, 403, "status"}, // could not be measured
+		{6, false, 503, "status"},  // failed
+		{1, true, 200, "none"},     // answered: the strip ends measured, so it keeps its cadence
+	} {
+		if _, err := pool.Raw().Exec(ctx,
+			`INSERT INTO checks (target_id, interval_sec, ts, region, ok, status_code, error_class, total_ms)
+			 VALUES ($1, 300, now() - make_interval(mins => $2::int), 'default', $3, $4, $5, 230)`,
+			targetID, row.ageMinutes, row.ok, row.code, row.class); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
+	pw := httptest.NewRecorder()
+	route.ServeHTTP(pw, r)
+	if pw.Code != http.StatusOK {
+		t.Fatalf("public status = %d (%s)", pw.Code, pw.Body.String())
+	}
+	var body struct {
+		Components []struct {
+			Recent *struct {
+				Bars        []string `json:"bars"`
+				At          []int64  `json:"at"`
+				IntervalSec int      `json:"intervalSec"`
+			} `json:"recent"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(pw.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Components) != 1 || body.Components[0].Recent == nil {
+		t.Fatalf("want one component carrying recent, got %s", pw.Body.String())
+	}
+	recent := body.Components[0].Recent
+	if want := []string{"nodata", "nodata", "down", "ok"}; !slices.Equal(recent.Bars, want) {
+		t.Fatalf("recent.bars = %v, want %v", recent.Bars, want)
+	}
+	if len(recent.At) != len(recent.Bars) || !slices.IsSorted(recent.At) {
+		t.Fatalf("recent.at = %v, want one ascending time per bar", recent.At)
+	}
+	if recent.IntervalSec != 300 {
+		t.Fatalf("recent.intervalSec = %d, want 300 (the newest check's cadence)", recent.IntervalSec)
+	}
+}
+
+// The latest-checks read's three bounds, which no other test can see: the
+// newest recentChecksMax rows (not the oldest, not all of them), oldest first
+// on the wire, and nothing from before recentChecksWindow.
+func TestLatestChecksAreTheNewestInsideTheWindow(t *testing.T) {
+	pool, _, sm := newHostWorld(t)
+	ctx := context.Background()
+	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), sm, false, nil, nil, false, "")
+	route := http.NewServeMux()
+	route.Handle("POST /public/watch", wa)
+	route.Handle("GET /public/status/{slug}", wa)
+
+	host := fmt.Sprintf("bounds-%d.example.com", time.Now().UnixNano()%100000)
+	w := watch(t, route, host, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("watch = %d (%s)", w.Code, w.Body.String())
+	}
+	slug := watchBody(t, w)["slug"].(string)
+	targetID := oneInt(t, pool, `SELECT root_target_id FROM status_page WHERE slug = $1`, slug)
+	if _, err := pool.Raw().Exec(ctx, `DELETE FROM checks WHERE target_id = $1`, targetID); err != nil {
+		t.Fatal(err)
+	}
+	// Five more one-minute checks than the strip holds, the newest thirty
+	// seconds old, and one failure from eight days ago that must not appear.
+	if _, err := pool.Raw().Exec(ctx,
+		`INSERT INTO checks (target_id, interval_sec, ts, region, ok, status_code, error_class, total_ms)
+		 SELECT $1::bigint, 60, now() - make_interval(secs => 30 + 60 * g), 'default', true, 200, 'none', 230
+		   FROM generate_series(0, $2::int - 1) g
+		 UNION ALL
+		 SELECT $1::bigint, 60, now() - interval '8 days', 'default', false, 503, 'status', 230`,
+		targetID, recentChecksMax+5); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/public/status/"+slug, nil)
+	pw := httptest.NewRecorder()
+	route.ServeHTTP(pw, r)
+	var body struct {
+		Components []struct {
+			Recent *struct {
+				Bars []string `json:"bars"`
+				At   []int64  `json:"at"`
+			} `json:"recent"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(pw.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Components) != 1 || body.Components[0].Recent == nil {
+		t.Fatalf("want one component carrying recent, got %s", pw.Body.String())
+	}
+	recent := body.Components[0].Recent
+	if len(recent.Bars) != recentChecksMax || slices.Contains(recent.Bars, "down") {
+		t.Fatalf("got %d bars (down among them: %v), want the %d newest, all ok",
+			len(recent.Bars), slices.Contains(recent.Bars, "down"), recentChecksMax)
+	}
+	if !slices.IsSorted(recent.At) {
+		t.Fatal("recent.at is not oldest first")
+	}
+	// The newest row is the one thirty seconds old: an ASC read would end 185 minutes back.
+	if age := time.Now().Unix() - recent.At[len(recent.At)-1]; age < 0 || age > 120 {
+		t.Fatalf("the newest bar is %d s old, want the newest check (about 30 s)", age)
 	}
 }
