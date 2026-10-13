@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -366,5 +367,192 @@ func TestBuildStripCadenceFloorIgnoresOutOfWindowRow(t *testing.T) {
 	bars, bucket, _, _ := buildStrip(slots, now)
 	if bucket != 30*time.Minute || len(bars) != 96 {
 		t.Fatalf("bucket=%v bars=%d, want 30m, 96 (the out-of-window row must not widen the bucket)", bucket, len(bars))
+	}
+}
+
+// No checks in the window is not an empty strip but an absent one: zero bars,
+// zero timestamps and interval 0 tell the caller to omit `recent` from the
+// response, so a component with nothing latest draws its history alone.
+func TestRecentBarsWithNoChecksDrawsNothing(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+
+	bars, at, intervalSec := recentBars(nil, now)
+	if len(bars) != 0 || len(at) != 0 || intervalSec != 0 {
+		t.Fatalf("recentBars(nil, ...) = (%v, %v, %d), want no bars, no timestamps, interval 0", bars, at, intervalSec)
+	}
+}
+
+// One bar per check, never a bucket: a check that answered is ok, one that
+// failed is down, one that could not be measured is nodata. The timestamps are
+// the checks' own, in order, and the interval is the newest check's cadence.
+func TestRecentBarsIsOneBarPerCheck(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	checks := []recentCheck{
+		{at: now.Add(-150 * time.Second), ok: false, measurable: false, intervalSec: 60},
+		{at: now.Add(-90 * time.Second), ok: false, measurable: true, intervalSec: 60},
+		{at: now.Add(-30 * time.Second), ok: true, measurable: true, intervalSec: 60},
+	}
+
+	bars, at, intervalSec := recentBars(checks, now)
+	if want := []string{"nodata", "down", "ok"}; !slices.Equal(bars, want) {
+		t.Fatalf("bars = %v, want %v", bars, want)
+	}
+	if len(at) != len(checks) {
+		t.Fatalf("got %d timestamps, want %d", len(at), len(checks))
+	}
+	for i, c := range checks {
+		if at[i] != c.at.Unix() {
+			t.Fatalf("at[%d] = %d, want %d", i, at[i], c.at.Unix())
+		}
+	}
+	if intervalSec != 60 {
+		t.Fatalf("intervalSec = %d, want 60", intervalSec)
+	}
+}
+
+// A silent stretch between two checks is ONE nodata bar, stamped with the
+// moment the first missing check was due. The stretch has to outlast three of
+// the older check's intervals AND what one lost probe lease explains (five
+// minutes plus two intervals): a deploy restarts the probe mid-batch, and that
+// hole is ours, not a stop.
+func TestRecentBarsSilentStretchIsOneNodataBar(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	pair := func(apartSec int, intervalSec int32) []recentCheck {
+		return []recentCheck{
+			{at: now.Add(-time.Duration(apartSec+30) * time.Second), ok: true, measurable: true, intervalSec: intervalSec},
+			{at: now.Add(-30 * time.Second), ok: true, measurable: true, intervalSec: intervalSec},
+		}
+	}
+
+	t.Run("ten silent minutes on a one-minute check are one bar", func(t *testing.T) {
+		checks := pair(600, 60)
+		bars, at, _ := recentBars(checks, now)
+		if want := []string{"ok", "nodata", "ok"}; !slices.Equal(bars, want) {
+			t.Fatalf("bars = %v, want %v", bars, want)
+		}
+		if at[1] != checks[0].at.Unix()+60 {
+			t.Fatalf("at[1] = %d, want %d (the moment the first missing check was due)", at[1], checks[0].at.Unix()+60)
+		}
+	})
+
+	for _, tc := range []struct {
+		name        string
+		apartSec    int
+		intervalSec int32
+		wantGap     bool
+	}{
+		{"a lost lease on a one-minute check is not a gap", 400, 60, false},
+		{"exactly lease plus two intervals is not a gap", 420, 60, false},
+		{"one second past it is", 421, 60, true},
+		{"exactly three intervals at 300 s is not a gap", 900, 300, false},
+		{"one second past three intervals is", 901, 300, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bars, _, _ := recentBars(pair(tc.apartSec, tc.intervalSec), now)
+			if got := len(bars) == 3; got != tc.wantGap {
+				t.Fatalf("bars = %v, gap bar drawn = %v, want %v", bars, got, tc.wantGap)
+			}
+		})
+	}
+}
+
+// The trailing gap is the point of the strip: once the newest check has been
+// silent past its own stop rule the strip ends on nodata, so the page reads
+// the current state off the newest bar and never calls a paused check
+// operational. A stopped strip also stops claiming a cadence.
+func TestRecentBarsStoppedCheckEndsOnNodata(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+
+	t.Run("the newest check is ten minutes old", func(t *testing.T) {
+		checks := []recentCheck{{at: now.Add(-600 * time.Second), ok: true, measurable: true, intervalSec: 60}}
+		bars, at, intervalSec := recentBars(checks, now)
+		if want := []string{"ok", "nodata"}; !slices.Equal(bars, want) {
+			t.Fatalf("bars = %v, want %v", bars, want)
+		}
+		if at[1] != checks[0].at.Unix()+60 {
+			t.Fatalf("at[1] = %d, want %d (the moment the first missing check was due)", at[1], checks[0].at.Unix()+60)
+		}
+		if intervalSec != 0 {
+			t.Fatalf("intervalSec = %d, want 0 (a stopped check keeps no cadence)", intervalSec)
+		}
+	})
+
+	t.Run("a check a lost lease would explain is still current", func(t *testing.T) {
+		checks := []recentCheck{{at: now.Add(-400 * time.Second), ok: true, measurable: true, intervalSec: 60}}
+		bars, _, intervalSec := recentBars(checks, now)
+		if want := []string{"ok"}; !slices.Equal(bars, want) {
+			t.Fatalf("bars = %v, want %v", bars, want)
+		}
+		if intervalSec != 60 {
+			t.Fatalf("intervalSec = %d, want 60", intervalSec)
+		}
+	})
+}
+
+// Each stretch is judged by the OLDER row's own interval: SubmitResults stamps
+// a row with the interval it schedules the next check by, so a later cadence
+// says nothing about when that row's successor was due.
+func TestRecentBarsStretchIsJudgedByTheOlderRowsInterval(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+
+	t.Run("a target slowing from 300 s to 900 s draws no gap", func(t *testing.T) {
+		// The 300 s row's successor comes 300 s later and is the first 900 s row.
+		checks := []recentCheck{
+			{at: now.Add(-1260 * time.Second), ok: true, measurable: true, intervalSec: 300},
+			{at: now.Add(-960 * time.Second), ok: true, measurable: true, intervalSec: 900},
+			{at: now.Add(-60 * time.Second), ok: true, measurable: true, intervalSec: 900},
+		}
+		bars, _, _ := recentBars(checks, now)
+		if want := []string{"ok", "ok", "ok"}; !slices.Equal(bars, want) {
+			t.Fatalf("bars = %v, want %v", bars, want)
+		}
+	})
+
+	t.Run("a 300 s check silent for 1200 s is a gap whatever cadence it resumes at", func(t *testing.T) {
+		checks := []recentCheck{
+			{at: now.Add(-1260 * time.Second), ok: true, measurable: true, intervalSec: 300},
+			{at: now.Add(-60 * time.Second), ok: true, measurable: true, intervalSec: 3600},
+		}
+		bars, _, _ := recentBars(checks, now)
+		if want := []string{"ok", "nodata", "ok"}; !slices.Equal(bars, want) {
+			t.Fatalf("bars = %v, want %v (the wider, later interval must not hide the stop)", bars, want)
+		}
+	})
+}
+
+// A refusal puts the target into backoff on purpose, up to 64 intervals: the
+// rows are far apart, their bars are nodata already, and neither a gap bar
+// nor a cadence belongs on that strip.
+func TestRecentBarsBackoffDrawsNoGapAndClaimsNoCadence(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	checks := []recentCheck{
+		{at: now.Add(-20 * time.Hour), ok: true, measurable: true, intervalSec: 900},
+		{at: now.Add(-20*time.Hour + 900*time.Second), ok: false, measurable: false, intervalSec: 900},
+		{at: now.Add(-16 * time.Hour), ok: false, measurable: false, intervalSec: 900},
+		{at: now.Add(-8 * time.Hour), ok: false, measurable: false, intervalSec: 900},
+	}
+	bars, _, intervalSec := recentBars(checks, now)
+	if want := []string{"ok", "nodata", "nodata", "nodata"}; !slices.Equal(bars, want) {
+		t.Fatalf("bars = %v, want %v", bars, want)
+	}
+	if intervalSec != 0 {
+		t.Fatalf("intervalSec = %d, want 0 (\"every 15 min\" over checks hours apart is a lie)", intervalSec)
+	}
+}
+
+// A row that carries no interval cannot be judged: no gap bar, however long
+// the silence, and no cadence to print.
+func TestRecentBarsRowWithoutAnIntervalFlagsNoGap(t *testing.T) {
+	now := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	checks := []recentCheck{
+		{at: now.Add(-10 * time.Hour), ok: true, measurable: true, intervalSec: 0},
+		{at: now.Add(-5 * time.Hour), ok: true, measurable: true, intervalSec: 0},
+	}
+	bars, _, intervalSec := recentBars(checks, now)
+	if want := []string{"ok", "ok"}; !slices.Equal(bars, want) {
+		t.Fatalf("bars = %v, want %v", bars, want)
+	}
+	if intervalSec != 0 {
+		t.Fatalf("intervalSec = %d, want 0", intervalSec)
 	}
 }

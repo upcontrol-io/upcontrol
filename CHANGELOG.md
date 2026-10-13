@@ -6,6 +6,21 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-10-13
+
+A status page can show that a host is checked every minute. No migration.
+
+### Added
+- **A status page component carries its latest checks.** `recent` rides beside `bars` on
+  `GET /public/status/{slug}` and `GET /v1/status-page`: the newest 180 checks of the last 7
+  days, one bar per check (`bars`, with each check's time in `at` and the cadence in
+  `intervalSec`). The count is the bound and the window follows the cadence: three hours at a
+  60 s check, fifteen at 300 s, forty-five at 900 s. A stretch with no check in it, past
+  three intervals of the check before it, is one `nodata` bar, so the strip ends on `nodata`
+  whenever a check has stopped running, and `intervalSec` is then 0. A page can now show that a host is checked every minute, which the history
+  strip, at 12-hour bars for a target older than a week, could not. No migration; `bars`, `barSpanSec` and `uptime` are unchanged,
+  and the bundled front draws them as before.
+
 ## [0.37.0] — 2026-09-25
 
 Every status page is in search from the moment it exists, and it answers the questions people

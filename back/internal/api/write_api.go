@@ -1679,6 +1679,100 @@ func buildStrip(slots map[int64]slotCounts, now time.Time) (bars []string, bucke
 	return bars, bucket, ok, total
 }
 
+// The latest-checks strip is bounded twice: the newest recentChecksMax checks,
+// and none older than recentChecksWindow. The count is the real bound and the
+// window follows the cadence (owner decision, 2026-10-12): 180 checks are three
+// hours at the fastest cadence sold (60 s), fifteen at Free's 300 s, forty-five
+// at a settled host page's 900 s. The window only stops a slow or stopped check
+// from reaching back for ever: a week is what an hourly check needs to fill
+// most of the strip, and past it the checks are no longer "latest".
+const (
+	recentChecksMax    = 180
+	recentChecksWindow = 7 * 24 * time.Hour
+)
+
+// recentCheck is one row of the latest-checks read.
+type recentCheck struct {
+	at          time.Time
+	ok          bool
+	measurable  bool
+	intervalSec int32
+}
+
+// probeLeaseTTL mirrors the lease LeaseTargets takes in queries/schedule.sql
+// (`lease_until = now() + interval '5 minutes'`): a batch lost between lease
+// and submit (ucapi or ucprobe restarting, which every deploy does) holds its
+// targets that long.
+const probeLeaseTTL = 5 * time.Minute
+
+// stopAfter is how long the silence after a check has to last before the strip
+// calls it a stop: three of that check's own intervals (the incident query's
+// rule), but never less than one lost lease can explain. Without that floor
+// every deploy drew a grey bar and two minutes of "no data" on some one-minute
+// check's public page, for a hole that was ours and five minutes long.
+func stopAfter(intervalSec int32) time.Duration {
+	iv := time.Duration(intervalSec) * time.Second
+	return max(3*iv, probeLeaseTTL+2*iv)
+}
+
+// recentBars turns a target's latest checks (oldest first) into the strip a
+// status page opens on: ONE BAR PER CHECK, never a bucket, so the strip cannot
+// claim a cadence the probe does not run. A check that answered is ok, one
+// that failed is down, one that could not be measured is nodata.
+//
+// A silent stretch is one extra nodata bar, stamped with the moment the first
+// missing check was due: between two checks, and after the newest one. Each
+// stretch is judged by the OLDER row's own interval_sec and by nothing else:
+// SubmitResults stamps a row with the same interval it schedules the next
+// check by, so a row's successor is due at ts + interval_sec whatever the
+// cadence becomes later. (Widening by the next row's interval or by the
+// target's current one only hid real stops: a paused check fell back to a
+// 900 s cadence nothing runs, and stayed "operational" for 45 minutes.)
+// The trailing bar is the point: the newest bar is nodata whenever the check
+// has stopped running, so a page reads the component's current state off it
+// with no clock maths of its own, and never calls a paused check operational.
+//
+// No bar follows a row that could not be measured: a refusal puts the target
+// into backoff on purpose (up to 64 intervals), and its bar is nodata already.
+//
+// intervalSec is the cadence the newest check was taken at, and it is sent
+// only while it is being kept: a strip that ends on nodata (stopped, or
+// backing off) sends 0, and the page prints no "every N" over it.
+func recentBars(checks []recentCheck, now time.Time) (bars []string, at []int64, intervalSec int32) {
+	if len(checks) == 0 {
+		return nil, nil, 0
+	}
+	gap := func(prev recentCheck, until time.Time) {
+		if prev.intervalSec <= 0 || !prev.measurable {
+			return
+		}
+		if until.Sub(prev.at) > stopAfter(prev.intervalSec) {
+			bars = append(bars, "nodata")
+			at = append(at, prev.at.Add(time.Duration(prev.intervalSec)*time.Second).Unix())
+		}
+	}
+	for i, c := range checks {
+		if i > 0 {
+			gap(checks[i-1], c.at)
+		}
+		status := "down"
+		switch {
+		case !c.measurable:
+			status = "nodata"
+		case c.ok:
+			status = "ok"
+		}
+		bars = append(bars, status)
+		at = append(at, c.at.Unix())
+	}
+	last := checks[len(checks)-1]
+	gap(last, now)
+	if bars[len(bars)-1] != "nodata" {
+		intervalSec = last.intervalSec
+	}
+	return bars, at, intervalSec
+}
+
 // statusComponents renders one component per monitor with measured uptime and
 // bars, sized per target by stripPlanFor. `publicOnly` drops the owner's
 // unpublished ones. Since migration 009 the checks table is keyed by target:
@@ -1690,7 +1784,8 @@ func buildStrip(slots map[int64]slotCounts, now time.Time) (bars []string, bucke
 // draw as nodata bars and never count against uptime. The project is the
 // only scope, as in statusConfig: the caller has already resolved it to one
 // the reader may see. `now` is the caller's, so the bars and the updatedAt it
-// stamps bucket against the same instant.
+// stamps bucket against the same instant. Each component also carries `recent`,
+// its latest checks one bar each, built by recentBars.
 func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg statusPageConfig, publicOnly bool, page statusPageRow, now time.Time) []map[string]any {
 	type compRow struct {
 		id       int64 // monitor id; 0 for the root pseudo component
@@ -1785,6 +1880,40 @@ func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg st
 		}
 	}
 
+	// The latest checks, one row each: the strip the page opens on. Each
+	// target's newest recentChecksMax rows inside recentChecksWindow, read
+	// backwards off checks_target_ts_idx.
+	// ponytail: one probe region today, so a row is a check; with several
+	// regions the rows of one round must fold into one bar first.
+	// The COALESCEs are load-bearing: checks.ok and error_class are nullable,
+	// and one row pgx cannot scan closes the result, cutting the strip short
+	// with no error anyone sees. A NULL verdict counts as it does everywhere
+	// else: not ok, not measurable.
+	recentByTarget := map[int64][]recentCheck{}
+	if h.pgs != nil {
+		rRows, rerr := h.pgs.Raw().Query(ctx, fmt.Sprintf(`
+			SELECT t.id, c.ts, c.ok, c.measurable, c.interval_sec
+			  FROM unnest($1::bigint[]) AS t(id)
+			 CROSS JOIN LATERAL (
+			   SELECT ts, COALESCE(ok, false) AS ok, COALESCE(%s, false) AS measurable,
+			          COALESCE(interval_sec, 0) AS interval_sec
+			     FROM checks
+			    WHERE target_id = t.id AND ts >= $2
+			    ORDER BY ts DESC
+			    LIMIT %d) c
+			 ORDER BY t.id, c.ts`, pgstore.MeasurableSQL, recentChecksMax), targets, now.Add(-recentChecksWindow))
+		if rerr == nil {
+			for rRows.Next() {
+				var tid int64
+				var c recentCheck
+				if rRows.Scan(&tid, &c.at, &c.ok, &c.measurable, &c.intervalSec) == nil {
+					recentByTarget[tid] = append(recentByTarget[tid], c)
+				}
+			}
+			rRows.Close()
+		}
+	}
+
 	out := make([]map[string]any, 0, len(mons))
 	for _, m := range mons {
 		shown, ok := cfg.Shown[m.key]
@@ -1795,13 +1924,19 @@ func (h *writeAPI) statusComponents(ctx context.Context, projectID int64, cfg st
 			continue
 		}
 		bars, bucket, okSum, total := buildStrip(byTarget[m.targetID], now)
-		out = append(out, map[string]any{
+		comp := map[string]any{
 			"key": m.key, "name": m.name, "shown": shown,
 			"uptime": pctLabelAPI(okSum, total), "bars": bars,
 			// What one bar covers. The page draws its own axis from this, so a
 			// strip of 15-minute bars can never be labelled "30 days ago".
 			"barSpanSec": int(bucket / time.Second),
-		})
+		}
+		// Absent, never empty: a component with no check in the window draws
+		// its history alone.
+		if rBars, rAt, rInterval := recentBars(recentByTarget[m.targetID], now); len(rBars) > 0 {
+			comp["recent"] = map[string]any{"bars": rBars, "at": rAt, "intervalSec": int(rInterval)}
+		}
+		out = append(out, comp)
 	}
 	return out
 }
