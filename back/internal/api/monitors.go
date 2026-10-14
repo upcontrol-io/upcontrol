@@ -1,5 +1,6 @@
-// Monitor CRUD handlers for the /v1/monitors surface, tenant-scoped and
-// mockData-shaped. The entitlement gate (402 + upgrade.reason) is the wall.
+// Monitor CRUD handlers for the /v1/monitors surface, scoped to the session's
+// current project and mockData-shaped. The entitlement gate (402 +
+// upgrade.reason) is the wall.
 
 package api
 
@@ -49,10 +50,16 @@ func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Notify members read, login members change: creating/editing/deleting a
-	// check is a settings act.
-	if r.Method != http.MethodGet && !canManage(r.Context(), h.pool, s) {
-		writeAPIErr(w, http.StatusForbidden, "notify_role")
-		return
+	// check is a settings act. The scope answers the role together with the
+	// project it is held in, and an edit or a delete reaches that project's
+	// checks alone: one team per project.
+	var sc scope
+	if r.Method != http.MethodGet {
+		sc = resolveScope(r.Context(), h.pool, s)
+		if !sc.canManage() {
+			writeAPIErr(w, http.StatusForbidden, "notify_role")
+			return
+		}
 	}
 	tenantID := s.TenantID
 	id := r.PathValue("id")
@@ -64,9 +71,9 @@ func (h *monitors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && id != "":
 		h.notFound(w) // GET single not needed by the front; list covers it
 	case r.Method == http.MethodPatch && id != "":
-		h.patch(w, r, tenantID, id)
+		h.patch(w, r, tenantID, sc.ProjectID, id)
 	case r.Method == http.MethodDelete && id != "":
-		h.delete(w, r, tenantID, id)
+		h.delete(w, r, tenantID, sc.ProjectID, id)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -311,7 +318,7 @@ func (h *monitors) nameProjectIfUnnamed(ctx context.Context, projectID int64, ki
 		projectID, claimed, host)
 }
 
-func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, id string) {
 	var req struct {
 		Name     *string `json:"name"`
 		Target   *string `json:"target"`
@@ -339,15 +346,18 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 	}
 	// The BEFORE state decides the pulls below: unpausing or lowering the
 	// interval starts a check sooner, and unpausing onto a down target opens
-	// the incident in the same transaction as the PATCH.
+	// the incident in the same transaction as the PATCH. It is read in the
+	// current project only, so a sibling project's check is a 404 like an
+	// unknown id, and the writes below never reach it.
 	var targetID int64
 	var wasPaused bool
 	var pausedBy *string
 	var oldInterval int32
 	var kind string
 	if err := h.pool.Raw().QueryRow(ctx,
-		`SELECT target_id, paused, paused_by, interval_sec, kind FROM monitor WHERE public_id = $1 AND tenant_id = $2`,
-		pubID, tenantID).Scan(&targetID, &wasPaused, &pausedBy, &oldInterval, &kind); err != nil {
+		`SELECT target_id, paused, paused_by, interval_sec, kind FROM monitor
+		  WHERE public_id = $1 AND tenant_id = $2 AND project_id = $3`,
+		pubID, tenantID, projectID).Scan(&targetID, &wasPaused, &pausedBy, &oldInterval, &kind); err != nil {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -459,7 +469,7 @@ func (h *monitors) patch(w http.ResponseWriter, r *http.Request, tenantID int64,
 		h.pingURL(full.Kind, full.PingToken), full.Paused, full.PausedBy))
 }
 
-func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64, id string) {
+func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID, projectID int64, id string) {
 	ctx := r.Context()
 	pubID := parseUUID(id)
 	// Snapshot rule, same as PATCH: deleting from a frozen project would change
@@ -467,18 +477,32 @@ func (h *monitors) delete(w http.ResponseWriter, r *http.Request, tenantID int64
 	if h.frozenMonitor(w, r, tenantID, pubID) {
 		return
 	}
-	// Close an open incident while the monitor id still resolves: monitor_id is
-	// ON DELETE SET NULL, and after the DELETE nothing can find the row.
-	if mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
+	mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
 		PublicID: pubID, TenantID: tenantID,
-	}); err == nil {
+	})
+	switch {
+	case err == nil && mon.ProjectID != projectID:
+		// The current project's checks only, as in PATCH: a sibling project's
+		// is not this reader's to close or delete. It answers exactly as an
+		// unknown id does (the DELETE below finds nothing and says 204), so the
+		// answer does not tell the reader that the id exists elsewhere.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case err == nil:
+		// Close an open incident while the monitor id still resolves: monitor_id is
+		// ON DELETE SET NULL, and after the DELETE nothing can find the row.
 		if cerr := incident.New(h.pool, nil).Close(ctx, mon.ID, incident.ReasonMonitorDelete); cerr != nil {
 			// A failed tidy-up fails the delete: nothing afterwards can find the row.
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
+	case !errors.Is(err, pgx.ErrNoRows):
+		// A broken read cannot say whose check this is, and the DELETE below is
+		// scoped to the workspace alone: it may not run on a guess.
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
 	}
-	err := h.pool.Queries().DeleteMonitor(ctx, sqlc.DeleteMonitorParams{
+	err = h.pool.Queries().DeleteMonitor(ctx, sqlc.DeleteMonitorParams{
 		PublicID: pubID, TenantID: tenantID,
 	})
 	if err != nil {

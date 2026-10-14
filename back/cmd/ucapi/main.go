@@ -274,6 +274,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/status-page/domain/verify", wa)
 	mux.Handle("GET /v1/logs", wa)
 	mux.Handle("GET /v1/dashboard/catalog", wa)
+	mux.Handle("GET /v1/dashboard/marks", wa)
 	mux.Handle("POST /v1/series", wa)
 	// The overlay's token mint: session-authed like the series read, and
 	// registered beside it for the same reason every wa route is.

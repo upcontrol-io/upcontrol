@@ -6,6 +6,44 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-10-14
+
+A board can say why a metric moved, and a save no longer erases what an agent appended. No
+migration.
+
+### Added
+- **An event's fields filter its count.** `POST /v1/series` takes `labels` on an event read and
+  on a bare-name `people` read: up to three pairs (a key of 1 to 60 bytes, a value of at most
+  256, no control characters), counting only the rows whose labels hold every pair. It is a
+  field of its own, so an older core refuses it rather than answering the unfiltered count.
+- **Unique people behind one event.** A `people` read with only a `name` counts distinct people
+  per bucket, and its `total` and `previous` are distinct over the whole window.
+- **Response percentiles.** A check read takes `p50` and `p95`: the response time over the ok
+  probes, in ms.
+- **A board-wide bucket.** `bucket: hour | day` reads a range in UTC hours or days instead of
+  its own step; refused on a read with no time axis, or one that leaves a single bucket or more
+  than 744.
+- **`GET /v1/dashboard/marks`**: the project's deploys (several within ten minutes counted
+  once), releases (the first `app_started` carrying a new `release`, else `version`) and
+  incidents inside a range, for a board's charts. Gated by the plan's history like
+  `/v1/series`; a week's or a month's read is aligned on the hour.
+- **A board save checks what it was read from.** `GET /v1/dashboard` and
+  `GET /v1/dashboards/{id}` carry `X-Board-Rev`; `PUT /v1/dashboards` takes each board's
+  `base` and refuses the whole save with 409 `board_changed` when a board moved since, so a
+  card an agent appended meanwhile survives. A save that sends no base is still accepted.
+- A stored layout may hold a `ratio` widget, with exactly two refs.
+
+### Changed
+- **Board reads queue rather than fail under load**: `/v1/series` and the marks read share
+  four read slots, wait for one, free it before writing the answer, and give up after 60 s; a
+  read slower than a second is logged.
+- **Ingest**: a log row's `ts` is clamped to a sane window while an event keeps its own time,
+  and an event carries the sender's service as a `service` label.
+- A layout whose ref names a `count` other than `people` or `events` is refused.
+
+### Fixed
+- `PATCH` and `DELETE /v1/monitors/{id}` reach only the current project's checks.
+
 ## [0.38.0] — 2026-10-13
 
 A status page can show that a host is checked every minute. No migration.

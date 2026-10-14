@@ -2092,6 +2092,8 @@ export interface paths {
                 /** @description OK */
                 200: {
                     headers: {
+                        /** @description A hash of the stored layout in one canonical JSON form, so spacing and key order never change it (of the empty layout when nothing is stored), the `base` a save of this board sends back. Not an ETag: a proxy that compresses the answer rewrites those. */
+                        "X-Board-Rev"?: string;
                         [name: string]: unknown;
                     };
                     content: {
@@ -2318,7 +2320,7 @@ export interface paths {
         };
         /**
          * Save several boards in one transaction.
-         * @description Session only. Every board is stamped `session` and its pending proposal is resolved, exactly as the single save does; one refused board refuses them all. At most 16 boards a request, and each layout is held to the same 64 KB a single board is: a `bad_layout` names the board it is about.
+         * @description Session only. Every board is stamped `session` and its pending proposal is resolved, exactly as the single save does; one refused board refuses them all. At most 16 boards a request, and each layout is held to the same 64 KB a single board is: a `bad_layout` names the board it is about. A board sent with a `base` that no longer matches its stored revision refuses the whole save with 409 `board_changed`, whose message names the first board found moved: the caller re-reads every board it sent and keeps its edit.
          */
         put: {
             parameters: {
@@ -2359,6 +2361,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                409: components["responses"]["Conflict"];
             };
         };
         /**
@@ -2445,6 +2448,8 @@ export interface paths {
                 /** @description OK */
                 200: {
                     headers: {
+                        /** @description A hash of the stored layout in one canonical JSON form, so spacing and key order never change it (of the empty layout when nothing is stored), the `base` a save of this board sends back. */
+                        "X-Board-Rev"?: string;
                         [name: string]: unknown;
                     };
                     content: {
@@ -2760,6 +2765,56 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 /** @description A read behind one of the lists failed (`read_failed`). No partial catalog is returned: an empty list is a claim about the project, and a list left short by a broken read would make that claim without measuring it. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/dashboard/marks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The deploys, releases and incidents of the current project inside a range, for the board's charts to mark. Gated like `/v1/series`: a range wider than the plan's `historyDays` is a 402. Each kind reads at most its latest 100 rows (deploys before the ten-minute fold), so the oldest part of a long window can hold fewer marks than happened; an empty list is a real answer. */
+        get: {
+            parameters: {
+                query: {
+                    range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardMarks"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+                /** @description A read behind one of the kinds failed (`read_failed`). */
                 500: {
                     headers: {
                         [name: string]: unknown;
@@ -4564,8 +4619,11 @@ export interface components {
         DashboardWidget: {
             /** @example w_1 */
             id: string;
-            /** @enum {string} */
-            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap";
+            /**
+             * @description `ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share.
+             * @enum {string}
+             */
+            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap" | "ratio";
             title: string;
             metrics: components["schemas"]["DashboardMetricRef"][];
             /**
@@ -4640,7 +4698,31 @@ export interface components {
                 /** @description A board id, or the alias `main`. */
                 id: string;
                 layout: components["schemas"]["DashboardLayout"];
+                /** @description Request only, optional: the `X-Board-Rev` the edit began from. When it no longer matches the stored board, the whole save is refused with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased. Absent, or an empty string, means the caller predates the check. */
+                base?: string;
+                /** @description Answer only: the saved board's new `X-Board-Rev`, the base of the next edit. */
+                rev?: string;
             }[];
+        };
+        /** @description What happened on the project's clock inside a range, for the board's charts to mark: newest last. */
+        DashboardMarks: {
+            marks: components["schemas"]["DashboardMark"][];
+        };
+        DashboardMark: {
+            /**
+             * @description `deploy`: an event the project sent under a deploy name (a hook, or `track('deploy')`), several within ten minutes counted once. `release`: the first time a new `release` (else `version`) appeared on `app_started`. `incident`: an incident of the project, from `at` to `until`.
+             * @enum {string}
+             */
+            kind: "deploy" | "release" | "incident";
+            /** Format: date-time */
+            at: string;
+            /**
+             * Format: date-time
+             * @description Incidents only: when it resolved. Absent while it is still open.
+             */
+            until?: string | null;
+            /** @description What the mark is: a short sha, a release, an incident title. */
+            label: string;
         };
         /** @description What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure. */
         DashboardCatalog: {
@@ -4696,17 +4778,26 @@ export interface components {
             /** @description Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it. */
             id: string;
             /**
-             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
              * @enum {string}
              */
             source: "logs" | "check" | "event" | "metric" | "people";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name; people: the event name a breakdown or an A/B test reads. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads. */
             name?: string;
             where?: {
                 [key: string]: string;
             };
+            /** @description Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption. */
+            labels?: {
+                [key: string]: string;
+            };
+            /**
+             * @description Read in UTC hours or UTC days instead of the range's own bucket. The span stays the range's; a bucket that would leave one bucket or more than 744 is refused, and so is a bucket on a read with no time axis (a group, steps or a cohort).
+             * @enum {string}
+             */
+            bucket?: "hour" | "day";
             /** @description Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold. */
             group?: string[];
             /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */

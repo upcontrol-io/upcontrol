@@ -144,6 +144,27 @@ func (e DashboardLayoutVersion) Valid() bool {
 	}
 }
 
+// Defines values for DashboardMarkKind.
+const (
+	DashboardMarkKindDeploy   DashboardMarkKind = "deploy"
+	DashboardMarkKindIncident DashboardMarkKind = "incident"
+	DashboardMarkKindRelease  DashboardMarkKind = "release"
+)
+
+// Valid indicates whether the value is a known member of the DashboardMarkKind enum.
+func (e DashboardMarkKind) Valid() bool {
+	switch e {
+	case DashboardMarkKindDeploy:
+		return true
+	case DashboardMarkKindIncident:
+		return true
+	case DashboardMarkKindRelease:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DashboardMetricRefCount.
 const (
 	DashboardMetricRefCountEvents DashboardMetricRefCount = "events"
@@ -216,6 +237,7 @@ const (
 	DashboardWidgetKindLine       DashboardWidgetKind = "line"
 	DashboardWidgetKindLogs       DashboardWidgetKind = "logs"
 	DashboardWidgetKindNetwork    DashboardWidgetKind = "network"
+	DashboardWidgetKindRatio      DashboardWidgetKind = "ratio"
 	DashboardWidgetKindRetention  DashboardWidgetKind = "retention"
 	DashboardWidgetKindStat       DashboardWidgetKind = "stat"
 	DashboardWidgetKindStatus     DashboardWidgetKind = "status"
@@ -243,6 +265,8 @@ func (e DashboardWidgetKind) Valid() bool {
 	case DashboardWidgetKindLogs:
 		return true
 	case DashboardWidgetKindNetwork:
+		return true
+	case DashboardWidgetKindRatio:
 		return true
 	case DashboardWidgetKindRetention:
 		return true
@@ -723,6 +747,24 @@ func (e RecipientRole) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryBucket.
+const (
+	Day  SeriesQueryBucket = "day"
+	Hour SeriesQueryBucket = "hour"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryBucket enum.
+func (e SeriesQueryBucket) Valid() bool {
+	switch e {
+	case Day:
+		return true
+	case Hour:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SeriesQueryCohort.
 const (
 	Week SeriesQueryCohort = "week"
@@ -894,6 +936,39 @@ func (e WebBeaconT) Valid() bool {
 	case Heat:
 		return true
 	case View:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetV1DashboardMarksParamsRange.
+const (
+	GetV1DashboardMarksParamsRangeN12h  GetV1DashboardMarksParamsRange = "12h"
+	GetV1DashboardMarksParamsRangeN1h   GetV1DashboardMarksParamsRange = "1h"
+	GetV1DashboardMarksParamsRangeN24h  GetV1DashboardMarksParamsRange = "24h"
+	GetV1DashboardMarksParamsRangeN31d  GetV1DashboardMarksParamsRange = "31d"
+	GetV1DashboardMarksParamsRangeN365d GetV1DashboardMarksParamsRange = "365d"
+	GetV1DashboardMarksParamsRangeN4h   GetV1DashboardMarksParamsRange = "4h"
+	GetV1DashboardMarksParamsRangeN7d   GetV1DashboardMarksParamsRange = "7d"
+)
+
+// Valid indicates whether the value is a known member of the GetV1DashboardMarksParamsRange enum.
+func (e GetV1DashboardMarksParamsRange) Valid() bool {
+	switch e {
+	case GetV1DashboardMarksParamsRangeN12h:
+		return true
+	case GetV1DashboardMarksParamsRangeN1h:
+		return true
+	case GetV1DashboardMarksParamsRangeN24h:
+		return true
+	case GetV1DashboardMarksParamsRangeN31d:
+		return true
+	case GetV1DashboardMarksParamsRangeN365d:
+		return true
+	case GetV1DashboardMarksParamsRangeN4h:
+		return true
+	case GetV1DashboardMarksParamsRangeN7d:
 		return true
 	default:
 		return false
@@ -1184,11 +1259,17 @@ type ConnectableSource struct {
 // DashboardBatch Every board one Save changed, written in one transaction: a widget moved between two boards is two documents, and saving one without the other would duplicate it or lose it.
 type DashboardBatch struct {
 	Boards []struct {
+		// Base Request only, optional: the `X-Board-Rev` the edit began from. When it no longer matches the stored board, the whole save is refused with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased. Absent, or an empty string, means the caller predates the check.
+		Base *string `json:"base,omitempty"`
+
 		// Id A board id, or the alias `main`.
 		Id string `json:"id"`
 
 		// Layout The whole board, on a 12-column grid: `x + w` never exceeds 12, ids are unique, and the document stays under 64 KB.
 		Layout DashboardLayout `json:"layout"`
+
+		// Rev Answer only: the saved board's new `X-Board-Rev`, the base of the next edit.
+		Rev *string `json:"rev,omitempty"`
 	} `json:"boards"`
 }
 
@@ -1258,6 +1339,28 @@ type DashboardList struct {
 	Max *int `json:"max,omitempty"`
 }
 
+// DashboardMark defines model for DashboardMark.
+type DashboardMark struct {
+	At time.Time `json:"at"`
+
+	// Kind `deploy`: an event the project sent under a deploy name (a hook, or `track('deploy')`), several within ten minutes counted once. `release`: the first time a new `release` (else `version`) appeared on `app_started`. `incident`: an incident of the project, from `at` to `until`.
+	Kind DashboardMarkKind `json:"kind"`
+
+	// Label What the mark is: a short sha, a release, an incident title.
+	Label string `json:"label"`
+
+	// Until Incidents only: when it resolved. Absent while it is still open.
+	Until *time.Time `json:"until,omitempty"`
+}
+
+// DashboardMarkKind `deploy`: an event the project sent under a deploy name (a hook, or `track('deploy')`), several within ten minutes counted once. `release`: the first time a new `release` (else `version`) appeared on `app_started`. `incident`: an incident of the project, from `at` to `until`.
+type DashboardMarkKind string
+
+// DashboardMarks What happened on the project's clock inside a range, for the board's charts to mark: newest last.
+type DashboardMarks struct {
+	Marks []DashboardMark `json:"marks"`
+}
+
 // DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry.
 type DashboardMetricRef struct {
 	// Cohort `people` only: `week` reads the retention grid.
@@ -1293,7 +1396,9 @@ type DashboardWidget struct {
 	H int `json:"h"`
 
 	// Id Example: w_1
-	Id      string               `json:"id"`
+	Id string `json:"id"`
+
+	// Kind `ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share.
 	Kind    DashboardWidgetKind  `json:"kind"`
 	Metrics []DashboardMetricRef `json:"metrics"`
 
@@ -1305,7 +1410,7 @@ type DashboardWidget struct {
 	Y     int                   `json:"y"`
 }
 
-// DashboardWidgetKind defines model for DashboardWidget.Kind.
+// DashboardWidgetKind `ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share.
 type DashboardWidgetKind string
 
 // DashboardWidgetRange Present only for kinds with a time axis.
@@ -1986,6 +2091,9 @@ type Series struct {
 
 // SeriesQuery One widget's ask. `where` narrows the source — logs: service (the empty string is the unlabelled one), level, fingerprint, q, attr.<key>; check: check (the monitor's id); metric: label equalities. An unknown key is ignored, so a board saved against a newer front still draws.
 type SeriesQuery struct {
+	// Bucket Read in UTC hours or UTC days instead of the range's own bucket. The span stays the range's; a bucket that would leave one bucket or more than 744 is refused, and so is a bucket on a read with no time axis (a group, steps or a cohort).
+	Bucket *SeriesQueryBucket `json:"bucket,omitempty"`
+
 	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
 	Cohort *SeriesQueryCohort `json:"cohort,omitempty"`
 
@@ -1998,17 +2106,23 @@ type SeriesQuery struct {
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
 	Id string `json:"id"`
 
-	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name; people: the event name a breakdown or an A/B test reads.
+	// Labels Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
+	Labels *map[string]string `json:"labels,omitempty"`
+
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads.
 	Name  *string          `json:"name,omitempty"`
 	Range SeriesQueryRange `json:"range"`
 
-	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
 	Source SeriesQuerySource `json:"source"`
 
 	// Steps `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order.
 	Steps *[]string          `json:"steps,omitempty"`
 	Where *map[string]string `json:"where,omitempty"`
 }
+
+// SeriesQueryBucket Read in UTC hours or UTC days instead of the range's own bucket. The span stays the range's; a bucket that would leave one bucket or more than 744 is refused, and so is a bucket on a read with no time axis (a group, steps or a cohort).
+type SeriesQueryBucket string
 
 // SeriesQueryCohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
 type SeriesQueryCohort string
@@ -2019,7 +2133,7 @@ type SeriesQueryCount string
 // SeriesQueryRange defines model for SeriesQuery.Range.
 type SeriesQueryRange string
 
-// SeriesQuerySource `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+// SeriesQuerySource `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
 type SeriesQuerySource string
 
 // SeriesRequest Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer.
@@ -2375,6 +2489,14 @@ type PostV1ClaimJSONBody struct {
 	ClaimToken *string `json:"claimToken,omitempty"`
 	Slug       *string `json:"slug,omitempty"`
 }
+
+// GetV1DashboardMarksParams defines parameters for GetV1DashboardMarks.
+type GetV1DashboardMarksParams struct {
+	Range GetV1DashboardMarksParamsRange `form:"range" json:"range"`
+}
+
+// GetV1DashboardMarksParamsRange defines parameters for GetV1DashboardMarks.
+type GetV1DashboardMarksParamsRange string
 
 // PostV1EventJSONBody defines parameters for PostV1Event.
 type PostV1EventJSONBody map[string]interface{}

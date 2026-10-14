@@ -279,6 +279,8 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// round trip.
 	case r.URL.Path == "/v1/dashboard/catalog" && r.Method == http.MethodGet:
 		h.getDashboardCatalog(w, r, tenantID)
+	case r.URL.Path == "/v1/dashboard/marks" && r.Method == http.MethodGet:
+		h.getDashboardMarks(w, r, tenantID)
 	case r.URL.Path == "/v1/series" && r.Method == http.MethodPost:
 		h.postSeries(w, r, tenantID)
 	// The heatmap overlay's one-hour read token; a read that travels as a
