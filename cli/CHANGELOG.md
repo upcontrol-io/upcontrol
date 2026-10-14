@@ -3,6 +3,46 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-10-14 - upcontrol 0.5.0
+
+- `SDK_PIN` moves to `1.1.0`, so a fresh `npx upcontrol init` installs the SDK whose
+  `app_started` names the release it booted from (the entry below). The pin is exact:
+  publish the SDK first, or a new install is sent to a version that does not exist.
+- **The `dashboard` topic teaches the board's new reads.** An event ref's `where` is the
+  event's own labels now (at most 3 pairs, a key of 1 to 60 bytes, a value of at most 256,
+  compared as exact text; the keys the ingest takes for itself, such as `level`, `host` or
+  `msg`, never become labels). A `people` ref with only a `name` counts unique people on a
+  stat, a line, a bar or a ratio. A `check` ref takes `p50` and `p95`. A line or a bar draws
+  one to three refs, and three filtered refs of one event are how an event is split. A new
+  kind, `ratio`, takes exactly two refs of one unit (people out of people, or rows out of
+  rows), the count first and what it is out of second, and draws the share with its
+  fraction, a sparkline and the change in points against the previous window. The
+  topic also says that markers (deploys, releases, incidents) appear on line and bar cards
+  by themselves, what feeds them, and that a `where` on a funnel, breakdown, heatmap, A/B or
+  retention ref is not read yet, so that card stays a Sample.
+- **The `experiment` topic stops teaching two identities for one person.** It handed the agent
+  `expose(arm, req)` beside `convert(arm, userId)`: a request is fingerprinted with a salt that
+  is new in every server process, so the card divided the people who converted by people nobody
+  had exposed. Both calls now take the same stable id, the user's or the anonymous id the app
+  already keeps, sent prefixed (`'u_' + user.id`): the SDK scrubs every string it sends, and a
+  bare 13 to 19 digit id that passes the card check would be redacted, folding every such user
+  into one person. The `funnel` and `retention` topics and the SDK README teach the same
+  prefix. The topic also says when the card claims more than counts: against an arm
+  named exactly `control`, each arm's difference in points; once every arm has 30 people
+  exposed, 5 who converted and 5 who did not, a 95% interval and a verdict; below that, "too
+  few to tell". It replaces the line that said the card claims no confidence intervals.
+- **`wire` carries what the markers read.** `app_started` with `release` and `deploy` with
+  `sha`, for a sender that does not use the SDK, and the rule that an A/B test's two stats
+  carry the same `uc.actor`. `SKILL.md`, `rules.md` and `uptime.md` say in one place each to set
+  `UPCONTROL_RELEASE` where the platform's own deploy variable is not read (Heroku sets
+  `HEROKU_SLUG_COMMIT` only with its `runtime-dyno-metadata` labs feature).
+- **`board` names the field the server refused.** A 400 `unknown_field` printed
+  `board: refused (HTTP 400)` and nothing else; it now prints `board: unknown field "<name>"`,
+  so the agent fixes the key instead of guessing. Every other refusal reads as before.
+- Needs the core release after 0.38.0, which carries these reads. An older core refuses an
+  event filter, a bare-name `people` read and a `ratio` card, and answers `p50` and `p95`
+  with no reading, so nothing is drawn with a wrong number.
+
 ## 2026-10-14 - @upcontrol/sdk 1.1.0
 
 - **`app_started` names the deploy it booted from.** The automatic event carried only
@@ -10,7 +50,8 @@ deploy is rolled back, a bad published version is on other people's machines).
   marked no release at all. It now also carries `release`, read from the first non-empty of
   these environment variables, in this order: `UPCONTROL_RELEASE`, `VERCEL_GIT_COMMIT_SHA`,
   `RENDER_GIT_COMMIT`, `RAILWAY_GIT_COMMIT_SHA`, `HEROKU_SLUG_COMMIT`, `FLY_IMAGE_REF`,
-  `K_REVISION`. Set `UPCONTROL_RELEASE` on a platform the list does not know. The board's
+  `K_REVISION` (Heroku sets its variable only with the `runtime-dyno-metadata` labs feature).
+  Set `UPCONTROL_RELEASE` on a platform the list does not know. The board's
   release marks read it: a release is `release`, else `version` unless that is `0`.
 - **The value is trimmed and cut, and the field is omitted rather than sent empty.**
   Surrounding whitespace goes, then the first 64 characters are kept: whole characters, so a

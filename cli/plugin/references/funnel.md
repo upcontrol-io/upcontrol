@@ -68,16 +68,20 @@ form render, and inside the payment provider's success branch for the paid
 step.
 
 ```ts
-visitToPaid.step('signup', user.id);     // after the account row is created
-visitToPaid.step('checkout', user.id);   // where checkout truly starts
-visitToPaid.step('paid', userId);        // the payment success branch, not the redirect
+visitToPaid.step('signup', 'u_' + user.id);     // after the account row is created
+visitToPaid.step('checkout', 'u_' + user.id);   // where checkout truly starts
+visitToPaid.step('paid', 'u_' + userId);        // the payment success branch, not the redirect
 ```
 
 ## The rules
 
 - One line per step. No wrappers, no control-flow changes, no `await` -
   `step()` never throws and never blocks.
-- The request or the user id, never an email, never a session token.
+- The request or the user id, never an email, never a session token. A numeric
+  id goes prefixed (`'u_' + user.id`, the same on every step): the SDK scrubs
+  every string it sends, `uc.actor` included, and a bare number of 13 to 19
+  digits that passes the card check becomes `[redacted:card:N]`, which folds
+  every such user into one person.
 - Steps go in journey order in the declaration. The declaration scopes and
   validates the calls in code; the board's card names the step events itself,
   and the card is what defines the journey.
@@ -87,9 +91,9 @@ visitToPaid.step('paid', userId);        // the payment success branch, not the 
   A request is fingerprinted on the user's own server (a salted hash of the
   address plus the user-agent: the framework's `ip` first, then the first
   `x-forwarded-for` hop, then the socket), so the raw address never leaves; a
-  string id passes through unchanged as the caller's own identifier. A request
-  with no address at all is not counted (one warning on stderr). Known crawler
-  user-agents (bot, crawl, spider, slurp, headless) are not counted either.
+  string id is the caller's own identifier. A request with no address at all is
+  not counted (one warning on stderr). Known crawler user-agents (bot, crawl,
+  spider, slurp, headless) are not counted either.
 - The events carry `uc.actor`, which is what lets the same numbers be produced
   from any language - see `npx upcontrol skills wire`.
 

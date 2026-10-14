@@ -19,7 +19,11 @@ What to tell the user:
 ## Where code DOES help this goal
 
 - `app_started` (automatic with the SDK) turns a restart loop into a named
-  incident instead of a flapping uptime check.
+  incident instead of a flapping uptime check. It also names the `release` the
+  process booted from, and the board marks each new release, and each incident,
+  beside its line and bar charts, so "it broke right after this release" is
+  something the board shows rather than something to guess. Where the platform
+  sets no deploy variable the SDK reads, set `UPCONTROL_RELEASE` (topic `rules`).
 - `request_failed` points inside the app separate "the process is up but
   erroring" from "the host is down" - the difference between an uptime page
   that says "fine" and one that tells the truth.

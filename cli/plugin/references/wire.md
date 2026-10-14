@@ -65,8 +65,33 @@ from event names - so all a sender does is emit the events.
 |---|---|
 | funnel | one named event per step, each with `uc.actor` |
 | retention | any event carrying `uc.actor`; the cohort is the week that actor was first seen |
-| A/B test | the same event name with `uc.variant` and `uc.stat` (`exposed` / `converted`) |
+| A/B test | the same event name with `uc.variant` and `uc.stat` (`exposed` / `converted`), and the SAME `uc.actor` on both stats |
 | breakdown | an event with the dimension as an ordinary field (`"country":"FI"`) |
+
+An A/B card divides the people who converted by the people who were exposed, so
+a conversion sent under another id than the exposure is a person nobody exposed:
+use the user's id, or the anonymous id the app already keeps, on both lines.
+
+## Marking deploys and releases
+
+The board draws a deploy, a release or an incident beside a line or a bar that
+moved. A sender in any language feeds the first two with two events:
+
+```
+{"ts":"...","msg":"app_started","uc.event":true,"version":"1.4.2","release":"3f9c2a1d"}
+{"ts":"...","msg":"deploy","uc.event":true,"sha":"3f9c2a1d"}
+```
+
+- `app_started`, once per boot. `release` names what is running - a commit sha
+  or a build id; the SDK sends up to 64 characters - and the first time a new
+  one appears is drawn as a release. With no `release`, a new `version` does the
+  same (a `version` of `0` names nothing). A full 40-character commit sha is
+  shown as its first 7 characters.
+- `deploy`, once per deploy, usually from the pipeline. `sha` is the commit, and
+  its first 7 characters label the mark (`commit_sha` works as well). Deploy
+  events less than 10 minutes after the one before draw as a single deploy.
+
+Neither names a person, so neither needs `uc.actor`.
 
 ## Go
 

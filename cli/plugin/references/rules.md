@@ -43,13 +43,21 @@ throw:
 import '@upcontrol/sdk/auto';
 ```
 
-That single line installs the automatic pieces: `app_started` on boot,
+That single line installs the automatic pieces: `app_started` on boot (it names
+the `release` the process runs when the environment says which),
 `unhandled_exception` on crashes (observed via `uncaughtExceptionMonitor` - the
 process still crashes exactly as before), and a best-effort flush when the
 event loop drains. Configuration is environment-only: `UPCONTROL_API_KEY`,
 optionally `UPCONTROL_ENDPOINT`, and `UPCONTROL_SERVICE` - one short lowercase
 name per deployable (`api`, `worker`, `front`) that every line carries and the
 dashboard filters by. No config object, no init call.
+
+The SDK reads the deploy variable of Vercel, Render, Railway, Fly and Cloud Run
+by itself. Heroku sets its own (`HEROKU_SLUG_COMMIT`) only after
+`heroku labs:enable runtime-dyno-metadata`, which is off by default. Everywhere
+else, and on Heroku without that flag, set `UPCONTROL_RELEASE` (a config var on
+Heroku) to the commit sha or build id where the app is deployed: the board marks
+each new release beside its line and bar charts.
 
 Without a key the SDK stays silent: `track()` becomes a no-op, one warning is
 printed at startup, nothing accumulates. The app is never affected.

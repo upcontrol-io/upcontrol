@@ -46,14 +46,14 @@ anonymous hit has no id to give.
 Express:
 
 ```ts
-app.use((req, res, next) => { if (req.user) signups.seen(String(req.user.id)); next(); });
+app.use((req, res, next) => { if (req.user) signups.seen('u_' + req.user.id); next(); });
 ```
 
 Fastify and Koa:
 
 ```ts
-fastify.addHook('onRequest', (request, reply, done) => { if (request.user) signups.seen(String(request.user.id)); done(); });
-app.use(async (ctx, next) => { if (ctx.state.user) signups.seen(String(ctx.state.user.id)); await next(); });
+fastify.addHook('onRequest', (request, reply, done) => { if (request.user) signups.seen('u_' + request.user.id); done(); });
+app.use(async (ctx, next) => { if (ctx.state.user) signups.seen('u_' + ctx.state.user.id); await next(); });
 ```
 
 Next.js - in the root layout, once the session is read (it sees every page).
@@ -62,7 +62,7 @@ declares `runtime: 'nodejs'`:
 
 ```ts
 const session = await auth();
-if (session?.user) signups.seen(String(session.user.id)); // in the root layout, before its return
+if (session?.user) signups.seen('u_' + session.user.id); // in the root layout, before its return
 ```
 
 ## The rules
@@ -70,7 +70,10 @@ if (session?.user) signups.seen(String(session.user.id)); // in the root layout,
 - One line. No wrappers, no control-flow changes, no `await` - `seen()`
   never throws and never blocks.
 - The stable user id, never an email, never a session token, never a request
-  object.
+  object. A numeric id goes prefixed (`'u_' + user.id`, the same every week): the
+  SDK scrubs every string it sends, `uc.actor` included, and a bare number of 13
+  to 19 digits that passes the card check becomes `[redacted:card:N]`, which
+  folds every such user into one person.
 - A person counts once per ISO week (Monday). The week they were first seen
   starts their cohort; every later week they are seen again counts them once
   in that week.
