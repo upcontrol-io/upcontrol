@@ -470,12 +470,13 @@ func TestTheAtomicSaveWritesEveryBoardOrNone(t *testing.T) {
 	}
 	first := listing(t, h).Boards[0].ID
 	second := newBoard(t, h, "Sales")
+	_, firstRev := readRev(t, h, "/v1/dashboards/"+first)
+	_, secondRev := readRev(t, h, "/v1/dashboards/"+second)
 
 	// One board past the grid refuses the whole request, and the message names
 	// the board it is about.
 	bad := `{"version":2,"widgets":[{"id":"w_1","kind":"line","title":"x","metrics":[{"source":"logs"}],"x":7,"y":0,"w":6,"h":4}]}`
-	code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards",
-		`{"boards":[{"id":"`+first+`","layout":`+curatedBoard+`},{"id":"`+second+`","layout":`+bad+`}]}`)
+	code, body := saveBoardsCall(t, h, saveEntry(first, curatedBoard, firstRev), saveEntry(second, bad, secondRev))
 	if code != http.StatusBadRequest || !strings.Contains(body, "bad_layout") || !strings.Contains(body, second) {
 		t.Fatalf("a refused board names itself; got %d %s", code, body)
 	}
@@ -483,22 +484,23 @@ func TestTheAtomicSaveWritesEveryBoardOrNone(t *testing.T) {
 		t.Fatalf("the board saved before the refusal must roll back; got %d %s", code, got)
 	}
 
-	code, body = sessionCall(t, h, http.MethodPut, "/v1/dashboards",
-		`{"boards":[{"id":"`+first+`","layout":`+curatedBoard+`},{"id":"`+second+`","layout":`+oneWidgetBoard+`}]}`)
+	code, body = saveBoardsCall(t, h, saveEntry(first, curatedBoard, firstRev), saveEntry(second, oneWidgetBoard, secondRev))
 	if code != http.StatusOK {
 		t.Fatalf("both boards save in one request; got %d %s", code, body)
 	}
-	if code, got := sessionCall(t, h, http.MethodGet, "/v1/dashboards/"+first, ""); code != http.StatusOK || !sameBoard(t, got, curatedBoard) {
-		t.Fatalf("the first board took the save; got %d %s", code, got)
+	var got string
+	got, firstRev = readRev(t, h, "/v1/dashboards/"+first)
+	if !sameBoard(t, got, curatedBoard) {
+		t.Fatalf("the first board took the save; got %s", got)
 	}
-	if code, got := sessionCall(t, h, http.MethodGet, "/v1/dashboards/"+second, ""); code != http.StatusOK || !sameBoard(t, got, oneWidgetBoard) {
-		t.Fatalf("the second board took the save; got %d %s", code, got)
+	got, secondRev = readRev(t, h, "/v1/dashboards/"+second)
+	if !sameBoard(t, got, oneWidgetBoard) {
+		t.Fatalf("the second board took the save; got %s", got)
 	}
 
 	// Each board is held to the same 64 KB a single save is, and two of them
 	// near that ceiling still ride one request.
-	code, body = sessionCall(t, h, http.MethodPut, "/v1/dashboards",
-		`{"boards":[{"id":"`+first+`","layout":`+bigBoard(60000)+`},{"id":"`+second+`","layout":`+bigBoard(60000)+`}]}`)
+	code, body = saveBoardsCall(t, h, saveEntry(first, bigBoard(60000), firstRev), saveEntry(second, bigBoard(60000), secondRev))
 	if code != http.StatusOK {
 		t.Fatalf("two boards near the per-board cap save together; got %d %s", code, body)
 	}
@@ -583,9 +585,50 @@ func TestASaveFromAStaleBaseIsRefusedWhole(t *testing.T) {
 	}
 }
 
+// An edit that cannot name the board it began from is refused like a stale
+// one: a save with no base is a 409 naming the board, and nothing is written,
+// not the board, not one ahead of it whose base matched, and not the Main a
+// save onto the never-stored alias lays down on its way.
+func TestASaveWithNoBaseIsRefusedWhole(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+
+	code, body := saveBoardsCall(t, h, saveEntry("main", curatedBoard, ""))
+	if code != http.StatusConflict || !strings.Contains(body, "board_changed") || !strings.Contains(body, mainBoard) {
+		t.Fatalf("a save with no base onto the unstored alias is a 409 naming it; got %d %s", code, body)
+	}
+	if list := listing(t, h); len(list.Boards) != 1 || list.Boards[0].ID != mainBoard {
+		t.Fatalf("the refused save must not lay Main down; got %+v", list.Boards)
+	}
+
+	// The single-board door still takes a save with no base.
+	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards/main", curatedBoard); code != http.StatusOK {
+		t.Fatalf("the person's board = %d %s", code, body)
+	}
+	unbased := listing(t, h).Boards[0].ID
+	based := newBoard(t, h, "Sales")
+	unbasedLayout, unbasedRev := readRev(t, h, "/v1/dashboards/"+unbased)
+	basedLayout, basedRev := readRev(t, h, "/v1/dashboards/"+based)
+
+	// The board with a matching base goes first, so its write is already made
+	// when the one with none refuses the save.
+	code, body = saveBoardsCall(t, h, saveEntry(based, oneWidgetBoard, basedRev), saveEntry(unbased, oneWidgetBoard, ""))
+	if code != http.StatusConflict || !strings.Contains(body, "board_changed") || !strings.Contains(body, unbased) {
+		t.Fatalf("a save with no base is a 409 naming the board; got %d %s", code, body)
+	}
+	for _, want := range []struct{ id, layout, rev string }{
+		{unbased, unbasedLayout, unbasedRev},
+		{based, basedLayout, basedRev},
+	} {
+		if layout, rev := readRev(t, h, "/v1/dashboards/"+want.id); layout != want.layout || rev != want.rev {
+			t.Fatalf("nothing may be written, %s included; got %s, rev %s", want.id, layout, rev)
+		}
+	}
+}
+
 // A base that matches saves, and the answer's rev is the rev the next read
-// carries, so a person who saves twice never trips over their own save. A
-// save that sends no base is the save it always was.
+// carries, so a person who saves twice never trips over their own save.
 func TestAMatchingBaseSavesAndAnswersTheNextReadsRev(t *testing.T) {
 	pool := openProjectsGateDB(t)
 	tenantID := seedPlanTenant(t, pool, "Growth", 1)
@@ -615,12 +658,10 @@ func TestAMatchingBaseSavesAndAnswersTheNextReadsRev(t *testing.T) {
 		}
 		rev = next
 	}
-	if code, body := saveBoardsCall(t, h, saveEntry("main", curatedBoard, "")); code != http.StatusOK {
-		t.Fatalf("a save with no base = %d %s", code, body)
-	}
-	// An empty base is no base, never one that matches nothing.
-	if code, body := saveBoardsCall(t, h, `{"id":"main","layout":`+oneWidgetBoard+`,"base":""}`); code != http.StatusOK {
-		t.Fatalf("a save with an empty base = %d %s", code, body)
+	// An empty base is no base, and no base is refused like a stale one.
+	if code, body := saveBoardsCall(t, h, `{"id":"main","layout":`+oneWidgetBoard+`,"base":""}`); code != http.StatusConflict ||
+		!strings.Contains(body, "board_changed") {
+		t.Fatalf("a save with an empty base is a 409 board_changed; got %d %s", code, body)
 	}
 }
 
@@ -779,8 +820,8 @@ func TestLayingTheAliasKeepsAMainThisWorkspaceAlreadySaved(t *testing.T) {
 	tenantID := seedPlanTenant(t, pool, "Growth", 1)
 	h := planTenantAPI(t, pool, tenantID)
 
-	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards",
-		`{"boards":[{"id":"main","layout":`+curatedBoard+`}]}`); code != http.StatusOK {
+	_, rev := readRev(t, h, "/v1/dashboards/main")
+	if code, body := saveBoardsCall(t, h, saveEntry("main", curatedBoard, rev)); code != http.StatusOK {
 		t.Fatalf("the person's first Save = %d %s", code, body)
 	}
 	// What createBoard, a key PUT and an append do after their stale read.

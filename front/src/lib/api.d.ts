@@ -2320,7 +2320,7 @@ export interface paths {
         };
         /**
          * Save several boards in one transaction.
-         * @description Session only. Every board is stamped `session` and its pending proposal is resolved, exactly as the single save does; one refused board refuses them all. At most 16 boards a request, and each layout is held to the same 64 KB a single board is: a `bad_layout` names the board it is about. A board sent with a `base` that no longer matches its stored revision refuses the whole save with 409 `board_changed`, whose message names the first board found moved: the caller re-reads every board it sent and keeps its edit.
+         * @description Session only. Every board is stamped `session` and its pending proposal is resolved, exactly as the single save does; one refused board refuses them all. At most 16 boards a request, and each layout is held to the same 64 KB a single board is: a `bad_layout` names the board it is about. A board sent without a `base`, or with one that no longer matches its stored revision, refuses the whole save with 409 `board_changed`, whose message names the first board refused: the caller re-reads every board it sent and keeps its edit.
          */
         put: {
             parameters: {
@@ -4698,7 +4698,7 @@ export interface components {
                 /** @description A board id, or the alias `main`. */
                 id: string;
                 layout: components["schemas"]["DashboardLayout"];
-                /** @description Request only, optional: the `X-Board-Rev` the edit began from. When it no longer matches the stored board, the whole save is refused with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased. Absent, or an empty string, means the caller predates the check. */
+                /** @description Request only: the `X-Board-Rev` the edit began from. A save without one (absent or empty) or with one that no longer matches the stored board is refused whole with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased: the caller re-reads the board and saves again with its rev. Optional in the schema, which the answer shares, so a caller without one gets that refusal and never a 400. */
                 base?: string;
                 /** @description Answer only: the saved board's new `X-Board-Rev`, the base of the next edit. */
                 rev?: string;
