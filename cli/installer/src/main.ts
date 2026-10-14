@@ -459,10 +459,11 @@ function readBoardInput(spec: string): string | null {
 
 // One failure path for every board call: unreachable keeps verify's exit 3,
 // a refused write prints the server's own sentence (what is wrong with the
-// layout, or what a plan lifts) instead of a bare status.
+// layout, or what a plan lifts) instead of a bare status, and an unknown key
+// in the layout is named, since the server sends it with no sentence.
 function boardFail(
   endpoint: string,
-  r: { error?: string; status?: number; code?: string; message?: string },
+  r: { error?: string; status?: number; code?: string; message?: string; field?: string },
   flags: Flags,
 ): number {
   if (r.error === 'unreachable') {
@@ -479,6 +480,8 @@ function boardFail(
     err('board: this server keeps one board per project, so --new cannot make another - put the cards on it with `npx upcontrol board --add <file>`');
   } else if (oldCore && (flags.list || flags.board !== undefined)) {
     err('board: this server keeps one board per project - run `npx upcontrol board` without --list or --board');
+  } else if (r.code === 'unknown_field' && typeof r.field === 'string') {
+    err(`board: unknown field "${r.field}"`);
   } else {
     err(r.message ?? `board: refused (HTTP ${r.status ?? '?'})`);
   }
