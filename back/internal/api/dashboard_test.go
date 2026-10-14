@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,17 +63,163 @@ func TestValidateSeries_RejectsWhatCannotBeAnswered(t *testing.T) {
 	}
 }
 
+// labels narrow the two reads of one event name over time, within the
+// contract's caps, and every refusal names the query it is about.
+func TestValidateSeries_Labels(t *testing.T) {
+	pro := map[string]string{"plan": "pro"}
+	for _, ok := range []seriesQuery{
+		{ID: "ev", Source: "event", Range: "24h", Name: "purchase", Labels: pro},
+		{ID: "bare", Source: "people", Range: "24h", Name: "purchase", Labels: pro},
+		{ID: "caps", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
+			"a": "1", "b": "2", strings.Repeat("k", 60): strings.Repeat("v", 256)}},
+		// An empty object filters nothing, so it is nobody's business which read
+		// carries it.
+		{ID: "none", Source: "logs", Range: "24h", Labels: map[string]string{}},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s must be accepted; got %q", ok.ID, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "logs", Source: "logs", Range: "24h", Labels: pro},
+		{ID: "check", Source: "check", Range: "24h", Name: "uptime", Labels: pro},
+		{ID: "metric", Source: "metric", Range: "24h", Name: "load", Labels: pro},
+		{ID: "funnel", Source: "people", Range: "24h", Steps: []string{"visit", "signup"}, Labels: pro},
+		{ID: "retention", Source: "people", Range: "24h", Cohort: "week", Labels: pro},
+		{ID: "breakdown", Source: "people", Range: "24h", Name: "purchase", Group: []string{"plan"}, Labels: pro},
+		{ID: "four", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
+			"a": "1", "b": "2", "c": "3", "d": "4"}},
+		{ID: "emptykey", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"": "x"}},
+		{ID: "longkey", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{strings.Repeat("k", 61): "x"}},
+		{ID: "longvalue", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"k": strings.Repeat("v", 257)}},
+		// Postgres refuses a NUL inside jsonb with a 500 for the whole board.
+		{ID: "nulvalue", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"plan": "pro\x00"}},
+		{ID: "ctrlkey", Source: "people", Range: "24h", Name: "purchase", Labels: map[string]string{"pl\nan": "pro"}},
+	} {
+		msg := validateSeries([]seriesQuery{bad})
+		if msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// A people query naming one event and nothing else is a shape of its own now;
+// the people queries that name nothing at all are still refused, and so is a
+// row count on anything but a one-key fold.
+func TestValidateSeries_BarePeopleName(t *testing.T) {
+	if msg := validateSeries([]seriesQuery{{ID: "a", Source: "people", Range: "7d", Name: "signup"}}); msg != "" {
+		t.Fatalf("a bare people name must be accepted; got %q", msg)
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "nothing", Source: "people", Range: "7d"},
+		{ID: "unnamed", Source: "people", Range: "7d", Group: []string{"plan"}},
+		{ID: "rows", Source: "people", Range: "7d", Name: "signup", Count: "events"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must still be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// A bucket keeps the range's span and must leave more than one bucket and no
+// more than a 31-day month of hours.
+func TestValidateSeries_Bucket(t *testing.T) {
+	for _, ok := range []struct{ rng, bucket string }{
+		{"4h", "hour"}, {"24h", "hour"}, {"7d", "hour"}, {"31d", "hour"},
+		{"7d", "day"}, {"31d", "day"}, {"365d", "day"},
+	} {
+		q := seriesQuery{ID: "a", Source: "event", Range: ok.rng, Name: "signup", Bucket: ok.bucket}
+		if msg := validateSeries([]seriesQuery{q}); msg != "" {
+			t.Fatalf("%s on %s must be accepted; got %q", ok.bucket, ok.rng, msg)
+		}
+	}
+	for _, bad := range []struct{ rng, bucket string }{
+		{"1h", "hour"}, {"365d", "hour"}, {"1h", "day"}, {"12h", "day"}, {"24h", "day"}, {"7d", "week"},
+	} {
+		q := seriesQuery{ID: "q1", Source: "event", Range: bad.rng, Name: "signup", Bucket: bad.bucket}
+		if msg := validateSeries([]seriesQuery{q}); msg == "" || !strings.HasSuffix(msg, " in q1") {
+			t.Fatalf("%s on %s must be refused by name; got %q", bad.bucket, bad.rng, msg)
+		}
+	}
+	// A fold has no time axis to cut, so a bucket on one is refused, never
+	// ignored; the bare people name keeps one and keeps its bucket.
+	if msg := validateSeries([]seriesQuery{{ID: "a", Source: "people", Range: "7d", Name: "signup", Bucket: "day"}}); msg != "" {
+		t.Fatalf("a bare people name in day buckets must be accepted; got %q", msg)
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "grouped", Source: "metric", Range: "7d", Name: "load", Group: []string{"host"}, Bucket: "day"},
+		{ID: "breakdown", Source: "people", Range: "7d", Name: "purchase", Group: []string{"plan"}, Bucket: "day"},
+		{ID: "funnel", Source: "people", Range: "7d", Steps: []string{"visit", "signup"}, Bucket: "day"},
+		{ID: "retention", Source: "people", Range: "7d", Cohort: "week", Bucket: "day"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg != "bucket needs a time axis in "+bad.ID {
+			t.Fatalf("%s must be refused for want of a time axis; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// A bucket re-lands the window on a UTC hour or a UTC midnight and keeps the
+// span, so the history gate, which reads the span, answers as it did.
+func TestRebucket_KeepsTheSpanOnTheBucketsOwnBoundary(t *testing.T) {
+	now := time.Date(2026, 9, 6, 13, 7, 23, 0, time.UTC)
+	for _, c := range []struct {
+		rng, bucket string
+		step, n     int
+		to          time.Time
+	}{
+		{"24h", "hour", 3600, 24, time.Date(2026, 9, 6, 14, 0, 0, 0, time.UTC)},
+		{"7d", "hour", 3600, 168, time.Date(2026, 9, 6, 14, 0, 0, 0, time.UTC)},
+		{"7d", "day", 86400, 7, time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)},
+		{"31d", "day", 86400, 31, time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)},
+	} {
+		own := seriesRanges[c.rng]
+		r := rebucket(own, c.bucket)
+		if r.step != c.step || r.buckets != c.n {
+			t.Fatalf("%s in %s buckets = %d of %ds, want %d of %ds", c.rng, c.bucket, r.buckets, r.step, c.n, c.step)
+		}
+		from, to := r.window(now)
+		if !to.Equal(c.to) || to.Sub(from) != time.Duration(own.step*own.buckets)*time.Second {
+			t.Fatalf("%s in %s spans %s .. %s, want a whole %s up to %s", c.rng, c.bucket, from, to, c.rng, c.to)
+		}
+	}
+	if r := rebucket(seriesRanges["24h"], ""); r != seriesRanges["24h"] {
+		t.Fatalf("no bucket is the range's own step; got %+v", r)
+	}
+}
+
+// The rev a save checks its base against is the document's, not its spelling:
+// postgres hands a jsonb layout back with its own key order and spacing, and
+// a save answered with one rev must find the same rev on the next read.
+func TestBoardRev_IsTheDocumentNotItsSpelling(t *testing.T) {
+	ours := `{"version":2,"widgets":[{"id":"w_1","kind":"stat","title":"<Signups>","metrics":[{"source":"event","name":"signup"}],"x":0,"y":0,"w":4,"h":4}]}`
+	theirs := `{"version": 2, "widgets": [{"h": 4, "w": 4, "x": 0, "y": 0, "id": "w_1", "kind": "stat", "title": "<Signups>", "metrics": [{"name": "signup", "source": "event"}]}]}`
+	rev := boardRev([]byte(ours))
+	if len(rev) != 16 || strings.Trim(rev, "0123456789abcdef") != "" {
+		t.Fatalf("a rev is 16 hex characters; got %q", rev)
+	}
+	if got := boardRev([]byte(theirs)); got != rev {
+		t.Fatalf("two spellings of one layout must be one rev; got %s and %s", rev, got)
+	}
+	if got := boardRev([]byte(strings.Replace(ours, `"h":4`, `"h":5`, 1))); got == rev {
+		t.Fatal("a different layout must be a different rev")
+	}
+	// Pinned: the empty board is what every never-saved alias is served as, so
+	// a change in the canonical form would refuse the first save of every tab
+	// open across a deploy.
+	if got := boardRev(emptyLayout); got != "4ce8b0daa99532bd" || got != boardRev([]byte(`{"widgets": [], "version": 2}`)) {
+		t.Fatalf("the empty board's rev drifted; got %s", got)
+	}
+}
+
 func TestSeriesWindow_LandsOnBucketBoundaries(t *testing.T) {
 	// 13:07:23 is mid-bucket: `to` must round UP, so the last bucket is the
 	// current, partial one rather than a bucket that already closed.
 	now := time.Date(2026, 9, 6, 13, 7, 23, 0, time.UTC)
-	from, to, r, ok := seriesWindow("24h", now)
-	if !ok {
-		t.Fatal("24h must be a known range")
-	}
+	r := seriesRanges["24h"]
 	if r.step != 1800 || r.buckets != 48 {
 		t.Fatalf("24h is 48 buckets of 1800s; got %d of %d", r.buckets, r.step)
 	}
+	from, to := r.window(now)
 	if to.Unix()%int64(r.step) != 0 || from.Unix()%int64(r.step) != 0 {
 		t.Fatalf("both ends must sit on a bucket boundary; got %s .. %s", from, to)
 	}
@@ -94,11 +241,11 @@ func TestSeriesWindow_EveryRangeSpansItsOwnName(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 6, 13, 7, 23, 0, time.UTC)
 	for name, want := range spans {
-		from, to, _, ok := seriesWindow(name, now)
+		r, ok := seriesRanges[name]
 		if !ok {
 			t.Fatalf("%s must be a known range", name)
 		}
-		if to.Sub(from) != want {
+		if from, to := r.window(now); to.Sub(from) != want {
 			t.Fatalf("%s spans %s, want %s", name, to.Sub(from), want)
 		}
 	}
@@ -414,6 +561,38 @@ func TestValidateLayout(t *testing.T) {
 				t.Fatal("this layout must be refused, and the refusal must say why")
 			}
 		})
+	}
+}
+
+// A ratio is a count over what it is out of: two refs, and any other number
+// has nothing to divide.
+func TestValidateLayout_ARatioReadsExactlyTwoRefs(t *testing.T) {
+	ref := apigen.DashboardMetricRef{Source: apigen.DashboardMetricRefSourceEvent}
+	refused := `widget "w_1": a ratio reads exactly two refs, a count and what it is out of`
+	for n, want := range map[int]string{1: refused, 2: "", 3: refused} {
+		b := widget("w_1")
+		b.Kind, b.Metrics = apigen.DashboardWidgetKindRatio, slices.Repeat([]apigen.DashboardMetricRef{ref}, n)
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != want {
+			t.Fatalf("a ratio of %d refs = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// A count the contract does not name never reaches storage: the app drops a ref
+// with an unknown count on read, so a typo an agent sent through the CLI would
+// otherwise vanish from the board on its next Save.
+func TestValidateLayout_RefusesACountTheContractDoesNotName(t *testing.T) {
+	for count, want := range map[string]string{
+		"people": "",
+		"events": "",
+		"users":  `widget "w_1" counts an unknown "users"`,
+	} {
+		c := apigen.DashboardMetricRefCount(count)
+		b := widget("w_1")
+		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourcePeople, Count: &c}}
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != want {
+			t.Fatalf("count %q = %q, want %q", count, got, want)
+		}
 	}
 }
 

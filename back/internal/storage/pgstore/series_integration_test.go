@@ -11,6 +11,7 @@ package pgstore
 import (
 	"context"
 	"maps"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -247,27 +248,95 @@ func TestCheckAndEventSeries(t *testing.T) {
 	if len(cat) != 2 || cat[0].Name != "signup" || cat[0].Times != 2 {
 		t.Fatalf("the catalog lists each name once, most seen first; got %+v", cat)
 	}
-	buckets, err := s.EventBuckets(ctx, seriesTenant, catalogProject, "signup", from, from.Add(10*time.Minute), 60)
+	buckets, err := s.EventBuckets(ctx, seriesTenant, catalogProject, "signup", nil, false, from, from.Add(10*time.Minute), 60)
 	if err != nil {
 		t.Fatalf("event buckets: %v", err)
 	}
 	if len(buckets) != 1 || buckets[0].Index != 0 || buckets[0].Count != 2 {
 		t.Fatalf("both signups sit in the first minute; got %+v", buckets)
 	}
+
+	// --- percentiles ---------------------------------------------------------
+	// Minute 0 holds the ok probes 100 and 300: p50 200, p95 290 (interpolated).
+	// Minute 2 holds a failure and an unmeasured reading, no ok probe: absent,
+	// which the API draws as null, never 0 ms.
+	percentile := func(p float64, step int) map[int64]float64 {
+		t.Helper()
+		rows, err := s.CheckPercentile(ctx, seriesTenant, 5, p, from, from.Add(10*time.Minute), step)
+		if err != nil {
+			t.Fatalf("check percentile: %v", err)
+		}
+		got := map[int64]float64{}
+		for _, b := range rows {
+			got[b.Index] = b.Ms
+		}
+		return got
+	}
+	if got := percentile(0.5, 60); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("p50 of minute 0 is 200, and the minute without an ok probe is absent; got %v", got)
+	}
+	if got := percentile(0.95, 60); len(got) != 1 || math.Abs(got[0]-290) > 1e-9 {
+		t.Fatalf("p95 of minute 0 is 290; got %v", got)
+	}
+	// One bucket as wide as the window is the window's own percentile.
+	if got := percentile(0.5, 600); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("the window's p50 is a read of its own; got %v", got)
+	}
+
+	// --- labels --------------------------------------------------------------
+	// A label filter is containment over every pair asked for, on the window
+	// and on the previous span alike.
+	labelled := []EventRow{
+		{Name: "purchase", TS: from.Add(5 * time.Second), Labels: map[string]string{"plan": "pro", "region": "eu"}},
+		{Name: "purchase", TS: from.Add(65 * time.Second), Labels: map[string]string{"plan": "pro", "region": "us"}},
+		{Name: "purchase", TS: from.Add(70 * time.Second), Labels: map[string]string{"plan": "free"}},
+		{Name: "purchase", TS: from.Add(-5 * time.Minute), Labels: map[string]string{"plan": "pro"}},
+		{Name: "purchase", TS: from.Add(-4 * time.Minute), Labels: map[string]string{"plan": "free"}},
+	}
+	for i := range labelled {
+		labelled[i].TenantID, labelled[i].ProjectID = seriesTenant, bucketProject
+	}
+	if err := s.InsertEvents(ctx, labelled); err != nil {
+		t.Fatalf("insert labelled events: %v", err)
+	}
+	count := func(labels map[string]string, lo, hi time.Time, step int) map[int64]int64 {
+		t.Helper()
+		rows, err := s.EventBuckets(ctx, seriesTenant, bucketProject, "purchase", labels, false, lo, hi, step)
+		if err != nil {
+			t.Fatalf("event buckets with %v: %v", labels, err)
+		}
+		got := map[int64]int64{}
+		for _, b := range rows {
+			got[b.Index] = b.Count
+		}
+		return got
+	}
+	window := from.Add(10 * time.Minute)
+	same := func(name string, got, want map[int64]int64) {
+		t.Helper()
+		if !maps.Equal(got, want) {
+			t.Fatalf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	same("no labels", count(nil, from, window, 60), map[int64]int64{0: 1, 1: 2})
+	same("plan pro", count(map[string]string{"plan": "pro"}, from, window, 60), map[int64]int64{0: 1, 1: 1})
+	same("plan pro in eu", count(map[string]string{"plan": "pro", "region": "eu"}, from, window, 60), map[int64]int64{0: 1})
+	same("a value nobody sent", count(map[string]string{"plan": "team"}, from, window, 60), map[int64]int64{})
+	same("plan pro, the previous span", count(map[string]string{"plan": "pro"}, from.Add(-10*time.Minute), from, 600), map[int64]int64{0: 1})
 }
 
 // The field list is the picker's "what can I break this event down by", so
-// the wire's own namespace must never reach it and each event's keys arrive
-// most-used first.
+// neither the wire's own namespace nor the service ingest stamps on every
+// event may reach it, and each event's keys arrive most-used first.
 func TestCatalogEventFields(t *testing.T) {
 	s, _ := openStore(t)
 	ctx := context.Background()
 	at := time.Now().UTC().Add(-5 * time.Minute)
 
 	events := []EventRow{
-		{Name: "purchase", TS: at, Labels: map[string]string{"plan": "pro", "region": "eu", "uc.variant": "A"}},
-		{Name: "purchase", TS: at.Add(time.Second), Labels: map[string]string{"plan": "free"}},
-		{Name: "signup", TS: at.Add(2 * time.Second), Labels: map[string]string{"source": "ads"}},
+		{Name: "purchase", TS: at, Labels: map[string]string{"plan": "pro", "region": "eu", "uc.variant": "A", "service": "shop"}},
+		{Name: "purchase", TS: at.Add(time.Second), Labels: map[string]string{"plan": "free", "service": "shop"}},
+		{Name: "signup", TS: at.Add(2 * time.Second), Labels: map[string]string{"source": "ads", "service": "shop"}},
 		// Newer page views than everything else: they get their own scan, and
 		// must not eat the budget of the three rows above.
 		{Name: "uc.pageview", TS: at.Add(3 * time.Second), Labels: map[string]string{"path": "/"}, Actor: "v1"},
@@ -286,10 +355,10 @@ func TestCatalogEventFields(t *testing.T) {
 		t.Fatalf("catalog event fields: %v", err)
 	}
 	if got := fields["purchase"]; len(got) != 2 || got[0] != "plan" || got[1] != "region" {
-		t.Fatalf("purchase carries plan then region, most-used first, and never uc.variant; got %v", got)
+		t.Fatalf("purchase carries plan then region, most-used first, and never uc.variant or service; got %v", got)
 	}
 	if got := fields["signup"]; len(got) != 1 || got[0] != "source" {
-		t.Fatalf("signup carries source alone; got %v", got)
+		t.Fatalf("signup carries source alone, never service; got %v", got)
 	}
 	if got := fields["uc.pageview"]; len(got) != 1 || got[0] != "path" {
 		t.Fatalf("page views keep their fields from their own scan; got %v", got)

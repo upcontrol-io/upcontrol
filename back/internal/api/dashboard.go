@@ -10,11 +10,15 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +177,35 @@ type seriesQuery struct {
 	// filters them out, so without this such a card reads 0 and says nothing
 	// about why.
 	Count string `json:"count"`
+	// Labels narrows an event read, or a bare-name people read, to the rows
+	// whose labels hold every pair. A field of its own rather than a `where`
+	// key, so a core that predates it refuses the query as an unknown field
+	// instead of answering the unfiltered count under a filtered caption.
+	Labels map[string]string `json:"labels"`
+	// Bucket reads the range in UTC hours or days instead of its own step.
+	Bucket string `json:"bucket"`
+}
+
+// bareName is a people query that names one event and nothing else: the
+// distinct people behind it per bucket, the one people read with a time axis.
+func (q seriesQuery) bareName() bool {
+	return q.Source == "people" && q.Name != "" && len(q.Steps) == 0 && q.Cohort == "" && len(q.Group) == 0
+}
+
+// seriesBucketSteps are the board-wide buckets a query may ask for instead of
+// its range's own step. A bucket keeps the range's span, so it costs no depth
+// and the history gate never sees it; one that leaves a single bucket, or more
+// than maxSeriesBuckets (a 31-day month of hours), is refused.
+var seriesBucketSteps = map[string]int{"hour": 3600, "day": 86400}
+
+const maxSeriesBuckets = 744
+
+// rebucket is r read in a board-wide bucket: the same span, the bucket's step.
+func rebucket(r seriesRange, bucket string) seriesRange {
+	if step, ok := seriesBucketSteps[bucket]; ok {
+		return seriesRange{step: step, buckets: r.step * r.buckets / step}
+	}
+	return r
 }
 
 type seriesRequest struct {
@@ -206,6 +239,18 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		if _, ok := seriesRanges[q.Range]; !ok {
 			return "unknown range " + q.Range + " in " + q.ID
+		}
+		if q.Bucket != "" {
+			if _, ok := seriesBucketSteps[q.Bucket]; !ok {
+				return "unknown bucket " + q.Bucket + " in " + q.ID
+			}
+			if len(q.Group) > 0 || len(q.Steps) > 0 || q.Cohort != "" {
+				return "bucket needs a time axis in " + q.ID
+			}
+			if n := rebucket(seriesRanges[q.Range], q.Bucket).buckets; n < 2 || n > maxSeriesBuckets {
+				return fmt.Sprintf("%s buckets over %s make %d, and a read holds 2 to %d, in %s",
+					q.Bucket, q.Range, n, maxSeriesBuckets, q.ID)
+			}
 		}
 		if q.Source != "people" && (len(q.Steps) > 0 || q.Cohort != "") {
 			return "steps and cohort are only for the people source in " + q.ID
@@ -253,8 +298,29 @@ func validateSeries(qs []seriesQuery) string {
 				if q.Name == "" {
 					return "a people group query needs a name in " + q.ID
 				}
+			case q.bareName():
+				// The distinct people behind one event name, per bucket.
 			default:
-				return "a people query needs steps, a cohort, or a group in " + q.ID
+				return "a people query needs steps, a cohort, a group, or a name in " + q.ID
+			}
+		}
+		if len(q.Labels) > 0 {
+			// The two reads of one event name over time. Every other shape folds
+			// or groups, where a filter would need a meaning of its own.
+			if q.Source != "event" && !q.bareName() {
+				return "labels are only for an event read or a people read of one name in " + q.ID
+			}
+			if len(q.Labels) > 3 {
+				return fmt.Sprintf("at most 3 labels per query, got %d in %s", len(q.Labels), q.ID)
+			}
+			for k, v := range q.Labels {
+				// Postgres refuses a NUL inside jsonb with an error, which would
+				// answer the whole board with a 500; refused here it is a 400
+				// that names the query. Tab and newline go with it: no label
+				// worth filtering on holds one.
+				if k == "" || len(k) > 60 || len(v) > 256 || strings.ContainsFunc(k+v, unicode.IsControl) {
+					return "a label key is 1 to 60 bytes and its value at most 256, with no control characters, in " + q.ID
+				}
 			}
 		}
 		// A fold of one label may count rows instead of actors; nothing else may.
@@ -273,20 +339,16 @@ func validateSeries(qs []seriesQuery) string {
 	return ""
 }
 
-// seriesWindow places a range on the clock: `to` is rounded UP to the next
-// bucket boundary so the last bucket is the current, partial one, and `from`
-// is a whole span back — which leaves both ends on a boundary, so a bucket
-// index is arithmetic rather than a lookup.
-func seriesWindow(rng string, now time.Time) (from, to time.Time, r seriesRange, ok bool) {
-	r, ok = seriesRanges[rng]
-	if !ok {
-		return time.Time{}, time.Time{}, r, false
-	}
+// window places r on the clock: `to` is rounded UP to the next bucket boundary
+// so the last bucket is the current, partial one, and `from` is a whole span
+// back — which leaves both ends on a boundary, so a bucket index is arithmetic
+// rather than a lookup. Boundaries are epoch arithmetic, so an hour or a day
+// bucket lands on a UTC hour or a UTC midnight.
+func (r seriesRange) window(now time.Time) (from, to time.Time) {
 	step := int64(r.step)
 	end := ((now.Unix() + step - 1) / step) * step
 	to = time.Unix(end, 0).UTC()
-	from = to.Add(-time.Duration(r.step*r.buckets) * time.Second)
-	return from, to, r, true
+	return to.Add(-time.Duration(r.step*r.buckets) * time.Second), to
 }
 
 // getDashboardCatalog answers every list or none of them. An empty list is a
@@ -464,7 +526,16 @@ func (h *writeAPI) catalogMetrics(ctx context.Context, tenantID, projectID int64
 	return out, nil
 }
 
+// seriesReadGuard bounds one request's reads. Only a pathological read meets
+// it, and that read then takes the read_failed path like any other failure.
+const seriesReadGuard = 60 * time.Second
+
+// slowSeriesRead is how long a series request may take before it logs what it
+// asked for.
+const slowSeriesRead = time.Second
+
 func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID int64) {
+	start := time.Now()
 	var req seriesRequest
 	if !decodeStrict(w, r, &req) {
 		return
@@ -485,22 +556,63 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 		writeUpgradeRequired(w, msg, plan)
 		return
 	}
+	// The reads wait for a slot rather than fail for want of one (readSlots).
+	// A caller that left while it waited is owed no answer.
+	queued := time.Now()
+	release, err := takeReadSlot(ctx)
+	if err != nil {
+		return
+	}
+	defer release()
+	waited := time.Since(queued)
+	defer func() { logSlowSeries(tenantID, req.Queries, time.Since(start), waited) }()
+	ctx, cancel := context.WithTimeout(ctx, seriesReadGuard)
+	defer cancel()
 	projectID := h.currentProject(ctx, r, tenantID)
 	qb := query.New(tenantID, projectID)
 	now := time.Now().UTC()
 	memo := &oldestMemo{h: h, tenantID: tenantID, projectID: projectID}
 	out := make([]any, 0, len(req.Queries))
 	for _, q := range req.Queries {
-		s, err := h.oneSeries(ctx, qb, tenantID, projectID, q, now, memo)
-		if err != nil {
-			// No partial body: a board that draws some of its charts and
-			// silently drops the rest reads as measured, and it is not.
-			writeAPIErr(w, http.StatusInternalServerError, "read_failed")
-			return
+		var s map[string]any
+		if s, err = h.oneSeries(ctx, qb, tenantID, projectID, q, now, memo); err != nil {
+			break
 		}
 		out = append(out, s)
 	}
+	release()
+	if err != nil {
+		// No partial body: a board that draws some of its charts and
+		// silently drops the rest reads as measured, and it is not.
+		writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+		return
+	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"series": out})
+}
+
+// logSlowSeries logs one line for a series request past slowSeriesRead, the
+// queue wait included and also given apart. It is the measurement that month
+// buckets and declared label indexes wait for, so it names what either would
+// change: the sources, the ranges, the buckets, and whether labels filtered.
+func logSlowSeries(tenantID int64, qs []seriesQuery, took, waited time.Duration) {
+	if took <= slowSeriesRead {
+		return
+	}
+	distinct := func(field func(seriesQuery) string) []string {
+		var out []string
+		for _, q := range qs {
+			if v := field(q); v != "" && !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	slog.Warn("series: slow read", "tenant_id", tenantID, "queries", len(qs),
+		"sources", distinct(func(q seriesQuery) string { return q.Source }),
+		"ranges", distinct(func(q seriesQuery) string { return q.Range }),
+		"buckets", distinct(func(q seriesQuery) string { return q.Bucket }),
+		"labels", slices.ContainsFunc(qs, func(q seriesQuery) bool { return len(q.Labels) > 0 }),
+		"ms", took.Milliseconds(), "wait_ms", waited.Milliseconds())
 }
 
 // oneSeries answers one query. An empty project is zeros and nulls, never an
@@ -508,8 +620,12 @@ func (h *writeAPI) postSeries(w http.ResponseWriter, r *http.Request, tenantID i
 // A read that failed is an error, though — a chart may not print a number
 // nothing measured.
 func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenantID, projectID int64, q seriesQuery, now time.Time, memo *oldestMemo) (map[string]any, error) {
-	from, to, r, _ := seriesWindow(q.Range, now)
-	if q.Source == "people" {
+	// A bucket keeps the range's span and lands the window on its own boundary.
+	// validateSeries allows one only on a read with points, so the two folds
+	// below always get their range's own step.
+	r := rebucket(seriesRanges[q.Range], q.Bucket)
+	from, to := r.window(now)
+	if q.Source == "people" && !q.bareName() {
 		return h.peopleSeries(ctx, tenantID, projectID, q, from, to, r)
 	}
 	if len(q.Group) > 0 {
@@ -522,8 +638,8 @@ func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenant
 	case "logs":
 		points, total, previous, err = h.logsSeries(ctx, qb, q, from, to, r, memo)
 	case "check":
-		points, total, previous, err = h.checkSeries(ctx, tenantID, q, from, to, r)
-	case "event":
+		points, total, previous, err = h.checkSeries(ctx, tenantID, projectID, q, from, to, r)
+	case "event", "people":
 		points, total, previous, err = h.eventSeries(ctx, tenantID, projectID, q, from, to, r)
 	case "metric":
 		points, total, previous, err = h.metricSeries(ctx, tenantID, projectID, q, from, to, r)
@@ -586,12 +702,13 @@ func groupedAnswer(q seriesQuery, from, to time.Time, r seriesRange, rows []any)
 	}
 }
 
-// peopleSeries answers the people source's four reads, every one a GROUP BY
-// over events with a person behind them. The shape picks the read: steps name
-// a funnel's events; cohort "week" the retention grid; a group of one narrows
-// one event name to one label's values (breakdown); a group of two folds one
-// event name by its arm and stat label keys (an A/B test). In both grouped
-// shapes `name` is the event name.
+// peopleSeries answers the people source's four grouped reads, every one a
+// GROUP BY over events with a person behind them. The shape picks the read:
+// steps name a funnel's events; cohort "week" the retention grid; a group of
+// one narrows one event name to one label's values (breakdown); a group of two
+// folds one event name by its arm and stat label keys (an A/B test). In both
+// grouped shapes `name` is the event name. A bare name has a time axis, and
+// eventSeries answers it.
 func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
 	rows := []any{}
 	if h.pgs != nil {
@@ -816,11 +933,17 @@ func (h *writeAPI) runSeriesBuckets(ctx context.Context, lq query.LogQuery) ([]p
 	return out, rows.Err()
 }
 
+// eventSeries counts one event name per bucket, or for a bare-name people
+// query the distinct people behind it, either one narrowed by the query's
+// labels. Events add up across buckets, so their total is the buckets' sum.
+// People do not: one person active in two buckets is one person in the
+// window, so their total is a read of its own, one bucket the window's width.
 func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
 	if h.pgs == nil {
 		return nil, nil, nil, nil
 	}
-	rows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, from, to, r.step)
+	people := q.Source == "people"
+	rows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from, to, r.step)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -839,7 +962,17 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	}
 	points, total := countPoints(rows, r, from, o)
 	span := to.Sub(from)
-	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, from.Add(-span), from, int(span/time.Second))
+	if people && total != nil {
+		window, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from, to, int(span/time.Second))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		total = int64(0)
+		if len(window) > 0 {
+			total = window[0].Count
+		}
+	}
+	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -847,30 +980,39 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 }
 
 // checkNames is what the check source reads: the uptime share, the whole
-// response time, and the four phases a probe measures.
+// response time, the four phases a probe measures, and two percentiles of the
+// response time (checkPercentiles).
 var checkNames = map[string]bool{
 	"response": true, "uptime": true, "dns": true, "tcp": true, "tls": true, "wait": true,
+	"p50": true, "p95": true,
 }
 
+var checkPercentiles = map[string]float64{"p50": 0.5, "p95": 0.95}
+
 // checkSeries answers `response` (the average response time of the ok probes),
-// `uptime` (their share) or one of the four phases. An unknown check or an
-// unknown name answers a null series rather than an error: the widget names
-// something that used to exist, and a chart saying "no data" is the honest
-// reading.
-func (h *writeAPI) checkSeries(ctx context.Context, tenantID int64, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
+// `uptime` (their share), one of the four phases, or a percentile. An unknown
+// check or an unknown name answers a null series rather than an error: the
+// widget names something that used to exist, and a chart saying "no data" is
+// the honest reading.
+func (h *writeAPI) checkSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) ([]any, any, any, error) {
 	if h.pgs == nil || !checkNames[q.Name] {
 		return nil, nil, nil, nil
 	}
 	mon, err := h.pool.Queries().GetMonitorByPublicID(ctx, sqlc.GetMonitorByPublicIDParams{
 		PublicID: parseUUID(q.Where["check"]), TenantID: tenantID,
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The widget names a check that is gone: a null series says so. A read
-		// that broke on the way to that answer does not.
+	// The widget names a check that is gone, or one of a sibling project of
+	// this workspace, which this board does not reach and so reads exactly
+	// like one that is gone: a null series says so. A read that broke on the
+	// way to that answer does not.
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && mon.ProjectID != projectID) {
 		return nil, nil, nil, nil
 	}
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if p, ok := checkPercentiles[q.Name]; ok {
+		return h.checkPercentileSeries(ctx, tenantID, mon.ID, p, from, to, r)
 	}
 	rows, err := h.pgs.CheckBuckets(ctx, tenantID, mon.ID, from, to, r.step)
 	if err != nil {
@@ -895,6 +1037,40 @@ func (h *writeAPI) checkSeries(ctx context.Context, tenantID int64, q seriesQuer
 		accCheck(&prev, b)
 	}
 	return points, checkValue(q.Name, whole), checkValue(q.Name, prev), nil
+}
+
+// checkPercentileSeries answers p50 and p95. A percentile does not add up the
+// way a sum and a count do, so the window's and the previous span's are reads
+// of their own, one bucket wide, rather than a fold of the buckets. A bucket
+// with no ok probe is null.
+func (h *writeAPI) checkPercentileSeries(ctx context.Context, tenantID, monitorID int64, p float64, from, to time.Time, r seriesRange) ([]any, any, any, error) {
+	read := func(lo, hi time.Time, step, buckets int) ([]any, error) {
+		rows, err := h.pgs.CheckPercentile(ctx, tenantID, monitorID, p, lo, hi, step)
+		if err != nil {
+			return nil, err
+		}
+		points := make([]any, buckets)
+		for _, b := range rows {
+			if b.Index >= 0 && b.Index < int64(buckets) {
+				points[b.Index] = b.Ms
+			}
+		}
+		return points, nil
+	}
+	span := to.Sub(from)
+	points, err := read(from, to, r.step, r.buckets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	total, err := read(from, to, int(span/time.Second), 1)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prev, err := read(from.Add(-span), from, int(span/time.Second), 1)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return points, total[0], prev[0], nil
 }
 
 // accCheck adds one bucket into a running whole, so a single bucket's reading
@@ -1038,6 +1214,20 @@ func writeLayout(w http.ResponseWriter, layout []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(layout)
+}
+
+// boardRev is the revision a save checks its base against: a hash of the
+// layout as a document, never as text. The column is jsonb, so a read hands
+// back postgres's own spelling of what a save wrote, and re-encoding through
+// one encoder first (sorted keys, no spaces) makes every spelling of one
+// document one rev. Every caller hands it JSON, the column or a document just
+// marshalled, so neither step can fail.
+func boardRev(layout []byte) string {
+	var doc any
+	_ = json.Unmarshal(layout, &doc)
+	canon, _ := json.Marshal(doc)
+	sum := sha256.Sum256(canon)
+	return hex.EncodeToString(sum[:8])
 }
 
 // board is one stored board as every door needs it: its identity, who curated
@@ -1477,17 +1667,20 @@ func (h *writeAPI) createBoard(w http.ResponseWriter, r *http.Request, d boardDo
 // getBoardLayout answers one board's document on both doors. The alias is
 // allowed not to exist: a project that never saved a board reads the empty
 // layout, never a 404, because the front reads a 404 there as a core without
-// this endpoint.
+// this endpoint. Every read carries the document's rev, the base a save of it
+// sends back; it is a header of its own and not an ETag, because a proxy that
+// compresses the answer rewrites those.
 func (h *writeAPI) getBoardLayout(w http.ResponseWriter, r *http.Request, d boardDoor, raw string) {
 	b, found, ok := h.liveBoard(r.Context(), w, d, raw)
 	if !ok {
 		return
 	}
-	if !found {
-		writeLayout(w, emptyLayout)
-		return
+	layout := emptyLayout
+	if found {
+		layout = b.layout
 	}
-	writeLayout(w, b.layout)
+	w.Header().Set("X-Board-Rev", boardRev(layout))
+	writeLayout(w, layout)
 }
 
 // putBoardLayout replaces one board, on both doors. The narrowness the key
@@ -1576,7 +1769,9 @@ func (h *writeAPI) putBoardLayout(w http.ResponseWriter, r *http.Request, d boar
 // transaction. A widget moved between two boards is two documents, and saving
 // one without the other would duplicate it or lose it; one refused board
 // refuses them all, which is what the rollback is for. Session only, so every
-// board it writes is a human's curation.
+// board it writes is a human's curation. An entry that carries the rev its
+// edit began from is refused when the board moved since — a card the agent
+// appended meanwhile would otherwise be erased by a draft that never held it.
 func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoor) {
 	// decodeStrict's own 1 MB limit bounds the request; each board's stored
 	// document is then held to the same 64 KB a single save is, below, so the
@@ -1585,6 +1780,8 @@ func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoo
 		Boards []struct {
 			ID     string                 `json:"id"`
 			Layout apigen.DashboardLayout `json:"layout"`
+			// "" is no base at all, exactly like an absent one.
+			Base string `json:"base"`
 		} `json:"boards"`
 	}
 	if !decodeStrict(w, r, &req) {
@@ -1648,6 +1845,29 @@ func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoo
 				return
 			}
 		}
+		// The base is compared on the row this entry writes, locked until the
+		// save commits, so nothing lands between the comparison and the write.
+		// A Main this save just laid down was the empty layout it is served as;
+		// a row gone since it resolved moved as surely as one rewritten. The
+		// deferred rollback undoes whatever this save already wrote.
+		if entry.Base != "" {
+			current := emptyLayout
+			var err error
+			if !laid {
+				err = tx.QueryRow(ctx,
+					`SELECT layout FROM dashboard WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+					b.id, d.tenantID).Scan(&current)
+			}
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+				return
+			}
+			if err != nil || boardRev(current) != entry.Base {
+				writeAPIErrMsg(w, http.StatusConflict, "board_changed",
+					"this dashboard changed since it was read: "+entry.ID)
+				return
+			}
+		}
 		if !laid {
 			rows, err := q.PutBoardLayout(ctx, sqlc.PutBoardLayoutParams{
 				ID: b.id, TenantID: d.tenantID, Layout: stored, WrittenBy: "session",
@@ -1661,7 +1881,11 @@ func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoo
 				return
 			}
 		}
-		saved = append(saved, map[string]any{"id": uuidStr(b.publicID), "layout": json.RawMessage(stored)})
+		// The rev of what was stored, which is the rev the next read carries:
+		// boardRev reads the document, not postgres's spelling of it.
+		saved = append(saved, map[string]any{
+			"id": uuidStr(b.publicID), "layout": json.RawMessage(stored), "rev": boardRev(stored),
+		})
 	}
 	if err := tx.Commit(ctx); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "write_failed")
@@ -2043,11 +2267,19 @@ func validateLayout(doc apigen.DashboardLayout) string {
 		// stored here is a card that vanishes on the next read and is erased by the next save.
 		case len(wd.Metrics) == 0:
 			return fmt.Sprintf("widget %q reads nothing", wd.Id)
+		case wd.Kind == apigen.DashboardWidgetKindRatio && len(wd.Metrics) != 2:
+			return fmt.Sprintf("widget %q: a ratio reads exactly two refs, a count and what it is out of", wd.Id)
 		}
 		seen[wd.Id] = true
 		for _, m := range wd.Metrics {
 			if !m.Source.Valid() {
 				return fmt.Sprintf("widget %q reads an unknown source %q", wd.Id, string(m.Source))
+			}
+			// A count the contract does not name is refused here, so a stored
+			// board never carries a typo: the app drops a ref with an unknown
+			// count on read, and a mistyped one would vanish on the next Save.
+			if m.Count != nil && !m.Count.Valid() {
+				return fmt.Sprintf("widget %q counts an unknown %q", wd.Id, string(*m.Count))
 			}
 		}
 	}

@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { track, flush } from './index.js';
+import { releaseFrom } from './release.js';
 
 function appVersion(): string {
   try {
@@ -19,9 +20,11 @@ const g = globalThis as { __upcontrolAuto?: boolean };
 if (!g.__upcontrolAuto) {
   g.__upcontrolAuto = true;
 
+  const release = releaseFrom(process.env);
   track('app_started', {
     version: appVersion(),
     env: process.env.NODE_ENV || 'production',
+    ...(release && { release }),
   });
 
   process.on('uncaughtExceptionMonitor', (err: unknown) => {

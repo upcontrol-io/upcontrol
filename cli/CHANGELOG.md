@@ -3,6 +3,24 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-10-14 - @upcontrol/sdk 1.1.0
+
+- **`app_started` names the deploy it booted from.** The automatic event carried only
+  `version`, so a project on Vercel or Render whose `package.json` version never changes
+  marked no release at all. It now also carries `release`, read from the first non-empty of
+  these environment variables, in this order: `UPCONTROL_RELEASE`, `VERCEL_GIT_COMMIT_SHA`,
+  `RENDER_GIT_COMMIT`, `RAILWAY_GIT_COMMIT_SHA`, `HEROKU_SLUG_COMMIT`, `FLY_IMAGE_REF`,
+  `K_REVISION`. Set `UPCONTROL_RELEASE` on a platform the list does not know. The board's
+  release marks read it: a release is `release`, else `version` unless that is `0`.
+- **The value is trimmed and cut, and the field is omitted rather than sent empty.**
+  Surrounding whitespace goes, then the first 64 characters are kept: whole characters, so a
+  cut never lands inside a surrogate pair. A variable that is unset, empty or whitespace-only
+  is skipped to the next one, and when none is left the event has no `release` field at all.
+- Nothing else on the wire changes. `version` and `env` on `app_started` are exactly what
+  they were, `install_verified` is untouched and no other event gains a field, which is why
+  this is a minor. A server that draws no release marks stores `release` as one more
+  attribute and does nothing with it. `SDK_VERSION` is `1.1.0`.
+
 ## 2026-09-21 - upcontrol 0.4.0
 
 - **A project holds several named boards, and `board` can see all of them.**

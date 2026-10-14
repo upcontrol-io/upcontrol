@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // CatalogEvent is one event name the project sent inside the catalog window.
@@ -110,7 +112,9 @@ func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, si
 // multiplies rows by the field count, and the picker only needs the shape of
 // recent traffic. The `uc.` prefix is the wire's own namespace (`uc.variant`,
 // `uc.stat`), never a dimension somebody would rank people by, so those keys
-// are dropped. Page views get a small scan of their own: on a busy site they
+// are dropped, and so is `service`: ingest copies the sender's service onto
+// every event, so it would rank first everywhere and push a real field past
+// perEvent. Page views get a small scan of their own: on a busy site they
 // would fill the whole `scan` and push every rarer event's fields out. Every
 // page view carries an actor, so the non-empty actor test filters nothing
 // there; it lets the people index serve that scan.
@@ -130,7 +134,7 @@ func (s *Store) CatalogEventFields(ctx context.Context, tenantID, projectID int6
 			            AND name = 'uc.pageview' AND actor <> ''
 			          ORDER BY ts DESC LIMIT 1000)) recent
 			    CROSS JOIN LATERAL jsonb_each_text(labels) AS pair(key, value)
-			   WHERE key NOT LIKE 'uc.%'
+			   WHERE key NOT LIKE 'uc.%' AND key <> 'service'
 			   GROUP BY name, key
 		) f WHERE rn <= $5 ORDER BY name, times DESC`,
 		tenantID, projectID, since, scan, perEvent)
@@ -315,28 +319,40 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 }
 
 // EventBuckets counts a named event into buckets of stepSeconds over
-// [from, to). One bucket as wide as the whole span is how a previous-span
-// total is read.
-func (s *Store) EventBuckets(ctx context.Context, tenantID, projectID int64, name string, from, to time.Time, stepSeconds int) ([]Bucket, error) {
+// [from, to), only the rows whose labels hold every pair of `labels` when it
+// has any. One bucket as wide as the whole span is how a previous-span total
+// is read. `people` counts the distinct people behind the rows instead, and
+// people do not add up across buckets: one person active in two buckets is one
+// person in the window, so a people total is this read with one bucket that
+// wide, never a sum of narrower ones.
+func (s *Store) EventBuckets(ctx context.Context, tenantID, projectID int64, name string, labels map[string]string, people bool, from, to time.Time, stepSeconds int) ([]Bucket, error) {
+	fold, actors := "count(*)::bigint", ""
+	if people {
+		fold, actors = peopleCount, " AND actor <> ''"
+	}
+	narrow, args := eventLabels(labels, []any{tenantID, projectID, name, float64(from.Unix()), from, to})
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+bucketExpr(4, stepSeconds)+` AS bucket, count(*)::bigint
+		SELECT `+bucketExpr(4, stepSeconds)+` AS bucket, `+fold+`
 		  FROM events
-		 WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND ts >= $5 AND ts < $6
-		 GROUP BY bucket ORDER BY bucket`,
-		tenantID, projectID, name, float64(from.Unix()), from, to)
+		 WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND ts >= $5 AND ts < $6`+actors+narrow+`
+		 GROUP BY bucket ORDER BY bucket`, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []Bucket{}
-	for rows.Next() {
-		var b Bucket
-		if err := rows.Scan(&b.Index, &b.Count); err != nil {
-			return nil, err
-		}
-		out = append(out, b)
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Bucket])
+}
+
+// eventLabels is the label filter an event read appends to its WHERE, and the
+// args it binds: "" and args untouched when there is nothing to narrow by, so
+// an unfiltered read keeps its statement text exactly. The pairs ride as one
+// parameter, never in the SQL, and containment is exact because every label
+// value is stored as a JSON string.
+func eventLabels(labels map[string]string, args []any) (string, []any) {
+	if len(labels) == 0 {
+		return "", args
 	}
-	return out, rows.Err()
+	args = append(args, string(jsonb(labels)))
+	return fmt.Sprintf(" AND labels @> $%d::jsonb", len(args)), args
 }
 
 // MeasurableSQL is the unmeasured-exclusion predicate every uptime or
@@ -396,6 +412,33 @@ func (s *Store) CheckBuckets(ctx context.Context, tenantID, monitorID int64, fro
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// PercentileBucket is one bucket's percentile of a check's response time.
+type PercentileBucket struct {
+	Index int64
+	Ms    float64
+}
+
+// CheckPercentile reads the p-th percentile (0 to 1) of the ok probes' response
+// time per bucket, through the same join and the same could-not-measure
+// exclusion CheckBuckets reads. A bucket with no ok probe has no row, which the
+// caller draws as null. A percentile does not add up, so a window's is this
+// read with one bucket that wide, never a fold of narrower ones.
+func (s *Store) CheckPercentile(ctx context.Context, tenantID, monitorID int64, p float64, from, to time.Time, stepSeconds int) ([]PercentileBucket, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+bucketExpr(3, stepSeconds)+` AS bucket,
+		       percentile_cont($6::float8) WITHIN GROUP (ORDER BY total_ms)
+		  FROM checks c
+		  JOIN monitor m ON m.id = $2 AND m.tenant_id = $1 AND m.target_id = c.target_id
+		 WHERE c.ts >= $4 AND c.ts < $5 AND c.ok AND c.total_ms IS NOT NULL
+		   AND `+MeasurableSQL+`
+		 GROUP BY bucket ORDER BY bucket`,
+		tenantID, monitorID, float64(from.Unix()), from, to, p)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[PercentileBucket])
 }
 
 // MetricBuckets averages a metric's readings per bucket and keeps the newest

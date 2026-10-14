@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
@@ -515,6 +516,235 @@ func TestTheAtomicSaveWritesEveryBoardOrNone(t *testing.T) {
 	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards",
 		`{"boards":[`+strings.Join(many, ",")+`]}`); code != http.StatusBadRequest {
 		t.Fatalf("%d boards in one save is a 400; got %d %s", len(many), code, body)
+	}
+}
+
+// readRev reads a board through the session door with its X-Board-Rev, the
+// base the next save of it sends back.
+func readRev(t *testing.T, h *writeAPI, path string) (string, string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+	rev := w.Header().Get("X-Board-Rev")
+	if w.Code != http.StatusOK || rev == "" {
+		t.Fatalf("GET %s = %d %s, rev %q", path, w.Code, w.Body.String(), rev)
+	}
+	return strings.TrimSpace(w.Body.String()), rev
+}
+
+// saveEntry spells one board of a batch save; an empty base sends none.
+func saveEntry(id, layout, base string) string {
+	if base == "" {
+		return `{"id":"` + id + `","layout":` + layout + `}`
+	}
+	return `{"id":"` + id + `","layout":` + layout + `,"base":"` + base + `"}`
+}
+
+func saveBoardsCall(t *testing.T, h *writeAPI, entries ...string) (int, string) {
+	t.Helper()
+	return sessionCall(t, h, http.MethodPut, "/v1/dashboards", `{"boards":[`+strings.Join(entries, ",")+`]}`)
+}
+
+// A person's Save begun before the agent wrote would erase what the agent
+// wrote. A base that no longer matches refuses the whole save and writes
+// nothing at all, not even a board ahead of it whose base still matched.
+func TestASaveFromAStaleBaseIsRefusedWhole(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	key := seedAgentKey(t, pool, tenantID, boardOf(t, pool, tenantID))
+
+	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards/main", curatedBoard); code != http.StatusOK {
+		t.Fatalf("the person's board = %d %s", code, body)
+	}
+	moved := listing(t, h).Boards[0].ID
+	untouched := newBoard(t, h, "Sales")
+	_, movedRev := readRev(t, h, "/v1/dashboards/"+moved)
+	_, untouchedRev := readRev(t, h, "/v1/dashboards/"+untouched)
+
+	// While the person edits, the agent appends to the board they curated.
+	if code, body := keyCall(t, h, http.MethodPost, "/v1/dashboards/"+moved+"/widgets", key, agentBlock); code != http.StatusOK {
+		t.Fatalf("the agent's append = %d %s", code, body)
+	}
+	appended, _ := readRev(t, h, "/v1/dashboards/"+moved)
+
+	// The board that did not move goes first, so its write is already made
+	// when the moved one refuses the save.
+	code, body := saveBoardsCall(t, h,
+		saveEntry(untouched, oneWidgetBoard, untouchedRev),
+		saveEntry(moved, oneWidgetBoard, movedRev))
+	if code != http.StatusConflict || !strings.Contains(body, "board_changed") {
+		t.Fatalf("a save from a stale base is a 409 board_changed; got %d %s", code, body)
+	}
+	for id, want := range map[string]string{moved: appended, untouched: string(emptyLayout)} {
+		if code, got := sessionCall(t, h, http.MethodGet, "/v1/dashboards/"+id, ""); code != http.StatusOK || !sameBoard(t, got, want) {
+			t.Fatalf("nothing may be written, %s included; got %d %s", id, code, got)
+		}
+	}
+}
+
+// A base that matches saves, and the answer's rev is the rev the next read
+// carries, so a person who saves twice never trips over their own save. A
+// save that sends no base is the save it always was.
+func TestAMatchingBaseSavesAndAnswersTheNextReadsRev(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+
+	body, rev := readRev(t, h, "/v1/dashboards/main")
+	if body != string(emptyLayout) || rev != boardRev(emptyLayout) {
+		t.Fatalf("the alias with nothing stored is the empty board, rev and all; got %s, rev %s", body, rev)
+	}
+
+	for i, layout := range []string{curatedBoard, oneWidgetBoard} {
+		code, answer := saveBoardsCall(t, h, saveEntry("main", layout, rev))
+		if code != http.StatusOK {
+			t.Fatalf("save %d from the current base = %d %s", i, code, answer)
+		}
+		var out struct {
+			Boards []struct {
+				Rev string `json:"rev"`
+			} `json:"boards"`
+		}
+		if err := json.Unmarshal([]byte(answer), &out); err != nil {
+			t.Fatalf("decode the save's answer: %v (%s)", err, answer)
+		}
+		_, next := readRev(t, h, "/v1/dashboards/main")
+		if len(out.Boards) != 1 || out.Boards[0].Rev != next {
+			t.Fatalf("save %d answers the rev the next read carries, %s; got %s", i, next, answer)
+		}
+		rev = next
+	}
+	if code, body := saveBoardsCall(t, h, saveEntry("main", curatedBoard, "")); code != http.StatusOK {
+		t.Fatalf("a save with no base = %d %s", code, body)
+	}
+	// An empty base is no base, never one that matches nothing.
+	if code, body := saveBoardsCall(t, h, `{"id":"main","layout":`+oneWidgetBoard+`,"base":""}`); code != http.StatusOK {
+		t.Fatalf("a save with an empty base = %d %s", code, body)
+	}
+}
+
+// A name is not the layout: renaming moves updated_at and never the rev, so a
+// tab renamed mid-edit saves from the base it began with. The alias with
+// nothing stored is laid down by its rename as the empty board it was served
+// as, which is the board its rev already named.
+func TestARenameLeavesTheRevAlone(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Growth", 1)
+	h := planTenantAPI(t, pool, tenantID)
+
+	for _, name := range []string{"Overview", "Renamed"} {
+		_, rev := readRev(t, h, "/v1/dashboards/main")
+		if code, body := sessionCall(t, h, http.MethodPatch, "/v1/dashboards/main", `{"name":"`+name+`"}`); code != http.StatusOK {
+			t.Fatalf("renaming to %s = %d %s", name, code, body)
+		}
+		if _, after := readRev(t, h, "/v1/dashboards/main"); after != rev {
+			t.Fatalf("renaming to %s moved the rev from %s to %s", name, rev, after)
+		}
+		if code, body := saveBoardsCall(t, h, saveEntry("main", curatedBoard, rev)); code != http.StatusOK {
+			t.Fatalf("a save from the pre-rename base = %d %s", code, body)
+		}
+	}
+}
+
+// The race the check exists for, on the board that has no row yet: the person
+// reads the empty alias, the agent lays it down, and the person's Save, begun
+// from the empty board, is refused rather than erasing the agent's.
+func TestAKeyWriteBetweenTheReadAndTheSaveRefusesTheSave(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	key := seedAgentKey(t, pool, tenantID, boardOf(t, pool, tenantID))
+
+	_, rev := readRev(t, h, "/v1/dashboard")
+	if code, body := keyCall(t, h, http.MethodPut, "/v1/dashboard", key, curatedBoard); code != http.StatusOK {
+		t.Fatalf("the agent's write = %d %s", code, body)
+	}
+	code, body := saveBoardsCall(t, h, saveEntry("main", oneWidgetBoard, rev))
+	if code != http.StatusConflict || !strings.Contains(body, "board_changed") || !strings.Contains(body, mainBoard) {
+		t.Fatalf("a save begun before the agent wrote is a 409 naming the board; got %d %s", code, body)
+	}
+	if code, got := getBoard(t, h); code != http.StatusOK || !sameBoard(t, got, curatedBoard) {
+		t.Fatalf("the agent's board must be untouched; got %d %s", code, got)
+	}
+	// Re-read, the same save goes through.
+	_, rev = readRev(t, h, "/v1/dashboard")
+	if code, body := saveBoardsCall(t, h, saveEntry("main", oneWidgetBoard, rev)); code != http.StatusOK {
+		t.Fatalf("a save from the fresh base = %d %s", code, body)
+	}
+}
+
+// The alias can move under a save after it resolved. The person read an empty
+// Main; then the oldest board is deleted and Main laid down again with the
+// agent's cards, in one transaction the save's check waits on. The save
+// resolved the alias to the row that move deletes, so its locked read finds
+// no row at all, and that is a board that moved: the save must refuse rather
+// than answer as if the agent's new Main were not there.
+func TestAnAliasThatMovesAfterTheCheckRefusesTheSave(t *testing.T) {
+	pool := openProjectsGateDB(t)
+	tenantID := seedPlanTenant(t, pool, "Free", 1)
+	h := planTenantAPI(t, pool, tenantID)
+	projectID := boardOf(t, pool, tenantID)
+	ctx := t.Context()
+
+	if code, body := sessionCall(t, h, http.MethodPut, "/v1/dashboards/main", string(emptyLayout)); code != http.StatusOK {
+		t.Fatalf("the empty Main = %d %s", code, body)
+	}
+	// The empty board's rev, so the base matches the row the save resolves and
+	// only the move can refuse it.
+	if _, rev := readRev(t, h, "/v1/dashboards/main"); rev != boardRev(emptyLayout) {
+		t.Fatalf("the empty Main reads as the empty board's rev; got %s", rev)
+	}
+
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the move: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var mover int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&mover); err != nil {
+		t.Fatalf("read the mover's pid: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM dashboard WHERE tenant_id = $1 AND project_id = $2`,
+		tenantID, projectID); err != nil {
+		t.Fatalf("delete the oldest board: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO dashboard (tenant_id, project_id, name, layout, written_by)
+		VALUES ($1, $2, 'Main', $3::jsonb, 'key')`, tenantID, projectID, curatedBoard); err != nil {
+		t.Fatalf("lay Main down again: %v", err)
+	}
+
+	type answer struct {
+		code int
+		body string
+	}
+	saved := make(chan answer, 1)
+	go func() {
+		code, body := saveBoardsCall(t, h, saveEntry("main", oneWidgetBoard, boardRev(emptyLayout)))
+		saved <- answer{code, body}
+	}()
+	// The save is inside its check once it waits on the deleted row.
+	for waiting := false; !waiting; {
+		select {
+		case got := <-saved:
+			t.Fatalf("the save answered without waiting on the deleted row: %d %s", got.code, got.body)
+		case <-time.After(10 * time.Millisecond):
+		}
+		if err := pool.Raw().QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY (pg_blocking_pids(pid)))`,
+			mover).Scan(&waiting); err != nil {
+			t.Fatalf("watch the save wait: %v", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the move: %v", err)
+	}
+	got := <-saved
+	if got.code != http.StatusConflict || !strings.Contains(got.body, "board_changed") || !strings.Contains(got.body, mainBoard) {
+		t.Fatalf("a save whose alias moved under it is a 409 naming it; got %d %s", got.code, got.body)
+	}
+	if code, body := getBoard(t, h); code != http.StatusOK || !sameBoard(t, body, curatedBoard) {
+		t.Fatalf("the agent's Main must be untouched; got %d %s", code, body)
 	}
 }
 

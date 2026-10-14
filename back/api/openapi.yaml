@@ -793,7 +793,8 @@ components:
         id: { type: string, example: "w_1" }
         kind:
           type: string
-          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap]
+          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap, ratio]
+          description: "`ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share."
         title: { type: string }
         metrics:
           type: array
@@ -912,6 +913,46 @@ components:
             properties:
               id: { type: string, description: "A board id, or the alias `main`." }
               layout: { $ref: "#/components/schemas/DashboardLayout" }
+              base:
+                type: string
+                maxLength: 64
+                description: >
+                  Request only, optional: the `X-Board-Rev` the edit began from.
+                  When it no longer matches the stored board, the whole save is
+                  refused with 409 `board_changed` and nothing is written, so a
+                  card the agent appended meanwhile is never erased. Absent, or
+                  an empty string, means the caller predates the check.
+              rev:
+                type: string
+                description: "Answer only: the saved board's new `X-Board-Rev`, the base of the next edit."
+    DashboardMarks:
+      type: object
+      description: "What happened on the project's clock inside a range, for the board's charts to mark: newest last."
+      required: [marks]
+      properties:
+        marks:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardMark" }
+    DashboardMark:
+      type: object
+      required: [kind, at, label]
+      properties:
+        kind:
+          type: string
+          enum: [deploy, release, incident]
+          description: >
+            `deploy`: an event the project sent under a deploy name (a hook, or
+            `track('deploy')`), several within ten minutes counted once.
+            `release`: the first time a new `release` (else `version`) appeared
+            on `app_started`. `incident`: an incident of the project, from
+            `at` to `until`.
+        at: { type: string, format: date-time }
+        until:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Incidents only: when it resolved. Absent while it is still open."
+        label: { type: string, description: "What the mark is: a short sha, a release, an incident title." }
     DashboardCatalog:
       type: object
       description: "What this project actually sent over the last 7 days. Every list is present and an empty one is a real answer: a project that sends nothing yet is not an error, and the board draws that as an empty picker rather than a failure."
@@ -1000,16 +1041,35 @@ components:
         source:
           type: string
           enum: [logs, check, event, metric, people]
-          description: "`people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed."
+          description: "`people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed."
         range:
           type: string
           enum: ["1h", "4h", "12h", "24h", "7d", "31d", "365d"]
         name:
           type: string
-          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls` or `wait`; event: the event name; metric: the metric name; people: the event name a breakdown or an A/B test reads."
+          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads."
         where:
           type: object
           additionalProperties: { type: string }
+        labels:
+          type: object
+          maxProperties: 3
+          additionalProperties: { type: string, maxLength: 256 }
+          description: >
+            Event reads and bare-name people reads only: count only the rows
+            whose labels hold every one of these pairs (keys 1-60 bytes, values
+            at most 256 bytes, no control characters).
+            A field of its own, not a `where` key, so a core that predates it
+            refuses the query as an unknown field instead of answering the
+            unfiltered count under a filtered caption.
+        bucket:
+          type: string
+          enum: [hour, day]
+          description: >
+            Read in UTC hours or UTC days instead of the range's own bucket. The
+            span stays the range's; a bucket that would leave one bucket or more
+            than 744 is refused, and so is a bucket on a read with no time axis
+            (a group, steps or a cohort).
         group:
           type: array
           maxItems: 2
@@ -3088,6 +3148,10 @@ paths:
       responses:
         "200":
           description: OK
+          headers:
+            X-Board-Rev:
+              description: "A hash of the stored layout in one canonical JSON form, so spacing and key order never change it (of the empty layout when nothing is stored), the `base` a save of this board sends back. Not an ETag: a proxy that compresses the answer rewrites those."
+              schema: { type: string }
           content:
             {
               application/json:
@@ -3286,6 +3350,10 @@ paths:
         is resolved, exactly as the single save does; one refused board refuses
         them all. At most 16 boards a request, and each layout is held to the
         same 64 KB a single board is: a `bad_layout` names the board it is about.
+        A board sent with a `base` that no longer matches its stored revision
+        refuses the whole save with 409 `board_changed`, whose message names
+        the first board found moved: the caller re-reads every board it sent
+        and keeps its edit.
       requestBody:
         required: true
         content:
@@ -3306,6 +3374,7 @@ paths:
         "402": { $ref: "#/components/responses/PaymentRequired" }
         "403": { description: notify_role }
         "404": { description: unknown_board }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /v1/dashboards/{id}:
     parameters:
@@ -3324,6 +3393,10 @@ paths:
       responses:
         "200":
           description: OK
+          headers:
+            X-Board-Rev:
+              description: "A hash of the stored layout in one canonical JSON form, so spacing and key order never change it (of the empty layout when nothing is stored), the `base` a save of this board sends back."
+              schema: { type: string }
           content:
             {
               application/json:
@@ -3512,6 +3585,45 @@ paths:
             catalog is returned: an empty list is a claim about the project,
             and a list left short by a broken read would make that claim
             without measuring it.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/Error" } },
+            }
+
+  /v1/dashboard/marks:
+    get:
+      tags: [dashboard]
+      security:
+        - cookieAuth: []
+      x-hand-written: true
+      summary: >
+        The deploys, releases and incidents of the current project inside a
+        range, for the board's charts to mark. Gated like `/v1/series`: a range
+        wider than the plan's `historyDays` is a 402. Each kind reads at most its
+        latest 100 rows (deploys before the ten-minute fold), so the oldest part
+        of a long window can hold fewer marks than happened; an empty list is a
+        real answer.
+      parameters:
+        - name: range
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: ["1h", "4h", "12h", "24h", "7d", "31d", "365d"]
+      responses:
+        "200":
+          description: OK
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/DashboardMarks" } },
+            }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "500":
+          description: A read behind one of the kinds failed (`read_failed`).
           content:
             {
               application/json:

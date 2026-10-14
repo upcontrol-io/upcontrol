@@ -10,6 +10,7 @@ package pgstore
 
 import (
 	"context"
+	"maps"
 	"testing"
 	"time"
 
@@ -104,11 +105,51 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 		rowsPerPlan[1].Labels["plan"] != "free" || rowsPerPlan[1].Sum != 1 {
 		t.Fatalf("pro=3 events (the actorless one counts) then free=1; got %+v", rowsPerPlan)
 	}
+
+	// The bare name: the people behind one event per bucket. ada logs in in
+	// both five-minute halves, so the halves read 2 and 1 people and the
+	// window 2, never their sum 3; the actorless login is nobody. A label
+	// narrows the people the same way it narrows the events.
+	seedEvent(t, pool, from.Add(30*time.Second), "login", "ada", map[string]string{"method": "google"})
+	seedEvent(t, pool, from.Add(40*time.Second), "login", "grace", map[string]string{"method": "email"})
+	seedEvent(t, pool, from.Add(6*time.Minute), "login", "ada", map[string]string{"method": "google"})
+	seedEvent(t, pool, from.Add(6*time.Minute), "login", "", map[string]string{"method": "google"})
+	seedEvent(t, pool, from.Add(-5*time.Minute), "login", "linus", nil)
+	people := func(labels map[string]string, lo, hi time.Time, step int) map[int64]int64 {
+		t.Helper()
+		rows, err := s.EventBuckets(ctx, peopleTenant, peopleProject, "login", labels, true, lo, hi, step)
+		if err != nil {
+			t.Fatalf("people buckets: %v", err)
+		}
+		got := map[int64]int64{}
+		for _, b := range rows {
+			got[b.Index] = b.Count
+		}
+		return got
+	}
+	span := to.Sub(from)
+	for _, c := range []struct {
+		name   string
+		labels map[string]string
+		lo, hi time.Time
+		step   int
+		want   map[int64]int64
+	}{
+		{"per half", nil, from, to, 300, map[int64]int64{0: 2, 1: 1}},
+		{"the window, distinct", nil, from, to, int(span / time.Second), map[int64]int64{0: 2}},
+		{"the previous span", nil, from.Add(-span), from, int(span / time.Second), map[int64]int64{0: 1}},
+		{"by google, per half", map[string]string{"method": "google"}, from, to, 300, map[int64]int64{0: 1, 1: 1}},
+		{"by google, the window", map[string]string{"method": "google"}, from, to, int(span / time.Second), map[int64]int64{0: 1}},
+	} {
+		if got := people(c.labels, c.lo, c.hi, c.step); !maps.Equal(got, c.want) {
+			t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 func mustEventBuckets(t *testing.T, s *Store, name string, from, to time.Time) []Bucket {
 	t.Helper()
-	rows, err := s.EventBuckets(context.Background(), peopleTenant, peopleProject, name, from, to, 600)
+	rows, err := s.EventBuckets(context.Background(), peopleTenant, peopleProject, name, nil, false, from, to, 600)
 	if err != nil {
 		t.Fatalf("event buckets: %v", err)
 	}

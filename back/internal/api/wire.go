@@ -113,11 +113,36 @@ func aggregateHistory(rows []pgstore.LogRow) []pgstore.HistoryBump {
 	return out
 }
 
+// A log row's ts is the sender's claim, and logs has day partitions only around
+// today: a row whose ts has none fails the whole COPY it rides in, and the
+// batcher never retries a flush, so one stale or far-future line would take
+// every good row of its batch with it, other tenants' included. Outside these
+// bounds a plain line's log row is stamped with the receive time instead, and
+// an event gets no log row at all: events is not partitioned, so the event row
+// keeps the sender's own time, which a backfill needs, and a log twin stamped
+// now would count in the live logs panel and the log charts as a line sent
+// this minute.
+//
+// ponytail: both bounds sit inside the roller's horizon (worker.go
+// rollLogPartitions: the widest plan window of 720 h plus a day behind, 3 days
+// ahead) and are copied by hand. They must shrink if the widest plan window
+// ever drops below 30 days; derive them from the roller if that starts to bite.
+const (
+	logTSMaxAge   = 30 * 24 * time.Hour
+	logTSMaxAhead = 2 * 24 * time.Hour
+)
+
 // decodeRows decodes RowEnvelopes into LogRows plus promoted EventRows; an
 // event-named row is double-written. Labels are cloned: sha aliasing stays out.
+// A ts outside the log partitions (see logTSMaxAge) stamps a plain line's log
+// row with now and drops an event's log row: the event row keeps the sender's
+// own time. The envelope's service rides into the event's labels so an event
+// filters by service like its log twin.
 func decodeRows(rows [][]byte) ([]pgstore.LogRow, []pgstore.EventRow) {
 	logRows := make([]pgstore.LogRow, 0, len(rows))
 	var eventRows []pgstore.EventRow
+	now := time.Now().UTC()
+	oldest, newest := now.Add(-logTSMaxAge), now.Add(logTSMaxAhead)
 	for _, raw := range rows {
 		var env ingest.RowEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil {
@@ -136,15 +161,29 @@ func decodeRows(rows [][]byte) ([]pgstore.LogRow, []pgstore.EventRow) {
 			Fingerprint: env.Fingerprint,
 			Attrs:       env.Attrs,
 		}
-		if env.TS != "" {
-			lr.TS, _ = time.Parse(time.RFC3339Nano, env.TS)
+		ts, _ := time.Parse(time.RFC3339Nano, env.TS)
+		if ts.IsZero() {
+			ts = now
 		}
-		if lr.TS.IsZero() {
-			lr.TS = time.Now().UTC()
+		lr.TS = ts
+		outside := ts.Before(oldest) || ts.After(newest)
+		if outside {
+			lr.TS = now
 		}
-		logRows = append(logRows, lr)
+		if !outside || env.Event == "" {
+			logRows = append(logRows, lr)
+		}
 		if env.Event != "" {
 			labels := maps.Clone(env.Attrs)
+			// The envelope's service is a column, not an attr, so without this an
+			// event cannot be filtered by the service that sent it. A "service"
+			// label the sender set wins; Clone of nil attrs is nil, so allocate.
+			if _, set := labels["service"]; !set && env.Service != "" {
+				if labels == nil {
+					labels = map[string]string{}
+				}
+				labels["service"] = env.Service
+			}
 			// Ingest carries the deploy sha as commit_sha; read_api's eventText
 			// reads Labels["sha"] (read_api.go:741) — alias when sha is empty.
 			if labels["sha"] == "" && labels["commit_sha"] != "" {
@@ -153,7 +192,7 @@ func decodeRows(rows [][]byte) ([]pgstore.LogRow, []pgstore.EventRow) {
 			eventRows = append(eventRows, pgstore.EventRow{
 				TenantID:    uint64(env.TenantID),
 				ProjectID:   uint64(env.ProjectID),
-				TS:          lr.TS,
+				TS:          ts,
 				Name:        env.Event,
 				Labels:      labels,
 				Actor:       env.Actor,
