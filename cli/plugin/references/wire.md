@@ -64,7 +64,7 @@ from event names - so all a sender does is emit the events.
 | Feed | What to send |
 |---|---|
 | funnel | one named event per step, each with `uc.actor` |
-| retention | any event carrying `uc.actor`; the cohort is the week that actor was first seen |
+| retention | any event carrying `uc.actor`; the cohort is the week that actor was first seen. A card may also name one event, and then only that event counts, for the first week and for the returns: to follow one population, give its events one name (the one you would pass to `retention()`) |
 | A/B test | the same event name with `uc.variant` and `uc.stat` (`exposed` / `converted`), and the SAME `uc.actor` on both stats |
 | breakdown | an event with the dimension as an ordinary field (`"country":"FI"`) |
 

@@ -2,9 +2,10 @@
 
 // The board's series reads against a real database, through ServeHTTP over
 // the owner's fixed identity: a label filter on an event read and on its
-// previous window, the distinct people behind a bare event name, a check's
-// percentiles, a sibling project's check reading as no check at all, and the
-// read queue. Run with -tags=integration and UC_TEST_POSTGRES set.
+// previous window, the distinct people behind a bare event name, a retention
+// grid of one event, a check's percentiles, a sibling project's check reading
+// as no check at all, and the read queue. Run with -tags=integration and
+// UC_TEST_POSTGRES set.
 
 package api
 
@@ -29,6 +30,10 @@ type seriesAnswer struct {
 	Points   []*float64 `json:"points"`
 	Total    *float64   `json:"total"`
 	Previous *float64   `json:"previous"`
+	Rows     []struct {
+		Labels map[string]string `json:"labels"`
+		Value  float64           `json:"value"`
+	} `json:"rows"`
 }
 
 // bucketOf is the index ts lands in on the answer's own clock, so a case never
@@ -177,6 +182,27 @@ func TestABarePeopleNameCountsPeopleNotEvents(t *testing.T) {
 		if num(s.Points[e]) != c.early || num(s.Points[l]) != c.late || num(s.Total) != c.total || num(s.Previous) != c.before {
 			t.Fatalf("%s: early %v late %v total %v previous %v, want %v %v %v %v", c.id,
 				num(s.Points[e]), num(s.Points[l]), num(s.Total), num(s.Previous), c.early, c.late, c.total, c.before)
+		}
+	}
+}
+
+// A retention grid that names an event reads that event's people alone, and the
+// name reaches the read through the exact query the board sends: a workspace's
+// actor that never sent `visitors` joins the project's grid and not that one.
+func TestARetentionGridReadsOneEventsPeople(t *testing.T) {
+	pool, h, tenantID := seriesWorld(t, 1)
+	project := boardOf(t, pool, tenantID)
+	at := time.Now().UTC().Add(-time.Hour)
+	seedEventRow(t, pool, tenantID, project, at, "visitors", "ada", `{}`)
+	seedEventRow(t, pool, tenantID, project, at, "trial_started", "tenant:7", `{}`)
+
+	got := readSeries(t, h, `[
+		{"id":"all","source":"people","range":"31d","cohort":"week"},
+		{"id":"visitors","source":"people","range":"31d","cohort":"week","name":"visitors"}]`)
+	for id, want := range map[string]float64{"all": 2, "visitors": 1} {
+		rows := got[id].Rows
+		if len(rows) != 1 || rows[0].Labels["week"] != "0" || rows[0].Value != want {
+			t.Fatalf("%s: want one week-0 cell of %v people; got %+v", id, want, rows)
 		}
 	}
 }

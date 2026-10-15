@@ -16,8 +16,8 @@ this order and never prints it:
    so), and writes the key into `.env` itself.
 
 The anonymous project accepts data immediately and belongs to nobody yet. Init
-prints a **claim URL** - signing in through it attaches the project to an
-account. Claiming later never changes the key, so nothing deployed breaks. An
+prints a **claim URL** - open it, sign in if asked, and one press attaches the
+project to an account. Claiming later never changes the key, so nothing deployed breaks. An
 unclaimed project cannot notify anyone (there is nowhere to send alerts) -
 that is a fact, not a nag; say it plainly when the user asks why claim.
 

@@ -212,7 +212,7 @@ func TestHTMLDoorParityPinsTheStateSentence(t *testing.T) {
 		"Measured from one location outside " + host + " by UpControl.",
 		`href="/status/` + slug + `#claim"`,
 		`href="/status"`,
-		`href="/?check=` + host,
+		`<a href="/">Check your own site</a>`,
 		`Powered by <a href="https://upcontrol.io/">UpControl</a>`,
 	} {
 		if !strings.Contains(html, want) {

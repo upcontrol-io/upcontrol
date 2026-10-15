@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	sqlc "go.upcontrol.io/back/gen/pg"
+	"go.upcontrol.io/back/internal/account/auth"
 	"go.upcontrol.io/back/internal/account/session"
 	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/ring/query"
@@ -39,8 +41,8 @@ type install struct {
 	// self-host has no use-before-signup story.
 	selfHosted bool
 
-	// rec fires the claim's page_claimed server event. Optional: nil skips
-	// only the count, never the claim; the cmd wiring attaches the recorder.
+	// rec fires the claim's and the anonymous mint's server events. Optional:
+	// nil skips only the count, never the claim; the cmd wiring attaches it.
 	rec *analytics.Recorder
 
 	mu   sync.Mutex
@@ -258,7 +260,7 @@ func newUnclaimedTenant(ctx context.Context, pool *pg.Pool, name, domain string)
 }
 
 func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 	if !h.allow("mint:" + analytics.ClientIP(r)) {
 		writeAPIErr(w, http.StatusTooManyRequests, "rate_limited")
 		return
@@ -273,12 +275,18 @@ func (h *install) anonymous(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// A terminal carries no visitor cookie: props.project is what joins this
+	// mint to the project's first install and to its claim.
+	h.rec.ServerEvent(ctx, "anonymous_project_minted", 0, t.TenantID,
+		map[string]string{"project": strconv.FormatInt(t.ProjectID, 10)})
 
 	writeAPIJSON(w, http.StatusOK, map[string]any{
 		"projectId":  "prj_" + hex.EncodeToString(t.ProjectPubID.Bytes[:6]),
 		"key":        t.Key, // shown exactly once, like POST /v1/keys/rotate
 		"claimToken": t.ClaimToken,
-		"claimUrl":   h.publicOrigin + "/claim/" + t.ClaimToken,
+		// The token rides the fragment, which a browser never sends: no access
+		// log and no Referer ever holds it.
+		"claimUrl": h.publicOrigin + "/claim#" + t.ClaimToken,
 	})
 }
 
@@ -288,7 +296,8 @@ type claimReq struct {
 }
 
 func (h *install) claim(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	// The claim's event carries the visitor who pressed it.
+	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 	s, ok := requireSession(w, r, h.sess)
 	if !ok {
 		return
@@ -312,7 +321,7 @@ func (h *install) claim(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusNotFound, "invalid_claim_token")
 		return
 	}
-	h.adoptTenant(ctx, w, s, anonTenantID)
+	h.adoptTenant(ctx, w, s, anonTenantID, "")
 }
 
 // claimBySlug claims the UNCLAIMED status page the slug names — open claim,
@@ -334,19 +343,30 @@ func (h *install) claimBySlug(ctx context.Context, w http.ResponseWriter, s sqlc
 		writeAPIErr(w, http.StatusGone, "page_removed")
 		return
 	}
-	h.adoptTenant(ctx, w, s, anonTenantID)
+	h.adoptTenant(ctx, w, s, anonTenantID, slug)
 }
 
-// adoptTenant moves the anonymous tenant's whole project footprint into the
-// claimer's tenant, then deletes the anonymous tenant. Claim adopts, it never
-// adds a membership. One
-// transaction; the conditional burn is the race lock, exactly as the slug
-// path always had it.
-func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc.Session, anonTenantID int64) {
+// adoptTenant moves the anonymous tenant's whole footprint, its data with it,
+// into the claimer's OWN workspace, deletes the anonymous tenant and points
+// the session at the adopted project. Never the workspace the session merely
+// stands in: a guest's claim would land in, and be counted against, the
+// host's. Claim adopts, it never adds a membership. One transaction; the
+// conditional burn is the race lock. slug names the page a slug claim was
+// made for, "" on the token path.
+func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc.Session, anonTenantID int64, slug string) {
+	// The fixed single-user identity has no session row and owns its tenant.
+	own := s.TenantID
+	if s.ID != 0 {
+		var err error
+		if own, err = auth.OwnTenantID(ctx, h.pool, s.PersonID, h.selfHosted); err != nil || own == 0 {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
 	// Self-adoption is impossible before anything is touched: an anon id that
 	// IS the claimer's own tenant answers the burn's 404 locally, so no future
 	// wiring mistake can reparent a tenant onto itself and DELETE it.
-	if anonTenantID == s.TenantID {
+	if anonTenantID == own {
 		writeAPIErr(w, http.StatusNotFound, "not_claimable")
 		return
 	}
@@ -371,7 +391,7 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	// gate below counts projects, and two claims landing together would each
 	// count the other's row as absent and both pass. The anon tenant's burn
 	// is the other half of the lock, per anon page.
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM tenant WHERE id = $1 FOR UPDATE`, s.TenantID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM tenant WHERE id = $1 FOR UPDATE`, own); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -398,7 +418,7 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		                     WHERE ps.project_id = p.id AND ps.next > 1)
 		    AND NOT EXISTS (SELECT 1 FROM events e
 		                     WHERE e.tenant_id = $1 AND e.project_id = p.id)
-		    AND NOT EXISTS (SELECT 1 FROM web_usage u WHERE u.tenant_id = $1)`, s.TenantID); err != nil {
+		    AND NOT EXISTS (SELECT 1 FROM web_usage u WHERE u.tenant_id = $1)`, own); err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -407,14 +427,28 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	// the just-absorbed empty one it does not. The count rides the open
 	// transaction (a pool-bound count would only see the deletion after
 	// commit); the wall itself has one owner, projectsRefusalQ.
-	if msg, plan := projectsRefusalQ(ctx, h.pool, h.pool.Queries().WithTx(tx), s.TenantID); msg != "" {
+	if msg, plan := projectsRefusalQ(ctx, h.pool, h.pool.Queries().WithTx(tx), own); msg != "" {
+		// The wall is the claimer's own workspace's, so the session goes there:
+		// from a guest workspace the upgrade it offers would be somebody else's
+		// plan, whose checkout refuses a guest. After the rollback: it puts back
+		// the project the absorb deleted and frees the tenant row the session's
+		// foreign key must lock.
+		if own != s.TenantID {
+			_ = tx.Rollback(ctx)
+			var first *int64
+			_ = h.pool.Raw().QueryRow(ctx,
+				`SELECT min(id) FROM project WHERE tenant_id = $1 AND frozen_at IS NULL`, own).Scan(&first)
+			_ = h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
+				ID: s.ID, TenantID: own, ProjectID: first,
+			})
+		}
 		writeUpgradeRequired(w, msg, plan)
 		return
 	}
 	// The projects coming in, read before they are reparented: a channel is
 	// per project now, so each needs the claimer's address seeded onto it.
 	var adopted []int64
-	if rows, err := tx.Query(ctx, `SELECT id FROM project WHERE tenant_id = $1`, anonTenantID); err == nil {
+	if rows, err := tx.Query(ctx, `SELECT id FROM project WHERE tenant_id = $1 ORDER BY id`, anonTenantID); err == nil {
 		for rows.Next() {
 			var id int64
 			if rows.Scan(&id) == nil {
@@ -430,9 +464,12 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 	for _, table := range [...]string{
 		"project", "monitor", "incident", "status_page",
 		"source_connection", "api_key", "install_token", "dashboard",
+		// The data, which every read filters by tenant: left behind, the
+		// claimed project opens empty and its install reads unverified.
+		"logs", "events", "metrics", "series_1m", "series_1h", "web_heat",
 	} {
 		if _, err := tx.Exec(ctx,
-			`UPDATE `+table+` SET tenant_id = $1 WHERE tenant_id = $2`, s.TenantID, anonTenantID); err != nil {
+			`UPDATE `+table+` SET tenant_id = $1 WHERE tenant_id = $2`, own, anonTenantID); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -451,7 +488,16 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 			  WHERE p.id = $3 AND p.email IS NOT NULL
 			    AND NOT EXISTS (SELECT 1 FROM alert_channel c
 			                     WHERE c.project_id = $2 AND c.kind = 'email' AND c.target = p.email)`,
-			s.TenantID, projectID, s.PersonID); err != nil {
+			own, projectID, s.PersonID); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	// The app opens on what was just claimed. The fixed identity has no row.
+	if s.ID != 0 && len(adopted) > 0 {
+		if err := h.pool.Queries().WithTx(tx).SetSessionScope(ctx, sqlc.SetSessionScopeParams{
+			ID: s.ID, TenantID: own, ProjectID: &adopted[0],
+		}); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -460,10 +506,13 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The claim is the one moment a page changes hands: it counts (plan part
-	// 5's server event), and a nil recorder skips only the count.
-	if h.rec != nil {
-		h.rec.ServerEvent(ctx, "page_claimed", s.PersonID, s.TenantID, nil)
+	// The claim is the one moment a page or a project changes hands, so it
+	// counts; a nil recorder skips only the count.
+	if slug != "" {
+		h.rec.ServerEvent(ctx, "page_claimed", s.PersonID, own, map[string]string{"slug": slug})
+	} else if len(adopted) > 0 {
+		h.rec.ServerEvent(ctx, "claim_token_redeemed", s.PersonID, own,
+			map[string]string{"project": strconv.FormatInt(adopted[0], 10)})
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{"claimed": true})
 }

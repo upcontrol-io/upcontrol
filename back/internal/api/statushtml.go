@@ -222,7 +222,6 @@ type slugPageData struct {
 	Components  []componentLine
 	Incidents   []incidentLine
 	FAQ         []faqItem
-	CheckHref   string
 	ClaimHref   string
 }
 
@@ -323,7 +322,6 @@ func (h *statusPages) renderPage(w http.ResponseWriter, ctx context.Context, pro
 		Claimed:   claimed,
 		Hosted:    hosted != "",
 		Origin:    origin,
-		CheckHref: "/?check=" + template.URLQueryEscaper(host),
 		ClaimHref: "/status/" + meta.slug + "#claim",
 	}
 	if hosted != "" {
@@ -689,7 +687,7 @@ footer nav a { margin-right: 14px; }
 <nav>
 <a href="{{.ClaimHref}}">Site owner? Claim this page.</a>
 <a href="/status">Status directory</a>
-<a href="{{.CheckHref}}">Check your own site</a>
+<a href="/">Check your own site</a>
 </nav>
 {{- end}}
 </footer>

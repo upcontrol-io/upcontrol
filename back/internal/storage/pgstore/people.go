@@ -116,24 +116,37 @@ func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, 
 // itself, and the front already draws on that rule. The server's own `uc.`
 // names stay out: a page view's actor is a visitor hash that changes every
 // day, so each day's visitors would join as a new cohort and never return.
-func (s *Store) RetentionCohorts(ctx context.Context, tenantID, projectID int64, from, to time.Time) ([]LabelSum, error) {
+//
+// A name narrows the grid to that one event's people: the cohort is the
+// Monday of an actor's first event OF THAT NAME, ever, and a return is the
+// same event in a later week. Empty is every event, read by the very statement
+// the grid ran before names existed: the filter is spliced in rather than
+// written as an OR on an empty parameter, so that statement keeps its plan and
+// its partial index. A `uc.` name reads nothing: the exclusion above holds.
+func (s *Store) RetentionCohorts(ctx context.Context, tenantID, projectID int64, name string, from, to time.Time) ([]LabelSum, error) {
+	args := []any{tenantID, projectID, from, to, from.Unix(), to.Unix(), maxGroupRows}
+	only := ""
+	if name != "" {
+		args = append(args, name)
+		only = fmt.Sprintf(" AND name = $%d", len(args))
+	}
 	rows, err := s.pool.Query(ctx, `
 		WITH firsts AS (
 			SELECT actor, floor((extract(epoch from min(ts)) + 259200) / 604800)::bigint AS cohort
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'`+only+`
 			 GROUP BY actor
 		), active AS (
 			SELECT actor, floor((extract(epoch from ts) + 259200) / 604800)::bigint AS wk
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'`+only+`
 			   AND ts >= $3 AND ts < $4
 		)
 		SELECT f.cohort * 604800 - 259200 AS monday, active.wk - f.cohort AS week, `+peopleCount+`
 		  FROM active JOIN firsts f USING (actor)
 		 WHERE f.cohort * 604800 - 259200 >= $5 AND f.cohort * 604800 - 259200 < $6
 		 GROUP BY monday, week ORDER BY monday, week LIMIT $7`,
-		tenantID, projectID, from, to, from.Unix(), to.Unix(), maxGroupRows)
+		args...)
 	if err != nil {
 		return nil, err
 	}

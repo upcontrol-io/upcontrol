@@ -129,10 +129,14 @@ func ParseBody(rd io.Reader) (kept []event, dropped int) {
 
 // scope is the request-scoped analytics context. Token is the raw uc_vid
 // (empty = anonymous); IP and UA are used once at enqueue, never stored raw.
+// Source names an automated caller of ours (X-Upcontrol-Source): the
+// recorder stamps it on the server events the request causes so the reports
+// can leave them out. Analytics only: no limit, ceiling or door reads it.
 type scope struct {
-	Token string
-	IP    string
-	UA    string
+	Token  string
+	IP     string
+	UA     string
+	Source string
 }
 
 type scopeKey struct{}
@@ -150,10 +154,15 @@ func scopeFrom(ctx context.Context) *scope {
 }
 
 // ScopeFromRequest builds a scope from the uc_vid cookie, the client IP
-// (X-Forwarded-For first) and the User-Agent.
+// (X-Forwarded-For first), the User-Agent and X-Upcontrol-Source. The header
+// is unauthenticated, so the event-name grammar bounds what it can write.
 func ScopeFromRequest(r *http.Request) *scope {
 	tok, _ := VisitorToken(r)
-	return &scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}
+	s := &scope{Token: tok, IP: ClientIP(r), UA: r.UserAgent()}
+	if v := r.Header.Get("X-Upcontrol-Source"); eventNameRe.MatchString(v) {
+		s.Source = v
+	}
+	return s
 }
 
 // ClientIP prefers the first X-Forwarded-For entry then falls back to the peer

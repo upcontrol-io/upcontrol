@@ -55,7 +55,12 @@ type writeAPI struct {
 	pool *pg.Pool
 	pgs  *pgstore.Store
 	sess *session.Manager
-	exec *executor.Executor
+	// exec runs the guarded probes of the check and watch doors: the
+	// executor in production, a stub in the tests, whose hosts no network
+	// answers.
+	exec interface {
+		Execute(context.Context, executor.CheckSpec) executor.Result
+	}
 	// selfHosted (UC_SELF_HOSTED=1): the anonymous watch door provisions
 	// 'Self-hosted' tenants, same as the sign-in door.
 	selfHosted bool
@@ -2367,73 +2372,10 @@ func (h *writeAPI) publicCheck(w http.ResponseWriter, r *http.Request) {
 	h.rec.ServerEvent(ctx, "public_check_run", 0, 0, map[string]string{
 		"host": bareHost(host), "cached": "false",
 	})
-	status := "ok"
-	if !res.OK {
-		status = "down"
-	}
-	meta := fmt.Sprintf("%d ms · HTTP %d", res.TotalMs, res.StatusCode)
-	if !res.OK {
-		meta = fmt.Sprintf("%d ms · %s", res.TotalMs, res.ErrorClass)
-	}
-	// Could-not-measure is a state here too: an auth wall or a bot filter
-	// answered, so this one request says nothing about whether the service
-	// is up, and the page Start watching mints will say the same.
-	if availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
-		status = "nodata"
-		meta = fmt.Sprintf("%d ms · HTTP %d, refuses automated checks", res.TotalMs, res.StatusCode)
-	}
-	if res.ErrorClass == "blocked_target" {
-		meta = "blocked — internal address refused"
-	}
 	// Facts one request cannot answer, on the same host and behind the same
 	// guard. Bounded, not a crawl: see internal/discover.
 	facts := discover.Run(r.Context(), h.exec, net.DefaultResolver, host, res)
-	network := append(networkRowsFrom(res, status), discoveredRows(facts)...)
-
-	// Every pickable row's id IS its URL, so the watch request can send the
-	// ids back as targets with no lookup table in between.
-	groups := []map[string]any{
-		{"title": "Live probe", "source": "from a real request", "rows": []map[string]any{
-			{"id": host, "name": host, "meta": meta, "status": status, "recommended": res.OK},
-		}},
-	}
-	// Reading order, widest first: the typed address, then its other hosts,
-	// then pages (an api. host is its own failure domain).
-	if rows := pageRows(facts.Hosts); len(rows) > 0 {
-		groups = append(groups, map[string]any{
-			"title": "Hosts", "source": facts.Hosts[0].Source, "rows": rows,
-		})
-	}
-	// The API carries a checkbox like Hosts' rows: a path-based API is the
-	// same thing on a site that routes instead of subdomaining.
-	if row := apiRow(host, facts.API); row != nil {
-		groups = append(groups, map[string]any{
-			"title": "API", "source": facts.API.Source, "rows": []map[string]any{row},
-		})
-	}
-	if rows := pageRows(facts.Pages); len(rows) > 0 {
-		groups = append(groups, map[string]any{
-			"title": "Pages", "source": facts.Pages[0].Source, "rows": rows,
-		})
-	}
-	body := map[string]any{
-		"groups":        groups,
-		"networkChecks": network,
-		// Raw result exposed for transparency (and so the SSRF acceptance is
-		// observable in the response: blocked_target shows up here verbatim).
-		"probe": map[string]any{
-			"ok":          res.OK,
-			"status_code": res.StatusCode,
-			"error_class": res.ErrorClass,
-			"total_ms":    res.TotalMs,
-		},
-	}
-	if stages := stagesFrom(res); len(stages) > 0 {
-		body["stages"] = stages
-	}
-	// How many rows an account can watch, sent by the server: the plan's
-	// numbers live in one place.
-	body["watchLimit"] = h.freeWatchLimit(r.Context())
+	body := h.checkAnswer(r.Context(), host, res, facts)
 
 	// A CLAIMED page for the host, when one exists: the landing then opens it
 	// instead of promising a watch it cannot perform.
@@ -2461,6 +2403,78 @@ func (h *writeAPI) freeWatchLimit(ctx context.Context) int32 {
 	return limit
 }
 
+// checkAnswer is the CheckResponse for one probe of target: the rows, the
+// waterfall, the raw result. facts is what discovery established, zero when
+// it did not run. The watch door's unreachable refusal carries the same
+// answer, so a client shows why without probing a second time.
+func (h *writeAPI) checkAnswer(ctx context.Context, target string, res executor.Result, facts discover.Facts) map[string]any {
+	status := "ok"
+	if !res.OK {
+		status = "down"
+	}
+	meta := fmt.Sprintf("%d ms · HTTP %d", res.TotalMs, res.StatusCode)
+	if !res.OK {
+		meta = fmt.Sprintf("%d ms · %s", res.TotalMs, res.ErrorClass)
+	}
+	// Could-not-measure is a state here too: an auth wall or a bot filter
+	// answered, so this one request says nothing about whether the service
+	// is up, and the page Start watching mints will say the same.
+	if availability.Unmeasured(res.ErrorClass, int(res.StatusCode)) {
+		status = "nodata"
+		meta = fmt.Sprintf("%d ms · HTTP %d, refuses automated checks", res.TotalMs, res.StatusCode)
+	}
+	if res.ErrorClass == "blocked_target" {
+		meta = "blocked — internal address refused"
+	}
+	network := append(networkRowsFrom(res, status), discoveredRows(facts)...)
+
+	// Every pickable row's id IS its URL, so the watch request can send the
+	// ids back as targets with no lookup table in between.
+	groups := []map[string]any{
+		{"title": "Live probe", "source": "from a real request", "rows": []map[string]any{
+			{"id": target, "name": target, "meta": meta, "status": status, "recommended": res.OK},
+		}},
+	}
+	// Reading order, widest first: the typed address, then its other hosts,
+	// then pages (an api. host is its own failure domain).
+	if rows := pageRows(facts.Hosts); len(rows) > 0 {
+		groups = append(groups, map[string]any{
+			"title": "Hosts", "source": facts.Hosts[0].Source, "rows": rows,
+		})
+	}
+	// The API carries a checkbox like Hosts' rows: a path-based API is the
+	// same thing on a site that routes instead of subdomaining.
+	if row := apiRow(target, facts.API); row != nil {
+		groups = append(groups, map[string]any{
+			"title": "API", "source": facts.API.Source, "rows": []map[string]any{row},
+		})
+	}
+	if rows := pageRows(facts.Pages); len(rows) > 0 {
+		groups = append(groups, map[string]any{
+			"title": "Pages", "source": facts.Pages[0].Source, "rows": rows,
+		})
+	}
+	body := map[string]any{
+		"groups":        groups,
+		"networkChecks": network,
+		// Raw result exposed for transparency (and so the SSRF acceptance is
+		// observable in the response: blocked_target shows up here verbatim).
+		"probe": map[string]any{
+			"ok":          res.OK,
+			"status_code": res.StatusCode,
+			"error_class": res.ErrorClass,
+			"total_ms":    res.TotalMs,
+		},
+	}
+	if stages := stagesFrom(res); len(stages) > 0 {
+		body["stages"] = stages
+	}
+	// How many rows an account can watch, sent by the server: the plan's
+	// numbers live in one place.
+	body["watchLimit"] = h.freeWatchLimit(ctx)
+	return body
+}
+
 // stagesFrom turns phase timings into the waterfall. TTFBMs is measured from
 // request start and already holds dns+tcp+tls, so wait/html are derived.
 func stagesFrom(res executor.Result) []map[string]any {
@@ -2477,7 +2491,11 @@ func stagesFrom(res executor.Result) []map[string]any {
 	add("tls", res.TLSMs)
 
 	// The derived two ARE measured once a response arrived: emitted at 0
-	// rather than dropped. The guards prevent uint32 underflow.
+	// rather than dropped. With no response there is no first byte to derive
+	// them from. The guards prevent uint32 underflow.
+	if res.StatusCode == 0 {
+		return stages
+	}
 	preTTFB := res.DNSMs + res.ConnectMs + res.TLSMs
 	if res.TTFBMs >= preTTFB {
 		stages = append(stages, map[string]any{"label": "wait", "ms": res.TTFBMs - preTTFB})
@@ -2522,8 +2540,10 @@ func networkRowsFrom(res executor.Result, status string) []map[string]any {
 		"note": responseNote, "status": status,
 	})
 	// Zero hops is a measured fact (the URL answered directly), not an absence,
-	// so this row is always sent once the request itself completed.
-	if res.ErrorClass != "blocked_target" {
+	// so this row is sent whenever a response arrived. With none (a refused
+	// target, no DNS answer, a timeout) "0 hops" would describe a request
+	// that never completed.
+	if res.StatusCode > 0 {
 		rows = append(rows, map[string]any{
 			"label": "redirects", "value": fmt.Sprintf("%d hops", res.RedirectCount),
 			"note": redirectNote(res.RedirectCount), "status": "ok",
@@ -2773,10 +2793,13 @@ type watchRequest struct {
 }
 
 func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
-	// A host typed on the landing becomes a real account: with an address the
-	// door provisions exactly what the magic link would, so the two doors
-	// agree; without one it mints an unclaimed tenant the visitor can claim
-	// later, because the result comes first and the account second.
+	// A host typed on the landing gets its status page. Without an address
+	// the door opens the host's page when one exists, claimed or not,
+	// anyone's, and creates nothing; a host with no page gets an unclaimed one
+	// carrying one check, the host, and only if it answers. A signed-in caller
+	// is no different: only a claim puts a page in an account. With an
+	// address the door provisions exactly what the magic link would, so the
+	// two doors agree.
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 	var req watchRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -2795,10 +2818,6 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusBadRequest, "missing_email")
 		return
 	}
-	if !h.watchAllow(analytics.ClientIP(r)) {
-		writeRetryAfter(w, "rate_limited", watchCooldown)
-		return
-	}
 
 	// Host canonicalization before any lookup or mint (plan part 2): the
 	// project's domain, the slug and the root target all key on the result,
@@ -2810,10 +2829,21 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	target := "https://" + host
 
-	// The mint door is the only door blocked_host guards: a host that asked
-	// for removal is never minted again, and an unregistrable host (an IP
-	// literal, a bare public suffix) has no page to hand out. The check door
-	// and a signed-in owner's /v1/monitors are never gated here.
+	// The host's live page, read once. Opening a page that exists is a read,
+	// so it runs before the host gate, the cooldown and the day's ceilings,
+	// which price a mint: nothing is probed, subscribed, created or counted.
+	// For the e-mail arm the read decides the page (a suffixed one beside a
+	// live page) and whether the door probes at all.
+	existing := hostLivePage(ctx, h.pool, host)
+	if req.Email == "" && existing != nil {
+		h.openExisting(ctx, w, existing, target)
+		return
+	}
+
+	// The host gate guards a mint, never that read: a host that asked for
+	// removal is never minted again, and an unregistrable host (an IP literal,
+	// a bare public suffix, a platform subdomain) gets no new page. The check
+	// door and a signed-in owner's /v1/monitors never pass through it.
 	if refused, code := blockedHostRefused(ctx, h.pool, host); refused {
 		if code == "blocked_host" {
 			writeAPIErr(w, http.StatusForbidden, code)
@@ -2822,13 +2852,10 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-
-	// Decision 7: the e-mail-less arm reads the session. A signed-in visitor
-	// whose plan has room for another project gets it in their own tenant
-	// below; signed out, or no room, keeps the anonymous demo mint. An error
-	// is simply no session - the door is public, a missing cookie must never
-	// fail it.
-	s, serr := h.sess.FromRequest(ctx, r)
+	if !h.watchAllow(analytics.ClientIP(r)) {
+		writeRetryAfter(w, "rate_limited", watchCooldown)
+		return
+	}
 
 	// Mint audit and ceilings (plan part 2): counted from status_page rows
 	// before anything is created - a refusal creates nothing - and counted
@@ -2839,10 +2866,6 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The host's live page, read once here: every arm below asks the same
-	// question, and it also decides whether the door probes at all.
-	existing := hostLivePage(ctx, h.pool, host)
-
 	// The target is probed by the same guarded executor as any check, so an
 	// internal address cannot be turned into a monitor by typing it here. It
 	// runs LAST and only for a host with no live page: a request this door is
@@ -2850,10 +2873,10 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 	// has a page already has this root target in probe_target, probed on a
 	// schedule behind the same guard - nothing left to check, nothing to
 	// measure. For a fresh host the result is kept: it becomes the page's
-	// first check row (watchTail), so the page lands measured rather than grey
-	// until the first scheduled probe - taken with the scheduler's own spec
-	// (rpc/probeservice.go: 10 s, 5 redirects), so the row is the same
-	// instrument as every row that follows it.
+	// first check row (recordMintProbe), so the page lands measured rather
+	// than grey until the first scheduled probe - taken with the scheduler's
+	// own spec (rpc/probeservice.go: 10 s, 5 redirects), so the row is the
+	// same instrument as every row that follows it.
 	var probe *mintProbe
 	if existing == nil {
 		at := time.Now()
@@ -2864,6 +2887,20 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			writeAPIErr(w, http.StatusBadRequest, "blocked_target")
 			return
 		}
+		// No HTTP answer at all (no DNS answer, refused, timed out, a TLS
+		// failure, a redirect loop): nothing is created. The probe's
+		// diagnostic rides the refusal, so the client shows why without
+		// probing the host again. Only the door without an address refuses;
+		// the e-mail arm still mints.
+		if req.Email == "" && res.StatusCode == 0 {
+			writeAPIJSON(w, http.StatusBadRequest, map[string]any{
+				"error": map[string]string{
+					"code": "unreachable", "message": "That site did not answer, so nothing was created.",
+				},
+				"check": h.checkAnswer(ctx, target, res, discover.Facts{}),
+			})
+			return
+		}
 		probe = &mintProbe{res: res, at: at}
 		// The probe took up to ten seconds; a second visitor may have minted
 		// this host meanwhile. Re-read before choosing an arm, so the race is
@@ -2871,21 +2908,20 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 		existing = hostLivePage(ctx, h.pool, host)
 	}
 
-	// The client's target list is not trusted: each must belong to the asked
-	// host, or this becomes a probe-enrolment service for strangers. The cap
-	// is the Free plan's watch limit, the same number the check answer sends.
-	wanted := h.wantedTargets(target, req.Targets)
-
-	// The project is named after the site asked about; an existing account
-	// keeps the name it has.
-	var tenantID, projectID int64
 	if req.Email != "" {
-		_, tid, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
-		if err != nil || tid == 0 {
+		// The client's target list is not trusted: each must belong to the
+		// asked host, or this becomes a probe-enrolment service for strangers.
+		// The cap is the Free plan's watch limit, the same number the check
+		// answer sends.
+		wanted := h.wantedTargets(target, req.Targets)
+		// The project is named after the site asked about; an existing account
+		// keeps the name it has.
+		var projectID int64
+		_, tenantID, err := auth.Provision(ctx, h.pool, req.Email, host, h.rec, h.selfHosted)
+		if err != nil || tenantID == 0 {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		tenantID = tid
 		h.rec.LinkEmail(ctx, req.Email)
 		// A live project: a frozen one is a snapshot no door may add to, and
 		// every plan carries at least one live project.
@@ -2902,96 +2938,50 @@ func (h *writeAPI) publicWatch(w http.ResponseWriter, r *http.Request) {
 			watchRefuse(w, err)
 			return
 		}
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
+		h.watchTail(ctx, w, r, req.Email, tenantID, projectID, watching, slug, target, probe)
 		return
 	}
 
-	// One page per host at this anonymous door. The claimed page wins when
-	// both kinds exist (hostLivePage's ORDER BY): a claimed host is never
-	// re-minted or added to - reusing it would let anyone who types the
-	// domain add monitors to somebody's account - so the visitor gets their
-	// OWN suffixed page on the same root target (decision 9, never a second
-	// probe). An unclaimed page is reused exactly as before.
+	// A page minted for this host while the probe ran is opened, not copied.
 	if existing != nil {
-		if existing.Claimed {
-			t, p, watching, slug, err := h.mintOwnPage(ctx, host, existing, wanted, audit)
-			if err != nil {
-				watchRefuse(w, err)
-				return
-			}
-			tenantID, projectID = t, p
-			h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
-			h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-			h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
-			return
-		}
-		// Unclaimed: answer its slug, create no new page, but DO subscribe the
-		// ticked rows - a watch that asks to watch more than the page holds is
-		// additive, as it always was. Nothing minted: no event, no audit row.
-		tenantID, projectID = existing.TenantID, existing.ProjectID
-		watching := h.subscribeWanted(ctx, tenantID, projectID, host, wanted)
-		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, existing.Slug, target, probe)
+		h.openExisting(ctx, w, existing, target)
 		return
 	}
-
-	// No live page for the host: the mint arm is where the session matters
-	// (Decision 7) - a host nobody holds, typed by a signed-in visitor with
-	// room for one more project, becomes a project in their OWN tenant - no
-	// demo page to claim later, and the monitors and status page below land
-	// on the caller's account from the first check. Everything else keeps
-	// the demo mint exactly as today: signed out, no room (the wall is on
-	// the claim button, never on the check). The tenant is the caller's own,
-	// never the session's: a guest standing in a host workspace would
-	// otherwise spend its owner's projects and checks.
-	own := false
-	if serr == nil && s.PersonID != 0 {
-		ownTenant, oerr := auth.OwnTenantID(ctx, h.pool, s.PersonID, h.selfHosted)
-		if oerr == nil && ownTenant != 0 {
-			if msg, _ := h.projectsRefusal(ctx, ownTenant); msg == "" {
-				pid, perr := createTenantProject(ctx, h.pool, ownTenant, host)
-				if perr == nil {
-					tenantID, projectID = ownTenant, pid
-					own = true
-					// Decision 18: the caller just created this project;
-					// the app must open on it, and the workspace follows.
-					// Same pick as createProject, and like it the pick
-					// never gates the response.
-					if s.ID != 0 {
-						_ = h.pool.Queries().SetSessionScope(ctx, sqlc.SetSessionScopeParams{
-							ID: s.ID, TenantID: ownTenant, ProjectID: &pid,
-						})
-					}
-				}
-			}
-		}
-	}
-	if !own {
-		t, p, watching, slug, err := h.mintOwnPage(ctx, host, nil, wanted, audit)
-		if err != nil {
-			watchRefuse(w, err)
-			return
-		}
-		tenantID, projectID = t, p
-		h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
-		h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-		h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
-		return
-	}
-	// The signed-in arm: same page rules as every mint (no live page exists
-	// for this host - that is how this arm was reached), on the caller's own
-	// project. page_minted fires with the watch source scope fields.
-	watching, slug, err := h.watchMintPage(watchMint{
-		host: host, wanted: wanted, audit: audit,
-		tenantID: tenantID, projectID: projectID, existing: nil,
-	})
+	watching, slug, err := h.mintOwnPage(ctx, host, audit)
 	if err != nil {
 		watchRefuse(w, err)
 		return
 	}
 	h.rec.ServerEvent(ctx, "watch_signup", 0, 0, map[string]string{"host": host})
 	h.rec.ServerEvent(ctx, "page_minted", 0, 0, map[string]string{"source": "watch"})
-	h.watchTail(ctx, w, r, req, tenantID, projectID, watching, slug, target, probe)
+	h.recordMintProbe(ctx, target, probe)
+	watchAnswer(w, slug, watching, true)
+}
+
+// openExisting answers the host's live page as it is. watching is what the
+// page's project already watches of the host, and 0 on a claimed page, which
+// is somebody's account and not a stranger's to count.
+func (h *writeAPI) openExisting(ctx context.Context, w http.ResponseWriter, page *hostPageRow, target string) {
+	watching := 0
+	if !page.Claimed {
+		_ = h.pool.Raw().QueryRow(ctx,
+			`SELECT count(*) FROM monitor m JOIN probe_target pt ON pt.id = m.target_id
+			  WHERE m.project_id = $1 AND pt.key = $2`,
+			page.ProjectID, targetkey.Website(target, "")).Scan(&watching)
+	}
+	watchAnswer(w, page.Slug, watching, false)
+}
+
+// watchAnswer is the door's answer without an address: where the page is and
+// whether this call created it. No account was made, so there is no login.
+func watchAnswer(w http.ResponseWriter, slug string, watching int, created bool) {
+	writeAPIJSON(w, http.StatusOK, map[string]any{
+		"statusUrl": "/status/" + slug,
+		"slug":      slug,
+		"created":   created,
+		"watching":  watching,
+		"login":     map[string]any{},
+	})
 }
 
 // watchIntervalSec is the cadence every monitor the watch door mints starts
@@ -3217,11 +3207,9 @@ func (h *writeAPI) wantedTargets(target string, ticked []string) []string {
 // hostPageRow is what the watch door needs to know about a host's live page:
 // who holds it, whether it is claimed, and which target is its root.
 type hostPageRow struct {
-	TenantID     int64
 	ProjectID    int64
 	Slug         string
 	RootTargetID *int64
-	IsHostPage   bool
 	Claimed      bool
 }
 
@@ -3231,7 +3219,7 @@ type hostPageRow struct {
 func hostLivePage(ctx context.Context, pool *pg.Pool, host string) *hostPageRow {
 	var row hostPageRow
 	err := pool.Raw().QueryRow(ctx,
-		`SELECT sp.tenant_id, sp.project_id, sp.slug, sp.root_target_id, sp.is_host_page,
+		`SELECT sp.project_id, sp.slug, sp.root_target_id,
 		       (t.claim_token_hash IS NULL) AS claimed
 		  FROM status_page sp
 		  JOIN project p ON p.id = sp.project_id
@@ -3239,30 +3227,18 @@ func hostLivePage(ctx context.Context, pool *pg.Pool, host string) *hostPageRow 
 		 WHERE p.domain = $1 AND sp.removed_at IS NULL
 		 ORDER BY (t.claim_token_hash IS NULL) DESC, sp.is_host_page DESC, sp.id
 		 LIMIT 1`, host).Scan(
-		&row.TenantID, &row.ProjectID, &row.Slug, &row.RootTargetID, &row.IsHostPage, &row.Claimed)
+		&row.ProjectID, &row.Slug, &row.RootTargetID, &row.Claimed)
 	if err != nil {
 		return nil
 	}
 	return &row
 }
 
-// subscribeWanted turns the landing's ticked rows into subscriptions on the
-// SHARED targets (plan part 1: one URL, one probe - a reused page's project
-// subscribes to the same target a fresh mint would). Idempotent per
-// (project, target); returns how many rows the project now watches.
-func (h *writeAPI) subscribeWanted(ctx context.Context, tenantID, projectID int64, host string, wanted []string) int {
-	watching := 0
-	_ = h.watchTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
-		var err error
-		watching, err = subscribeWantedTx(ctx, q, tx, tenantID, projectID, host, wanted)
-		return err
-	})
-	return watching
-}
-
-// subscribeWantedTx is subscribeWanted inside a caller's transaction: every
-// row resolves through GetOrCreateProbeTarget and pulls the target due, so a
-// subscription's first check runs at the next lease.
+// subscribeWantedTx turns the wanted rows into subscriptions on the SHARED
+// targets (plan part 1: one URL, one probe), inside the caller's transaction.
+// Idempotent per (project, target); returns how many rows the project now
+// watches. Every row resolves through GetOrCreateProbeTarget and pulls the
+// target due, so a subscription's first check runs at the next lease.
 //
 // Every arm reaches a tenant with a plan, so the create gate's budget holds
 // here too: a row the project already watches costs nothing, a new one takes
@@ -3323,9 +3299,9 @@ func subscribeWantedTx(ctx context.Context, q *sqlc.Queries, tx pgx.Tx, tenantID
 }
 
 // watchMint is one page-minting run on an EXISTING tenant and project (the
-// e-mail arm and the signed-in arm): subscribe the wanted rows, upsert the
-// page row with its audit columns and the first-page rule from `existing`
-// (nil = no live page for the host, so this mint IS the host page).
+// e-mail arm): subscribe the wanted rows, upsert the page row with its audit
+// columns and the first-page rule from `existing` (nil = no live page for the
+// host, so this mint IS the host page).
 type watchMint struct {
 	host      string
 	wanted    []string
@@ -3378,30 +3354,24 @@ func mintUnclaimedTriple(ctx context.Context, tx pgx.Tx, host string) (tenantID,
 	return tenantID, projectID, nil
 }
 
-// mintOwnPage is the anonymous door's own-project mint: a fresh unclaimed
-// tenant and project (the demo triple), the wanted subscriptions, and a page
-// that is either the host's first (existing == nil) or a SUFFIXED second
-// page sharing the claimed one's root target (decision 9). One transaction;
-// on refusal nothing exists afterwards.
-func (h *writeAPI) mintOwnPage(ctx context.Context, host string, existing *hostPageRow, wanted []string, audit mintAudit) (tenantID, projectID int64, watching int, slug string, err error) {
+// mintOwnPage is the door's mint without an address: a fresh unclaimed
+// tenant and project (the demo triple), one check on the host and the host's
+// page. More checks take a sign-in and the page's Add a check. One
+// transaction; on refusal nothing exists afterwards.
+func (h *writeAPI) mintOwnPage(ctx context.Context, host string, audit mintAudit) (watching int, slug string, err error) {
 	err = h.watchTx(ctx, func(q *sqlc.Queries, tx pgx.Tx) error {
 		if code, _ := h.mintCeilingRefused(ctx, tx, audit); code != "" {
 			return refusalError(code)
 		}
-		// The host-pages cap guards only ETERNAL pages: a second (suffixed)
-		// page is not one - the reaper collects it under the old rule.
-		if existing == nil {
-			if code := h.hostPagesCeilingRefused(ctx, tx); code != "" {
-				return refusalError(code)
-			}
+		if code := h.hostPagesCeilingRefused(ctx, tx); code != "" {
+			return refusalError(code)
 		}
-		var terr error
-		tenantID, projectID, terr = mintUnclaimedTriple(ctx, tx, host)
+		tenantID, projectID, terr := mintUnclaimedTriple(ctx, tx, host)
 		if terr != nil {
 			return terr
 		}
-		// The api key, tx-bound like createTenantProject's: a pool-bound mint
-		// would autocommit outside this transaction.
+		// The api key, tx-bound: a pool-bound mint would autocommit outside
+		// this transaction.
 		secret := randomHex()
 		keyHash := sha256.Sum256([]byte(keyScheme(keyKindSecret) + secret))
 		if _, err := q.CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
@@ -3411,20 +3381,19 @@ func (h *writeAPI) mintOwnPage(ctx context.Context, host string, existing *hostP
 			return err
 		}
 		var serr error
-		watching, serr = subscribeWantedTx(ctx, q, tx, tenantID, projectID, host, wanted)
+		watching, serr = subscribeWantedTx(ctx, q, tx, tenantID, projectID, host, []string{"https://" + host})
 		if serr != nil {
 			return serr
 		}
 		slug, serr = upsertWatchPage(ctx, tx, watchMint{
 			host: host, audit: audit, tenantID: tenantID, projectID: projectID,
-			existing: existing,
 		})
 		return serr
 	})
 	if err != nil {
-		return 0, 0, 0, "", err
+		return 0, "", err
 	}
-	return tenantID, projectID, watching, slug, nil
+	return watching, slug, nil
 }
 
 // upsertWatchPage writes the page row a watch mint leaves behind: the audit
@@ -3516,32 +3485,28 @@ func (h *writeAPI) watchTx(ctx context.Context, fn func(*sqlc.Queries, pgx.Tx) e
 
 // watchTail is the e-mail arm's response side: the e-mail channel, the
 // login code (dev echoes it), and the JSON answer.
-func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http.Request, req watchRequest, tenantID, projectID int64, watching int, slug string, target string, probe *mintProbe) {
-	// Every arm ends here with the root target in place, so this is where the
+func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http.Request, email string, tenantID, projectID int64, watching int, slug string, target string, probe *mintProbe) {
+	// The arm ends here with the root target in place, so this is where the
 	// guard probe becomes the page's first measurement. Nil: no probe ran.
 	h.recordMintProbe(ctx, target, probe)
 	// The e-mail channel is the point of leaving an address: without it the
 	// account would watch the host and tell nobody.
-	if req.Email != "" {
-		_, _ = h.pool.Raw().Exec(ctx,
-			`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
-			 SELECT gen_random_uuid(), $1, $2, 'email', $3
-			  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND target = $3)`,
-			tenantID, projectID, req.Email)
-	}
+	_, _ = h.pool.Raw().Exec(ctx,
+		`INSERT INTO alert_channel (public_id, tenant_id, project_id, kind, target)
+		 SELECT gen_random_uuid(), $1, $2, 'email', $3
+		  WHERE NOT EXISTS (SELECT 1 FROM alert_channel WHERE project_id = $2 AND kind = 'email' AND target = $3)`,
+		tenantID, projectID, email)
 	login := map[string]any{}
-	if req.Email != "" {
-		if code, cerr := auth.IssueLoginCode(ctx, h.pool, req.Email, analytics.ClientIP(r)); cerr == nil {
-			// Best-effort in both modes: dev never depends on an inbox, and in
-			// prod a stored-but-undelivered code just waits on the retry.
-			if h.mailer != nil {
-				if serr := h.mailer.SendCode(ctx, req.Email, code); serr != nil {
-					slog.Warn("watch: login code stored but not delivered", "email", req.Email, "err", serr)
-				}
+	if code, cerr := auth.IssueLoginCode(ctx, h.pool, email, analytics.ClientIP(r)); cerr == nil {
+		// Best-effort in both modes: dev never depends on an inbox, and in
+		// prod a stored-but-undelivered code just waits on the retry.
+		if h.mailer != nil {
+			if serr := h.mailer.SendCode(ctx, email, code); serr != nil {
+				slog.Warn("watch: login code stored but not delivered", "email", email, "err", serr)
 			}
-			if h.devMode {
-				login["dev_token"] = code
-			}
+		}
+		if h.devMode {
+			login["dev_token"] = code
 		}
 	}
 	writeAPIJSON(w, http.StatusOK, map[string]any{
@@ -3550,49 +3515,6 @@ func (h *writeAPI) watchTail(ctx context.Context, w http.ResponseWriter, r *http
 		"watching":  watching,
 		"login":     login,
 	})
-}
-
-// createTenantProject provisions a project for a tenant that already exists —
-// the signed-in watch door's mint: newUnclaimedTenant's triple (project,
-// project_seq, api_key) minus the tenant and the claim token, in one
-// transaction like POST /v1/projects, so a failure mid-provision leaves no
-// half-made project eating a plan slot. The gate is the caller's: this door
-// checks it once, before choosing between this and the demo mint.
-func createTenantProject(ctx context.Context, pool *pg.Pool, tenantID int64, domain string) (int64, error) {
-	tx, err := pool.Raw().Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var projectID int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO project (public_id, tenant_id, domain) VALUES ($1, $2, $3) RETURNING id`,
-		newUUID(), tenantID, domain).Scan(&projectID); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO project_seq (project_id, next) VALUES ($1, 1) ON CONFLICT DO NOTHING`, projectID); err != nil {
-		return 0, err
-	}
-	// The key insert is tx-bound (createProject's pattern): a pool-bound
-	// issueKeyOfKind would autocommit outside the transaction. This is the THIRD
-	// copy of that mint in this package — the comment on issueNamedKey claiming
-	// "nothing else here mints" was wrong three ways, and every copy had to gain
-	// Kind and Origins by hand when the columns arrived, because a missing
-	// `text[] NOT NULL` field encodes as NULL and fails the insert.
-	secret := randomHex()
-	hash := sha256.Sum256([]byte(keyScheme(keyKindSecret) + secret))
-	if _, err := pool.Queries().WithTx(tx).CreateAPIKey(ctx, sqlc.CreateAPIKeyParams{
-		TenantID:   tenantID,
-		ProjectID:  projectID,
-		Prefix:     secret[:12],
-		SecretHash: hash[:],
-		Kind:       keyKindSecret,
-		Origins:    []string{},
-	}); err != nil {
-		return 0, err
-	}
-	return projectID, tx.Commit(ctx)
 }
 
 // sameHostTargets keeps only targets belonging to the asked host: without it

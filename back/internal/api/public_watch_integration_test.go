@@ -1,12 +1,12 @@
 //go:build integration
 
-// The watch door reads the session
-// and the public status page says whose it is (T8): a signed-in visitor with
-// room gets the project in their own tenant — with the session's pick set to
-// it (Decision 18) — at the limit or signed out they still get the anonymous
-// demo mint, and publicStatus answers mine only for the owner.
-// public_watch_test.go is the unit lane; these need the real routes, a real
-// session cookie and real Postgres. -tags=integration with UC_TEST_POSTGRES.
+// The watch door ignores the session (owner rule, 2026-10-15): signed in or
+// out, with room or at the limit, a fresh host gets the same unclaimed demo
+// page and nothing lands in the caller's workspace; only a claim does that.
+// The public status page says whose it is (T8): publicStatus answers mine
+// only for the owner. public_watch_test.go is the unit lane; these need the
+// real routes, a real session cookie and real Postgres. -tags=integration
+// with UC_TEST_POSTGRES.
 package api
 
 import (
@@ -37,6 +37,8 @@ type watchFixture struct {
 	sess        *session.Manager
 	route       http.Handler
 	ownerCookie *http.Cookie
+	// The door's prober: the hosts here are made up, so a stub answers.
+	probe *stubProber
 	// How many watches this fixture has sent: each gets its own spoofed
 	// address, so two in a row never share the per-IP cooldown.
 	watches int
@@ -123,6 +125,8 @@ func newWatchFixture(t *testing.T) *watchFixture {
 	// A pgstore, not nil: the mint records its guard probe through it, and the
 	// signed-out test below reads that row back.
 	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), f.sess, false, nil, nil, false, "")
+	f.probe = answering()
+	wa.exec = f.probe
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -161,10 +165,11 @@ func (f *watchFixture) unclaimedCount(t *testing.T) int64 {
 	return f.count(t, `SELECT count(*) FROM tenant WHERE claim_token_hash IS NOT NULL`)
 }
 
-// Signed in with room and a host nobody holds: the project is created in the
-// CALLER's tenant — the full provisioning triple, monitors and status page on
-// the caller's ids from the first check — and no unclaimed tenant appears.
-func TestWatchSignedInWithRoomCreatesTheProjectInTheCallersTenant(t *testing.T) {
+// Signed in with room and a host nobody holds: the session is ignored, so the
+// caller gets the same unclaimed page a stranger gets. Nothing is created in
+// their workspace and the session's pick does not move; only a claim attaches
+// a page to an account.
+func TestWatchSignedInWithRoomStillMintsTheDemoTenant(t *testing.T) {
 	f := newWatchFixture(t)
 	host := fmt.Sprintf("room-%d.example.com", time.Now().UnixNano())
 	before := f.unclaimedCount(t)
@@ -173,53 +178,23 @@ func TestWatchSignedInWithRoomCreatesTheProjectInTheCallersTenant(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("watch signed-in with room = %d (%s), want 200", w.Code, w.Body.String())
 	}
-	if after := f.unclaimedCount(t); after != before {
-		t.Fatalf("unclaimed tenants %d -> %d, want unchanged (no demo mint for a caller with room)", before, after)
+	if after := f.unclaimedCount(t); after != before+1 {
+		t.Fatalf("unclaimed tenants %d -> %d, want before+1 (the demo mint, signed in or not)", before, after)
 	}
-
-	ctx := context.Background()
-	// The project — exactly one on the caller, named after the host, with the
-	// whole provisioning triple newUnclaimedTenant mints.
-	var projectID int64
-	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.tenantID); n != 1 {
-		t.Fatalf("caller projects = %d, want exactly 1", n)
+	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.tenantID); n != 0 {
+		t.Fatalf("caller projects = %d, want 0 (nothing lands in the caller's workspace)", n)
 	}
-	if err := f.pool.Raw().QueryRow(ctx,
-		`SELECT id FROM project WHERE tenant_id = $1`, f.tenantID).Scan(&projectID); err != nil {
-		t.Fatalf("caller project: %v", err)
-	}
-	var domain string
-	if err := f.pool.Raw().QueryRow(ctx,
-		`SELECT domain FROM project WHERE id = $1`, projectID).Scan(&domain); err != nil || domain != host {
-		t.Fatalf("project domain = %q (err %v), want the watched %q", domain, err, host)
-	}
-	if n := f.count(t, `SELECT count(*) FROM project_seq WHERE project_id = $1`, projectID); n != 1 {
-		t.Fatalf("project_seq rows = %d, want 1 (the provisioning triple)", n)
-	}
-	if n := f.count(t, `SELECT count(*) FROM api_key WHERE tenant_id = $1 AND project_id = $2`, f.tenantID, projectID); n != 1 {
-		t.Fatalf("api_key rows = %d, want 1 (the provisioning triple)", n)
-	}
-	// Monitors and the status page land on the caller's ids, not a demo page.
-	if n := f.count(t, `SELECT count(*) FROM monitor WHERE tenant_id = $1 AND project_id = $2`, f.tenantID, projectID); n != 1 {
-		t.Fatalf("monitors on the caller = %d, want 1", n)
-	}
-	if n := f.count(t, `SELECT count(*) FROM status_page WHERE tenant_id = $1 AND project_id = $2`, f.tenantID, projectID); n != 1 {
-		t.Fatalf("status_page rows on the caller = %d, want 1", n)
-	}
-	// Decision 18: the session's pick now points at the new project, so
-	// /v1/me opens on what the caller just created (createProject parity).
-	var pick int64
-	if err := f.pool.Raw().QueryRow(ctx,
-		`SELECT project_id FROM session WHERE person_id = $1`, f.personID).Scan(&pick); err != nil || pick != projectID {
-		t.Fatalf("session project_id = %d (err %v), want the new project %d", pick, err, projectID)
+	var pick *int64
+	if err := f.pool.Raw().QueryRow(context.Background(),
+		`SELECT project_id FROM session WHERE person_id = $1`, f.personID).Scan(&pick); err != nil || pick != nil {
+		t.Fatalf("session project_id = %v (err %v), want still none", pick, err)
 	}
 }
 
-// A guest whose session stands in somebody else's workspace (an invite redeem
-// lands it there) watches a fresh host: the project lands in the guest's OWN
-// workspace, created on demand like createProject's, never in the host's, and
-// the session's workspace follows the new project.
-func TestWatchSignedInGuestCreatesTheProjectInTheirOwnTenant(t *testing.T) {
+// A guest whose session stands in somebody else's workspace watches a fresh
+// host: the page is the unclaimed demo page, in neither the host's workspace
+// nor one of the guest's own, and the session stays where it stood.
+func TestWatchSignedInGuestStillMintsTheDemoTenant(t *testing.T) {
 	f := newWatchFixture(t)
 	ctx := context.Background()
 	var guestID int64
@@ -241,18 +216,19 @@ func TestWatchSignedInGuestCreatesTheProjectInTheirOwnTenant(t *testing.T) {
 	if n := f.count(t, `SELECT count(*) FROM project WHERE tenant_id = $1`, f.tenantID); n != 0 {
 		t.Fatalf("host workspace projects = %d, want 0 (a guest never spends the host's plan)", n)
 	}
-	var ownTenant, projectID int64
-	if err := f.pool.Raw().QueryRow(ctx,
-		`SELECT t.id, p.id FROM tenant t JOIN project p ON p.tenant_id = t.id
-		  WHERE t.owner_person_id = $1 AND p.domain = $2`, guestID, host).Scan(&ownTenant, &projectID); err != nil {
-		t.Fatalf("the guest's own project for %s: %v", host, err)
+	if n := f.count(t, `SELECT count(*) FROM tenant WHERE owner_person_id = $1`, guestID); n != 0 {
+		t.Fatalf("the guest owns %d workspaces after a watch, want 0", n)
 	}
-	var sessTenant, sessProject int64
+	var unclaimed bool
 	if err := f.pool.Raw().QueryRow(ctx,
-		`SELECT tenant_id, project_id FROM session WHERE person_id = $1`, guestID).Scan(&sessTenant, &sessProject); err != nil ||
-		sessTenant != ownTenant || sessProject != projectID {
-		t.Fatalf("session scope = (%d, %d) err %v, want the guest's own (%d, %d)",
-			sessTenant, sessProject, err, ownTenant, projectID)
+		`SELECT t.claim_token_hash IS NOT NULL FROM project p JOIN tenant t ON t.id = p.tenant_id
+		  WHERE p.domain = $1`, host).Scan(&unclaimed); err != nil || !unclaimed {
+		t.Fatalf("the page's holder unclaimed = %v (err %v), want the demo tenant", unclaimed, err)
+	}
+	var sessTenant int64
+	if err := f.pool.Raw().QueryRow(ctx,
+		`SELECT tenant_id FROM session WHERE person_id = $1`, guestID).Scan(&sessTenant); err != nil || sessTenant != f.tenantID {
+		t.Fatalf("session tenant = %d (err %v), want still the host's %d", sessTenant, err, f.tenantID)
 	}
 }
 
@@ -318,44 +294,44 @@ func TestWatchSignedOutMintsTheDemoTenant(t *testing.T) {
 	}
 	// The page lands measured: the door's guard probe is the root target's first
 	// check row, stamped with the node's region and the watch interval. The host
-	// does not resolve, so the row is a measured failure, not a missing one.
+	// answered, so the row is a measured success, not a missing one.
 	rootChecks := func() int64 {
 		return f.count(t,
 			`SELECT count(*) FROM checks c JOIN probe_target pt ON pt.id = c.target_id
-			  WHERE pt.url = $1 AND c.region = $2 AND c.interval_sec = $3 AND NOT c.ok`,
+			  WHERE pt.url = $1 AND c.region = $2 AND c.interval_sec = $3 AND c.ok`,
 			"https://"+host, scheduleRegion(), watchIntervalSec)
 	}
 	if n := rootChecks(); n != 1 {
 		t.Fatalf("guard probe rows for the root target = %d, want 1", n)
 	}
 
-	// A second visitor for the same host, from another address: the live page is
-	// reused and the history keeps the one row the mint measured (this pins the
-	// row count; the door's own "probe nothing" is not observed here).
-	slugOf := func(rec *httptest.ResponseRecorder) string {
-		t.Helper()
-		var resp struct {
-			Slug string `json:"slug"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode watch: %v", err)
-		}
-		return resp.Slug
+	// A second visitor for the same host, from another address: the live page
+	// is opened as it is, with no second probe and no second row.
+	var first, second struct {
+		Slug    string `json:"slug"`
+		Created bool   `json:"created"`
 	}
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil || !first.Created {
+		t.Fatalf("first watch answered %s (err %v), want created", w.Body.String(), err)
+	}
+	probes := f.probe.calls.Load()
 	again := f.watch(t, host, nil)
 	if again.Code != http.StatusOK {
 		t.Fatalf("second watch = %d (%s), want 200", again.Code, again.Body.String())
 	}
-	if got, want := slugOf(again), slugOf(w); got != want {
-		t.Fatalf("second watch slug = %q, want the live page's %q", got, want)
+	if err := json.Unmarshal(again.Body.Bytes(), &second); err != nil || second.Slug != first.Slug || second.Created {
+		t.Fatalf("second watch answered %s (err %v), want the live page %q, not created", again.Body.String(), err, first.Slug)
+	}
+	if n := f.probe.calls.Load(); n != probes {
+		t.Fatalf("the second watch probed %d times, want none", n-probes)
 	}
 	if n := rootChecks(); n != 1 {
 		t.Fatalf("check rows after a second watch = %d, want still 1 (no second probe, no second row)", n)
 	}
 
-	// And the page's state line reads that row: a measured failure, never
+	// And the page's state line reads that row: a measured answer, never
 	// "No data yet" over a measurement (hostPageState's facts-less fallback).
-	pr := httptest.NewRequest(http.MethodGet, "/public/status/"+slugOf(w), nil)
+	pr := httptest.NewRequest(http.MethodGet, "/public/status/"+first.Slug, nil)
 	pw := httptest.NewRecorder()
 	f.route.ServeHTTP(pw, pr)
 	var pub struct {
@@ -363,18 +339,20 @@ func TestWatchSignedOutMintsTheDemoTenant(t *testing.T) {
 			Kind string `json:"kind"`
 		} `json:"state"`
 	}
-	if err := json.Unmarshal(pw.Body.Bytes(), &pub); err != nil || pub.State.Kind != "down" {
-		t.Fatalf("public state after the mint = %q (%v), want down: the guard probe is the first measurement", pub.State.Kind, err)
+	if err := json.Unmarshal(pw.Body.Bytes(), &pub); err != nil || pub.State.Kind != "ok" {
+		t.Fatalf("public state after the mint = %q (%v), want ok: the guard probe is the first measurement", pub.State.Kind, err)
 	}
 }
 
 // The per-IP cooldown names its window: a 429 without Retry-After is a wall
-// the client can only guess at, and guessing means retrying into it.
+// the client can only guess at, and guessing means retrying into it. It
+// prices a mint, so the second watch is a fresh host: an existing page opens
+// before the cooldown is consulted.
 func TestWatchCooldownCarriesRetryAfter(t *testing.T) {
 	f := newWatchFixture(t)
-	host := fmt.Sprintf("cooldown-%d.example.com", time.Now().UnixNano())
+	uniq := time.Now().UnixNano()
 	// The same address twice, unlike watch(): the cooldown is the thing under test.
-	post := func() *httptest.ResponseRecorder {
+	post := func(host string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/public/watch",
 			strings.NewReader(`{"host":"`+host+`"}`))
 		r.Header.Set("X-Forwarded-For", "203.0.113.254")
@@ -382,10 +360,10 @@ func TestWatchCooldownCarriesRetryAfter(t *testing.T) {
 		f.route.ServeHTTP(w, r)
 		return w
 	}
-	if w := post(); w.Code != http.StatusOK {
+	if w := post(fmt.Sprintf("cooldown-%d.example.com", uniq)); w.Code != http.StatusOK {
 		t.Fatalf("first watch = %d (%s), want 200", w.Code, w.Body.String())
 	}
-	again := post()
+	again := post(fmt.Sprintf("cooldown-next-%d.example.com", uniq))
 	if again.Code != http.StatusTooManyRequests {
 		t.Fatalf("second watch inside the cooldown = %d, want 429", again.Code)
 	}

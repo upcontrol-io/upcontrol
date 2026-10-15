@@ -156,9 +156,10 @@ func (h *google) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.SetCookie(w, sessToken, session.DefaultTTL, !h.devMode)
+	door.markVerified(ctx, person)
 	h.rec.ServerEvent(ctx, "signed_in", person.ID, person.TenantID, nil)
 	h.rec.LinkPerson(ctx, person.ID, person.TenantID)
-	writeAccount(w, person)
+	writeAccount(w, person, pendingClaim{})
 }
 
 func (h *google) allowedRedirect(uri string) bool {

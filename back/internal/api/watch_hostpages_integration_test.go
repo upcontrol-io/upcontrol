@@ -1,8 +1,9 @@
 //go:build integration
 
 // The watch vertical after migration 009 (plan parts 1-2): shared probes,
-// host pages, canonical hosts, the alias fold, second pages, removal, the
-// mint ceilings. Needs Postgres: -tags=integration with UC_TEST_POSTGRES.
+// host pages, canonical hosts, the alias fold, a claimed host opened as it
+// is, removal, the mint ceilings. Needs Postgres: -tags=integration with
+// UC_TEST_POSTGRES.
 // Each test builds its own database, so a failed run leaves nothing behind
 // for the next one.
 package api
@@ -74,6 +75,8 @@ func newHostWorld(t *testing.T) (*pg.Pool, http.Handler, *session.Manager) {
 	t.Cleanup(pool.Close)
 	sm := session.New(pool, session.DefaultTTL, nil)
 	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
+	// The hosts these tests watch are made up: only a stub answers for them.
+	wa.exec = answering()
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
 	mux.Handle("GET /public/status/{slug}", wa)
@@ -246,9 +249,10 @@ func TestHostPageSurvivesRootMonitorDelete(t *testing.T) {
 	}
 }
 
-// A host with a CLAIMED page mints the visitor their own SUFFIXED page on
-// the same root target; an unclaimed one is reused as-is.
-func TestSecondPageForAHostWithAClaimedPage(t *testing.T) {
+// A host with a CLAIMED page is opened, never copied: the second visitor gets
+// the claimed page's own slug, watching 0, and no tenant, page, check or
+// probe appears for them.
+func TestAClaimedHostIsOpenedNeverCopied(t *testing.T) {
 	pool, route, _ := newHostWorld(t)
 	uniq := time.Now().UnixNano() % 100000
 	host := fmt.Sprintf("claimed-%d.example.com", uniq)
@@ -266,34 +270,29 @@ func TestSecondPageForAHostWithAClaimedPage(t *testing.T) {
 		`UPDATE tenant SET claim_token_hash = NULL WHERE id = $1`, firstTenant); err != nil {
 		t.Fatal(err)
 	}
-	targetsBefore := oneInt(t, pool, `SELECT count(*) FROM probe_target`)
+	count := func() [4]int64 {
+		return [4]int64{
+			oneInt(t, pool, `SELECT count(*) FROM tenant`),
+			oneInt(t, pool, `SELECT count(*) FROM status_page`),
+			oneInt(t, pool, `SELECT count(*) FROM monitor`),
+			oneInt(t, pool, `SELECT count(*) FROM probe_target`),
+		}
+	}
+	before := count()
 
 	second := watch(t, route, host, "")
 	if second.Code != http.StatusOK {
 		t.Fatalf("second watch = %d (%s)", second.Code, second.Body.String())
 	}
 	body := watchBody(t, second)
-	secondSlug := body["slug"].(string)
-	if secondSlug == firstSlug {
-		t.Fatalf("the claimed page's slug was handed to a second visitor")
+	if body["slug"] != firstSlug || body["statusUrl"] != "/status/"+firstSlug {
+		t.Fatalf("second watch answered %v, want the claimed page %q itself", body, firstSlug)
 	}
-	// A shared root: one probe, two pages.
-	if n := oneInt(t, pool, `SELECT count(*) FROM probe_target`); n != targetsBefore {
-		t.Fatalf("probe_target rows %d -> %d, want no new probe (shared root)", targetsBefore, n)
+	if body["created"] != false || body["watching"] != float64(0) {
+		t.Fatalf("second watch answered created %v, watching %v; want false and 0", body["created"], body["watching"])
 	}
-	var roots int
-	if err := pool.Raw().QueryRow(context.Background(),
-		`SELECT count(DISTINCT root_target_id) FROM status_page WHERE root_target_id IS NOT NULL`).Scan(&roots); err != nil || roots != 1 {
-		t.Fatalf("distinct root targets = %d (err %v), want 1", roots, err)
-	}
-	// The second page is NOT the host page.
-	if isHost := oneInt(t, pool,
-		`SELECT count(*) FROM status_page WHERE slug = $1 AND is_host_page`, secondSlug); isHost != 0 {
-		t.Fatal("the suffixed second page is marked is_host_page")
-	}
-	if isHost := oneInt(t, pool,
-		`SELECT count(*) FROM status_page WHERE slug = $1 AND is_host_page`, firstSlug); isHost != 1 {
-		t.Fatal("the first page is not marked is_host_page")
+	if after := count(); after != before {
+		t.Fatalf("tenant, status_page, monitor, probe_target rows %v -> %v, want nothing created", before, after)
 	}
 }
 
@@ -346,6 +345,7 @@ func TestMintCeilingsRefuseAndCreateNothing(t *testing.T) {
 	pool, _, _ := newHostWorld(t)
 	const ip = "198.51.100.77"
 	wa := NewWriteAPI(pool, nil, session.New(pool, session.DefaultTTL, nil), false, nil, nil, false, "")
+	wa.exec = answering()
 	wa.statusKnobs.MintPerIPPerDay = 2
 	mux := http.NewServeMux()
 	mux.Handle("POST /public/watch", wa)
@@ -588,6 +588,7 @@ func TestPublicStatusCarriesTheLatestChecks(t *testing.T) {
 	// newHostWorld's own handler has no checks store, so it never runs the
 	// strip reads; this one does.
 	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), sm, false, nil, nil, false, "")
+	wa.exec = answering()
 	route := http.NewServeMux()
 	route.Handle("POST /public/watch", wa)
 	route.Handle("GET /public/status/{slug}", wa)
@@ -600,8 +601,8 @@ func TestPublicStatusCarriesTheLatestChecks(t *testing.T) {
 	slug := watchBody(t, w)["slug"].(string)
 	targetID := oneInt(t, pool, `SELECT root_target_id FROM status_page WHERE slug = $1`, slug)
 	// With a checks store wired, the watch door has already stored its guard
-	// probe as the target's first row (recordMintProbe), and what that probe
-	// of a made-up host answered is the network's business, not this test's.
+	// probe as the target's first row (recordMintProbe), and what the stub
+	// answered for a made-up host is not this test's business.
 	if _, err := pool.Raw().Exec(ctx, `DELETE FROM checks WHERE target_id = $1`, targetID); err != nil {
 		t.Fatal(err)
 	}
@@ -667,6 +668,7 @@ func TestLatestChecksAreTheNewestInsideTheWindow(t *testing.T) {
 	pool, _, sm := newHostWorld(t)
 	ctx := context.Background()
 	wa := NewWriteAPI(pool, pgstore.New(pool.Raw()), sm, false, nil, nil, false, "")
+	wa.exec = answering()
 	route := http.NewServeMux()
 	route.Handle("POST /public/watch", wa)
 	route.Handle("GET /public/status/{slug}", wa)

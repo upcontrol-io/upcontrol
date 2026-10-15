@@ -131,7 +131,7 @@ the board would work out; it changes nothing about what is drawn. What
 | `event` | the event name you passed to `track()` | the event's own fields, as text (below) |
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
-| `people` | the event name, on a breakdown, an A/B test or the `heatmap` card, or alone for a unique count | the event's own fields, on a `name` alone (below); none on the rest. `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
+| `people` | the event name, on a breakdown, an A/B test or the `heatmap` card, optionally on a retention grid, or alone for a unique count | the event's own fields, on a `name` alone (below); none on the rest. `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
 
 A `people` ref is the definition itself - the card is built from event names,
 with nothing declared elsewhere to keep in sync. It counts distinct people: an
@@ -141,7 +141,7 @@ reading:
 | card | ref |
 |---|---|
 | `funnel` | `{ "source": "people", "steps": ["visit", "signup", "payment.succeeded"] }` - the step event names, in journey order, 2 to 12 |
-| `retention` | `{ "source": "people", "cohort": "week" }` - the whole project; there is nothing to name |
+| `retention` | `{ "source": "people", "cohort": "week" }` - every event the project sent. `name` is optional: `{ "source": "people", "cohort": "week", "name": "<event>" }` counts only the people of that one event, the name `retention()` was given. Their first such event is the cohort, and the same event in a later week a return. A name starting `uc.` reads nothing |
 | `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
 | `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows; the card compares each arm with the one named `control`, and what it claims is topic `experiment` |
 | `heatmap` | `{ "source": "people", "name": "uc.pageview", "field": "path", "count": "events" }` - fixed: the web script's page views, nothing to pick |

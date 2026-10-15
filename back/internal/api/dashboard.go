@@ -291,7 +291,8 @@ func validateSeries(qs []seriesQuery) string {
 					}
 				}
 			case q.Cohort == "week":
-				// Retention: the range is the whole question.
+				// Retention: the range is the whole question, and a `name`, when
+				// there is one, narrows the grid to that event's people.
 			case len(q.Group) == 1 || len(q.Group) == 2:
 				// Breakdown (one key) or an A/B test (two keys, the arm and
 				// the stat label keys); `name` is the event name in both.
@@ -704,11 +705,11 @@ func groupedAnswer(q seriesQuery, from, to time.Time, r seriesRange, rows []any)
 
 // peopleSeries answers the people source's four grouped reads, every one a
 // GROUP BY over events with a person behind them. The shape picks the read:
-// steps name a funnel's events; cohort "week" the retention grid; a group of
-// one narrows one event name to one label's values (breakdown); a group of two
-// folds one event name by its arm and stat label keys (an A/B test). In both
-// grouped shapes `name` is the event name. A bare name has a time axis, and
-// eventSeries answers it.
+// steps name a funnel's events; cohort "week" the retention grid, of one
+// event's people when `name` is set; a group of one narrows one event name to
+// one label's values (breakdown); a group of two folds one event name by its
+// arm and stat label keys (an A/B test). In both grouped shapes `name` is the
+// event name. A bare name has a time axis, and eventSeries answers it.
 func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
 	rows := []any{}
 	if h.pgs != nil {
@@ -720,7 +721,7 @@ func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, 
 		case len(q.Steps) > 0:
 			sums, err = h.pgs.FunnelSteps(ctx, tenantID, projectID, q.Steps, from, to)
 		case q.Cohort == "week":
-			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, from, to)
+			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, q.Name, from, to)
 		case len(q.Group) == 1:
 			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], q.Count == "events", from, to)
 		default: // two group keys: validateSeries refused every other shape

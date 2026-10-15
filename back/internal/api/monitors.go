@@ -23,6 +23,7 @@ import (
 
 	sqlc "go.upcontrol.io/back/gen/pg"
 	"go.upcontrol.io/back/internal/account/session"
+	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/detect/availability"
 	"go.upcontrol.io/back/internal/incident"
 	"go.upcontrol.io/back/internal/incident/triage"
@@ -37,10 +38,19 @@ type monitors struct {
 	pgs    *pgstore.Store
 	sess   *session.Manager
 	origin string
+	// rec fires a workspace's first_check_created. Optional: nil skips only
+	// the count; the cmd wiring attaches the recorder.
+	rec *analytics.Recorder
 }
 
 func NewMonitors(p *pg.Pool, pgs *pgstore.Store, sm *session.Manager, origin string) *monitors {
 	return &monitors{pool: p, pgs: pgs, sess: sm, origin: strings.TrimRight(origin, "/")}
+}
+
+// WithRecorder attaches the analytics recorder that fires first_check_created.
+func (h *monitors) WithRecorder(rec *analytics.Recorder) *monitors {
+	h.rec = rec
+	return h
 }
 
 // ServeHTTP routes by method + path pattern.
@@ -194,6 +204,8 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	// Set when the subscription joined a target already down: its incident
 	// opened inside the transaction, the evidence slice follows the commit.
 	var openedMonitor int64
+	// Set when this create stamped the workspace's first check.
+	var first bool
 	err := h.inTx(r.Context(), func(q *sqlc.Queries, tx pgx.Tx) error {
 		tkey, tkind, turl := key, kind, normTarget
 		if kind == "heartbeat" {
@@ -224,6 +236,19 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 		row, created, ierr = insertMonitorOnTarget(r.Context(), tx, params, targetID)
 		if ierr != nil {
 			return ierr
+		}
+		// A workspace's first check counts once: checks are deleted outright,
+		// so only the stamp tells the first from a re-add, and the tenant row
+		// it locks serializes two first creates. An unclaimed demo tenant has
+		// no owner and is never stamped.
+		if created {
+			tag, serr := tx.Exec(r.Context(),
+				`UPDATE tenant SET first_check_at = now()
+				  WHERE id = $1 AND first_check_at IS NULL AND owner_person_id IS NOT NULL`, tenantID)
+			if serr != nil {
+				return serr
+			}
+			first = tag.RowsAffected() == 1
 		}
 		if kind == "heartbeat" {
 			// Open the first window at interval + grace: a job that starts on its
@@ -261,6 +286,10 @@ func (h *monitors) create(w http.ResponseWriter, r *http.Request, tenantID int64
 	}
 	if openedMonitor != 0 {
 		incident.New(h.pool, h.pgs).FreezeOpenIncident(r.Context(), openedMonitor)
+	}
+	if first {
+		h.rec.ServerEvent(analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r)),
+			"first_check_created", s.PersonID, tenantID, map[string]string{"kind": kind})
 	}
 	// The first website check names the project, only when it is still unnamed:
 	// a shared status-page link must not be renamed out from under it.

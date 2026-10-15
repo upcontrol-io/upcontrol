@@ -185,6 +185,12 @@ export interface paths {
                         email: string;
                         /** @description Present when redeeming the link, absent when requesting. */
                         token?: string;
+                        /** @description Request only. The slug of the unclaimed status page this sign-in was started for. Kept with the code on the server, never mailed, and answered at redeem as `pendingClaim`, so a link opened on another device still finishes the claim. A value not shaped like a slug is dropped, never refused. */
+                        claim?: string;
+                        /** @description Request only. A CLI project's claim token (32 lowercase hex). Kept with the code on the server for the code's lifetime, never mailed and never logged, and answered at redeem as `pendingClaim`. Any other shape is dropped. */
+                        claimToken?: string;
+                        /** @description Request only. The /app path to land on after the claim. Anything outside /app is dropped. */
+                        next?: string;
                     };
                 };
             };
@@ -196,7 +202,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Account"];
+                        "application/json": components["schemas"]["MagicLinkRedeemed"];
                     };
                 };
                 /** @description Link sent (always, to avoid email enumeration). */
@@ -3381,7 +3387,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start watching a host; sends a confirmation email (7-day pending TTL). */
+        /**
+         * Open a host's public status page, creating it when there is none.
+         * @description Without an email, the host's existing page (claimed or not, anyone's) is answered as it is and nothing is created. A host with no page gets an unclaimed page, the same for a signed-in caller as for a stranger: nothing lands in the caller's own workspace, which only a claim does. It is created only when the host gives an HTTP answer; otherwise the door answers 400 `unreachable` with the probe's diagnostic and creates nothing. With an email the call provisions the account and mails a sign-in code.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -3402,6 +3411,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["WatchResponse"];
+                    };
+                };
+                /** @description Refused. `unreachable` carries `check`, the diagnostic the probe established (the CheckResponse /public/check would answer for it), so the client can show why without probing again. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WatchRefused"];
                     };
                 };
                 429: components["responses"]["TooManyRequests"];
@@ -3459,6 +3477,7 @@ export interface paths {
                             /** @description Shown exactly once. */
                             key: string;
                             claimToken: string;
+                            /** @description The page that attaches the project to a signed-in person: <origin>/claim#<token>. The token rides the fragment, so it never reaches an access log. */
                             claimUrl: string;
                         };
                     };
@@ -3482,10 +3501,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Attach the signed-in person to the anonymous tenant the claim token
-         *     names (cli/SPEC.md §7.3). One-time: the token hash is cleared on
-         *     success. Idempotent for an already-claimed member only via membership's
-         *     ON CONFLICT; an unknown or spent token is 404.
+         * Adopt an anonymous project into the caller's OWN workspace (cli/SPEC.md
+         *     §7.3), never into a workspace the session merely guests in: its data
+         *     and its unchanged key move with it, and the session points at the
+         *     project. Works once: the token hash, or the unclaimed page, is burned
+         *     on success. An unknown or spent token is 404, a removed page 410, and
+         *     a workspace with no room for one more project 402.
          */
         post: {
             parameters: {
@@ -3515,7 +3536,17 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
                 404: components["responses"]["NotFound"];
+                /** @description The status page was removed. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -4198,6 +4229,16 @@ export interface components {
             /** @enum {string} */
             role?: "notify" | "login";
         };
+        /** @description What a magic-link sign-in was started for, kept with the code on the server so the link finishes it on any device. The client performs it with POST /v1/claim: a slug claims that unclaimed status page; a claimToken is offered as a press, never claimed on load. */
+        PendingClaim: {
+            slug?: string;
+            claimToken?: string;
+            /** @description The /app path to land on after the claim. */
+            next?: string;
+        };
+        MagicLinkRedeemed: components["schemas"]["Account"] & {
+            pendingClaim?: components["schemas"]["PendingClaim"];
+        };
         Project: {
             /** @example prj_1 */
             id: string;
@@ -4605,7 +4646,7 @@ export interface components {
             };
             /** @description `people` only: a funnel's step event names, in journey order. The card is the journey's one definition. */
             steps?: string[];
-            /** @description `people` only: `week` reads the retention grid. */
+            /** @description `people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return). */
             cohort?: string;
             /** @description `people` only: the event field a breakdown ranks the values of. */
             field?: string;
@@ -4784,7 +4825,7 @@ export interface components {
             source: "logs" | "check" | "event" | "metric" | "people";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. */
             name?: string;
             where?: {
                 [key: string]: string;
@@ -4803,7 +4844,7 @@ export interface components {
             /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */
             steps?: string[];
             /**
-             * @description `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+             * @description `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people.
              * @enum {string}
              */
             cohort?: "week";
@@ -5092,11 +5133,11 @@ export interface components {
             host: string;
             /**
              * Format: email
-             * @description Optional. With an address the call provisions the account and mails a sign-in code; without one it creates or reuses the host's public status page.
+             * @description Optional. With an address the call provisions the account and mails a sign-in code; without one it opens the host's existing public status page, or creates an unclaimed one for a host that answers.
              */
             email?: string;
             /**
-             * @description The ticked rows' ids (absolute URLs) to watch alongside the host. Untrusted: the server keeps only the ones on `host` and creates no more than the plan allows. Absent means "just the host".
+             * @description The ticked rows' ids (absolute URLs) to watch alongside the host, read on the email arm only. Without an email a page carries one check, the host itself: a new page is created with it alone and an existing page gains nothing, because more checks take a sign-in and the page's Add a check. Untrusted: the server keeps only the ones on `host` and creates no more than the plan allows.
              * @example [
              *       "https://example.com/pricing"
              *     ]
@@ -5108,12 +5149,17 @@ export interface components {
             statusUrl: string;
             /** @example prj-42 */
             slug?: string;
+            /** @description True when this call created the page; false when the host's existing page was answered. */
+            created?: boolean;
             /**
              * Format: int32
-             * @description How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused.
+             * @description How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused. 0 when the host's page is already claimed: it is answered as it is.
              */
             watching?: number;
             login?: components["schemas"]["WatchLogin"];
+        };
+        WatchRefused: components["schemas"]["Error"] & {
+            check?: components["schemas"]["CheckResponse"];
         };
         /** @description How the visitor gets into the account this call just created. On the e-mail path a magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes. */
         WatchLogin: {
