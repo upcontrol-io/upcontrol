@@ -121,6 +121,24 @@ func TestValidateSeries_BarePeopleName(t *testing.T) {
 	}
 }
 
+// A retention grid may name its event, which narrows it to that event's
+// people. It is still a cohort, so a filter, a row count and a bucket on it
+// stay refused.
+func TestValidateSeries_ANamedRetentionGrid(t *testing.T) {
+	if msg := validateSeries([]seriesQuery{{ID: "a", Source: "people", Range: "31d", Cohort: "week", Name: "visitors"}}); msg != "" {
+		t.Fatalf("a retention grid of one event must be accepted; got %q", msg)
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "labels", Source: "people", Range: "31d", Cohort: "week", Name: "visitors", Labels: map[string]string{"plan": "pro"}},
+		{ID: "rows", Source: "people", Range: "31d", Cohort: "week", Name: "visitors", Count: "events"},
+		{ID: "bucket", Source: "people", Range: "31d", Cohort: "week", Name: "visitors", Bucket: "day"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must still be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
 // A bucket keeps the range's span and must leave more than one bucket and no
 // more than a 31-day month of hours.
 func TestValidateSeries_Bucket(t *testing.T) {
@@ -721,6 +739,7 @@ func TestReadLayout_KeepsEveryRefACardCanCarry(t *testing.T) {
 	for _, one := range []struct{ name, ref, token string }{
 		{"a funnel's journey", `{"source":"people","steps":["visit","signup"]}`, `"steps":["visit","signup"]`},
 		{"a retention grid", `{"source":"people","cohort":"week"}`, `"cohort":"week"`},
+		{"a retention grid of one event", `{"source":"people","cohort":"week","name":"visitors"}`, `"name":"visitors"`},
 		{"a breakdown's field", `{"source":"people","name":"page","field":"value"}`, `"field":"value"`},
 		{"an A/B test's event", `{"source":"people","name":"checkout"}`, `"source":"people"`},
 		{"a narrowed log pick", `{"source":"logs","where":{"service":"api"},"label":"api errors"}`, `"label":"api errors"`},

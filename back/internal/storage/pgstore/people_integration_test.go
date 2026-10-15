@@ -187,7 +187,7 @@ func TestPeopleRetentionAndExperiment(t *testing.T) {
 	// to retain, or every day's visitors would be a cohort that never returns.
 	seedEvent(t, pool, from.Add(3*24*time.Hour), "uc.pageview", "3f2a9c0d1e4b5a67", nil)
 
-	cohorts, err := s.RetentionCohorts(ctx, peopleTenant, peopleProject, from, to)
+	cohorts, err := s.RetentionCohorts(ctx, peopleTenant, peopleProject, "", from, to)
 	if err != nil {
 		t.Fatalf("retention cohorts: %v", err)
 	}
@@ -227,5 +227,54 @@ func TestPeopleRetentionAndExperiment(t *testing.T) {
 	if len(people) != 3 ||
 		people["A/exposed"] != 1 || people["B/exposed"] != 1 || people["A/converted"] != 1 {
 		t.Fatalf("A exposed 1 (ada twice is one person), B exposed 1, A converted 1, the keyless rows nothing; got %v", people)
+	}
+}
+
+// A named grid is one event's people: their first event OF THAT NAME is the
+// cohort, and only that event in a later week is a return. The nameless grid
+// over the same rows is what it always was, and a `uc.` name reads nothing.
+func TestPeopleRetentionByEvent(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	to := mondayUTC(time.Now().UTC())
+	from := to.Add(-28 * 24 * time.Hour)
+	day := 24 * time.Hour
+
+	// grace was first seen before the window, but her first signin is inside it,
+	// and she signs in again a week later.
+	seedEvent(t, pool, from.Add(-48*time.Hour), "visit", "grace", nil)
+	seedEvent(t, pool, from.Add(2*day), "signin", "grace", nil)
+	seedEvent(t, pool, from.Add(9*day), "signin", "grace", nil)
+	// ada visits in both weeks and never signs in.
+	seedEvent(t, pool, from.Add(day), "visit", "ada", nil)
+	seedEvent(t, pool, from.Add(8*day), "visit", "ada", nil)
+	// linus signs in once; his visit a week later is no signin return.
+	seedEvent(t, pool, from.Add(day), "signin", "linus", nil)
+	seedEvent(t, pool, from.Add(8*day), "visit", "linus", nil)
+	seedEvent(t, pool, from.Add(3*day), "uc.pageview", "3f2a9c0d1e4b5a67", nil)
+
+	first := from.Format("2006-01-02")
+	for _, c := range []struct {
+		name string
+		want map[string]float64
+	}{
+		// grace and linus first signed in in the first week; grace alone came back.
+		{"signin", map[string]float64{first + "/0": 2, first + "/1": 1}},
+		// Every event: ada and linus, both back a week later; grace's first event
+		// predates the window.
+		{"", map[string]float64{first + "/0": 2, first + "/1": 2}},
+		{"uc.pageview", map[string]float64{}},
+	} {
+		rows, err := s.RetentionCohorts(ctx, peopleTenant, peopleProject, c.name, from, to)
+		if err != nil {
+			t.Fatalf("retention cohorts of %q: %v", c.name, err)
+		}
+		got := map[string]float64{}
+		for _, row := range rows {
+			got[row.Labels["cohort"]+"/"+row.Labels["week"]] = row.Sum
+		}
+		if !maps.Equal(got, c.want) {
+			t.Fatalf("the grid of %q: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
