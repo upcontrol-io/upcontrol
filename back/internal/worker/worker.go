@@ -286,6 +286,14 @@ func runLocked(ctx context.Context, pool *pg.Pool, lockKey int64, fn func(contex
 // tenant row is deleted after 7 days. The delete's cascade clears the
 // tenant's remaining rows, the same cascade claim adoption relies on.
 func reapUnclaimed(ctx context.Context, pool *pg.Pool) error {
+	// A sign-in's claim lives as long as its code. Only a redeem clears it, so
+	// a code that dies unredeemed would keep a CLI claim token, a bearer
+	// credential stored in plain text because the redeem hands it back.
+	if _, err := pool.Raw().Exec(ctx,
+		`UPDATE magic_link_code SET claim_slug = NULL, claim_token = NULL, claim_next = NULL
+		  WHERE expires_at < now() AND COALESCE(claim_slug, claim_token, claim_next) IS NOT NULL`); err != nil {
+		return err
+	}
 	if _, err := pool.Raw().Exec(ctx, `UPDATE monitor SET paused = true WHERE NOT paused AND tenant_id IN (SELECT id FROM tenant WHERE claim_token_hash IS NOT NULL AND created_at < now() - interval '24 hours')`); err != nil {
 		return err
 	}

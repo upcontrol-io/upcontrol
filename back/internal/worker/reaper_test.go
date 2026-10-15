@@ -1,9 +1,10 @@
 //go:build integration
 
-// The reaper's two statements:
+// The reaper's statements:
 // an unclaimed tenant older than 24 h has its monitors paused, one older than
-// 7 days is deleted (cascade), and a claimed tenant is never touched. Run
-// with -tags=integration, UC_TEST_POSTGRES set.
+// 7 days is deleted (cascade), and a claimed tenant is never touched; an
+// expired sign-in code keeps no claim. Run with -tags=integration,
+// UC_TEST_POSTGRES set.
 package worker
 
 import (
@@ -324,6 +325,37 @@ func TestReapUnclaimedSparesAHostPageWithFirstOk(t *testing.T) {
 	}
 	if n := count(t, pool, `SELECT count(*) FROM tenant WHERE id = $1`, collected); n != 0 {
 		t.Fatalf("an 8-day unclaimed tenant with only a SUFFIXED page survived (rows = %d, want 0)", n)
+	}
+}
+
+// A sign-in's claim dies with its code: an expired code that was never
+// redeemed keeps no claim, the CLI's bearer token included, and a live code
+// keeps its claim for the redeem.
+func TestReapUnclaimedClearsTheClaimOfADeadCode(t *testing.T) {
+	pool := openReaperDB(t)
+	ctx := context.Background()
+	uniq := time.Now().UnixNano()
+	dead, live := fmt.Sprintf("dead-%d@example.com", uniq), fmt.Sprintf("live-%d@example.com", uniq)
+	for email, left := range map[string]string{dead: "-1 minute", live: "10 minutes"} {
+		if _, err := pool.Raw().Exec(ctx,
+			`INSERT INTO magic_link_code (email, code_hash, expires_at, claim_slug, claim_token, claim_next)
+			 VALUES ($1, $2, now() + $3::interval, 'example-com', $4, '/app/alerts')`,
+			email, []byte(email), left, strings.Repeat("0a", 16)); err != nil {
+			t.Fatalf("seed code for %s: %v", email, err)
+		}
+	}
+
+	if err := reapUnclaimed(ctx, pool); err != nil {
+		t.Fatalf("reapUnclaimed: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM magic_link_code
+	                         WHERE email = $1 AND COALESCE(claim_slug, claim_token, claim_next) IS NULL`, dead); n != 1 {
+		t.Fatal("an expired code still holds its claim")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM magic_link_code
+	                         WHERE email = $1 AND claim_slug = 'example-com' AND claim_token IS NOT NULL
+	                           AND claim_next = '/app/alerts'`, live); n != 1 {
+		t.Fatal("a live code lost its claim")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -71,6 +72,44 @@ func (h *magicLink) WithSelfHosted(v bool) *magicLink { h.selfHosted = v; return
 type magicLinkReq struct {
 	Email string `json:"email"`
 	Token string `json:"token,omitempty"`
+	// Request only: what the sign-in was started for (pendingFrom).
+	Claim      string `json:"claim,omitempty"`
+	ClaimToken string `json:"claimToken,omitempty"`
+	Next       string `json:"next,omitempty"`
+}
+
+// pendingClaim is what a sign-in was started for: the unclaimed status page
+// (Slug), a CLI project's claim token (Token), the /app path to land on
+// (Next). The request keeps it with the code, never in the mail, and the
+// redeem answers it once, so a link opened on any device finishes the claim.
+type pendingClaim struct {
+	Slug  string `json:"slug,omitempty"`
+	Token string `json:"claimToken,omitempty"`
+	Next  string `json:"next,omitempty"`
+}
+
+var (
+	claimSlugRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	claimTokenRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// An /app path in printable ASCII; pendingFrom also refuses "//" and a
+	// backslash, so a browser can never read it as another origin.
+	nextPathRe = regexp.MustCompile(`^/app(?:[/?#][!-~]{0,250})?$`)
+)
+
+// pendingFrom keeps the request's claim fields that have the right shape and
+// drops the rest silently: a sign-in is never refused over them.
+func pendingFrom(req magicLinkReq) pendingClaim {
+	var p pendingClaim
+	if claimSlugRe.MatchString(req.Claim) {
+		p.Slug = req.Claim
+	}
+	if claimTokenRe.MatchString(req.ClaimToken) {
+		p.Token = req.ClaimToken
+	}
+	if nextPathRe.MatchString(req.Next) && !strings.Contains(req.Next, "//") && !strings.Contains(req.Next, `\`) {
+		p.Next = req.Next
+	}
+	return p
 }
 
 func (h *magicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -93,13 +132,13 @@ func (h *magicLink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Token == "" {
-		h.request(w, r, req.Email)
+		h.request(w, r, req.Email, pendingFrom(req))
 	} else {
 		h.redeem(w, r, req.Email, req.Token)
 	}
 }
 
-func (h *magicLink) request(w http.ResponseWriter, r *http.Request, email string) {
+func (h *magicLink) request(w http.ResponseWriter, r *http.Request, email string, pending pendingClaim) {
 	ctx := analytics.WithScope(r.Context(), analytics.ScopeFromRequest(r))
 
 	// Throttle by IP (sliding window, shared across replicas).
@@ -112,7 +151,7 @@ func (h *magicLink) request(w http.ResponseWriter, r *http.Request, email string
 		return
 	}
 
-	code, err := h.issueCode(ctx, email)
+	code, err := h.issueCode(ctx, email, pending)
 	if err != nil {
 		if errors.Is(err, ErrCodeCooldown) {
 			writeErr(w, http.StatusTooManyRequests, "rate_limited")
@@ -163,9 +202,10 @@ func (h *magicLink) request(w http.ResponseWriter, r *http.Request, email string
 // somebody else's live code, so the caller decides; the sign-in door answers 429.
 var ErrCodeCooldown = errors.New("magic-link: a code was issued recently")
 
-// issueCode stores one fresh code for email; both doors obey the same TTL,
-// cap and cooldown. It does NOT create the account.
-func (h *magicLink) issueCode(ctx context.Context, email string) (string, error) {
+// issueCode stores one fresh code for email, with what its sign-in was started
+// for; both doors obey the same TTL, cap and cooldown. It does NOT create the
+// account.
+func (h *magicLink) issueCode(ctx context.Context, email string, pending pendingClaim) (string, error) {
 	if existing, err := h.pool.Queries().GetMagicLinkCode(ctx, email); err == nil {
 		if existing.CreatedAt.Valid && time.Since(existing.CreatedAt.Time) < emailCooldown {
 			return "", ErrCodeCooldown
@@ -174,13 +214,24 @@ func (h *magicLink) issueCode(ctx context.Context, email string) (string, error)
 	code := genCode()
 	hash := sha256.Sum256([]byte(code))
 	if err := h.pool.Queries().UpsertMagicLinkCode(ctx, sqlc.UpsertMagicLinkCodeParams{
-		Email:     email,
-		CodeHash:  hash[:],
-		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		Email:      email,
+		CodeHash:   hash[:],
+		ExpiresAt:  pgtype.Timestamptz{Time: time.Now().Add(codeTTL), Valid: true},
+		ClaimSlug:  orNull(pending.Slug),
+		ClaimToken: orNull(pending.Token),
+		ClaimNext:  orNull(pending.Next),
 	}); err != nil {
 		return "", err
 	}
 	return code, nil
+}
+
+// orNull stores an empty string as NULL.
+func orNull(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func (h *magicLink) redeem(w http.ResponseWriter, r *http.Request, email, token string) {
@@ -205,8 +256,10 @@ func (h *magicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 	}
 
 	// One-time: mark redeemed BEFORE creating the session, so a concurrent
-	// redeem with the same code cannot also succeed.
+	// redeem with the same code cannot also succeed. The mark clears the
+	// stored claim; the row read above still holds it for this answer.
 	_, _ = h.pool.Queries().MarkMagicLinkRedeemed(ctx, email)
+	pending := pendingClaim{Slug: ptrStr(stored.ClaimSlug), Token: ptrStr(stored.ClaimToken), Next: ptrStr(stored.ClaimNext)}
 
 	person, err := h.ensurePerson(ctx, email)
 	if err != nil {
@@ -223,23 +276,43 @@ func (h *magicLink) redeem(w http.ResponseWriter, r *http.Request, email, token 
 		return
 	}
 	session.SetCookie(w, sessToken, session.DefaultTTL, !h.devMode) // Secure only in prod (dev is HTTP)
+	h.markVerified(ctx, person)
 	// The sign-in is the moment an anonymous uc_vid becomes a person; no
 	// cookie means visitor_id 0, the events still count unlinked.
 	h.rec.ServerEvent(ctx, "signed_in", person.ID, person.TenantID, nil)
 	h.rec.LinkPerson(ctx, person.ID, person.TenantID)
-	writeAccount(w, person)
+	writeAccount(w, person, pending)
+}
+
+// markVerified records that this sign-in proved the address. The first proof
+// is the account's birth, so account_created fires there and only there:
+// never on the request path, in Provision or for an invite, which create
+// rows nobody has proven.
+func (h *magicLink) markVerified(ctx context.Context, p personInfo) {
+	tag, err := h.pool.Raw().Exec(ctx,
+		`UPDATE person SET email_verified_at = now() WHERE id = $1 AND email_verified_at IS NULL`, p.ID)
+	if err != nil || tag.RowsAffected() != 1 {
+		return
+	}
+	h.rec.ServerEvent(ctx, "account_created", p.ID, p.TenantID, nil)
+	h.rec.MarkAccountCreated(ctx, p.ID, p.TenantID)
 }
 
 // writeAccount is the body every sign-in door answers with, so two doors can
-// never describe the same account differently.
-func writeAccount(w http.ResponseWriter, person personInfo) {
-	writeJSON(w, http.StatusOK, map[string]any{
+// never describe the same account differently. pending rides along only when
+// the sign-in was started for a claim.
+func writeAccount(w http.ResponseWriter, person personInfo, pending pendingClaim) {
+	body := map[string]any{
 		"id":       uuidStr(person.PublicID),
 		"name":     person.Name,
 		"email":    person.Email,
 		"initials": initials(person.Name, person.Email),
 		"plan":     "Free",
-	})
+	}
+	if pending != (pendingClaim{}) {
+		body["pendingClaim"] = pending
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 type personInfo struct {
@@ -266,7 +339,7 @@ func IssueLoginCode(ctx context.Context, pool *pg.Pool, email, ip string) (strin
 	if cnt, err := pool.Queries().RecordMagicLinkIP(ctx, ip); err == nil && cnt > ipWindowCap {
 		return "", ErrRateLimited
 	}
-	return h.issueCode(ctx, email)
+	return h.issueCode(ctx, email, pendingClaim{})
 }
 
 // ErrRateLimited means the caller's IP is past the shared magic-link window.
@@ -356,12 +429,10 @@ func (h *magicLink) ensureAccount(ctx context.Context, email, domain string) (pe
 		`INSERT INTO api_key (tenant_id, project_id, prefix, secret_hash, state) VALUES ($1, $2, $3, $4, 'active')`,
 		tenantID, projectID, keyPrefix, keyHash[:])
 	// An account is born with a way to be told: the email channel is seeded
-	// once at creation; NOT EXISTS keeps it idempotent on retry.
+	// once at creation; NOT EXISTS keeps it idempotent on retry. Creating the
+	// rows is not the account's birth: that is the first sign-in that proves
+	// the address (markVerified).
 	seedEmailChannel(ctx, h.pool, tenantID, projectID, email)
-	// Fired only on the NEW-account path: the funnel's account_created step,
-	// scoped to whichever door created the account.
-	h.rec.ServerEvent(ctx, "account_created", p.ID, tenantID, nil)
-	h.rec.MarkAccountCreated(ctx, p.ID, tenantID)
 	return personInfo{
 		ID: p.ID, PublicID: p.PublicID,
 		Name: p.Name, Email: ptrStr(p.Email),
