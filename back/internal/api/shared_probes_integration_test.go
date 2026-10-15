@@ -69,6 +69,8 @@ func newSharedWorld(t *testing.T, seats int) (*pg.Pool, http.Handler, []http.Coo
 	sm := session.New(pool, session.DefaultTTL, nil)
 	mon := NewMonitors(pool, pgstore.New(pool.Raw()), sm, "")
 	wa := NewWriteAPI(pool, nil, sm, false, nil, nil, false, "")
+	// The hosts watched through this world are made up: a stub answers them.
+	wa.exec = answering()
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/monitors", mon)
 	mux.Handle("PATCH /v1/monitors/{id}", mon)

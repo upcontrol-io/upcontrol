@@ -29,7 +29,7 @@ func find(rows []map[string]any, label string) map[string]any {
 func TestStagesOmitUnmeasuredPhases(t *testing.T) {
 	// An IP literal over plaintext: no name to resolve, no handshake. Sending
 	// dns:0 and tls:0 would read as "instant", which is the opposite of true.
-	res := executor.Result{ConnectMs: 41, TTFBMs: 182, TotalMs: 278}
+	res := executor.Result{StatusCode: 200, ConnectMs: 41, TTFBMs: 182, TotalMs: 278}
 	stages := stagesFrom(res)
 	got := labels(stages)
 	want := []string{"tcp", "wait", "html"}
@@ -50,7 +50,7 @@ func TestStagesOmitUnmeasuredPhases(t *testing.T) {
 func TestStagesSumToTotal(t *testing.T) {
 	// TTFBMs is measured from the start of the request: a naive pass-through
 	// would render this 546 ms request as 958 ms of bars.
-	res := executor.Result{DNSMs: 116, ConnectMs: 136, TLSMs: 160, TTFBMs: 546, TotalMs: 610}
+	res := executor.Result{StatusCode: 200, DNSMs: 116, ConnectMs: 136, TLSMs: 160, TTFBMs: 546, TotalMs: 610}
 	var sum uint32
 	for _, s := range stagesFrom(res) {
 		sum += s["ms"].(uint32)
@@ -63,7 +63,7 @@ func TestStagesSumToTotal(t *testing.T) {
 func TestStagesGuardAgainstUnderflow(t *testing.T) {
 	// A reused connection can leave the phases at or past TTFB. Unguarded, the
 	// uint32 subtraction renders a bar about four billion milliseconds wide.
-	res := executor.Result{DNSMs: 100, ConnectMs: 100, TLSMs: 100, TTFBMs: 50, TotalMs: 300}
+	res := executor.Result{StatusCode: 200, DNSMs: 100, ConnectMs: 100, TLSMs: 100, TTFBMs: 50, TotalMs: 300}
 	for _, s := range stagesFrom(res) {
 		if s["label"] == "wait" {
 			t.Fatalf("wait stage present when the phases already exceed TTFB: %v", s)
@@ -77,7 +77,7 @@ func TestStagesGuardAgainstUnderflow(t *testing.T) {
 func TestHtmlReportsAMeasuredZeroRatherThanVanishing(t *testing.T) {
 	// total == ttfb for a single-page shell: html is derived from numbers we
 	// hold, so a zero here is measured, not absent.
-	res := executor.Result{DNSMs: 24, TTFBMs: 168, TotalMs: 168}
+	res := executor.Result{StatusCode: 200, DNSMs: 24, TTFBMs: 168, TotalMs: 168}
 	html := find(stagesFrom(res), "html")
 	if html == nil {
 		t.Fatal("html stage dropped when it measured zero")
@@ -160,6 +160,30 @@ func TestNetworkRowsDropRedirectsForBlockedTarget(t *testing.T) {
 	}
 	if find(rows, "response") == nil {
 		t.Error("response row missing: the refusal is itself the outcome")
+	}
+}
+
+func TestNoAnswerHasNoRedirectsWaitOrHTML(t *testing.T) {
+	// A host that never answered (no DNS answer, refused, timed out) is the
+	// watch door's error screen: "0 hops, answers directly" and a waterfall
+	// of "wait <1 ms" + "html <total>" would describe a response that never
+	// came. The response row stays, naming why.
+	res := executor.Result{ErrorClass: "dns", TotalMs: 35}
+	rows := networkRowsFrom(res, "down")
+	if find(rows, "redirects") != nil {
+		t.Errorf("redirects row present with no response: %v", rows)
+	}
+	resp := find(rows, "response")
+	if resp == nil || resp["note"] != "dns" || resp["value"] != "35 ms" {
+		t.Errorf("response row = %v, want 35 ms naming dns", resp)
+	}
+	stages := stagesFrom(res)
+	if find(stages, "wait") != nil || find(stages, "html") != nil {
+		t.Errorf("stages = %v, want no wait and no html without a response", stages)
+	}
+	// A connection that got as far as TCP still shows that phase.
+	if got := labels(stagesFrom(executor.Result{ErrorClass: "timeout", ConnectMs: 12, TotalMs: 10000})); len(got) != 1 || got[0] != "tcp" {
+		t.Errorf("stages of a timeout after connect = %v, want [tcp]", got)
 	}
 }
 
