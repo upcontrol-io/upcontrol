@@ -2420,6 +2420,9 @@ type WatchRequest struct {
 
 // WatchResponse defines model for WatchResponse.
 type WatchResponse struct {
+	// Created True when this call created the page; false when the host's existing page was answered.
+	Created *bool `json:"created,omitempty"`
+
 	// Login How the visitor gets into the account this call just created. On the e-mail path a magic-link code is always issued; in prod it is delivered by email and this object is empty, because returning a login token to an anonymous caller who typed somebody else's address is account takeover. In dev the code rides the response so the flow works without an inbox — the same relaxation POST /v1/auth/magic-link makes.
 	Login *WatchLogin `json:"login,omitempty"`
 

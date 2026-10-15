@@ -5149,6 +5149,8 @@ export interface components {
             statusUrl: string;
             /** @example prj-42 */
             slug?: string;
+            /** @description True when this call created the page; false when the host's existing page was answered. */
+            created?: boolean;
             /**
              * Format: int32
              * @description How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused. 0 when the host's page is already claimed: it is answered as it is.

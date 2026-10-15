@@ -1726,6 +1726,9 @@ components:
       properties:
         statusUrl: { type: string, example: "https://status.example.com" }
         slug: { type: string, example: "prj-42" }
+        created:
+          description: True when this call created the page; false when the host's existing page was answered.
+          type: boolean
         watching:
           description: >
             How many of the asked rows the project now watches: the ones it
