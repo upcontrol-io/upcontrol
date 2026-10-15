@@ -522,6 +522,24 @@ func (e LogLevel) Valid() bool {
 	}
 }
 
+// Defines values for MagicLinkRedeemedRole.
+const (
+	MagicLinkRedeemedRoleLogin  MagicLinkRedeemedRole = "login"
+	MagicLinkRedeemedRoleNotify MagicLinkRedeemedRole = "notify"
+)
+
+// Valid indicates whether the value is a known member of the MagicLinkRedeemedRole enum.
+func (e MagicLinkRedeemedRole) Valid() bool {
+	switch e {
+	case MagicLinkRedeemedRoleLogin:
+		return true
+	case MagicLinkRedeemedRoleNotify:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MonitorPausedBy.
 const (
 	MonitorPausedByPlan MonitorPausedBy = "plan"
@@ -1363,7 +1381,7 @@ type DashboardMarks struct {
 
 // DashboardMetricRef What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry.
 type DashboardMetricRef struct {
-	// Cohort `people` only: `week` reads the retention grid.
+	// Cohort `people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return).
 	Cohort *string `json:"cohort,omitempty"`
 
 	// Count `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
@@ -1681,6 +1699,28 @@ type LogsResponse struct {
 	Volume []VolumeBucket `json:"volume"`
 }
 
+// MagicLinkRedeemed defines model for MagicLinkRedeemed.
+type MagicLinkRedeemed struct {
+	Email openapi_types.Email `json:"email"`
+
+	// Id Example: usr_1
+	Id string `json:"id"`
+
+	// Initials Example: AK
+	Initials string `json:"initials"`
+
+	// Name Example: Anna Kovacs
+	Name string `json:"name"`
+
+	// PendingClaim What a magic-link sign-in was started for, kept with the code on the server so the link finishes it on any device. The client performs it with POST /v1/claim: a slug claims that unclaimed status page; a claimToken is offered as a press, never claimed on load.
+	PendingClaim *PendingClaim          `json:"pendingClaim,omitempty"`
+	Plan         Plan                   `json:"plan"`
+	Role         *MagicLinkRedeemedRole `json:"role,omitempty"`
+}
+
+// MagicLinkRedeemedRole defines model for MagicLinkRedeemed.Role.
+type MagicLinkRedeemedRole string
+
 // MeResponse defines model for MeResponse.
 type MeResponse struct {
 	Account Account `json:"account"`
@@ -1827,6 +1867,15 @@ type OverviewResponse struct {
 		// Value Example: 99.98%
 		Value string `json:"value"`
 	} `json:"uptime,omitempty"`
+}
+
+// PendingClaim What a magic-link sign-in was started for, kept with the code on the server so the link finishes it on any device. The client performs it with POST /v1/claim: a slug claims that unclaimed status page; a claimToken is offered as a press, never claimed on load.
+type PendingClaim struct {
+	ClaimToken *string `json:"claimToken,omitempty"`
+
+	// Next The /app path to land on after the claim.
+	Next *string `json:"next,omitempty"`
+	Slug *string `json:"slug,omitempty"`
 }
 
 // Plan defines model for Plan.
@@ -2094,7 +2143,7 @@ type SeriesQuery struct {
 	// Bucket Read in UTC hours or UTC days instead of the range's own bucket. The span stays the range's; a bucket that would leave one bucket or more than 744 is refused, and so is a bucket on a read with no time axis (a group, steps or a cohort).
 	Bucket *SeriesQueryBucket `json:"bucket,omitempty"`
 
-	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+	// Cohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people.
 	Cohort *SeriesQueryCohort `json:"cohort,omitempty"`
 
 	// Count What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ''`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
@@ -2109,7 +2158,7 @@ type SeriesQuery struct {
 	// Labels Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
 	Labels *map[string]string `json:"labels,omitempty"`
 
-	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads.
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads.
 	Name  *string          `json:"name,omitempty"`
 	Range SeriesQueryRange `json:"range"`
 
@@ -2124,7 +2173,7 @@ type SeriesQuery struct {
 // SeriesQueryBucket Read in UTC hours or UTC days instead of the range's own bucket. The span stays the range's; a bucket that would leave one bucket or more than 744 is refused, and so is a bucket on a read with no time axis (a group, steps or a cohort).
 type SeriesQueryBucket string
 
-// SeriesQueryCohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself.
+// SeriesQueryCohort `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people.
 type SeriesQueryCohort string
 
 // SeriesQueryCount What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ”`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
@@ -2333,15 +2382,36 @@ type WatchLogin struct {
 	DevToken *string `json:"dev_token,omitempty"`
 }
 
+// WatchRefused defines model for WatchRefused.
+type WatchRefused struct {
+	Check *CheckResponse `json:"check,omitempty"`
+	Error struct {
+		// Code Example: plan_limit_exceeded
+		Code    string `json:"code"`
+		Message string `json:"message"`
+
+		// Upgrade Present only on 402. Drives the client's upgrade prompt.
+		Upgrade *struct {
+			// Plan The cheapest plan that lifts the limit, lowercased. Absent at the top of the ladder: there the client shows the message instead of the modal. The server names it from plan_entitlement; the client never computes it.
+			//
+			// Example: indie
+			Plan *string `json:"plan,omitempty"`
+
+			// Reason Example: Free allows 3 HTTP checks.
+			Reason string `json:"reason"`
+		} `json:"upgrade,omitempty"`
+	} `json:"error"`
+}
+
 // WatchRequest defines model for WatchRequest.
 type WatchRequest struct {
-	// Email Optional. With an address the call provisions the account and mails a sign-in code; without one it creates or reuses the host's public status page.
+	// Email Optional. With an address the call provisions the account and mails a sign-in code; without one it opens the host's existing public status page, or creates an unclaimed one for a host that answers.
 	Email *openapi_types.Email `json:"email,omitempty"`
 
 	// Host Example: example.com
 	Host string `json:"host"`
 
-	// Targets The ticked rows' ids (absolute URLs) to watch alongside the host. Untrusted: the server keeps only the ones on `host` and creates no more than the plan allows. Absent means "just the host".
+	// Targets The ticked rows' ids (absolute URLs) to watch alongside the host, read on the email arm only. Without an email a page carries one check, the host itself: a new page is created with it alone and an existing page gains nothing, because more checks take a sign-in and the page's Add a check. Untrusted: the server keeps only the ones on `host` and creates no more than the plan allows.
 	//
 	//
 	// Example: ["https://example.com/pricing"]
@@ -2359,7 +2429,7 @@ type WatchResponse struct {
 	// StatusUrl Example: https://status.example.com
 	StatusUrl string `json:"statusUrl"`
 
-	// Watching How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused.
+	// Watching How many of the asked rows the project now watches: the ones it already held, plus the new ones the workspace's remaining `http_checks` allowed (the same count the create gate reads). The rest were left out, never created paused. 0 when the host's page is already claimed: it is answered as it is.
 	Watching *int32 `json:"watching,omitempty"`
 }
 
@@ -2458,7 +2528,15 @@ type PostV1AuthGoogleJSONBody struct {
 
 // PostV1AuthMagicLinkJSONBody defines parameters for PostV1AuthMagicLink.
 type PostV1AuthMagicLinkJSONBody struct {
-	Email openapi_types.Email `json:"email"`
+	// Claim Request only. The slug of the unclaimed status page this sign-in was started for. Kept with the code on the server, never mailed, and answered at redeem as `pendingClaim`, so a link opened on another device still finishes the claim. A value not shaped like a slug is dropped, never refused.
+	Claim *string `json:"claim,omitempty"`
+
+	// ClaimToken Request only. A CLI project's claim token (32 lowercase hex). Kept with the code on the server for the code's lifetime, never mailed and never logged, and answered at redeem as `pendingClaim`. Any other shape is dropped.
+	ClaimToken *string             `json:"claimToken,omitempty"`
+	Email      openapi_types.Email `json:"email"`
+
+	// Next Request only. The /app path to land on after the claim. Anything outside /app is dropped.
+	Next *string `json:"next,omitempty"`
 
 	// Token Present when redeeming the link, absent when requesting.
 	Token *string `json:"token,omitempty"`

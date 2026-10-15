@@ -132,6 +132,25 @@ components:
         # project's workspace owner always answers `login`; `notify` gates every
         # management write.
         role: { type: string, enum: [notify, login] }
+    PendingClaim:
+      type: object
+      description: >
+        What a magic-link sign-in was started for, kept with the code on the
+        server so the link finishes it on any device. The client performs it
+        with POST /v1/claim: a slug claims that unclaimed status page; a
+        claimToken is offered as a press, never claimed on load.
+      properties:
+        slug: { type: string }
+        claimToken: { type: string }
+        next:
+          type: string
+          description: The /app path to land on after the claim.
+    MagicLinkRedeemed:
+      allOf:
+        - $ref: "#/components/schemas/Account"
+        - type: object
+          properties:
+            pendingClaim: { $ref: "#/components/schemas/PendingClaim" }
     Project:
       type: object
       required: [id, domain, createdAt, owned]
@@ -777,7 +796,7 @@ components:
           items: { type: string }
         cohort:
           type: string
-          description: "`people` only: `week` reads the retention grid."
+          description: "`people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return)."
         field:
           type: string
           description: "`people` only: the event field a breakdown ranks the values of."
@@ -1050,7 +1069,7 @@ components:
           enum: ["1h", "4h", "12h", "24h", "7d", "31d", "365d"]
         name:
           type: string
-          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test or a bare-name read reads."
+          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads."
         where:
           type: object
           additionalProperties: { type: string }
@@ -1086,7 +1105,7 @@ components:
         cohort:
           type: string
           enum: [week]
-          description: "`people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself."
+          description: "`people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people."
         count:
           type: string
           enum: [people, events]
@@ -1685,15 +1704,19 @@ components:
         email:
           description: >
             Optional. With an address the call provisions the account and
-            mails a sign-in code; without one it creates or reuses the host's
-            public status page.
+            mails a sign-in code; without one it opens the host's existing
+            public status page, or creates an unclaimed one for a host that
+            answers.
           type: string
           format: email
         targets:
           description: >
-            The ticked rows' ids (absolute URLs) to watch alongside the host.
-            Untrusted: the server keeps only the ones on `host` and creates no
-            more than the plan allows. Absent means "just the host".
+            The ticked rows' ids (absolute URLs) to watch alongside the host,
+            read on the email arm only. Without an email a page carries one
+            check, the host itself: a new page is created with it alone and an
+            existing page gains nothing, because more checks take a sign-in and
+            the page's Add a check. Untrusted: the server keeps only the ones
+            on `host` and creates no more than the plan allows.
           type: array
           items: { type: string }
           example: ["https://example.com/pricing"]
@@ -1708,11 +1731,18 @@ components:
             How many of the asked rows the project now watches: the ones it
             already held, plus the new ones the workspace's remaining
             `http_checks` allowed (the same count the create gate reads). The
-            rest were left out, never created paused.
+            rest were left out, never created paused. 0 when the host's page
+            is already claimed: it is answered as it is.
           type: integer
           format: int32
         login:
           $ref: "#/components/schemas/WatchLogin"
+    WatchRefused:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            check: { $ref: "#/components/schemas/CheckResponse" }
     WatchLogin:
       description: >
         How the visitor gets into the account this call just created. On the
@@ -2024,6 +2054,26 @@ paths:
                 token:
                   type: string
                   description: Present when redeeming the link, absent when requesting.
+                claim:
+                  type: string
+                  description: >
+                    Request only. The slug of the unclaimed status page this
+                    sign-in was started for. Kept with the code on the server,
+                    never mailed, and answered at redeem as `pendingClaim`, so
+                    a link opened on another device still finishes the claim.
+                    A value not shaped like a slug is dropped, never refused.
+                claimToken:
+                  type: string
+                  description: >
+                    Request only. A CLI project's claim token (32 lowercase
+                    hex). Kept with the code on the server for the code's
+                    lifetime, never mailed and never logged, and answered at
+                    redeem as `pendingClaim`. Any other shape is dropped.
+                next:
+                  type: string
+                  description: >
+                    Request only. The /app path to land on after the claim.
+                    Anything outside /app is dropped.
       responses:
         "202":
           description: Link sent (always, to avoid email enumeration).
@@ -2034,7 +2084,7 @@ paths:
           content:
             {
               application/json:
-                { schema: { $ref: "#/components/schemas/Account" } },
+                { schema: { $ref: "#/components/schemas/MagicLinkRedeemed" } },
             }
 
   /v1/auth/logout:
@@ -3946,7 +3996,16 @@ paths:
     post:
       tags: [public]
       security: []
-      summary: Start watching a host; sends a confirmation email (7-day pending TTL).
+      summary: Open a host's public status page, creating it when there is none.
+      description: >
+        Without an email, the host's existing page (claimed or not, anyone's)
+        is answered as it is and nothing is created. A host with no page gets
+        an unclaimed page, the same for a signed-in caller as for a stranger:
+        nothing lands in the caller's own workspace, which only a claim does.
+        It is created only when the host gives an HTTP answer; otherwise the
+        door answers 400 `unreachable` with the probe's diagnostic and creates
+        nothing. With an email the call provisions the account and mails a
+        sign-in code.
       requestBody:
         required: true
         content:
@@ -3961,6 +4020,16 @@ paths:
             {
               application/json:
                 { schema: { $ref: "#/components/schemas/WatchResponse" } },
+            }
+        "400":
+          description: >
+            Refused. `unreachable` carries `check`, the diagnostic the probe
+            established (the CheckResponse /public/check would answer for it),
+            so the client can show why without probing again.
+          content:
+            {
+              application/json:
+                { schema: { $ref: "#/components/schemas/WatchRefused" } },
             }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
@@ -3999,7 +4068,12 @@ paths:
                   projectId: { type: string }
                   key: { type: string, description: Shown exactly once. }
                   claimToken: { type: string }
-                  claimUrl: { type: string }
+                  claimUrl:
+                    type: string
+                    description: >
+                      The page that attaches the project to a signed-in
+                      person: <origin>/claim#<token>. The token rides the
+                      fragment, so it never reaches an access log.
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/claim:
@@ -4007,10 +4081,12 @@ paths:
       tags: [install]
       x-hand-written: true
       summary: |
-        Attach the signed-in person to the anonymous tenant the claim token
-        names (cli/SPEC.md §7.3). One-time: the token hash is cleared on
-        success. Idempotent for an already-claimed member only via membership's
-        ON CONFLICT; an unknown or spent token is 404.
+        Adopt an anonymous project into the caller's OWN workspace (cli/SPEC.md
+        §7.3), never into a workspace the session merely guests in: its data
+        and its unchanged key move with it, and the session points at the
+        project. Works once: the token hash, or the unclaimed page, is burned
+        on success. An unknown or spent token is 404, a removed page 410, and
+        a workspace with no room for one more project 402.
       requestBody:
         required: true
         content:
@@ -4036,7 +4112,13 @@ paths:
                 properties:
                   claimed: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: The status page was removed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /v1/install/status:
     get:
