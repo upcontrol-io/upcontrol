@@ -202,6 +202,27 @@ func TestScopeRoundTrip(t *testing.T) {
 	if scopeFrom(r.Context()) != nil {
 		t.Error("a context without a scope must yield nil")
 	}
+	if s.Source != "" {
+		t.Errorf("scope source = %q with no X-Upcontrol-Source header, want empty", s.Source)
+	}
+}
+
+func TestScopeSourceReadsOnlyANameShapedHeader(t *testing.T) {
+	// The header is unauthenticated: anything it carries lands in props, so
+	// only the event-name grammar gets through, never arbitrary text.
+	for header, want := range map[string]string{
+		"outreach":              "outreach",
+		"Outreach":              "",
+		"outreach; drop table":  "",
+		"":                      "",
+		strings.Repeat("a", 65): "",
+	} {
+		r := httptest.NewRequest("POST", "/public/watch", nil)
+		r.Header.Set("X-Upcontrol-Source", header)
+		if got := ScopeFromRequest(r).Source; got != want {
+			t.Errorf("X-Upcontrol-Source %q -> source %q, want %q", header, got, want)
+		}
+	}
 }
 
 func TestGeoResolvesCountry(t *testing.T) {

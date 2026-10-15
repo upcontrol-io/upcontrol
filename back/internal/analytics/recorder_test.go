@@ -222,6 +222,39 @@ func TestRecorderServerEventWithoutCookieIsVisitorZero(t *testing.T) {
 	}
 }
 
+func TestRecorderServerEventCarriesTheCallersSource(t *testing.T) {
+	r, _, sink := newTestRecorder(t)
+	r.Start()
+
+	// Our robot names itself: its events say so in props.source, over the
+	// door's own source, and the caller's map is left as it was handed in.
+	props := map[string]string{"source": "watch"}
+	r.ServerEvent(WithScope(context.Background(), &scope{IP: "8.8.8.8", UA: "curl/8.8.0", Source: "outreach"}),
+		"page_minted", 0, 0, props)
+	r.ServerEvent(WithScope(context.Background(), &scope{IP: "8.8.8.8", Source: "outreach"}),
+		"watch_signup", 0, 0, nil)
+	// Anyone else's events keep their props untouched.
+	r.ServerEvent(WithScope(context.Background(), &scope{IP: "8.8.8.8"}),
+		"public_check_run", 0, 0, map[string]string{"host": "example.com"})
+
+	var rows []pgstore.WebEventRow
+	for len(rows) < 3 {
+		rows = append(rows, waitBatch(t, sink)...)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v, want 3", rows)
+	}
+	if rows[0].Props["source"] != "outreach" || rows[1].Props["source"] != "outreach" {
+		t.Errorf("robot rows props = %v / %v, want source=outreach on both", rows[0].Props, rows[1].Props)
+	}
+	if props["source"] != "watch" {
+		t.Errorf("the caller's props map was mutated: %v", props)
+	}
+	if _, ok := rows[2].Props["source"]; ok || rows[2].Props["host"] != "example.com" {
+		t.Errorf("an unnamed caller's props = %v, want only host", rows[2].Props)
+	}
+}
+
 func TestRecorderLinkEmailAndPersonApplyToTheVisitorRow(t *testing.T) {
 	r, store, sink := newTestRecorder(t)
 	r.Start()

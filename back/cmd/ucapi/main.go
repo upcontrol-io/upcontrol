@@ -91,7 +91,13 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 
 	_ = os.MkdirAll(d.Config.SpoolDir, 0o755)
 
-	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, d.Config.ScrubOff, pgPool, pgs)
+	// Product analytics recorder: async, buffered, never on the response
+	// path. Its drain is sequenced into the pg/ch teardown tasks above. It
+	// starts before ingest, whose flush records a project's first install.
+	recorder = analytics.NewRecorder(analytics.PoolStore{Pool: pgPool}, pgs, d.Logger)
+	recorder.Start()
+
+	ingester, batch, err := api.WireIngest(d.Config.SpoolDir, d.Config.ScrubOff, pgPool, pgs, recorder)
 	if err != nil {
 		pgPool.Close()
 		return err
@@ -109,11 +115,6 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("OPTIONS /v1/event", http.HandlerFunc(ingester.HandlePreflight))
 	go driveBatcher(ctx, batch, 50*time.Millisecond, d.Logger)
 	d.Shutdown.Register(st("batcher", func(c context.Context) error { return batch.Close(c) }))
-
-	// Product analytics recorder: async, buffered, never on the response
-	// path. Its drain is sequenced into the pg/ch teardown tasks above.
-	recorder = analytics.NewRecorder(analytics.PoolStore{Pool: pgPool}, pgs, d.Logger)
-	recorder.Start()
 
 	// The web door: the script tag, the beacon the script sends, the overlay's
 	// read, all on the recorder's visitor reducer and /i's public-key gates.
@@ -206,7 +207,7 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// the endpoint stays a 501. A Settings token arrives on the next restart.
 	mux.Handle("POST /v1/auth/telegram", auth.NewTelegramMiniApp(pgPool, sm, tgToken(ctx), devMode))
 
-	mon := api.NewMonitors(pgPool, pgs, sm, d.Config.PublicOrigin)
+	mon := api.NewMonitors(pgPool, pgs, sm, d.Config.PublicOrigin).WithRecorder(recorder)
 	mux.Handle("GET /v1/monitors", mon)
 	mux.Handle("POST /v1/monitors", mon)
 	mux.Handle("PATCH /v1/monitors/{id}", mon)

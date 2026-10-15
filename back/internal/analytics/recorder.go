@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,13 +196,22 @@ func (r *Recorder) Track(ctx context.Context, events []event, personID, tenantID
 }
 
 // ServerEvent enqueues a single server-side event; the visitor is resolved
-// from the scope's uc_vid, no cookie means visitor_id 0.
+// from the scope's uc_vid, no cookie means visitor_id 0. A caller of ours
+// that names itself puts its name in props.source, over a door's own source:
+// the reports leave such rows out of the market.
 func (r *Recorder) ServerEvent(ctx context.Context, name string, personID, tenantID int64, props map[string]string) {
 	if r == nil {
 		return
 	}
 	t := r.baseTrack(ctx)
 	t.personID, t.tenantID = personID, tenantID
+	if s := scopeFrom(ctx); s != nil && s.Source != "" {
+		props = maps.Clone(props)
+		if props == nil {
+			props = map[string]string{}
+		}
+		props["source"] = s.Source
+	}
 	t.events = []event{{Name: name, Props: props}}
 	r.enqueue(t)
 }

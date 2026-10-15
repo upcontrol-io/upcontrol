@@ -8,6 +8,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,8 +23,11 @@ import (
 
 // chLogSink adapts batcher.Sink: decoded RowEnvelopes batch-insert into
 // Postgres. The JSON roundtrip is the seam that keeps the batcher DB-agnostic.
+// pool and rec mark a project's first install_verified.
 type chLogSink struct {
-	pgs *pgstore.Store
+	pgs  *pgstore.Store
+	pool *pg.Pool
+	rec  *analytics.Recorder
 }
 
 func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error {
@@ -39,6 +43,9 @@ func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error 
 	var evErr error
 	if len(eventRows) > 0 {
 		evErr = s.pgs.InsertEvents(ctx, eventRows)
+		if evErr == nil {
+			s.firstInstalls(ctx, eventRows)
+		}
 	}
 	// The per-minute upsert replaces ClickHouse's series_1m_mv, and the hourly
 	// one is the board's rollup: one aggregated statement each per flush, and
@@ -51,6 +58,27 @@ func (s *chLogSink) Flush(ctx context.Context, key string, rows [][]byte) error 
 	// The batcher swaps the batch out before calling Flush and never retries a
 	// failed flush, so a partial insert cannot duplicate on a later attempt.
 	return errors.Join(logErr, evErr, seriesErr, historyErr)
+}
+
+// firstInstalls stamps project.install_verified_at at a project's first
+// install_verified and records first_install_verified once. The SDK sends one
+// on every process start, so only the conditional stamp tells the first from
+// a restart, across batches and replicas. No request rides a flush: the event
+// has no visitor and joins its project through props.project.
+func (s *chLogSink) firstInstalls(ctx context.Context, rows []pgstore.EventRow) {
+	for _, r := range rows {
+		if r.Name != "install_verified" {
+			continue
+		}
+		tag, err := s.pool.Raw().Exec(ctx,
+			`UPDATE project SET install_verified_at = now() WHERE id = $1 AND install_verified_at IS NULL`,
+			int64(r.ProjectID))
+		if err != nil || tag.RowsAffected() != 1 {
+			continue
+		}
+		s.rec.ServerEvent(ctx, "first_install_verified", 0, int64(r.TenantID),
+			map[string]string{"project": strconv.FormatUint(r.ProjectID, 10)})
+	}
 }
 
 // aggregateSeries folds a flushed log batch into per-(tenant, project, minute,
@@ -274,9 +302,9 @@ func (f *dirSpoolFiller) FillPercent(_ context.Context) (int, error) {
 
 type Batcher = batcher.Batcher
 
-func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, pgs *pgstore.Store) (*ingest.Ingester, *Batcher, error) {
+func WireIngest(spoolDir string, scrubOff bool, pgPool *pg.Pool, pgs *pgstore.Store, rec *analytics.Recorder) (*ingest.Ingester, *Batcher, error) {
 	// Batcher: flushes to Postgres on 8 MiB / 200 ms / 1-sec-per-key.
-	bs := batcher.New(&chLogSink{pgs: pgs}, nil, batcher.Options{})
+	bs := batcher.New(&chLogSink{pgs: pgs, pool: pgPool, rec: rec}, nil, batcher.Options{})
 
 	// Seq allocators: one per project, created on first use, each leasing
 	// 10k-value blocks from its own project_seq row.
