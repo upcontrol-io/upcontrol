@@ -3,6 +3,19 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-10-15 - upcontrol 0.5.1
+
+- The bundled agent skill carries the references of core 0.41.0. The installer's own code is
+  unchanged.
+- **A retention card can follow one event.** The `dashboard`, `retention` and `wire` topics
+  teach the optional `name` on a retention ref (`{ "source": "people", "cohort": "week",
+  "name": "<event>" }`): only that event's people count, their first such event starts the
+  cohort, and the same event in a later week is a return. Without a name the grid still reads
+  every event the project sends, so the `retention` topic tells the agent to name the event
+  when other events carry a person too.
+- **The `key` topic describes the claim link as it works now**: open it, sign in if asked, and
+  one press attaches the project to an account (core 0.41.0 serves it at `/claim#<token>`).
+
 ## 2026-10-14 - upcontrol 0.5.0
 
 - `SDK_PIN` moves to `1.1.0`, so a fresh `npx upcontrol init` installs the SDK whose
