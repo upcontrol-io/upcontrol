@@ -6,6 +6,24 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-10-15
+
+A board save must say what it was read from. No migration.
+
+### Changed
+- **`PUT /v1/dashboards` refuses an entry with no `base`** (absent or empty) with 409
+  `board_changed`, exactly as it refuses a stale one, so a tab opened before the check can no
+  longer write over a card an agent appended. A front that sends a base heals by itself: it
+  re-reads the board, lays its draft over the latest and saves again. The single-board and key
+  doors are unchanged.
+- **The CLI names a refused field.** `npx upcontrol board` printed `board: refused (HTTP 400)`
+  for an unknown field; it now prints `board: unknown field "<name>"`.
+- **The agent's references teach this release's reads**: an event's fields as a filter,
+  unique people, `p50` and `p95`, the `ratio` widget (two counts of one unit), the markers
+  and what feeds them, and one stable id for an A/B test's `expose` and `convert`, prefixed so
+  the SDK's scrubber never reads a long numeric id as a card number. A test reads every JSON
+  example of the dashboard reference through the server's own layout door.
+
 ## [0.39.0] — 2026-10-14
 
 A board can say why a metric moved, and a save no longer erases what an agent appended. No
