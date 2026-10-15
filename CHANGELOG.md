@@ -6,6 +6,82 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-10-15
+
+A claim survives the sign-in on any device, the watch door opens the page a host already has,
+and a retention grid can read one event. Migration 013 keeps what a sign-in was started for
+with its code, stamps each project's first `install_verified` (backfilled from the events
+already stored), and marks every person who already signed in as verified. A self-hosted
+instance has neither the address-less watch door nor the anonymous project, so the watch and
+claim changes below do not reach it.
+
+### Added
+- **A sign-in remembers what it was started for.** The `POST /v1/auth/magic-link` request
+  takes `claim` (an unclaimed status page's slug), `claimToken` (a CLI project's) and `next`
+  (an `/app` path). The server keeps them with the code, never mails them, and the redeem
+  answers them once as `pendingClaim`, so a link opened on another device still knows which
+  claim it was for. A field of the wrong shape is dropped, never refused.
+- **A retention grid can read one event.** A `people` read with `cohort: week` takes a `name`:
+  an actor's cohort is the Monday of their first event of that name, and a return is the same
+  event in a later week. Without a name it reads every event, by the same statement as before.
+  A name starting `uc.` reads nothing.
+- **`POST /public/watch` answers 400 `unreachable`** without an email when the host gave no
+  HTTP answer (no DNS answer, refused, timed out, a TLS failure, a redirect loop), with
+  `check`: the diagnostic its probe established, in the shape `/public/check` answers. Nothing
+  is created.
+- `WatchResponse.created`: true when the call created the page, false when it answered the
+  host's existing one.
+- **Server events**: `claim_token_redeemed` (a CLI project claimed, with its `project`),
+  `anonymous_project_minted` (with its `project`), `first_check_created` (a workspace's first
+  check, with its `kind`) and `first_install_verified` (a project's first `install_verified`,
+  once however often the SDK restarts). `page_claimed` carries the page's `slug` and the
+  claimer's visitor.
+- **`X-Upcontrol-Source`**: a request that names an automated caller (a value in the
+  event-name grammar) has it stamped as `props.source` on every server event it causes, so a
+  report can leave those rows out. Nothing else reads it: no limit, ceiling or cooldown.
+
+### Changed
+- **Without an email, `POST /public/watch` opens what exists.** A host's existing page, claimed
+  or not, is answered as it is, before the cooldown and the day's ceilings, and nothing is
+  probed, subscribed or created. A host with no page that answers gets an unclaimed one with
+  one check, the host itself: `targets` are read only with an email. A signed-in caller gets the same
+  unclaimed page as anyone, never a project in their own workspace; only a claim moves a page
+  into an account. No suffixed copy is made beside a claimed page any more. The email arm is
+  unchanged.
+- **`account_created` fires at the first sign-in that proves the address** (the magic-link
+  redeem, or Google), never at the request, and never for an account the watch door or an
+  invitation provisions. The migration marks everyone who already signed in, so their next
+  sign-in is not counted as new.
+- **The anonymous project's `claimUrl` is `<origin>/claim#<token>`**, was `/claim/<token>`:
+  a browser never sends the fragment, so no access log or Referer holds the token.
+- The contract now lists `POST /v1/claim`'s 402 (the claimer's workspace has no room for one
+  more project; nothing is spent, so the token or the page waits for the upgrade) and 410 (a
+  removed page).
+- The watch door's `watch_signup` and `page_minted` fire only when it creates a page: opening
+  an existing one records neither.
+
+### Fixed
+- **A claim landed in whichever workspace the session stood in**, so a guest's claim went into,
+  and was counted against, the host's account. It adopts into the claimer's own workspace now,
+  and the session opens on the claimed project.
+- **A claimed project's data stayed behind.** Its logs, events, metrics, rollups and heatmap
+  cells kept the deleted anonymous workspace's id, so a claimed CLI project opened empty and
+  its install read unverified. They move with the project.
+- **`/public/check` described a request that never completed**: with no response it still sent
+  an `html` stage the length of the whole attempt, a `wait` stage when no earlier phase was
+  measured, and a `0 hops` redirects row. Without a response none of them is sent.
+- **A guest's refused claim left the wall in somebody else's workspace.** When the claimer's own
+  workspace has no room (402), the session now moves to that workspace before the answer, so
+  the upgrade it offers is the claimer's own; nothing is spent.
+- **A page on a host the mint gate refuses could not be opened.** The door reads the host's
+  existing page before the gate (a platform subdomain or a blocked host), because opening a
+  page creates nothing; the gate still prices a mint.
+- **`first_check_created` fires once per workspace** (`tenant.first_check_at`, migration 013):
+  deleting every check and adding one again no longer fires it twice.
+- **A sign-in code that expired kept its claim.** The worker's reaper clears what a dead code
+  was started for, so a CLI claim token never outlives its code.
+- The crawler status page's "Check your own site" links to `/`, as the app's footer does.
+
 ## [0.40.0] — 2026-10-15
 
 A board save must say what it was read from. No migration.
