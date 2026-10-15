@@ -36,35 +36,24 @@ arm (whatever it already runs - a cookie, a flag library, a config);
 the app chooses an arm, say so: the SDK will not invent the assignment, and
 without one the test measures nothing.
 
+**Pass the person's own stable id, and pass the same one to `convert()`.** The
+card is a rate: the people who converted out of the people who were exposed.
+That means something only when both calls name the same person with the same
+string - the signed-in user's id, or the anonymous id the app already keeps for
+a visitor (the one in its cookie or localStorage). Not a request: a request is
+fingerprinted with a salt that is new in every server process, so the same
+visitor is a different person after a restart, on a second instance, and in the
+payment webhook that carries the conversion. A request on `expose()` and a user
+id on `convert()` is the worst mix: the two counts describe different people and
+the card has nothing to divide. If the app keeps no id for the people in this
+test, say so rather than inventing one or falling back to the request.
+
 One line at the branch where the arm is chosen - usually one route, not a
-global middleware. `expose()` takes the same `who` a funnel step takes.
-
-Express:
+global middleware:
 
 ```ts
-app.get('/checkout', (req, res, next) => { checkoutCta.expose(arm, req); next(); }); // arm = what the app's own assignment chose
-```
-
-Fastify and Koa hand you the framework's request, which carries the client's
-address once the app trusts its proxy (`trustProxy` in Fastify, `app.proxy` in
-Koa; `trust proxy` in Express). Pass that, not the raw Node request:
-
-```ts
-fastify.get('/checkout', (request, reply) => { checkoutCta.expose(arm, request); /* existing handler stays */ });
-app.use(async (ctx, next) => { checkoutCta.expose(arm, ctx.request); await next(); });
-```
-
-Next.js: a route handler's `request`, or the page or layout that renders the
-variant with the request headers. The SDK needs Node (`node:crypto`), so not
-`middleware.ts` unless it declares `runtime: 'nodejs'`:
-
-```ts
-export async function GET(request: Request) { checkoutCta.expose(arm, request); /* existing handler stays */ }
-```
-
-```ts
-import { headers } from 'next/headers';
-checkoutCta.expose(arm, { headers: await headers() }); // in the page that renders the variant, before its return
+checkoutCta.expose(arm, 'u_' + user.id); // arm = what the app's own assignment chose; a signed-in user, id prefixed (see the rules)
+checkoutCta.expose(arm, visitorId);      // a visitor: the anonymous id the app already keeps
 ```
 
 ## Step 3 - convert() where the conversion happens
@@ -72,33 +61,66 @@ checkoutCta.expose(arm, { headers: await headers() }); // in the page that rende
 The board sentence names the conversion ("to paid"); put the line where that
 moment truly happens - inside the payment provider's success branch, not the
 redirect. Pass the arm the person was exposed to, read from wherever the
-assignment lives, and the same kind of `who`:
+assignment lives, and the same id `expose()` got:
 
 ```ts
-checkoutCta.convert(arm, userId);  // the payment success branch, the arm they saw
+checkoutCta.convert(arm, 'u_' + userId);  // the payment success branch: the arm they saw, the id they were exposed under
 ```
+
+A webhook has no browser: read the arm and the id from what the payment is tied
+to (the order, the customer, the checkout session's metadata). If the id cannot
+be recovered there, say so rather than passing something else.
 
 ## The rules
 
 - One line per call. No wrappers, no control-flow changes, no `await` -
   `expose()` and `convert()` never throw and never block.
-- The request or the user id, never an email, never a session token.
+- The user's id, or the anonymous id the app keeps - never an email, never a
+  session token, never a request. It is a string, and a numeric id goes prefixed
+  (`'u_' + user.id`, the same on both calls): the SDK scrubs every string it
+  sends, `uc.actor` included, and a bare number of 13 to 19 digits that passes
+  the card check becomes `[redacted:card:N]`, which folds every such user into
+  one person. A hash of the id works as well when the user would rather upcontrol
+  never held the real one, as long as both calls hash it the same way. An empty
+  or missing id sends nothing.
 - Control is first in the declaration. The board's card orders the arms by
-  people, putting a variant literally named `control` first.
+  people, putting a variant literally named `control` first, and compares the
+  other arms with that one: with no arm named exactly `control`, nothing is
+  compared.
 - The server counts a person once per arm per stat, so a reload does not
   inflate the rate and a second conversion does not move it. Keep the calls at
   the moment anyway, out of per-item loops.
-- The card reports counts and an uplift, and claims nothing more: no
-  significance testing, no confidence intervals. Do not promise those to the
-  user.
-- What leaves the process is one event per call, the person on it as `uc.actor`.
-  A request is fingerprinted on the user's own server (the same salted hash of
-  address plus user-agent a funnel uses), so the raw address never leaves, and
-  a string id passes through unchanged as the caller's own identifier. A
-  request with no address at all is not counted (one warning on stderr), and
-  known crawler user-agents are not counted either.
+- What leaves the process is one event per call, the id on it as `uc.actor`.
 - The events carry `uc.actor`, which is what lets the same numbers be produced
   from any language - see `npx upcontrol skills wire`.
+
+## What the card claims
+
+Read this before promising the user anything about a result.
+
+- **A difference, against `control`.** Each other arm shows its rate minus the
+  control's, in percentage points: `+2.4 pt vs control`. No arm named exactly
+  `control` means no comparison at all, only counts and rates.
+- **An interval and a verdict, once there are enough people.** When every arm,
+  control included, has at least 30 people exposed, at least 5 who converted and
+  at least 5 who did not, each of the other arms also shows a 95% interval for
+  its difference (Wald's, for two proportions) and one verdict in words:
+  - `ahead of control` - the whole interval is above zero;
+  - `behind control` - the whole interval is below zero;
+  - `not clear yet, keep collecting` - the interval spans zero.
+
+  A footnote says what the interval assumes:
+  `Assumes the same person is exposed and converts.`
+- **Below that floor**, each of the other arms says `too few to tell` and no
+  interval is drawn. One arm under the floor is enough: the interval needs every
+  arm.
+- **When expose() and convert() named different people** - any arm with more
+  people converted than exposed - the card shows the difference alone and says
+  there is no interval. The cause is the id: see step 2.
+
+The card never says `significant`. Tell the user what it says, in its words;
+do not promise significance, a winner or a sample size, and do not report a
+result while an arm is still under the floor.
 
 ## Verify
 

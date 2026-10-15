@@ -123,9 +123,10 @@ export async function mintPublicKey(endpoint: string, key: string, name: string,
 // (`bad_layout` and a sentence); the status alone would cost a round trip. The
 // code comes back too: a 404 that carries one is a board this core does not
 // have, while a 404 with no error object at all is a core that has no
-// /v1/dashboards to answer with.
-function boardError(text: string): { code?: string; message?: string } {
-  return parseJSON<{ error?: { code?: string; message?: string } }>(text)?.error ?? {};
+// /v1/dashboards to answer with. An unknown key in the layout is `unknown_field`
+// with the key in `field` and no sentence, so `field` rides along as well.
+function boardError(text: string): { code?: string; message?: string; field?: string } {
+  return parseJSON<{ error?: { code?: string; message?: string; field?: string } }>(text)?.error ?? {};
 }
 
 /** One shape for every board door: they differ by one field each, not by kind.
@@ -140,6 +141,7 @@ interface BoardResult {
   board?: string;
   code?: string;
   message?: string;
+  field?: string;
   error?: string;
 }
 

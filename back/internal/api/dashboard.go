@@ -1769,9 +1769,10 @@ func (h *writeAPI) putBoardLayout(w http.ResponseWriter, r *http.Request, d boar
 // transaction. A widget moved between two boards is two documents, and saving
 // one without the other would duplicate it or lose it; one refused board
 // refuses them all, which is what the rollback is for. Session only, so every
-// board it writes is a human's curation. An entry that carries the rev its
-// edit began from is refused when the board moved since — a card the agent
-// appended meanwhile would otherwise be erased by a draft that never held it.
+// board it writes is a human's curation. Each entry carries the rev its edit
+// began from and is refused when the board moved since, or when it carries
+// none — a card the agent appended meanwhile would otherwise be erased by a
+// draft that never held it.
 func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoor) {
 	// decodeStrict's own 1 MB limit bounds the request; each board's stored
 	// document is then held to the same 64 KB a single save is, below, so the
@@ -1848,25 +1849,24 @@ func (h *writeAPI) saveBoards(w http.ResponseWriter, r *http.Request, d boardDoo
 		// The base is compared on the row this entry writes, locked until the
 		// save commits, so nothing lands between the comparison and the write.
 		// A Main this save just laid down was the empty layout it is served as;
-		// a row gone since it resolved moved as surely as one rewritten. The
-		// deferred rollback undoes whatever this save already wrote.
-		if entry.Base != "" {
-			current := emptyLayout
-			var err error
-			if !laid {
-				err = tx.QueryRow(ctx,
-					`SELECT layout FROM dashboard WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
-					b.id, d.tenantID).Scan(&current)
-			}
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				writeAPIErr(w, http.StatusInternalServerError, "read_failed")
-				return
-			}
-			if err != nil || boardRev(current) != entry.Base {
-				writeAPIErrMsg(w, http.StatusConflict, "board_changed",
-					"this dashboard changed since it was read: "+entry.ID)
-				return
-			}
+		// a row gone since it resolved moved as surely as one rewritten; no base
+		// matches no rev, so an edit that cannot name what it began from is
+		// refused like a stale one. The deferred rollback undoes whatever this
+		// save already wrote.
+		current := emptyLayout
+		if !laid {
+			err = tx.QueryRow(ctx,
+				`SELECT layout FROM dashboard WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+				b.id, d.tenantID).Scan(&current)
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeAPIErr(w, http.StatusInternalServerError, "read_failed")
+			return
+		}
+		if err != nil || boardRev(current) != entry.Base {
+			writeAPIErrMsg(w, http.StatusConflict, "board_changed",
+				"this dashboard changed since it was read: "+entry.ID)
+			return
 		}
 		if !laid {
 			rows, err := q.PutBoardLayout(ctx, sqlc.PutBoardLayoutParams{

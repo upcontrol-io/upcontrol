@@ -54,7 +54,7 @@ interface Seen {
 interface BoardMock {
   url: string;
   seen: Seen[];
-  setPut(status: number): void;
+  setPut(status: number, error?: object): void;
   setCreate(status: number): void;
   close(): Promise<void>;
 }
@@ -67,6 +67,8 @@ function mockBoard(opts: { boards?: boolean } = {}): Promise<BoardMock> {
   const seen: Seen[] = [];
   const several = opts.boards !== false;
   let putStatus = 200;
+  // What a 400 on the PUT carries: a layout sentence unless a test sets another body.
+  let putError: object = { code: 'bad_layout', message: 'widget w1: x + w is 14, past the 12-column grid' };
   let createStatus = 201;
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -82,8 +84,7 @@ function mockBoard(opts: { boards?: boolean } = {}): Promise<BoardMock> {
         // A new core's alias names the board it parked on; an old core's 202 carries no id.
         if (putStatus === 202)
           res.writeHead(202).end(JSON.stringify(several ? { status: 'proposed', id: MAIN_ID, name: 'Main' } : { status: 'proposed' }));
-        else if (putStatus === 400)
-          res.writeHead(400).end(JSON.stringify({ error: { code: 'bad_layout', message: 'widget w1: x + w is 14, past the 12-column grid' } }));
+        else if (putStatus === 400) res.writeHead(400).end(JSON.stringify({ error: putError }));
         else res.writeHead(200).end(JSON.stringify(body));
       } else if (url === '/v1/dashboard/widgets' && req.method === 'POST') {
         const merged = [...LAYOUT.widgets, ...((body as { widgets: unknown[] }).widgets ?? [])];
@@ -110,7 +111,10 @@ function mockBoard(opts: { boards?: boolean } = {}): Promise<BoardMock> {
       resolve({
         url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
         seen,
-        setPut: (s: number) => (putStatus = s),
+        setPut: (s: number, e?: object) => {
+          putStatus = s;
+          if (e) putError = e;
+        },
         setCreate: (s: number) => (createStatus = s),
         close: () => new Promise<void>((r) => server.close(() => r())),
       }),
@@ -211,6 +215,21 @@ test('a refused layout prints the server message verbatim and exits 1', async ()
   await srv.close();
   assert.equal(code, 1);
   assert.equal(stderr.trim(), 'widget w1: x + w is 14, past the 12-column grid');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('an unknown field is named, not a bare "refused (HTTP 400)"', async () => {
+  const srv = await mockBoard();
+  // The strict decoder answers the offending key and no sentence, exactly this body.
+  srv.setPut(400, { code: 'unknown_field', field: 'colour' });
+  const cwd = boardCwd();
+  const file = join(cwd, 'board.json');
+  writeFileSync(file, JSON.stringify(LAYOUT));
+  const { stdout, stderr, code } = await runBoard(cwd, ['board', '--apply', file, '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 1);
+  assert.equal(stdout, '');
+  assert.equal(stderr.trim(), 'board: unknown field "colour"');
   rmSync(cwd, { recursive: true, force: true });
 });
 

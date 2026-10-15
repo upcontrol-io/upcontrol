@@ -1259,7 +1259,7 @@ type ConnectableSource struct {
 // DashboardBatch Every board one Save changed, written in one transaction: a widget moved between two boards is two documents, and saving one without the other would duplicate it or lose it.
 type DashboardBatch struct {
 	Boards []struct {
-		// Base Request only, optional: the `X-Board-Rev` the edit began from. When it no longer matches the stored board, the whole save is refused with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased. Absent, or an empty string, means the caller predates the check.
+		// Base Request only: the `X-Board-Rev` the edit began from. A save without one (absent or empty) or with one that no longer matches the stored board is refused whole with 409 `board_changed` and nothing is written, so a card the agent appended meanwhile is never erased: the caller re-reads the board and saves again with its rev. Optional in the schema, which the answer shares, so a caller without one gets that refusal and never a 400.
 		Base *string `json:"base,omitempty"`
 
 		// Id A board id, or the alias `main`.

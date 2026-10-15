@@ -100,6 +100,11 @@ Suggestions come from the repository, not a template.
 - The SDK is `@upcontrol/sdk` - zero dependencies, `track()` never throws, so a
   log point cannot break the caller. Version is pinned exactly by init; do not
   loosen it to a range.
+- `app_started` names the release it booted from when the platform sets a deploy
+  variable (Vercel, Render, Railway, Fly, Cloud Run, and Heroku only after
+  `heroku labs:enable runtime-dyno-metadata`); anywhere else, set
+  `UPCONTROL_RELEASE` to the commit sha or build id so the board can mark each
+  release on its charts.
 - This skill never sends the user's code anywhere. All intelligence is you; the
   SDK pushes only what the placed log points emit, scrubbed client-side first.
 - Uptime checks, status pages and alert channels live in the upcontrol app, not
