@@ -237,6 +237,9 @@ type MagicLinkCode struct {
 	ExpiresAt  pgtype.Timestamptz
 	RedeemedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+	ClaimSlug  *string
+	ClaimToken *string
+	ClaimNext  *string
 }
 
 type MagicLinkIp struct {
@@ -320,12 +323,13 @@ type ProbeTarget struct {
 }
 
 type Project struct {
-	ID        int64
-	PublicID  pgtype.UUID
-	TenantID  int64
-	Domain    string
-	CreatedAt pgtype.Timestamptz
-	FrozenAt  pgtype.Timestamptz
+	ID                int64
+	PublicID          pgtype.UUID
+	TenantID          int64
+	Domain            string
+	CreatedAt         pgtype.Timestamptz
+	FrozenAt          pgtype.Timestamptz
+	InstallVerifiedAt pgtype.Timestamptz
 }
 
 type ProjectMember struct {
@@ -457,6 +461,7 @@ type Tenant struct {
 	ClaimedAt      pgtype.Timestamptz
 	CreatedAt      pgtype.Timestamptz
 	OwnerPersonID  *int64
+	FirstCheckAt   pgtype.Timestamptz
 }
 
 type WebEvent struct {

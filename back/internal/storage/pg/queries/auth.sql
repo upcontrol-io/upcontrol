@@ -1,22 +1,30 @@
 -- name: UpsertMagicLinkCode :exec
 -- Store a freshly generated code for an email, replacing any prior code and
 -- resetting attempts/redeemed. expires_at is passed in (now + TTL at the caller).
-INSERT INTO magic_link_code (email, code_hash, expires_at)
-VALUES ($1, $2, $3)
+-- The claim columns are replaced too: a code carries what ITS request was
+-- started for, never an earlier request's.
+INSERT INTO magic_link_code (email, code_hash, expires_at, claim_slug, claim_token, claim_next)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (email) DO UPDATE
    SET code_hash  = EXCLUDED.code_hash,
        attempts   = 0,
        expires_at = EXCLUDED.expires_at,
        redeemed_at = NULL,
-       created_at = now();
+       created_at = now(),
+       claim_slug = EXCLUDED.claim_slug,
+       claim_token = EXCLUDED.claim_token,
+       claim_next = EXCLUDED.claim_next;
 
 -- name: GetMagicLinkCode :one
-SELECT email, code_hash, attempts, expires_at, redeemed_at, created_at
+SELECT email, code_hash, attempts, expires_at, redeemed_at, created_at,
+       claim_slug, claim_token, claim_next
   FROM magic_link_code WHERE email = $1;
 
 -- name: MarkMagicLinkRedeemed :execrows
--- One-time redemption: only the first redeem after issue succeeds.
-UPDATE magic_link_code SET redeemed_at = now()
+-- One-time redemption: only the first redeem after issue succeeds. The claim
+-- the request stored is answered by this redeem and goes with it.
+UPDATE magic_link_code
+   SET redeemed_at = now(), claim_slug = NULL, claim_token = NULL, claim_next = NULL
  WHERE email = $1 AND redeemed_at IS NULL;
 
 -- name: IncMagicLinkAttempts :execrows

@@ -12,7 +12,8 @@ import (
 )
 
 const getMagicLinkCode = `-- name: GetMagicLinkCode :one
-SELECT email, code_hash, attempts, expires_at, redeemed_at, created_at
+SELECT email, code_hash, attempts, expires_at, redeemed_at, created_at,
+       claim_slug, claim_token, claim_next
   FROM magic_link_code WHERE email = $1
 `
 
@@ -26,6 +27,9 @@ func (q *Queries) GetMagicLinkCode(ctx context.Context, email string) (MagicLink
 		&i.ExpiresAt,
 		&i.RedeemedAt,
 		&i.CreatedAt,
+		&i.ClaimSlug,
+		&i.ClaimToken,
+		&i.ClaimNext,
 	)
 	return i, err
 }
@@ -44,11 +48,13 @@ func (q *Queries) IncMagicLinkAttempts(ctx context.Context, email string) (int64
 }
 
 const markMagicLinkRedeemed = `-- name: MarkMagicLinkRedeemed :execrows
-UPDATE magic_link_code SET redeemed_at = now()
+UPDATE magic_link_code
+   SET redeemed_at = now(), claim_slug = NULL, claim_token = NULL, claim_next = NULL
  WHERE email = $1 AND redeemed_at IS NULL
 `
 
-// One-time redemption: only the first redeem after issue succeeds.
+// One-time redemption: only the first redeem after issue succeeds. The claim
+// the request stored is answered by this redeem and goes with it.
 func (q *Queries) MarkMagicLinkRedeemed(ctx context.Context, email string) (int64, error) {
 	result, err := q.db.Exec(ctx, markMagicLinkRedeemed, email)
 	if err != nil {
@@ -77,25 +83,40 @@ func (q *Queries) RecordMagicLinkIP(ctx context.Context, ip string) (int32, erro
 }
 
 const upsertMagicLinkCode = `-- name: UpsertMagicLinkCode :exec
-INSERT INTO magic_link_code (email, code_hash, expires_at)
-VALUES ($1, $2, $3)
+INSERT INTO magic_link_code (email, code_hash, expires_at, claim_slug, claim_token, claim_next)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (email) DO UPDATE
    SET code_hash  = EXCLUDED.code_hash,
        attempts   = 0,
        expires_at = EXCLUDED.expires_at,
        redeemed_at = NULL,
-       created_at = now()
+       created_at = now(),
+       claim_slug = EXCLUDED.claim_slug,
+       claim_token = EXCLUDED.claim_token,
+       claim_next = EXCLUDED.claim_next
 `
 
 type UpsertMagicLinkCodeParams struct {
-	Email     string
-	CodeHash  []byte
-	ExpiresAt pgtype.Timestamptz
+	Email      string
+	CodeHash   []byte
+	ExpiresAt  pgtype.Timestamptz
+	ClaimSlug  *string
+	ClaimToken *string
+	ClaimNext  *string
 }
 
 // Store a freshly generated code for an email, replacing any prior code and
 // resetting attempts/redeemed. expires_at is passed in (now + TTL at the caller).
+// The claim columns are replaced too: a code carries what ITS request was
+// started for, never an earlier request's.
 func (q *Queries) UpsertMagicLinkCode(ctx context.Context, arg UpsertMagicLinkCodeParams) error {
-	_, err := q.db.Exec(ctx, upsertMagicLinkCode, arg.Email, arg.CodeHash, arg.ExpiresAt)
+	_, err := q.db.Exec(ctx, upsertMagicLinkCode,
+		arg.Email,
+		arg.CodeHash,
+		arg.ExpiresAt,
+		arg.ClaimSlug,
+		arg.ClaimToken,
+		arg.ClaimNext,
+	)
 	return err
 }
