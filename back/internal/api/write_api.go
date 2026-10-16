@@ -3885,7 +3885,7 @@ func (h *writeAPI) publicStatusData(ctx context.Context, projectID int64, claime
 	resp["incidents"] = incidents
 	if state, ok := resp["state"].(map[string]any); ok {
 		comps, _ := resp["components"].([]map[string]any)
-		resp["faq"] = statusFAQ(meta.host, state, comps, incidents, claimed)
+		resp["faq"] = statusFAQ(meta.host, state, comps, incidents)
 	}
 	return resp, meta
 }

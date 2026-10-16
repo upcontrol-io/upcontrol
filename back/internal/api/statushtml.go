@@ -50,9 +50,10 @@ func brandOf(host string) string {
 }
 
 // statusFAQ builds a host page's questions from its measured state, its
-// components and its published incidents. claimed decides the alerts
-// question: only a page nobody owns offers Get alerts to a stranger.
-func statusFAQ(host string, state map[string]any, comps, incidents []map[string]any, claimed bool) []faqItem {
+// components and its published incidents. Questions a reader has about the
+// host only: the page's own doors (Get alerts) are not one of them (owner
+// decision, 2026-10-16).
+func statusFAQ(host string, state map[string]any, comps, incidents []map[string]any) []faqItem {
 	kind, _ := state["kind"].(string)
 	sentence, _ := state["sentence"].(string)
 	asOf, _ := state["asOf"].(string)
@@ -115,11 +116,6 @@ func statusFAQ(host string, state map[string]any, comps, incidents []map[string]
 				uptime+" over the last "+stripWindowLabel(time.Duration(span)*time.Second, len(bars))+
 					", measured from outside by UpControl.")
 		}
-	}
-
-	if !claimed {
-		add("How do I get alerted when "+host+" goes down?",
-			"Press Get alerts on this page. UpControl messages you the moment "+host+" stops answering our check.")
 	}
 	return faq
 }

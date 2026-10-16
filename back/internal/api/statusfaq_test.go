@@ -21,12 +21,12 @@ func TestBrandOf(t *testing.T) {
 
 // The FAQ answers from the measured state only: an up host says no, a down
 // one says yes and names why, an ongoing incident wins the outage question,
-// and only a page nobody owns offers Get alerts.
+// and no page sells its own doors there (owner decision, 2026-10-16).
 func TestStatusFAQ(t *testing.T) {
 	okState := map[string]any{"kind": "ok", "asOf": "12:04 UTC",
 		"sentence": "As of 12:04 UTC, datrade.io answered HTTP 200 in 146 ms from our check."}
 	comps := []map[string]any{{"uptime": "99.9%", "bars": []string{"ok", "ok"}, "barSpanSec": 43200}}
-	faq := statusFAQ("datrade.io", okState, comps, nil, false)
+	faq := statusFAQ("datrade.io", okState, comps, nil)
 	text := faqText(faq)
 	for _, want := range []string{
 		"Is Datrade down right now? No. As of 12:04 UTC, datrade.io answered HTTP 200",
@@ -34,17 +34,19 @@ func TestStatusFAQ(t *testing.T) {
 		"Is Datrade down for everyone or just me? Not for everyone",
 		"Is there a Datrade outage? No outage has been recorded",
 		"What is Datrade's uptime? 99.9% over the last 24 h",
-		"How do I get alerted when datrade.io goes down?",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("ok FAQ misses %q in:\n%s", want, text)
 		}
 	}
+	if strings.Contains(strings.ToLower(text), "alert") {
+		t.Errorf("the FAQ offers alerts; it answers a reader's questions only:\n%s", text)
+	}
 
 	downState := map[string]any{"kind": "down", "asOf": "12:04 UTC",
 		"sentence": "Our check has had no answer from datrade.io since 11:50 UTC (connection timed out)."}
 	incidents := []map[string]any{{"title": "datrade.io is down", "since": "Sep 25, 11:50", "ongoing": true}}
-	text = faqText(statusFAQ("datrade.io", downState, nil, incidents, true))
+	text = faqText(statusFAQ("datrade.io", downState, nil, incidents))
 	for _, want := range []string{
 		"Is Datrade down right now? Yes. Our check has had no answer",
 		"Is Datrade down for everyone or just me? Not just you",
@@ -54,8 +56,8 @@ func TestStatusFAQ(t *testing.T) {
 			t.Errorf("down FAQ misses %q in:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "Get alerts") || strings.Contains(text, "uptime") {
-		t.Errorf("a claimed page without components offered alerts or an uptime:\n%s", text)
+	if strings.Contains(text, "uptime") {
+		t.Errorf("a page without components claimed an uptime:\n%s", text)
 	}
 	if strings.Contains(text, "—") {
 		t.Error("the FAQ carries an em-dash")
