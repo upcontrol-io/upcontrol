@@ -6,6 +6,15 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.41.1] — 2026-10-16
+
+### Removed
+- **The alerts question in a status page's FAQ.** "How do I get alerted when <host> goes
+  down? Press Get alerts on this page" was the page's own door worded as a question; the
+  FAQ answers what a reader asks about the host and nothing else. Gone from the JSON `faq`
+  field, the crawler's HTML page and its FAQPage JSON-LD alike; the banner's `Get alerts`
+  link on an unclaimed page stays.
+
 ## [0.41.0] — 2026-10-15
 
 A claim survives the sign-in on any device, the watch door opens the page a host already has,
