@@ -37,11 +37,11 @@ const LEVEL_OPTIONS = [
 const DETAIL_COLUMNS = 120;
 
 /** How fine a histogram to ask for over the picked range, or 0 for none;
- *  below a minute is the only place the per-minute strip has no answer. */
+ *  the server decides whether it adds anything below the map's width. */
 function detailWidthFor(range: { from: number; to: number } | null): number {
 	if (!range) return 0;
 	const seconds = (range.to - range.from) / 1000;
-	if (seconds <= 0 || seconds > 3600) return 0;
+	if (seconds <= 0) return 0;
 	return Math.max(1, Math.floor(seconds / DETAIL_COLUMNS));
 }
 
@@ -272,6 +272,7 @@ export function LiveLogsPanel() {
 			<LogTimeline
 				buckets={answer?.volume ?? []}
 				detail={answer?.detail}
+				volumeBucketSeconds={answer?.volumeBucketSeconds}
 				onRangeChange={setRange}
 			/>
 

@@ -2024,12 +2024,27 @@ func (h *writeAPI) logQueryBuilder(ctx context.Context, r *http.Request, tenantI
 	return query.New(tenantID, projectID)
 }
 
+// logPlanWindow is how far back the plan lets /v1/logs reach. An entitlement
+// it cannot read is 0, no floor: a missing floor is not a floor of zero.
+func (h *writeAPI) logPlanWindow(ctx context.Context, tenantID int64) time.Duration {
+	plan, _ := h.pool.Queries().GetTenantPlan(ctx, tenantID)
+	if plan == "" {
+		plan = "Free"
+	}
+	ent, err := h.pool.Queries().GetPlanEntitlement(ctx, plan)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(ent.WindowHours) * time.Hour
+}
+
 func (h *writeAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int64) {
 	ctx := r.Context()
-	qb := h.logQueryBuilder(ctx, r, tenantID)
+	// Every read below stops at the plan's window, whatever range was asked.
+	qb := h.logQueryBuilder(ctx, r, tenantID).WithFloor(h.logPlanWindow(ctx, tenantID))
 	q := r.URL.Query()
-	// Absent or unrecognised window means the whole ring: a bad value must not
-	// invent a narrower window than was asked for.
+	// Absent or unrecognised window means the whole plan window: a bad value
+	// must not invent a narrower window than was asked for.
 	window := parseLogWindow(q.Get("window"))
 	// The dragged range bounds the lines and count, deliberately NOT the
 	// volume: the strip is the map the range was picked on.
@@ -2047,15 +2062,16 @@ func (h *writeAPI) getLogs(w http.ResponseWriter, r *http.Request, tenantID int6
 	if volume == nil {
 		volume = []map[string]any{}
 	}
+	mapSize := qb.VolumeBucketSeconds()
 	body := map[string]any{
-		"lines": lines, "volume": volume,
+		"lines": lines, "volume": volume, "volumeBucketSeconds": mapSize,
 		// The panel prints "showing N of total" rather than implying the window
 		// is what fits on screen.
 		"total": total,
 	}
-	// Sub-minute detail for the held range only; `volume` above stays the
-	// whole-ring map. Absent when it adds nothing finer than that map.
-	if size := query.DetailBucketSeconds(parseBucketSeconds(q.Get("bucketSeconds")), within); size > 0 {
+	// Finer detail for the held range only; `volume` above stays the
+	// whole-window map. Absent when it adds nothing finer than that map.
+	if size := query.DetailBucketSeconds(parseBucketSeconds(q.Get("bucketSeconds")), within); size > 0 && size < mapSize {
 		if rows := h.runBucketRows(ctx, qb.VolumeDetail(size, within, levels, services), "bucket"); rows != nil {
 			body["detail"] = map[string]any{"bucketSeconds": size, "buckets": rows}
 		}

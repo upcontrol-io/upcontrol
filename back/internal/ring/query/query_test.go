@@ -1,6 +1,7 @@
 package query
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -91,11 +92,75 @@ func TestServices_IsNeverFilteredByService(t *testing.T) {
 func TestVolume_GroupsByMinuteWithinScope(t *testing.T) {
 	q := New(1, 2)
 	got := q.Volume(nil, nil)
-	if !contains(got.SQL, "date_trunc('minute', ts)") {
-		t.Fatalf("volume must group by minute; got:\n%s", got.SQL)
+	if !contains(got.SQL, "to_timestamp(floor(extract(epoch from ts) / 60) * 60) AS minute") {
+		t.Fatalf("volume with no floor must group by minute; got:\n%s", got.SQL)
 	}
 	if !contains(got.SQL, "tenant_id = $1") || !contains(got.SQL, "project_id = $2") {
 		t.Fatalf("volume must stay scoped to tenant+project; got:\n%s", got.SQL)
+	}
+	if contains(got.SQL, "ts >=") {
+		t.Fatalf("volume with no floor must stay unbounded; got:\n%s", got.SQL)
+	}
+}
+
+func TestVolumeBucketSeconds_KeepsTheMapWithin1440(t *testing.T) {
+	cases := []struct {
+		window time.Duration
+		want   int
+	}{
+		{0, 60}, // no floor: the old minute map
+		{24 * time.Hour, 60},
+		{48 * time.Hour, 120},
+		{168 * time.Hour, 600},
+		{720 * time.Hour, 1800}, // exactly 1440 buckets still fits
+		{721 * time.Hour, 3600},
+		{10000 * time.Hour, 3600}, // past the ladder: its coarsest rung
+	}
+	for _, c := range cases {
+		q := New(1, 2).WithFloor(c.window)
+		if got := q.VolumeBucketSeconds(); got != c.want {
+			t.Errorf("window %v: VolumeBucketSeconds = %d, want %d", c.window, got, c.want)
+		}
+		if want := fmt.Sprintf("/ %d) * %d) AS minute", c.want, c.want); !contains(q.Volume(nil, nil).SQL, want) {
+			t.Errorf("window %v: Volume must group at %ds; got:\n%s", c.window, c.want, q.Volume(nil, nil).SQL)
+		}
+	}
+}
+
+func TestWithFloor_BoundsEveryLogsRead(t *testing.T) {
+	q := New(1, 2).WithFloor(24 * time.Hour)
+	floor := time.Now().UTC().Add(-24 * time.Hour)
+	within := Range{From: time.Unix(0, 0).UTC(), To: time.Now().UTC()}
+	for name, got := range map[string]LogQuery{
+		"Stream":       q.Stream(10, nil, nil, "", Range{}),
+		"Stream range": q.Stream(10, nil, nil, "", within),
+		"WindowCount":  q.WindowCount(Range{}, nil, nil, ""),
+		"Services":     q.Services(0),
+		"Services 48h": q.Services(48 * time.Hour),
+		"Volume":       q.Volume(nil, nil),
+		"VolumeDetail": q.VolumeDetail(5, Range{From: time.Now().Add(-25 * time.Hour), To: time.Now().Add(-23 * time.Hour)}, nil, nil),
+	} {
+		if !contains(got.SQL, "ts >= $3") {
+			t.Errorf("%s must be floored; got:\n%s", name, got.SQL)
+			continue
+		}
+		from, ok := got.Args[2].(time.Time)
+		// A from below the floor is raised to it, never honoured.
+		if !ok || from.Before(floor.Add(-time.Second)) || from.After(floor.Add(time.Second)) {
+			t.Errorf("%s floor = %v, want ~%v", name, got.Args[2], floor)
+		}
+	}
+	// A from above the floor is the reader's and stays.
+	recent := time.Now().UTC().Add(-time.Hour)
+	if got := q.Stream(10, nil, nil, "", Range{From: recent}); got.Args[2] != recent {
+		t.Errorf("a from inside the window must be kept; got %v", got.Args[2])
+	}
+}
+
+func TestWithFloor_ZeroWindowIsNoFloor(t *testing.T) {
+	// A plan window that could not be read must not become a floor of now.
+	if got := New(1, 2).WithFloor(0).Stream(10, nil, nil, "", Range{}); contains(got.SQL, "ts >=") {
+		t.Fatalf("no window must mean no floor; got:\n%s", got.SQL)
 	}
 }
 
@@ -124,12 +189,18 @@ func TestDetailBucketSeconds_SnapsAndRefuses(t *testing.T) {
 		{"unasked means no detail", 0, minute, 0},
 		{"a range with no bounds has no minute to detail", 5, Range{}, 0},
 		{
-			// Every width this could answer at would be coarser than the minute
-			// `volume` already draws, so there is nothing to add.
-			name: "a range too wide for any offered width is refused",
-			// 600 buckets is the cap, so 60s buckets cover 10 hours; 11 is past it.
+			// Below a coarse map a wide range still gets detail; whether it is
+			// finer than the map is the handler's question.
+			name:      "eleven hours coarsens to two minutes",
 			requested: 1,
 			within:    Range{From: time.Unix(0, 0).UTC(), To: time.Unix(11*3600, 0).UTC()},
+			want:      120,
+		},
+		{
+			name: "a range too wide for any offered width is refused",
+			// 600 buckets is the cap, so 1800s buckets cover 300 hours; 301 is past it.
+			requested: 1,
+			within:    Range{From: time.Unix(0, 0).UTC(), To: time.Unix(301*3600, 0).UTC()},
 			want:      0,
 		},
 		{

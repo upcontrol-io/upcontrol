@@ -13,11 +13,35 @@ import (
 type QueryBuilder struct {
 	projectID int64
 	tenantID  int64
+	// floor and span are WithFloor's: the oldest ts a ring read may reach and
+	// the window it was cut from. Zero is no floor.
+	floor time.Time
+	span  time.Duration
 }
 
 // New builds a QueryBuilder for a project.
 func New(tenantID, projectID int64) *QueryBuilder {
 	return &QueryBuilder{tenantID: tenantID, projectID: projectID}
+}
+
+// WithFloor bounds Stream, WindowCount, Services, Volume and VolumeDetail to
+// ts >= now - window (the plan's log window); window <= 0 leaves them
+// unbounded. The builder's other reads keep their own semantics.
+func (q *QueryBuilder) WithFloor(window time.Duration) *QueryBuilder {
+	if window > 0 {
+		q.floor = time.Now().UTC().Add(-window)
+		q.span = window
+	}
+	return q
+}
+
+// floored raises the range's start to the floor; a From below it is never
+// honoured.
+func (q *QueryBuilder) floored(within Range) Range {
+	if !q.floor.IsZero() && within.From.Before(q.floor) {
+		within.From = q.floor
+	}
+	return within
 }
 
 // LogQuery is a parameterised logs query. The caller passes the SQL and args to
@@ -84,7 +108,7 @@ func (q *QueryBuilder) Stream(limit int, levels, services []string, search strin
 		conditions = append(conditions, "message ILIKE ?")
 		args = append(args, "%"+search+"%")
 	}
-	conditions, args = appendRangeFilter(conditions, args, within)
+	conditions, args = appendRangeFilter(conditions, args, q.floored(within))
 
 	sql := fmt.Sprintf("SELECT seq, ts, level, service, message FROM logs WHERE %s ORDER BY seq DESC LIMIT %d",
 		strings.Join(conditions, " AND "), limit)
@@ -147,7 +171,7 @@ func (q *QueryBuilder) WindowCount(within Range, levels, services []string, sear
 		conditions = append(conditions, "message ILIKE ?")
 		args = append(args, "%"+search+"%")
 	}
-	conditions, args = appendRangeFilter(conditions, args, within)
+	conditions, args = appendRangeFilter(conditions, args, q.floored(within))
 
 	return bind("SELECT count(*) FROM logs WHERE "+strings.Join(conditions, " AND "), args)
 }
@@ -157,37 +181,61 @@ func (q *QueryBuilder) WindowCount(within Range, levels, services []string, sear
 func (q *QueryBuilder) Services(window time.Duration) LogQuery {
 	conditions := []string{"tenant_id = ?", "project_id = ?"}
 	args := []any{q.tenantID, q.projectID}
+	var within Range
 	if window > 0 {
-		conditions = append(conditions, "ts >= ?")
-		args = append(args, time.Now().UTC().Add(-window))
+		within.From = time.Now().UTC().Add(-window)
 	}
+	conditions, args = appendRangeFilter(conditions, args, q.floored(within))
 	return bind("SELECT service, count(*) AS lines FROM logs WHERE "+
 		strings.Join(conditions, " AND ")+
 		" GROUP BY service ORDER BY lines DESC", args)
 }
 
-// Volume returns per-minute line counts for the histogram, taking Stream's
-// filters (the strip describes the lines below it). The bucket is a minute.
+// volumeBuckets are the widths the whole-window map is drawn at, finest first.
+var volumeBuckets = []int64{60, 120, 300, 600, 900, 1800, 3600}
+
+// maxVolumeBuckets caps the map: a month of minutes was ~90k rows per read.
+const maxVolumeBuckets = 1440
+
+// VolumeBucketSeconds is the map's width: the finest rung that keeps the
+// floored window within maxVolumeBuckets, a minute with no floor.
+func (q *QueryBuilder) VolumeBucketSeconds() int {
+	span := int64(q.span / time.Second)
+	for _, size := range volumeBuckets {
+		if span <= size*maxVolumeBuckets {
+			return int(size)
+		}
+	}
+	return int(volumeBuckets[len(volumeBuckets)-1])
+}
+
+// Volume returns line counts per VolumeBucketSeconds for the histogram, taking
+// Stream's filters (the strip describes the lines below it). Each row's
+// `minute` is its bucket's start.
 func (q *QueryBuilder) Volume(levels, services []string) LogQuery {
+	size := q.VolumeBucketSeconds()
 	conditions := []string{"tenant_id = ?", "project_id = ?"}
 	args := []any{q.tenantID, q.projectID}
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
-	return bind("SELECT date_trunc('minute', ts) AS minute, level, count(*) AS lines "+
-		"FROM logs WHERE "+strings.Join(conditions, " AND ")+
-		" GROUP BY minute, level ORDER BY minute", args)
+	conditions, args = appendRangeFilter(conditions, args, q.floored(Range{}))
+	return bind(fmt.Sprintf(
+		"SELECT to_timestamp(floor(extract(epoch from ts) / %d) * %d) AS minute, level, count(*) AS lines "+
+			"FROM logs WHERE %s GROUP BY minute, level ORDER BY minute",
+		size, size, strings.Join(conditions, " AND ")), args)
 }
 
 // detailBuckets are the resolutions VolumeDetail answers at, finest first;
 // the same ladder the strip draws with.
-var detailBuckets = []int{1, 2, 5, 10, 15, 30, 60}
+var detailBuckets = []int{1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800}
 
 // maxDetailBuckets caps one answer; it keeps a wide range from grouping a
 // whole ring one second at a time.
 const maxDetailBuckets = 600
 
-// DetailBucketSeconds picks the resolution a detail read uses; 0 means "the
-// per-minute map already answers this" (no detail finer than a minute exists).
+// DetailBucketSeconds picks the resolution a detail read uses; 0 means no
+// offered width fits the range. Whether that is finer than the map is the
+// caller's question (VolumeBucketSeconds).
 func DetailBucketSeconds(requested int, within Range) int {
 	if requested <= 0 || within.From.IsZero() || within.To.IsZero() {
 		return 0
@@ -218,7 +266,7 @@ func (q *QueryBuilder) VolumeDetail(bucketSeconds int, within Range, levels, ser
 	args := []any{q.tenantID, q.projectID}
 	conditions, args = appendLevelFilter(conditions, args, levels)
 	conditions, args = appendServiceFilter(conditions, args, services)
-	conditions, args = appendRangeFilter(conditions, args, within)
+	conditions, args = appendRangeFilter(conditions, args, q.floored(within))
 	return bind(fmt.Sprintf(
 		"SELECT to_timestamp(floor(extract(epoch from ts) / %d) * %d) AS bucket, level, count(*) AS lines "+
 			"FROM logs WHERE %s GROUP BY bucket, level ORDER BY bucket",
