@@ -187,6 +187,20 @@ type seriesQuery struct {
 	Labels map[string]string `json:"labels"`
 	// Bucket reads the range in UTC hours or days instead of its own step.
 	Bucket string `json:"bucket"`
+	// Measure "amount" sums the events' money (amount_minor) in Currency instead
+	// of counting them: on an event read and on a breakdown alone.
+	Measure  string `json:"measure"`
+	Currency string `json:"currency"`
+}
+
+// isCurrency is an ISO 4217 code as the contract spells it: 3 upper-case letters.
+func isCurrency(s string) bool {
+	return len(s) == 3 && !strings.ContainsFunc(s, func(r rune) bool { return r < 'A' || r > 'Z' })
+}
+
+// breakdown is a people query folding one event name by one label key.
+func (q seriesQuery) breakdown() bool {
+	return q.Source == "people" && len(q.Steps) == 0 && q.Cohort == "" && len(q.Group) == 1
 }
 
 // bareName is a people query that names one event and nothing else: the
@@ -292,6 +306,27 @@ func validateSeries(qs []seriesQuery) string {
 		if q.Cohort != "" && q.Cohort != "week" {
 			return "unknown cohort " + q.Cohort + " in " + q.ID
 		}
+		// Money sums on the two reads that can carry it: an event read and a
+		// breakdown. A funnel, a retention grid and an A/B test count people, and
+		// `count` picks a counting axis a sum does not have.
+		switch q.Measure {
+		case "":
+			if q.Currency != "" {
+				return "currency is only for measure amount in " + q.ID
+			}
+		case "amount":
+			if !isCurrency(q.Currency) {
+				return "measure amount needs a currency of three upper-case letters in " + q.ID
+			}
+			if q.Source != "event" && !q.breakdown() {
+				return "measure is only for an event read or a breakdown in " + q.ID
+			}
+			if q.Count != "" {
+				return "measure and count do not go together in " + q.ID
+			}
+		default:
+			return "unknown measure " + q.Measure + " in " + q.ID
+		}
 		if q.Source == "web" {
 			// The web source's names, group and where are its own.
 			if msg := validateWeb(q); msg != "" {
@@ -351,8 +386,7 @@ func validateSeries(qs []seriesQuery) string {
 			// folds only the rows the filter leaves. A funnel filters per step
 			// (stepLabels); retention and an A/B test would need a meaning of
 			// their own.
-			breakdown := q.Source == "people" && len(q.Steps) == 0 && q.Cohort == "" && len(q.Group) == 1
-			if q.Source != "event" && !q.bareName() && !breakdown {
+			if q.Source != "event" && !q.bareName() && !q.breakdown() {
 				return "labels are only for an event read, a people read of one name or a breakdown in " + q.ID
 			}
 			if msg := labelsMsg(q.Labels, q.ID); msg != "" {
@@ -533,12 +567,16 @@ func (h *writeAPI) catalogEvents(ctx context.Context, tenantID, projectID int64,
 		if keys == nil {
 			keys = []string{}
 		}
-		out = append(out, map[string]any{
+		ev := map[string]any{
 			"name":   e.Name,
 			"times":  e.Times,
 			"lastTs": e.LastTS.UTC().Format(time.RFC3339),
 			"fields": keys,
-		})
+		}
+		if len(e.Currencies) > 0 {
+			ev["currencies"] = e.Currencies
+		}
+		out = append(out, ev)
 	}
 	return out, nil
 }
@@ -765,6 +803,8 @@ func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, 
 			sums, err = h.pgs.FunnelSteps(ctx, tenantID, projectID, q.Steps, q.StepLabels, from, to)
 		case q.Cohort == "week":
 			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, q.Name, from, to)
+		case len(q.Group) == 1 && q.Measure == "amount":
+			sums, err = h.pgs.BreakdownAmounts(ctx, tenantID, projectID, q.Name, q.Group[0], q.Currency, q.Labels, from, to)
 		case len(q.Group) == 1:
 			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], q.Labels, q.Count == "events", from, to)
 		default: // two group keys: validateSeries refused every other shape
@@ -987,7 +1027,15 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 		return nil, nil, nil, nil
 	}
 	people := q.Source == "people"
-	rows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from, to, r.step)
+	// An amount is a sum, so it adds up across buckets like a count and takes
+	// the same total and previous span.
+	read := func(from, to time.Time, step int) ([]pgstore.Bucket, error) {
+		if q.Measure == "amount" {
+			return h.pgs.AmountBuckets(ctx, tenantID, projectID, q.Name, q.Currency, q.Labels, from, to, step)
+		}
+		return h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from, to, step)
+	}
+	rows, err := read(from, to, r.step)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1007,7 +1055,7 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 	points, total := countPoints(rows, r, from, o)
 	span := to.Sub(from)
 	if people && total != nil {
-		window, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from, to, int(span/time.Second))
+		window, err := read(from, to, int(span/time.Second))
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -1016,7 +1064,7 @@ func (h *writeAPI) eventSeries(ctx context.Context, tenantID, projectID int64, q
 			total = window[0].Count
 		}
 	}
-	prevRows, err := h.pgs.EventBuckets(ctx, tenantID, projectID, q.Name, q.Labels, people, from.Add(-span), from, int(span/time.Second))
+	prevRows, err := read(from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2324,6 +2372,13 @@ func validateLayout(doc apigen.DashboardLayout) string {
 			// count on read, and a mistyped one would vanish on the next Save.
 			if m.Count != nil && !m.Count.Valid() {
 				return fmt.Sprintf("widget %q counts an unknown %q", wd.Id, string(*m.Count))
+			}
+			// An amount is read in one currency, so the two travel together.
+			if m.Measure != nil && !m.Measure.Valid() {
+				return fmt.Sprintf("widget %q measures an unknown %q", wd.Id, string(*m.Measure))
+			}
+			if (m.Measure != nil) != (m.Currency != nil) || m.Currency != nil && !isCurrency(*m.Currency) {
+				return fmt.Sprintf("widget %q: a measure needs a currency of three upper-case letters, and a currency a measure", wd.Id)
 			}
 			// A stored board never carries a filter for a step it lacks.
 			steps := 0

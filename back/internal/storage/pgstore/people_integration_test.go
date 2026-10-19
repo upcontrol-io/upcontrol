@@ -133,6 +133,46 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 		t.Fatalf("/pricing came from google, 2 people (linus's /docs rows are out); got %+v", pricing)
 	}
 
+	// The breakdown summing money: per plan, in one currency, with NO actor
+	// filter (the actorless 900 on free counts: money is money whoever paid),
+	// the euros left out, a lower-case currency the same currency, most first.
+	// The label filter narrows the rows as it does for counts.
+	for _, p := range []struct {
+		actor, plan, region, currency string
+		amount                        int64
+	}{
+		{"ada", "pro", "eu", "USD", 1000},
+		{"grace", "pro", "us", "usd", 500},
+		{"linus", "free", "eu", "USD", 400},
+		{"", "free", "us", "USD", 900},
+		{"ada", "pro", "eu", "EUR", 7000},
+	} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO events (tenant_id, project_id, ts, name, labels, actor, amount_minor, currency)
+			 VALUES ($1, $2, $3, 'charge', $4, $5, $6, $7)`,
+			peopleTenant, peopleProject, at, jsonb(map[string]string{"plan": p.plan, "region": p.region}),
+			p.actor, p.amount, p.currency); err != nil {
+			t.Fatalf("seed charge: %v", err)
+		}
+	}
+	revenue, err := s.BreakdownAmounts(ctx, peopleTenant, peopleProject, "charge", "plan", "USD", nil, from, to)
+	if err != nil {
+		t.Fatalf("breakdown amounts: %v", err)
+	}
+	if len(revenue) != 2 ||
+		revenue[0].Labels["plan"] != "pro" || revenue[0].Sum != 1500 ||
+		revenue[1].Labels["plan"] != "free" || revenue[1].Sum != 1300 {
+		t.Fatalf("USD per plan, most first: pro=1500 then free=1300 (actorless included); got %+v", revenue)
+	}
+	euRevenue, err := s.BreakdownAmounts(ctx, peopleTenant, peopleProject, "charge", "plan", "USD", map[string]string{"region": "eu"}, from, to)
+	if err != nil {
+		t.Fatalf("breakdown amounts in eu: %v", err)
+	}
+	if len(euRevenue) != 2 || euRevenue[0].Labels["plan"] != "pro" || euRevenue[0].Sum != 1000 ||
+		euRevenue[1].Labels["plan"] != "free" || euRevenue[1].Sum != 400 {
+		t.Fatalf("eu USD per plan: pro=1000 then free=400; got %+v", euRevenue)
+	}
+
 	// The bare name: the people behind one event per bucket. ada logs in in
 	// both five-minute halves, so the halves read 2 and 1 people and the
 	// window 2, never their sum 3; the actorless login is nobody. A label

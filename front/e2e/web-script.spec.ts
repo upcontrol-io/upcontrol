@@ -781,3 +781,109 @@ test("the Forms layer says so when no form activity is recorded", async ({ page 
 	await expect(page.locator("[data-uc-heatmap] .badge")).toHaveCount(0);
 	expect(errors).toEqual([]);
 });
+
+// A heatmap answer offering one deploy; with split= it carries the before window.
+async function heatmapCompare(page: Page, beforeViews = 1000) {
+	const urls: string[] = [];
+	await page.route(/api\.test\/w\/heatmap/, (route) => {
+		const url = route.request().url();
+		urls.push(url);
+		const split = url.includes("split=");
+		return route.fulfill({
+			contentType: "application/json",
+			headers: { "Access-Control-Allow-Origin": "https://site.test" },
+			body: JSON.stringify({
+				path: "/", device: "desktop", range: "7d", views: 1000,
+				clicks: [{ selector: "#buy", x: 32, y: 32, n: 300 }, { selector: "#other", x: 32, y: 32, n: 10 }],
+				rage: [], moves: [], dead: [], segments: [], forms: [],
+				hits: [{ selector: "#buy", x: 0, y: 0, n: 120 }],
+				scroll: Array.from({ length: 21 }, (_, i) => 1000 - i * 40),
+				deploys: [{ at: "2026-10-17T14:03:00Z", label: "v1.4.2" }],
+				...(split ? {
+					from: "2026-10-17",
+					before: {
+						from: "2026-10-15", to: "2026-10-17", views: beforeViews,
+						clicks: [{ selector: "#buy", x: 32, y: 32, n: 200 }, { selector: "#other", x: 32, y: 32, n: 90 }],
+						rage: [], dead: [], forms: [],
+						hits: [{ selector: "#buy", x: 0, y: 0, n: 90 }],
+						scroll: Array.from({ length: 21 }, (_, i) => 1000 - i * 45),
+					},
+				} : {}),
+			}),
+		});
+	});
+	return urls;
+}
+
+test("the overlay offers each deploy to compare around", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button> <button id="other">Other</button>');
+	await heatmapCompare(page);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	const cmp = page.getByRole("combobox", { name: "Compare" });
+	await expect(cmp.locator("option")).toHaveText(["No comparison", "Before / after v1.4.2 · Oct 17"]);
+	expect(errors).toEqual([]);
+});
+
+test("the overlay offers no comparison for a project with no deploys", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button>');
+	await heatmapWith(page, []);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	await expect(page.getByRole("combobox", { name: "Compare" })).toHaveCount(0);
+	expect(errors).toEqual([]);
+});
+
+test("comparing re-reads around the deploy, and No comparison goes back to the range", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button> <button id="other">Other</button>');
+	const urls = await heatmapCompare(page);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,000 desktop views · 7 days")).toBeVisible();
+	const cmp = page.getByRole("combobox", { name: "Compare" });
+	const range = page.locator("[data-uc-heatmap] select").first();
+	await cmp.selectOption("2026-10-17T14:03:00Z");
+	await expect(page.getByText("After: 1,000 views · before: 1,000 views")).toBeVisible();
+	expect(urls.at(-1)).toContain("split=" + encodeURIComponent("2026-10-17T14:03:00Z"));
+	expect(urls.at(-1)).not.toContain("range=");
+	await expect(range).toBeDisabled();
+	// A route change keeps the comparison.
+	await page.evaluate(() => history.pushState({}, "", "/next"));
+	await expect.poll(() => urls.at(-1)).toContain("path=%2Fnext");
+	expect(urls.at(-1)).toContain("split=");
+	await cmp.selectOption("");
+	await expect(page.getByText("1,000 desktop views · 7 days")).toBeVisible();
+	expect(urls.at(-1)).not.toContain("split=");
+	expect(urls.at(-1)).toContain("range=7d");
+	await expect(range).toBeEnabled();
+	expect(errors).toEqual([]);
+});
+
+test("a comparison with no views before it says so", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button>');
+	await heatmapCompare(page, 0);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await page.getByRole("combobox", { name: "Compare" }).selectOption("2026-10-17T14:03:00Z");
+	await expect(page.getByText("Not enough views on both sides to compare.")).toBeVisible();
+	expect(errors).toEqual([]);
+});
+
+test("in compare mode the pill reads before -> after, and every click layer draws", async ({ page }) => {
+	test.skip(test.info().project.name === "mobile", "a phone has no hover");
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button> <button id="other">Other</button>');
+	await heatmapCompare(page);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await page.getByRole("combobox", { name: "Compare" }).selectOption("2026-10-17T14:03:00Z");
+	await expect(page.getByText("After: 1,000 views · before: 1,000 views")).toBeVisible();
+	await page.locator("#buy").hover();
+	await expect(page.locator("[data-uc-heatmap] .pill"))
+		.toHaveText("CTR 9% -> 12% (+3 pts) · clicks 0.20 -> 0.30 per view");
+	for (const name of ["Rage", "Dead", "Moves", "Scroll", "Forms"]) await page.getByRole("button", { name }).click();
+	await page.locator("#other").hover();
+	await expect(page.getByText(/^\d+% -> \d+% of views reached here$/)).toBeVisible();
+	await page.waitForTimeout(300);
+	expect(errors).toEqual([]);
+});

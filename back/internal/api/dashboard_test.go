@@ -642,6 +642,68 @@ func TestValidateLayout_RefusesACountTheContractDoesNotName(t *testing.T) {
 	}
 }
 
+// An amount is read in one currency: a measure without a currency, a currency
+// without a measure, and a currency that is not three upper-case letters are
+// all refused by widget.
+func TestValidateLayout_MeasureTravelsWithACurrency(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	amount := apigen.DashboardMetricRefMeasureAmount
+	unknown := apigen.DashboardMetricRefMeasure("median")
+	pair := `widget "w_1": a measure needs a currency of three upper-case letters, and a currency a measure`
+	for _, c := range []struct {
+		name     string
+		measure  *apigen.DashboardMetricRefMeasure
+		currency *string
+		want     string
+	}{
+		{"neither", nil, nil, ""},
+		{"both", &amount, ptr("USD"), ""},
+		{"measure alone", &amount, nil, pair},
+		{"currency alone", nil, ptr("USD"), pair},
+		{"lower case", &amount, ptr("usd"), pair},
+		{"two letters", &amount, ptr("US"), pair},
+		{"unknown measure", &unknown, ptr("USD"), `widget "w_1" measures an unknown "median"`},
+	} {
+		b := widget("w_1")
+		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourceEvent, Measure: c.measure, Currency: c.currency}}
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != c.want {
+			t.Fatalf("%s = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Money sums on an event read and a breakdown, in one currency, and nowhere
+// else: a funnel, a retention grid and an A/B test are people.
+func TestValidateSeries_Measure(t *testing.T) {
+	for _, ok := range []seriesQuery{
+		{ID: "a", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "USD"},
+		{ID: "b", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "EUR", Labels: map[string]string{"plan": "pro"}, Bucket: "day"},
+		{ID: "c", Source: "people", Range: "7d", Name: "purchase", Group: []string{"plan"}, Measure: "amount", Currency: "USD"},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s must be accepted; got %q", ok.ID, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "nocur", Source: "event", Range: "7d", Name: "purchase", Measure: "amount"},
+		{ID: "lower", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "usd"},
+		{ID: "curonly", Source: "event", Range: "7d", Name: "purchase", Currency: "USD"},
+		{ID: "unknown", Source: "event", Range: "7d", Name: "purchase", Measure: "avg", Currency: "USD"},
+		{ID: "count", Source: "people", Range: "7d", Name: "purchase", Group: []string{"plan"}, Count: "events", Measure: "amount", Currency: "USD"},
+		{ID: "bare", Source: "people", Range: "7d", Name: "purchase", Measure: "amount", Currency: "USD"},
+		{ID: "funnel", Source: "people", Range: "7d", Steps: []string{"a", "b"}, Measure: "amount", Currency: "USD"},
+		{ID: "cohort", Source: "people", Range: "31d", Cohort: "week", Measure: "amount", Currency: "USD"},
+		{ID: "ab", Source: "people", Range: "7d", Name: "x", Group: []string{"uc.variant", "uc.stat"}, Measure: "amount", Currency: "USD"},
+		{ID: "logs", Source: "logs", Range: "7d", Measure: "amount", Currency: "USD"},
+		{ID: "metric", Source: "metric", Range: "7d", Name: "cpu", Measure: "amount", Currency: "USD"},
+		{ID: "web", Source: "web", Range: "7d", Name: "views", Measure: "amount", Currency: "USD"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
 // A stored board never carries a filter for a step it lacks.
 func TestValidateLayout_StepWhereFitsTheSteps(t *testing.T) {
 	steps := []string{"uc.pageview", "signup"}

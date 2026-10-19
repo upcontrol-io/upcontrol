@@ -78,6 +78,18 @@ type fakeWebStore struct {
 	forms     []pgstore.FormStat
 	quota     pgstore.WebQuota
 	heatFrom  time.Time // the fromDay HeatCells was last asked for
+	reads     []fakeRead
+
+	deploys, releases []pgstore.MarkRow
+	deployWindow      [2]time.Time // the [from, to) RecentDeploys was asked for
+}
+
+// fakeRead is one heatmap read: what ("views", a heat kind, "scroll",
+// "forms"), its [from, to) and its filters.
+type fakeRead struct {
+	what            string
+	from, to        time.Time
+	segment, source string
 }
 
 func (f *fakeWebStore) WebQuota(context.Context, int64, time.Time) (pgstore.WebQuota, error) {
@@ -162,27 +174,36 @@ func (f *fakeWebStore) ResolveHeatmapLink(_ context.Context, _ []byte) (int64, i
 	return 7, 9, true, nil
 }
 
-func (f *fakeWebStore) PageviewCount(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) (int64, error) {
+func (f *fakeWebStore) PageviewCount(_ context.Context, _, _ int64, _, _, segment, source string, from, to time.Time) (int64, error) {
 	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"views", from, to, segment, source})
 	return f.views, nil
 }
 
 // HeatCells answers [] for a kind with no cells, never nil, as the real store does.
-func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, segment, source, kind string, fromDay time.Time, _ int) ([]pgstore.HeatCell, error) {
+func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, segment, source, kind string, fromDay, toDay time.Time, _ int) ([]pgstore.HeatCell, error) {
 	f.heatFrom = fromDay
 	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{kind, fromDay, toDay, segment, source})
 	return append([]pgstore.HeatCell{}, f.cells[kind]...), nil
 }
 
-func (f *fakeWebStore) ScrollReach(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) ([21]int64, error) {
+func (f *fakeWebStore) ScrollReach(_ context.Context, _, _ int64, _, _, segment, source string, fromDay, toDay time.Time) ([21]int64, error) {
 	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"scroll", fromDay, toDay, segment, source})
 	return f.scroll, nil
 }
 
 // FormStats answers [] for no rows, never nil, as the real store does.
-func (f *fakeWebStore) FormStats(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) ([]pgstore.FormStat, error) {
+func (f *fakeWebStore) FormStats(_ context.Context, _, _ int64, _, _, segment, source string, fromDay, toDay time.Time) ([]pgstore.FormStat, error) {
 	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"forms", fromDay, toDay, segment, source})
 	return append([]pgstore.FormStat{}, f.forms...), nil
+}
+
+func (f *fakeWebStore) RecentDeploys(_ context.Context, _, _ int64, from, to time.Time) ([]pgstore.MarkRow, []pgstore.MarkRow, error) {
+	f.deployWindow = [2]time.Time{from, to}
+	return f.deploys, f.releases, nil
 }
 
 func (f *fakeWebStore) HistoryRefusal(_ context.Context, _ int64, days int) (string, string, error) {
@@ -1031,5 +1052,164 @@ func TestHeatmapAnswersForms(t *testing.T) {
 	}
 	if store.readFilter != [2]string{"member", "search"} {
 		t.Errorf("form read narrowed to %v, want member, search", store.readFilter)
+	}
+}
+
+// Every answer carries the project's deploys and releases inside the web
+// depth, worded like the board's marks (a burst folded into one), newest
+// first, at most 10; [] when there are none. The door's clock is Saturday
+// 2026-09-19.
+func TestHeatmapDeploys(t *testing.T) {
+	at := func(h, m int) time.Time { return time.Date(2026, 9, 10, h, m, 0, 0, time.UTC) }
+	store := fakeReadStore()
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+
+	rr := getHeatmap(t, d, base, nil)
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, `"deploys":[]`) {
+		t.Fatalf("no deploys: %d %s, want deploys as []", rr.Code, body)
+	}
+	if strings.Contains(body, `"from"`) || strings.Contains(body, `"before"`) || strings.Contains(body, `"to"`) {
+		t.Errorf("no split: %s, want no from, to or before", body)
+	}
+	want := [2]time.Time{time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)}
+	if store.deployWindow != want {
+		t.Errorf("deploys read over %v, want the 31-day web depth to the end of today", store.deployWindow)
+	}
+
+	// Oldest first, as the store reads them: 12 hourly deploys, the last one
+	// followed 5 minutes later by a sha-less event of the same burst.
+	for i := range 12 {
+		store.deploys = append(store.deploys, pgstore.MarkRow{At: at(i, 0), Name: "deploy", SHA: fmt.Sprintf("%02dabcdef0123", i)})
+	}
+	store.deploys = append(store.deploys, pgstore.MarkRow{At: at(11, 5), Name: "deploy.live"})
+	store.releases = []pgstore.MarkRow{{At: at(5, 30), Name: "v1.2.0"}}
+	rr = getHeatmap(t, d, base, nil)
+	var out heatOut
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Deploys) != 10 {
+		t.Fatalf("%d deploys, want the latest 10: %+v", len(out.Deploys), out.Deploys)
+	}
+	if got := out.Deploys[0]; !got.At.Equal(at(11, 5)) || got.Label != "11abcde" {
+		t.Errorf("newest = %+v, want the burst at its last event, keeping its sha", got)
+	}
+	if got := out.Deploys[6]; !got.At.Equal(at(5, 30)) || got.Label != "v1.2.0" {
+		t.Errorf("deploys[6] = %+v, want the release merged in its place", got)
+	}
+	if got := out.Deploys[9]; !got.At.Equal(at(3, 0)) {
+		t.Errorf("oldest kept = %+v, want 03:00", got)
+	}
+
+	// A 7-day plan offers the deploys of its 7 days.
+	store.histDays = 7
+	getHeatmap(t, d, base, nil)
+	if store.deployWindow[0] != time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC) {
+		t.Errorf("7-day plan: deploys from %v, want 09-12", store.deployWindow[0])
+	}
+}
+
+// With split the main numbers read from the split's UTC day to today, n days,
+// and before the n days before it, with the same filters. Past a week each
+// heat bound snaps back to its Monday, so a weekly row lands on one side only;
+// page views stay day-exact.
+func TestHeatmapSplitWindows(t *testing.T) {
+	date := func(m, d int) time.Time { return time.Date(2026, time.Month(m), d, 0, 0, 0, 0, time.UTC) }
+	var zero time.Time
+	for _, tc := range []struct {
+		name, split                    string
+		from, heatFrom                 time.Time // the after window's; it runs to now
+		bFrom, bTo, bHeatFrom, bHeatTo time.Time
+	}{
+		{"2 days old", "2026-09-17T15:00:00Z", date(9, 17), date(9, 17), date(9, 14), date(9, 17), date(9, 14), date(9, 17)},
+		{"today, in another zone", "2026-09-18T22:00:00-05:00", date(9, 19), date(9, 19), date(9, 18), date(9, 19), date(9, 18), date(9, 19)},
+		// Wednesday 09-09: n = 11, before from Saturday 08-29.
+		{"10 days old", "2026-09-09T10:00:00Z", date(9, 9), date(9, 7), date(8, 29), date(9, 9), date(8, 24), date(9, 7)},
+	} {
+		store := fakeReadStore()
+		d := newTestDoor(publicWebTenant(), store, nil)
+		rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200&range=7d&segment=member&source=search&split="+tc.split, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", tc.name, rr.Code, rr.Body.String())
+		}
+		for _, r := range store.reads {
+			if r.segment != "member" || r.source != "search" {
+				t.Errorf("%s: %s read narrowed to %q %q, want member, search", tc.name, r.what, r.segment, r.source)
+			}
+			after := r.to.IsZero()
+			var from, to time.Time
+			switch {
+			case after && r.what == "views":
+				from, to = tc.from, zero
+			case after:
+				from, to = tc.heatFrom, zero
+			case r.what == "views":
+				from, to = tc.bFrom, tc.bTo
+			default:
+				from, to = tc.bHeatFrom, tc.bHeatTo
+			}
+			if !r.from.Equal(from) || !r.to.Equal(to) {
+				t.Errorf("%s: %s read over [%v, %v), want [%v, %v)", tc.name, r.what, r.from, r.to, from, to)
+			}
+		}
+		if len(store.reads) != 16 {
+			t.Errorf("%s: %d reads, want 8 per window", tc.name, len(store.reads))
+		}
+		var out struct {
+			Range  string `json:"range"`
+			From   string `json:"from"`
+			Views  int64  `json:"views"`
+			Before map[string]json.RawMessage
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Range != "31d" || out.From != tc.from.Format(time.DateOnly) || out.Views != 42 {
+			t.Errorf("%s: range %q from %q views %d, want the deepest range, the split's day, the store's views", tc.name, out.Range, out.From, out.Views)
+		}
+		if string(out.Before["from"]) != `"`+tc.bFrom.Format(time.DateOnly)+`"` || string(out.Before["to"]) != `"`+tc.bTo.Format(time.DateOnly)+`"` {
+			t.Errorf("%s: before from %s to %s", tc.name, out.Before["from"], out.Before["to"])
+		}
+		for _, k := range []string{"views", "clicks", "rage", "dead", "hits", "scroll", "forms"} {
+			if _, ok := out.Before[k]; !ok {
+				t.Errorf("%s: before has no %s", tc.name, k)
+			}
+		}
+		if _, ok := out.Before["moves"]; ok {
+			t.Errorf("%s: before carries moves, which HeatmapWindow has not", tc.name)
+		}
+	}
+}
+
+// A split is refused when it is not a time, lies in a future day, or is older
+// than the web depth the plan reaches; one whose before window reaches past
+// the plan's history is the 402 a range would be.
+func TestHeatmapSplitRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		split    string
+		histDays int
+		want     int
+	}{
+		{"yesterday", 0, http.StatusBadRequest},
+		{"2026-09-20T00:00:00Z", 0, http.StatusBadRequest},
+		{"2026-09-19T23:00:00Z", 0, http.StatusOK},         // later today: the split's day is today
+		{"2026-08-18T12:00:00Z", 0, http.StatusBadRequest}, // 32 days: past the 31-day depth
+		{"2026-08-19T12:00:00Z", 0, http.StatusOK},
+		{"2026-09-11T12:00:00Z", 7, http.StatusBadRequest},
+		{"2026-09-12T12:00:00Z", 7, http.StatusPaymentRequired}, // before from 09-04: 15 days
+		{"2026-09-16T12:00:00Z", 7, http.StatusOK},              // before from 09-12: 7 days
+		{"2026-09-19T12:00:00Z", 1, http.StatusOK},
+		{"2026-09-18T12:00:00Z", 1, http.StatusPaymentRequired}, // inside the 24h depth, before from 09-16
+		{"2026-09-17T12:00:00Z", 1, http.StatusBadRequest},
+	} {
+		store := fakeReadStore()
+		store.histDays = tc.histDays
+		d := newTestDoor(publicWebTenant(), store, nil)
+		rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200&split="+tc.split, nil)
+		if rr.Code != tc.want {
+			t.Errorf("split %s on a %d-day plan: %d %s, want %d", tc.split, tc.histDays, rr.Code, rr.Body.String(), tc.want)
+		}
 	}
 }

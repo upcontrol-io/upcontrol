@@ -581,3 +581,141 @@ func TestScrubOffStoresVerbatim(t *testing.T) {
 		t.Errorf("attr = %q, want the value stored verbatim", env.Attrs["auth"])
 	}
 }
+
+func TestLiftAmount(t *testing.T) {
+	for _, c := range []struct {
+		amount, currency string
+		want             int64
+		wantCur          string
+		ok               bool
+	}{
+		{"1999", "usd", 1999, "USD", true},
+		{"-500", "EUR", -500, "EUR", true},
+		{"0", "JPY", 0, "JPY", true},
+		{"999999999999999", "USD", 999999999999999, "USD", true},
+		{"1000000000000000", "USD", 0, "", false}, // 16 digits
+		{"19.99", "USD", 0, "", false},
+		{"1e3", "USD", 0, "", false},
+		{"", "USD", 0, "", false},
+		{"-", "USD", 0, "", false},
+		{"+5", "USD", 0, "", false},
+		{"100", "US", 0, "", false},
+		{"100", "US1", 0, "", false},
+		{"100", "", 0, "", false},
+	} {
+		attrs := map[string]string{AmountAttr: c.amount, CurrencyAttr: c.currency, "keep": "me"}
+		got, cur, ok := liftAmount(attrs)
+		if got != c.want || cur != c.wantCur || ok != c.ok {
+			t.Errorf("liftAmount(%q, %q) = %d, %q, %v; want %d, %q, %v", c.amount, c.currency, got, cur, ok, c.want, c.wantCur, c.ok)
+		}
+		// Valid or not, neither key may survive as a label.
+		if _, has := attrs[AmountAttr]; has {
+			t.Errorf("%q: uc.amount survived the lift", c.amount)
+		}
+		if _, has := attrs[CurrencyAttr]; has {
+			t.Errorf("%q: uc.currency survived the lift", c.amount)
+		}
+		if attrs["keep"] != "me" {
+			t.Errorf("%q: lift touched a neighbouring attr", c.amount)
+		}
+	}
+	if _, _, ok := liftAmount(nil); ok {
+		t.Error("nil attrs lifted an amount")
+	}
+}
+
+func amountRow(t *testing.T, sink *fakeSink) RowEnvelope {
+	t.Helper()
+	if len(sink.rows) != 1 {
+		t.Fatalf("%d rows sank, want 1", len(sink.rows))
+	}
+	var env RowEnvelope
+	if err := json.Unmarshal(sink.rows[0], &env); err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+func TestEventCarriesAmount(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"purchase","uc.event":true,"uc.amount":1999,"uc.currency":"usd","plan":"pro"}`,
+		map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	env := amountRow(t, sink)
+	if env.AmountMinor != 1999 || env.Currency != "USD" {
+		t.Errorf("amount=%d currency=%q, want 1999 USD", env.AmountMinor, env.Currency)
+	}
+	if _, ok := env.Attrs[AmountAttr]; ok {
+		t.Error("uc.amount survived into the stored attrs")
+	}
+	if _, ok := env.Attrs[CurrencyAttr]; ok {
+		t.Error("uc.currency survived into the stored attrs")
+	}
+	if env.Attrs["plan"] != "pro" {
+		t.Errorf("plan = %q, the lift ate a real field", env.Attrs["plan"])
+	}
+}
+
+func TestEventInvalidAmountDroppedAndDeleted(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"purchase","uc.event":true,"uc.amount":"19.99","uc.currency":"USD"}`,
+		map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	env := amountRow(t, sink)
+	if env.AmountMinor != 0 || env.Currency != "" {
+		t.Errorf("amount=%d currency=%q, want no money", env.AmountMinor, env.Currency)
+	}
+	if _, ok := env.Attrs[AmountAttr]; ok {
+		t.Error("an invalid uc.amount survived into the stored attrs")
+	}
+	if _, ok := env.Attrs[CurrencyAttr]; ok {
+		t.Error("uc.currency survived into the stored attrs")
+	}
+}
+
+// A public key lives in a page, so its revenue could be forged: the keys are
+// still lifted out of the labels, and the amount never reaches the row.
+func TestPublicKeyAmountDropped(t *testing.T) {
+	ing, sink := newPublicIngester(publicTenant(), nil)
+	rr := post(t, ing, `{"msg":"purchase","uc.event":true,"uc.amount":1999,"uc.currency":"USD"}`, map[string]string{
+		"X-Upcontrol-Key": "uc_pub_abc",
+		"Origin":          "https://example.com",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	env := amountRow(t, sink)
+	if env.Event != "purchase" {
+		t.Fatalf("event = %q, want purchase", env.Event)
+	}
+	if env.AmountMinor != 0 || env.Currency != "" {
+		t.Errorf("a public key wrote money: amount=%d currency=%q", env.AmountMinor, env.Currency)
+	}
+	if _, ok := env.Attrs[AmountAttr]; ok {
+		t.Error("uc.amount survived into the stored attrs")
+	}
+	if _, ok := env.Attrs[CurrencyAttr]; ok {
+		t.Error("uc.currency survived into the stored attrs")
+	}
+}
+
+// A log line is not an event: nothing is lifted, so its attrs stay as sent.
+func TestLogLineAmountUntouched(t *testing.T) {
+	h, sink, _ := newIngester(0, nil)
+	rr := post(t, h, `{"msg":"charged a card","uc.amount":1999,"uc.currency":"USD"}`,
+		map[string]string{"X-Upcontrol-Key": "k"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code %d body %s", rr.Code, rr.Body.String())
+	}
+	env := amountRow(t, sink)
+	if env.Event != "" || env.AmountMinor != 0 || env.Currency != "" {
+		t.Errorf("log line became money: event=%q amount=%d currency=%q", env.Event, env.AmountMinor, env.Currency)
+	}
+	if env.Attrs[AmountAttr] != "1999" || env.Attrs[CurrencyAttr] != "USD" {
+		t.Errorf("log line attrs changed: %v", env.Attrs)
+	}
+}

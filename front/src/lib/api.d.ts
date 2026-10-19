@@ -4124,6 +4124,8 @@ export interface paths {
                     w: number;
                     /** @description Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used. */
                     range?: "24h" | "7d" | "31d";
+                    /** @description A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present. */
+                    split?: string;
                     /** @description Only the views the site marked with this segment. Absent or empty: every view, marked or not. */
                     segment?: string;
                     /** @description Only the views whose page load came from this kind of source. Absent or empty: every view. */
@@ -4671,6 +4673,13 @@ export interface components {
              * @enum {string}
              */
             count?: "people" | "events";
+            /**
+             * @description `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+             * @enum {string}
+             */
+            measure?: "amount";
+            /** @description ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together. */
+            currency?: string;
             label?: string;
         };
         DashboardWidget: {
@@ -4680,7 +4689,7 @@ export interface components {
              * @description `ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share.
              * @enum {string}
              */
-            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap" | "ratio";
+            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap" | "ratio" | "table";
             title: string;
             metrics: components["schemas"]["DashboardMetricRef"][];
             /**
@@ -4823,6 +4832,8 @@ export interface components {
             lastTs: string;
             /** @description Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth. */
             fields: string[];
+            /** @description The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money. */
+            currencies?: string[];
         };
         CatalogMetric: {
             name: string;
@@ -4873,6 +4884,13 @@ export interface components {
              * @enum {string}
              */
             count?: "people" | "events";
+            /**
+             * @description `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+             * @enum {string}
+             */
+            measure?: "amount";
+            /** @description Required with `measure`, refused without it. */
+            currency?: string;
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {
@@ -5301,6 +5319,18 @@ export interface components {
             /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
             hits: components["schemas"]["HeatCell"][];
             dead: components["schemas"]["HeatCell"][];
+            /** @description The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around. */
+            deploys: {
+                /** Format: date-time */
+                at: string;
+                label: string;
+            }[];
+            /**
+             * Format: date
+             * @description With `split`: the first UTC day the main numbers read.
+             */
+            from?: string;
+            before?: components["schemas"]["HeatmapWindow"];
             /** @description Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`. */
             forms: components["schemas"]["FormField"][];
             /** @description The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by. */
@@ -5309,6 +5339,23 @@ export interface components {
             scroll: number[];
             /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */
             heatPages?: number;
+        };
+        /** @description The window before a `split`, read exactly like the main numbers. */
+        HeatmapWindow: {
+            /** Format: date */
+            from: string;
+            /**
+             * Format: date
+             * @description Exclusive: the split's day.
+             */
+            to: string;
+            views: number;
+            clicks: components["schemas"]["HeatCell"][];
+            rage: components["schemas"]["HeatCell"][];
+            dead: components["schemas"]["HeatCell"][];
+            hits: components["schemas"]["HeatCell"][];
+            scroll: number[];
+            forms: components["schemas"]["FormField"][];
         };
         FormField: {
             selector: string;

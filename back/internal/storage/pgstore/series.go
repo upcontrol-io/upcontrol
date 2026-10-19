@@ -14,9 +14,10 @@ import (
 
 // CatalogEvent is one event name the project sent inside the catalog window.
 type CatalogEvent struct {
-	Name   string
-	Times  int64
-	LastTS time.Time
+	Name       string
+	Times      int64
+	LastTS     time.Time
+	Currencies []string // upper case, sorted; empty when the event carried no money
 }
 
 // CatalogMetric is one metric name with how many readings arrived and which
@@ -84,10 +85,13 @@ func bucketExpr(baseParam int, stepSeconds int) string {
 	return fmt.Sprintf("floor((extract(epoch from ts)::float8 - $%d) / %d)::bigint", baseParam, stepSeconds)
 }
 
-// CatalogEvents lists the event names the project sent since `since`.
+// CatalogEvents lists the event names the project sent since `since`, each
+// with the currencies its rows carried a non-zero amount in.
 func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, since time.Time) ([]CatalogEvent, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, count(*) AS times, max(ts) AS last_ts
+		SELECT name, count(*) AS times, max(ts) AS last_ts,
+		       COALESCE(array_agg(DISTINCT upper(currency) ORDER BY upper(currency))
+		                FILTER (WHERE amount_minor <> 0 AND currency <> ''), ARRAY[]::text[])
 		  FROM events
 		 WHERE tenant_id = $1 AND project_id = $2 AND ts >= $3
 		 GROUP BY name ORDER BY times DESC`, tenantID, projectID, since)
@@ -98,7 +102,7 @@ func (s *Store) CatalogEvents(ctx context.Context, tenantID, projectID int64, si
 	out := []CatalogEvent{}
 	for rows.Next() {
 		var e CatalogEvent
-		if err := rows.Scan(&e.Name, &e.Times, &e.LastTS); err != nil {
+		if err := rows.Scan(&e.Name, &e.Times, &e.LastTS, &e.Currencies); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -337,11 +341,26 @@ func (s *Store) EventBuckets(ctx context.Context, tenantID, projectID int64, nam
 	if people {
 		fold, actors = peopleCount, " AND actor <> ''"
 	}
-	narrow, args := eventLabels(labels, []any{tenantID, projectID, name, float64(from.Unix()), from, to})
+	return s.eventBuckets(ctx, fold, actors, []any{tenantID, projectID, name, float64(from.Unix()), from, to}, labels, stepSeconds)
+}
+
+// AmountBuckets sums the money a named event carried into buckets the way
+// EventBuckets counts it, in one currency only: two currencies are never added.
+// The currency is compared upper case, because a webhook source stores it as the
+// provider sent it. A bucket whose rows carried no amount sums to 0.
+func (s *Store) AmountBuckets(ctx context.Context, tenantID, projectID int64, name, currency string, labels map[string]string, from, to time.Time, stepSeconds int) ([]Bucket, error) {
+	return s.eventBuckets(ctx, "COALESCE(sum(amount_minor), 0)::bigint", " AND upper(currency) = $7",
+		[]any{tenantID, projectID, name, float64(from.Unix()), from, to, currency}, labels, stepSeconds)
+}
+
+// eventBuckets is the one bucketed read over events: args bind $1..$6 as
+// tenant, project, name, base epoch, from and to, and `where` may bind more.
+func (s *Store) eventBuckets(ctx context.Context, fold, where string, args []any, labels map[string]string, stepSeconds int) ([]Bucket, error) {
+	narrow, args := eventLabels(labels, args)
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+bucketExpr(4, stepSeconds)+` AS bucket, `+fold+`
 		  FROM events
-		 WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND ts >= $5 AND ts < $6`+actors+narrow+`
+		 WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND ts >= $5 AND ts < $6`+where+narrow+`
 		 GROUP BY bucket ORDER BY bucket`, args...)
 	if err != nil {
 		return nil, err

@@ -183,6 +183,21 @@ func (e DashboardMetricRefCount) Valid() bool {
 	}
 }
 
+// Defines values for DashboardMetricRefMeasure.
+const (
+	DashboardMetricRefMeasureAmount DashboardMetricRefMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the DashboardMetricRefMeasure enum.
+func (e DashboardMetricRefMeasure) Valid() bool {
+	switch e {
+	case DashboardMetricRefMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DashboardMetricRefSource.
 const (
 	DashboardMetricRefSourceCheck      DashboardMetricRefSource = "check"
@@ -244,6 +259,7 @@ const (
 	DashboardWidgetKindRetention  DashboardWidgetKind = "retention"
 	DashboardWidgetKindStat       DashboardWidgetKind = "stat"
 	DashboardWidgetKindStatus     DashboardWidgetKind = "status"
+	DashboardWidgetKindTable      DashboardWidgetKind = "table"
 )
 
 // Valid indicates whether the value is a known member of the DashboardWidgetKind enum.
@@ -276,6 +292,8 @@ func (e DashboardWidgetKind) Valid() bool {
 	case DashboardWidgetKindStat:
 		return true
 	case DashboardWidgetKindStatus:
+		return true
+	case DashboardWidgetKindTable:
 		return true
 	default:
 		return false
@@ -819,6 +837,21 @@ func (e SeriesQueryCount) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryMeasure.
+const (
+	SeriesQueryMeasureAmount SeriesQueryMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryMeasure enum.
+func (e SeriesQueryMeasure) Valid() bool {
+	switch e {
+	case SeriesQueryMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SeriesQueryRange.
 const (
 	SeriesQueryRangeN12h  SeriesQueryRange = "12h"
@@ -1249,6 +1282,9 @@ type CatalogCheck struct {
 
 // CatalogEvent One event name the project sent, and the field keys its recent rows carried. The fields are what a breakdown folds by: an event is picked, then one of its own fields, so nobody has to remember what they named it. Reserved `uc.`-prefixed keys are left out — they are the wire's, not a dimension.
 type CatalogEvent struct {
+	// Currencies The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money.
+	Currencies *[]string `json:"currencies,omitempty"`
+
 	// Fields Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth.
 	Fields []string  `json:"fields"`
 	LastTs time.Time `json:"lastTs"`
@@ -1453,11 +1489,17 @@ type DashboardMetricRef struct {
 	// Count `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
 	Count *DashboardMetricRefCount `json:"count,omitempty"`
 
+	// Currency ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together.
+	Currency *string `json:"currency,omitempty"`
+
 	// Field `people` only: the event field a breakdown ranks the values of.
-	Field  *string                  `json:"field,omitempty"`
-	Label  *string                  `json:"label,omitempty"`
-	Name   *string                  `json:"name,omitempty"`
-	Source DashboardMetricRefSource `json:"source"`
+	Field *string `json:"field,omitempty"`
+	Label *string `json:"label,omitempty"`
+
+	// Measure `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+	Measure *DashboardMetricRefMeasure `json:"measure,omitempty"`
+	Name    *string                    `json:"name,omitempty"`
+	Source  DashboardMetricRefSource   `json:"source"`
 
 	// StepWhere `people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{"path": "/pricing"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`.
 	StepWhere *[]map[string]string `json:"stepWhere,omitempty"`
@@ -1469,6 +1511,9 @@ type DashboardMetricRef struct {
 
 // DashboardMetricRefCount `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
 type DashboardMetricRefCount string
+
+// DashboardMetricRefMeasure `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+type DashboardMetricRefMeasure string
 
 // DashboardMetricRefSource defines model for DashboardMetricRef.Source.
 type DashboardMetricRefSource string
@@ -1596,12 +1641,23 @@ type HeatCell struct {
 
 // Heatmap defines model for Heatmap.
 type Heatmap struct {
-	Clicks []HeatCell    `json:"clicks"`
-	Dead   []HeatCell    `json:"dead"`
+	// Before The window before a `split`, read exactly like the main numbers.
+	Before *HeatmapWindow `json:"before,omitempty"`
+	Clicks []HeatCell     `json:"clicks"`
+	Dead   []HeatCell     `json:"dead"`
+
+	// Deploys The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around.
+	Deploys []struct {
+		At    time.Time `json:"at"`
+		Label string    `json:"label"`
+	} `json:"deploys"`
 	Device HeatmapDevice `json:"device"`
 
 	// Forms Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`.
 	Forms []FormField `json:"forms"`
+
+	// From With `split`: the first UTC day the main numbers read.
+	From *openapi_types.Date `json:"from,omitempty"`
 
 	// HeatPages How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them.
 	HeatPages *int `json:"heatPages,omitempty"`
@@ -1641,6 +1697,21 @@ type HeatmapLink struct {
 type HeatmapLinkRequest struct {
 	// Path Starts with /, at most 256 bytes.
 	Path string `json:"path"`
+}
+
+// HeatmapWindow The window before a `split`, read exactly like the main numbers.
+type HeatmapWindow struct {
+	Clicks []HeatCell         `json:"clicks"`
+	Dead   []HeatCell         `json:"dead"`
+	Forms  []FormField        `json:"forms"`
+	From   openapi_types.Date `json:"from"`
+	Hits   []HeatCell         `json:"hits"`
+	Rage   []HeatCell         `json:"rage"`
+	Scroll []int              `json:"scroll"`
+
+	// To Exclusive: the split's day.
+	To    openapi_types.Date `json:"to"`
+	Views int                `json:"views"`
 }
 
 // Incident defines model for Incident.
@@ -2244,6 +2315,9 @@ type SeriesQuery struct {
 	// Count What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ''`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
 	Count *SeriesQueryCount `json:"count,omitempty"`
 
+	// Currency Required with `measure`, refused without it.
+	Currency *string `json:"currency,omitempty"`
+
 	// Group Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold.
 	Group *[]string `json:"group,omitempty"`
 
@@ -2252,6 +2326,9 @@ type SeriesQuery struct {
 
 	// Labels Event reads, bare-name people reads and one-key people folds (a breakdown) only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). On a breakdown of `uc.pageview` by `from` with `{"path": "/pricing"}` it answers where the views of /pricing came from; by `path` with `{"from": "/pricing"}`, where they went next. A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
 	Labels *map[string]string `json:"labels,omitempty"`
+
+	// Measure `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+	Measure *SeriesQueryMeasure `json:"measure,omitempty"`
 
 	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null.
 	Name  *string          `json:"name,omitempty"`
@@ -2276,6 +2353,9 @@ type SeriesQueryCohort string
 
 // SeriesQueryCount What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ”`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
 type SeriesQueryCount string
+
+// SeriesQueryMeasure `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+type SeriesQueryMeasure string
 
 // SeriesQueryRange defines model for SeriesQuery.Range.
 type SeriesQueryRange string
@@ -2870,6 +2950,9 @@ type GetWHeatmapParams struct {
 
 	// Range Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used.
 	Range *GetWHeatmapParamsRange `form:"range,omitempty" json:"range,omitempty"`
+
+	// Split A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present.
+	Split *time.Time `form:"split,omitempty" json:"split,omitempty"`
 
 	// Segment Only the views the site marked with this segment. Absent or empty: every view, marked or not.
 	Segment *string `form:"segment,omitempty" json:"segment,omitempty"`

@@ -12,6 +12,7 @@ import (
 	"context"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ const (
 	catalogProject  = 92
 	bucketProject   = 93
 	reporterProject = 94
+	moneyProject    = 90
 )
 
 // wrappedFingerprint is above MaxInt64, so it lands in the bigint column as
@@ -323,6 +325,53 @@ func TestCheckAndEventSeries(t *testing.T) {
 	same("plan pro in eu", count(map[string]string{"plan": "pro", "region": "eu"}, from, window, 60), map[int64]int64{0: 1})
 	same("a value nobody sent", count(map[string]string{"plan": "team"}, from, window, 60), map[int64]int64{})
 	same("plan pro, the previous span", count(map[string]string{"plan": "pro"}, from.Add(-10*time.Minute), from, 600), map[int64]int64{0: 1})
+
+	// --- amounts -------------------------------------------------------------
+	// A sum per bucket in one currency: the euros never join the dollars, a
+	// webhook's lower-case currency is the same currency, a row with no money
+	// sums to 0, and the label filter and the previous span hold as for counts.
+	money := []EventRow{
+		{Name: "paid", TS: from.Add(5 * time.Second), AmountMinor: 1999, Currency: "USD", Labels: map[string]string{"plan": "pro"}},
+		{Name: "paid", TS: from.Add(10 * time.Second), AmountMinor: 500, Currency: "usd", Labels: map[string]string{"plan": "free"}},
+		{Name: "paid", TS: from.Add(65 * time.Second), AmountMinor: 700, Currency: "EUR", Labels: map[string]string{"plan": "pro"}},
+		{Name: "paid", TS: from.Add(70 * time.Second), AmountMinor: 0, Currency: "USD"},
+		{Name: "paid", TS: from.Add(-5 * time.Minute), AmountMinor: 300, Currency: "USD"},
+		{Name: "paid", TS: from.Add(-4 * time.Minute)}, // no money at all
+	}
+	for i := range money {
+		money[i].TenantID, money[i].ProjectID = seriesTenant, moneyProject
+	}
+	if err := s.InsertEvents(ctx, money); err != nil {
+		t.Fatalf("insert money events: %v", err)
+	}
+	sum := func(currency string, labels map[string]string, lo, hi time.Time, step int) map[int64]int64 {
+		t.Helper()
+		rows, err := s.AmountBuckets(ctx, seriesTenant, moneyProject, "paid", currency, labels, lo, hi, step)
+		if err != nil {
+			t.Fatalf("amount buckets %s %v: %v", currency, labels, err)
+		}
+		got := map[int64]int64{}
+		for _, b := range rows {
+			got[b.Index] = b.Count
+		}
+		return got
+	}
+	same("USD", sum("USD", nil, from, window, 60), map[int64]int64{0: 2499, 1: 0})
+	same("EUR", sum("EUR", nil, from, window, 60), map[int64]int64{1: 700})
+	same("USD on pro", sum("USD", map[string]string{"plan": "pro"}, from, window, 60), map[int64]int64{0: 1999})
+	same("a currency nobody paid in", sum("GBP", nil, from, window, 60), map[int64]int64{})
+	same("USD, the previous span", sum("USD", nil, from.Add(-10*time.Minute), from, 600), map[int64]int64{0: 300})
+
+	moneyCat, err := s.CatalogEvents(ctx, seriesTenant, moneyProject, from.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("money catalog: %v", err)
+	}
+	if len(moneyCat) != 1 || !slices.Equal(moneyCat[0].Currencies, []string{"EUR", "USD"}) {
+		t.Fatalf("the catalog lists each currency an amount arrived in, upper case and sorted; got %+v", moneyCat)
+	}
+	if len(cat[0].Currencies) != 0 || len(cat[1].Currencies) != 0 {
+		t.Fatalf("an event that carried no money lists no currency; got %+v", cat)
+	}
 }
 
 // The field list is the picker's "what can I break this event down by", so

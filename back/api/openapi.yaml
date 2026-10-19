@@ -816,6 +816,14 @@ components:
           type: string
           enum: [people, events]
           description: "`people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning."
+        measure:
+          type: string
+          enum: [amount]
+          description: "`amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`."
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          description: "ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together."
         label: { type: string }
     DashboardWidget:
       type: object
@@ -824,7 +832,7 @@ components:
         id: { type: string, example: "w_1" }
         kind:
           type: string
-          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap, ratio]
+          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap, ratio, table]
           description: "`ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share."
         title: { type: string }
         metrics:
@@ -1054,6 +1062,10 @@ components:
           type: array
           description: "Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth."
           items: { type: string }
+        currencies:
+          type: array
+          description: "The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money."
+          items: { type: string }
     CatalogMetric:
       type: object
       required: [name, readings, labels]
@@ -1140,6 +1152,19 @@ components:
             why, because every people read filters `actor <> ''`. It is refused
             on a funnel, a retention grid and an A/B test: those ARE people by
             definition, and a conversion rate over rows is not a rate.
+        measure:
+          type: string
+          enum: [amount]
+          description: >
+            `amount`: sum the events' money in `currency` (minor units) instead
+            of counting: on an `event` read (points, total, previous) and on a
+            one-key `people` fold (rows: the amount per value; the actor filter
+            does not apply, money is money whoever paid). Refused elsewhere and
+            with `count`.
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          description: "Required with `measure`, refused without it."
     SeriesRequest:
       type: object
       description: "Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer."
@@ -1937,7 +1962,7 @@ components:
         n: { type: integer }
     Heatmap:
       type: object
-      required: [path, device, range, views, clicks, rage, moves, scroll, hits, dead, segments, forms]
+      required: [path, device, range, views, clicks, rage, moves, scroll, hits, dead, segments, forms, deploys]
       properties:
         path: { type: string }
         device: { type: string, enum: [mobile, tablet, desktop] }
@@ -1953,6 +1978,18 @@ components:
           description: "One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through."
           items: { $ref: "#/components/schemas/HeatCell" }
         dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        deploys:
+          type: array
+          description: "The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around."
+          items:
+            type: object
+            required: [at, label]
+            properties:
+              at: { type: string, format: date-time }
+              label: { type: string }
+        from: { type: string, format: date, description: "With `split`: the first UTC day the main numbers read." }
+        before:
+          $ref: "#/components/schemas/HeatmapWindow"
         forms:
           type: array
           description: "Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`."
@@ -1971,6 +2008,20 @@ components:
             How many pages this plan keeps a heatmap for, its busiest by views.
             Absent when unlimited. A page with views and no heat is one outside
             them.
+    HeatmapWindow:
+      type: object
+      description: "The window before a `split`, read exactly like the main numbers."
+      required: [from, to, views, clicks, rage, dead, hits, scroll, forms]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date, description: "Exclusive: the split's day." }
+        views: { type: integer }
+        clicks: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        rage: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        hits: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        scroll: { type: array, items: { type: integer } }
+        forms: { type: array, items: { $ref: "#/components/schemas/FormField" } }
     FormField:
       type: object
       required: [selector, focus, fill, submit, left]
@@ -4549,6 +4600,11 @@ paths:
           required: false
           description: "Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used."
           schema: { type: string, enum: ["24h", "7d", "31d"] }
+        - name: split
+          in: query
+          required: false
+          description: "A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present."
+          schema: { type: string, format: date-time }
         - name: segment
           in: query
           required: false

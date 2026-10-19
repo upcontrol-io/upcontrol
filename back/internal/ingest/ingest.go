@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.upcontrol.io/back/internal/ingest/cardinality"
@@ -32,6 +33,11 @@ const (
 	// The reserved actor attribute: lifted onto the events row, never a label.
 	ActorAttr     = "uc.actor"
 	MaxActorBytes = 200
+
+	// The reserved money attributes, lifted onto the events row's amount_minor
+	// and currency and never left as labels (liftAmount).
+	AmountAttr   = "uc.amount"
+	CurrencyAttr = "uc.currency"
 )
 
 // KeyKindPublic is api_key.kind for a key that may live in a browser bundle:
@@ -267,8 +273,10 @@ type RowEnvelope struct {
 	Message     string            `json:"message"`
 	Fingerprint uint64            `json:"fingerprint,omitempty"`
 	Attrs       map[string]string `json:"attrs,omitempty"`
-	Event       string            `json:"event,omitempty"` // non-empty → wire.go also writes an events row
-	Actor       string            `json:"actor,omitempty"` // the lifted uc.actor; '' is a real answer (nobody)
+	Event       string            `json:"event,omitempty"`        // non-empty → wire.go also writes an events row
+	Actor       string            `json:"actor,omitempty"`        // the lifted uc.actor; '' is a real answer (nobody)
+	AmountMinor int64             `json:"amount_minor,omitempty"` // the lifted uc.amount, in minor units
+	Currency    string            `json:"currency,omitempty"`     // the lifted uc.currency, upper case; '' is no money
 }
 
 func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record, d overloadDecision, ws *warningAccumulator) [][]byte {
@@ -295,8 +303,18 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		// Before the cap, because capAttrs keeps the first 64 keys in sorted order and 'u'
 		// sorts late enough to be trimmed away.
 		var actor string
+		var amount int64
+		var currency string
 		if ev.Name != "" {
 			actor = liftActor(rec.Attrs)
+			// Money is lifted here for the same two reasons, and only for a SECRET key. A
+			// public key's amount is lifted and thrown away: that key lives in a page anyone
+			// can read, so the revenue it reports could be forged by anyone.
+			var ok bool
+			amount, currency, ok = liftAmount(rec.Attrs)
+			if !ok || t.Kind == KeyKindPublic {
+				amount, currency = 0, ""
+			}
 		}
 		// Scrub the message and attribute values (defense in depth). An operator
 		// on their own box may turn this off; the hosted service may not, and
@@ -339,6 +357,8 @@ func (h *Ingester) buildRows(ctx context.Context, t Tenant, recs []decode.Record
 		if ev.Name != "" {
 			env.Event = ev.Name
 			env.Actor = actor
+			env.AmountMinor = amount
+			env.Currency = currency
 		}
 		// Cardinality cap on host/service (a runaway field would blow up the CH
 		// LowCardinality dictionaries).
@@ -423,6 +443,30 @@ func liftActor(attrs map[string]string) string {
 		v = v[:MaxActorBytes]
 	}
 	return v
+}
+
+// liftAmount removes the reserved uc.amount and uc.currency from attrs and
+// returns them when both are valid: an amount is an integer in MINOR units
+// (cents for USD, yen for JPY), an optional '-' and 1 to 15 digits; a currency
+// is 3 letters, returned upper case. Either one missing or malformed is no
+// money at all, because half an amount cannot be summed. The delete runs on
+// every lift, valid or not, so neither key ever becomes a label.
+func liftAmount(attrs map[string]string) (amount int64, currency string, ok bool) {
+	a, c := attrs[AmountAttr], attrs[CurrencyAttr]
+	delete(attrs, AmountAttr)
+	delete(attrs, CurrencyAttr)
+	digits := strings.TrimPrefix(a, "-")
+	if digits == "" || len(digits) > 15 || strings.ContainsFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) {
+		return 0, "", false
+	}
+	if len(c) != 3 || strings.ContainsFunc(c, func(r rune) bool { return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') }) {
+		return 0, "", false
+	}
+	amount, err := strconv.ParseInt(a, 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return amount, strings.ToUpper(c), true
 }
 
 // overloadDecision is the stepped response to spool fill.

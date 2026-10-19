@@ -235,7 +235,7 @@ func TestCompactWeb(t *testing.T) {
 		from time.Time
 		want int64
 	}{{date(7), 12}, {date(8), 5}} {
-		cells, err := s.HeatCells(ctx, agency, site, "/", "desktop", "", "", "click", c.from, 10)
+		cells, err := s.HeatCells(ctx, agency, site, "/", "desktop", "", "", "click", c.from, time.Time{}, 10)
 		if err != nil || len(cells) != 1 || cells[0].N != c.want {
 			t.Fatalf("HeatCells from %s = %+v (%v), want one cell of %d", c.from.Format(time.DateOnly), cells, err, c.want)
 		}
@@ -430,11 +430,11 @@ func TestHeatReadsBySegment(t *testing.T) {
 		segment, source   string
 		views, clicks, sc int64
 	}{{"", "", 3, 6, 3}, {"member", "", 2, 3, 2}, {"", "search", 2, 4, 2}, {"member", "search", 1, 1, 1}, {"anon", "", 0, 0, 0}} {
-		views, err := s.PageviewCount(ctx, tenant, project, "/", "desktop", c.segment, c.source, day)
+		views, err := s.PageviewCount(ctx, tenant, project, "/", "desktop", c.segment, c.source, day, time.Time{})
 		if err != nil || views != c.views {
 			t.Errorf("(%q, %q) views = %d (%v), want %d", c.segment, c.source, views, err, c.views)
 		}
-		cells, err := s.HeatCells(ctx, tenant, project, "/", "desktop", c.segment, c.source, "click", day, 10)
+		cells, err := s.HeatCells(ctx, tenant, project, "/", "desktop", c.segment, c.source, "click", day, time.Time{}, 10)
 		var clicks int64
 		for _, cell := range cells {
 			clicks += cell.N
@@ -442,7 +442,7 @@ func TestHeatReadsBySegment(t *testing.T) {
 		if err != nil || clicks != c.clicks || len(cells) > 1 {
 			t.Errorf("(%q, %q) clicks = %+v (%v), want one cell of %d", c.segment, c.source, cells, err, c.clicks)
 		}
-		reach, err := s.ScrollReach(ctx, tenant, project, "/", "desktop", c.segment, c.source, day)
+		reach, err := s.ScrollReach(ctx, tenant, project, "/", "desktop", c.segment, c.source, day, time.Time{})
 		if err != nil || reach[0] != c.sc {
 			t.Errorf("(%q, %q) scroll reach = %d (%v), want %d", c.segment, c.source, reach[0], err, c.sc)
 		}
@@ -564,17 +564,60 @@ func TestFormStats(t *testing.T) {
 			t.Fatalf("add heat: %v", err)
 		}
 	}
-	all, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "", "", day)
+	all, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "", "", day, time.Time{})
 	want := []FormStat{{"#email", 3, 3, 0, 0}, {"#name", 0, 0, 0, 3}, {"form", 0, 0, 3, 0}}
 	if err != nil || !slices.Equal(all, want) {
 		t.Fatalf("all = %+v (%v), want %+v", all, err, want)
 	}
-	member, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "member", "", day)
+	member, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "member", "", day, time.Time{})
 	if err != nil || len(member) != 3 || member[0] != (FormStat{"#email", 2, 2, 0, 0}) {
 		t.Fatalf("member = %+v (%v), want #email at 2 focus 2 fill first", member, err)
 	}
-	none, err := s.FormStats(ctx, tenant, project, "/other", "desktop", "", "", day)
+	none, err := s.FormStats(ctx, tenant, project, "/other", "desktop", "", "", day, time.Time{})
 	if err != nil || none == nil || len(none) != 0 {
 		t.Fatalf("another path = %#v (%v), want []", none, err)
+	}
+}
+
+// The four heatmap reads stop before toDay when one is given, and run to now
+// when it is zero: the split's before window and its after window.
+func TestHeatReadsUpToDay(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	d17, d18 := time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	for i, day := range []time.Time{d17, d18} {
+		if err := s.InsertPageview(ctx, tenant, project, day.Add(time.Hour), map[string]string{"path": "/", "device": "desktop"}, fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+		if err := s.AddHeat(ctx, tenant, project, day, "/", "desktop", "", "", []HeatAdd{
+			{Kind: "click", Selector: "a", FX: 1, FY: 1, N: int64(i + 1)},
+			{Kind: "scroll", FY: 20, N: int64(i + 1)},
+			{Kind: "ffocus", Selector: "#email", N: int64(i + 1)},
+		}); err != nil {
+			t.Fatalf("heat: %v", err)
+		}
+	}
+	for _, c := range []struct {
+		name               string
+		to                 time.Time
+		views, clicks, sum int64
+	}{{"to 09-18", d18, 1, 1, 1}, {"no bound", time.Time{}, 2, 3, 3}} {
+		views, err := s.PageviewCount(ctx, tenant, project, "/", "desktop", "", "", d17, c.to)
+		if err != nil || views != c.views {
+			t.Errorf("%s: views = %d (%v), want %d", c.name, views, err, c.views)
+		}
+		cells, err := s.HeatCells(ctx, tenant, project, "/", "desktop", "", "", "click", d17, c.to, 10)
+		if err != nil || len(cells) != 1 || cells[0].N != c.clicks {
+			t.Errorf("%s: clicks = %+v (%v), want one cell of %d", c.name, cells, err, c.clicks)
+		}
+		reach, err := s.ScrollReach(ctx, tenant, project, "/", "desktop", "", "", d17, c.to)
+		if err != nil || reach[20] != c.sum {
+			t.Errorf("%s: scroll reach = %d (%v), want %d", c.name, reach[20], err, c.sum)
+		}
+		forms, err := s.FormStats(ctx, tenant, project, "/", "desktop", "", "", d17, c.to)
+		if err != nil || len(forms) != 1 || forms[0].Focus != c.sum {
+			t.Errorf("%s: forms = %+v (%v), want #email focused %d", c.name, forms, err, c.sum)
+		}
 	}
 }

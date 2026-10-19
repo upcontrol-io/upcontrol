@@ -87,13 +87,30 @@ func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, 
 	if countEvents {
 		fold, actors = "count(*) AS events", ""
 	}
-	narrow, args := eventLabels(labels, []any{tenantID, projectID, labelKey, name, from, to, maxGroupRows})
+	return s.breakdown(ctx, fold, actors, []any{tenantID, projectID, labelKey, name, from, to, maxGroupRows}, labelKey, labels)
+}
+
+// BreakdownAmounts ranks the values of one label by the money the event's rows
+// carried in one currency, most first: the revenue per plan, per country. No
+// actor filter, because money is money whoever paid, and a server-side charge
+// often has nobody behind it. The currency is compared upper case, as
+// AmountBuckets does.
+func (s *Store) BreakdownAmounts(ctx context.Context, tenantID, projectID int64, name, labelKey, currency string, labels map[string]string, from, to time.Time) ([]LabelSum, error) {
+	return s.breakdown(ctx, "COALESCE(sum(amount_minor), 0)::bigint AS amount", "AND upper(currency) = $8",
+		[]any{tenantID, projectID, labelKey, name, from, to, maxGroupRows, currency}, labelKey, labels)
+}
+
+// breakdown is the one fold of a label's values over an event name: args bind
+// $1..$7 as tenant, project, label key, name, from, to and the row cap, and
+// `where` may bind more.
+func (s *Store) breakdown(ctx context.Context, fold, where string, args []any, labelKey string, labels map[string]string) ([]LabelSum, error) {
+	narrow, args := eventLabels(labels, args)
 	// ORDER BY the ordinal, because the aggregate's name changes with what it counts.
 	rows, err := s.pool.Query(ctx, `
 		SELECT labels->>$3 AS g, `+fold+`
 		  FROM events
 		 WHERE tenant_id = $1 AND project_id = $2 AND name = $4
-		   `+actors+` AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6`+narrow+`
+		   `+where+` AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6`+narrow+`
 		 GROUP BY g ORDER BY 2 DESC LIMIT $7`,
 		args...)
 	if err != nil {

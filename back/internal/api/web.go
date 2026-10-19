@@ -45,10 +45,11 @@ type webStore interface {
 	PublicOrigins(ctx context.Context, tenantID, projectID int64) ([]string, error)
 	MintHeatmapLink(ctx context.Context, tokenHash []byte, tenantID, projectID int64, expires time.Time) error
 	ResolveHeatmapLink(ctx context.Context, tokenHash []byte) (tenantID, projectID int64, ok bool, err error)
-	PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from time.Time) (int64, error)
-	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay time.Time, limit int) ([]pgstore.HeatCell, error)
-	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([21]int64, error)
-	FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([]pgstore.FormStat, error)
+	PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from, toDay time.Time) (int64, error)
+	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay, toDay time.Time, limit int) ([]pgstore.HeatCell, error)
+	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay, toDay time.Time) ([21]int64, error)
+	FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay, toDay time.Time) ([]pgstore.FormStat, error)
+	RecentDeploys(ctx context.Context, tenantID, projectID int64, from, to time.Time) (deploys, releases []pgstore.MarkRow, err error)
 	HistoryRefusal(ctx context.Context, tenantID int64, days int) (msg, plan string, err error)
 	WebQuota(ctx context.Context, tenantID int64, now time.Time) (pgstore.WebQuota, error)
 }
@@ -97,6 +98,16 @@ type webStorePool struct {
 // the batch's widest query.
 func (s webStorePool) HistoryRefusal(ctx context.Context, tenantID int64, days int) (string, string, error) {
 	return historyRefusalDays(ctx, s.pool, tenantID, days)
+}
+
+// RecentDeploys is the board's deploy and release mark reads over [from, to).
+func (s webStorePool) RecentDeploys(ctx context.Context, tenantID, projectID int64, from, to time.Time) ([]pgstore.MarkRow, []pgstore.MarkRow, error) {
+	deploys, err := s.DeployMarks(ctx, tenantID, projectID, from, to)
+	if err != nil {
+		return nil, nil, err
+	}
+	releases, err := s.ReleaseMarks(ctx, tenantID, projectID, from, to)
+	return deploys, releases, err
 }
 
 // NewWebDoor wires the door. describe is the recorder's Describe; scrubOff is
@@ -635,21 +646,39 @@ func (d *webDoor) visitor(ctx context.Context, now time.Time, projectID int64, i
 // heatOut is the /w/heatmap answer, the Heatmap contract's shape; empty lists
 // are [], never null, because HeatCells answers [] for no rows.
 type heatOut struct {
-	Path   string             `json:"path"`
-	Device string             `json:"device"`
-	Range  string             `json:"range"`
-	Views  int64              `json:"views"`
-	Clicks []pgstore.HeatCell `json:"clicks"`
-	Rage   []pgstore.HeatCell `json:"rage"`
-	Moves  []pgstore.HeatCell `json:"moves"`
-	Hits   []pgstore.HeatCell `json:"hits"`
-	Dead   []pgstore.HeatCell `json:"dead"`
-	Scroll []int64            `json:"scroll"`
-	Forms  []pgstore.FormStat `json:"forms"`
+	Path   string `json:"path"`
+	Device string `json:"device"`
+	Range  string `json:"range"`
+	heatWindow
+	// The project's latest deploys and releases inside the web depth.
+	Deploys []heatDeploy `json:"deploys"`
+	// With a split: the window before it.
+	Before *heatWindow `json:"before,omitempty"`
 	// The project's segments, oldest first: what the overlay filters by.
 	Segments []string `json:"segments"`
 	// The plan's heatmap pages; absent when unlimited.
 	HeatPages *int32 `json:"heatPages,omitempty"`
+}
+
+// heatWindow is one window's numbers. From is set with a split, To and a nil
+// Moves only on the before window (HeatmapWindow carries no moves).
+type heatWindow struct {
+	From   string             `json:"from,omitzero"`
+	To     string             `json:"to,omitzero"`
+	Views  int64              `json:"views"`
+	Clicks []pgstore.HeatCell `json:"clicks"`
+	Rage   []pgstore.HeatCell `json:"rage"`
+	Moves  []pgstore.HeatCell `json:"moves,omitzero"`
+	Hits   []pgstore.HeatCell `json:"hits"`
+	Dead   []pgstore.HeatCell `json:"dead"`
+	Scroll []int64            `json:"scroll"`
+	Forms  []pgstore.FormStat `json:"forms"`
+}
+
+// heatDeploy is one entry of the answer's deploys.
+type heatDeploy struct {
+	At    time.Time `json:"at"`
+	Label string    `json:"label"`
 }
 
 // Heatmap is GET /w/heatmap: what the overlay draws. Authorised by the uch_
@@ -706,62 +735,78 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 	// beacon's would be stored as none.
 	segment, source := q.Get("segment"), q.Get("source")
 	okFilter := (segment == "" || validSegment(segment)) && (source == "" || webSources[source])
-	if !okPath || errWidth != nil || width <= 0 || !okRange || !okFilter {
+	var split time.Time
+	var errSplit error
+	if s := q.Get("split"); s != "" {
+		split, errSplit = time.Parse(time.RFC3339, s)
+	}
+	if !okPath || errWidth != nil || width <= 0 || !okRange || !okFilter || errSplit != nil {
 		writeAPIErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if rng == "" {
-		// No range asked is the overlay's first look: the deepest one the plan reaches, so
-		// opening a map is never a wall. The wall stays where the reader asks for more.
-		var err error
-		if rng, days, err = d.deepestRange(ctx, tenantID); err != nil {
-			writeAPIErr(w, http.StatusInternalServerError, "internal")
-			return
-		}
-	} else if msg, plan, err := d.store.HistoryRefusal(ctx, tenantID, days); err != nil {
+	// The web depth: how far back this plan's heat reaches, and so which
+	// deploys the overlay may offer and which splits it may ask for.
+	deepRng, deepDays, err := d.deepestRange(ctx, tenantID)
+	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
-	} else if msg != "" {
-		writeUpgradeRequired(w, msg, plan)
-		return
 	}
-	device := deviceFor(width)
 	now := d.now().UTC()
+	today := now.Truncate(24 * time.Hour)
+	var splitDay, beforeFrom time.Time
+	wall := days // the oldest day read, in days back from today; 0 is no wall
+	switch {
+	case !split.IsZero():
+		// After the split: its UTC day to today, n days. Before it: the n days
+		// before that. `range` is ignored; the answer names the deepest.
+		splitDay = split.UTC().Truncate(24 * time.Hour)
+		if splitDay.After(today) || splitDay.Before(today.AddDate(0, 0, -deepDays)) {
+			writeAPIErr(w, http.StatusBadRequest, "bad_request")
+			return
+		}
+		days = int(today.Sub(splitDay) / (24 * time.Hour)) // back to the split's day: n is days+1
+		beforeFrom = splitDay.AddDate(0, 0, -(days + 1))
+		// The wall is the before window's first day, capped at 31: no web
+		// data is kept past them whatever the plan.
+		rng, wall = deepRng, min(2*days+1, rangeDaysWeb["31d"])
+	case rng == "":
+		// No range asked is the overlay's first look: the deepest one the plan reaches, so
+		// opening a map is never a wall. The wall stays where the reader asks for more.
+		rng, days, wall = deepRng, deepDays, 0
+	}
+	if wall > 0 {
+		if msg, plan, err := d.store.HistoryRefusal(ctx, tenantID, wall); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		} else if msg != "" {
+			writeUpgradeRequired(w, msg, plan)
+			return
+		}
+	}
+	fromDay := today.AddDate(0, 0, -days)
+	device := deviceFor(width)
 	quota, err := d.store.WebQuota(ctx, tenantID, now)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	fromDay := now.Truncate(24*time.Hour).AddDate(0, 0, -days)
-	views, err := d.store.PageviewCount(ctx, tenantID, projectID, path, device, segment, source, fromDay)
+	after, err := d.heatRead(ctx, tenantID, projectID, path, device, segment, source, today, fromDay, time.Time{})
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Past a week the heat is in weekly buckets on their Monday: a longer
-	// range reads from its first day's Monday, so the edge bucket counts whole.
-	if days > 7 {
-		fromDay = fromDay.AddDate(0, 0, -(int(fromDay.Weekday())+6)%7)
+	var before *heatWindow
+	if !split.IsZero() {
+		after.From = splitDay.Format(time.DateOnly)
+		b, err := d.heatRead(ctx, tenantID, projectID, path, device, segment, source, today, beforeFrom, splitDay)
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		b.From, b.To, b.Moves = beforeFrom.Format(time.DateOnly), splitDay.Format(time.DateOnly), nil
+		before = &b
 	}
-	read := func(kind string) ([]pgstore.HeatCell, bool) {
-		cells, err := d.store.HeatCells(ctx, tenantID, projectID, path, device, segment, source, kind, fromDay, maxHeatRead)
-		return cells, err == nil
-	}
-	clicks, okClicks := read("click")
-	rage, okRage := read("rage")
-	moves, okMoves := read("move")
-	hits, okHits := read("hit")
-	dead, okDead := read("dead")
-	if !okClicks || !okRage || !okMoves || !okHits || !okDead {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	scroll, err := d.store.ScrollReach(ctx, tenantID, projectID, path, device, segment, source, fromDay)
-	if err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	forms, err := d.store.FormStats(ctx, tenantID, projectID, path, device, segment, source, fromDay)
+	deploys, releases, err := d.store.RecentDeploys(ctx, tenantID, projectID, today.AddDate(0, 0, -deepDays), today.AddDate(0, 0, 1))
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -772,21 +817,74 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, heatOut{
-		Path:      path,
-		Device:    device,
-		Range:     rng,
-		Views:     views,
-		Clicks:    clicks,
-		Rage:      rage,
-		Moves:     moves,
-		Hits:      hits,
-		Dead:      dead,
-		Scroll:    scroll[:],
-		Forms:     forms,
-		Segments:  segments,
-		HeatPages: quota.HeatPages,
+		Path:       path,
+		Device:     device,
+		Range:      rng,
+		heatWindow: after,
+		Deploys:    heatDeploys(deploys, releases),
+		Before:     before,
+		Segments:   segments,
+		HeatPages:  quota.HeatPages,
 	})
 }
+
+// heatRead reads one window's numbers: page views over [from, to), and the
+// heat over the same days with each bound snapped by weekStart. A zero to
+// reads to now.
+func (d *webDoor) heatRead(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, today, from, to time.Time) (heatWindow, error) {
+	var out heatWindow
+	var err error
+	if out.Views, err = d.store.PageviewCount(ctx, tenantID, projectID, path, device, segment, source, from, to); err != nil {
+		return out, err
+	}
+	from, to = weekStart(from, today), weekStart(to, today)
+	read := func(kind string) []pgstore.HeatCell {
+		if err != nil {
+			return nil
+		}
+		var cells []pgstore.HeatCell
+		cells, err = d.store.HeatCells(ctx, tenantID, projectID, path, device, segment, source, kind, from, to, maxHeatRead)
+		return cells
+	}
+	out.Clicks, out.Rage, out.Moves, out.Hits, out.Dead = read("click"), read("rage"), read("move"), read("hit"), read("dead")
+	if err != nil {
+		return out, err
+	}
+	scroll, err := d.store.ScrollReach(ctx, tenantID, projectID, path, device, segment, source, from, to)
+	if err != nil {
+		return out, err
+	}
+	out.Scroll = scroll[:]
+	out.Forms, err = d.store.FormStats(ctx, tenantID, projectID, path, device, segment, source, from, to)
+	return out, err
+}
+
+// weekStart snaps a heat bound older than a week back to its ISO Monday: past
+// a week the heat is in weekly rows on their Monday, so a bound on any other
+// day would cut that week in half. A zero bound stays zero.
+// ponytail: past a week, a comparison is by whole weeks: the split's week
+// counts on the after side, whole, and a before window reaches back to its
+// first day's Monday. Day-exact old heat would need daily rows kept a month.
+func weekStart(day, today time.Time) time.Time {
+	if day.IsZero() || today.Sub(day) <= 7*24*time.Hour {
+		return day
+	}
+	return day.AddDate(0, 0, -(int(day.Weekday())+6)%7)
+}
+
+// heatDeploys words the deploy and release rows the way the board's marks do,
+// a burst of deploy events folded into one, and keeps the latest
+// maxHeatDeploys, newest first.
+func heatDeploys(deploys, releases []pgstore.MarkRow) []heatDeploy {
+	marks := buildMarks(deploys, releases, nil)
+	out := []heatDeploy{}
+	for i := len(marks) - 1; i >= 0 && len(out) < maxHeatDeploys; i-- {
+		out = append(out, heatDeploy{At: marks[i].At, Label: marks[i].Label})
+	}
+	return out
+}
+
+const maxHeatDeploys = 10
 
 // postHeatmapLink is POST /v1/heatmap/link: mint the overlay's one-hour read
 // token. Any member may — the link reads a page the project's own public key

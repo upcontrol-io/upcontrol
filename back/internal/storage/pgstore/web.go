@@ -346,29 +346,41 @@ func (s *Store) ResolveHeatmapLink(ctx context.Context, tokenHash []byte) (tenan
 	return tenantID, projectID, true, nil
 }
 
-// PageviewCount counts the page views of one path on one device since `from`,
-// narrowed to one segment and one source when either is non-empty.
-func (s *Store) PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from time.Time) (int64, error) {
+// upTo is a heatmap read's exclusive upper bound: NULL for a zero time, so the
+// read runs to now.
+func upTo(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// PageviewCount counts the page views of one path on one device inside
+// [from, toDay), toDay zero for no upper bound, narrowed to one segment and
+// one source when either is non-empty.
+func (s *Store) PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from, toDay time.Time) (int64, error) {
 	var n int64
 	err := s.pool.QueryRow(ctx,
 		`SELECT count(*) FROM events
 		  WHERE tenant_id=$1 AND project_id=$2 AND name='uc.pageview' AND actor <> ''
 		    AND labels->>'path'=$3 AND labels->>'device'=$4 AND ts >= $5
-		    AND ($6 = '' OR labels->>'segment' = $6) AND ($7 = '' OR labels->>'source' = $7)`,
-		tenantID, projectID, path, device, from, segment, source).Scan(&n)
+		    AND ($6 = '' OR labels->>'segment' = $6) AND ($7 = '' OR labels->>'source' = $7)
+		    AND ($8::timestamptz IS NULL OR ts < $8)`,
+		tenantID, projectID, path, device, from, segment, source, upTo(toDay)).Scan(&n)
 	return n, err
 }
 
-// HeatCells reads one kind's cells since fromDay, busiest first, capped: a
-// map with thousands of cells is not a readable overlay. An empty segment or
-// source sums across all of them.
-func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay time.Time, limit int) ([]HeatCell, error) {
+// HeatCells reads one kind's cells inside [fromDay, toDay), toDay zero for no
+// upper bound, busiest first, capped: a map with thousands of cells is not a
+// readable overlay. An empty segment or source sums across all of them.
+func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay, toDay time.Time, limit int) ([]HeatCell, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT selector, fx, fy, sum(n) FROM web_heat
 		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND kind=$5 AND day >= $6
 		    AND ($8 = '' OR segment = $8) AND ($9 = '' OR source = $9)
+		    AND ($10::date IS NULL OR day < $10)
 		  GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT $7`,
-		tenantID, projectID, path, device, kind, fromDay, limit, segment, source)
+		tenantID, projectID, path, device, kind, fromDay, limit, segment, source, upTo(toDay))
 	if err != nil {
 		return nil, err
 	}
@@ -394,10 +406,10 @@ type FormStat struct {
 	Left     int64  `json:"left"`
 }
 
-// FormStats reads the form items since fromDay, one row per selector, most
-// focused first, capped at 200. An empty segment or source sums across all
-// of them.
-func (s *Store) FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([]FormStat, error) {
+// FormStats reads the form items inside [fromDay, toDay), toDay zero for no
+// upper bound, one row per selector, most focused first, capped at 200. An
+// empty segment or source sums across all of them.
+func (s *Store) FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay, toDay time.Time) ([]FormStat, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT selector,
 		        coalesce(sum(n) FILTER (WHERE kind = 'ffocus'), 0),
@@ -408,8 +420,9 @@ func (s *Store) FormStats(ctx context.Context, tenantID, projectID int64, path, 
 		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND day >= $5
 		    AND kind IN ('ffocus', 'ffill', 'fsubmit', 'fleft')
 		    AND ($6 = '' OR segment = $6) AND ($7 = '' OR source = $7)
+		    AND ($8::date IS NULL OR day < $8)
 		  GROUP BY 1 ORDER BY 2 DESC, selector COLLATE "C" LIMIT 200`,
-		tenantID, projectID, path, device, fromDay, segment, source)
+		tenantID, projectID, path, device, fromDay, segment, source, upTo(toDay))
 	if err != nil {
 		return nil, err
 	}
@@ -427,13 +440,14 @@ func (s *Store) FormStats(ctx context.Context, tenantID, projectID int64, path, 
 
 // ScrollReach reads the scroll fold as the overlay draws it: out[i] is the
 // page views whose deepest reach was at least i twentieths, cumulative from
-// the deepest.
-func (s *Store) ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([21]int64, error) {
+// the deepest. It reads [fromDay, toDay), toDay zero for no upper bound.
+func (s *Store) ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay, toDay time.Time) ([21]int64, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT fy, sum(n) FROM web_heat
 		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND kind='scroll' AND day >= $5
 		    AND ($6 = '' OR segment = $6) AND ($7 = '' OR source = $7)
-		  GROUP BY 1`, tenantID, projectID, path, device, fromDay, segment, source)
+		    AND ($8::date IS NULL OR day < $8)
+		  GROUP BY 1`, tenantID, projectID, path, device, fromDay, segment, source, upTo(toDay))
 	if err != nil {
 		return [21]int64{}, err
 	}

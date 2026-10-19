@@ -99,6 +99,7 @@ smallest the board accepts, and a kind that is not ranged must carry no
 | `breakdown` | the top of one dimension | 4 | 12 | 3 / 6 | yes | exactly one | `people` |
 | `heatmap` | top pages, a Heatmap button per row | 4 | 12 | 3 / 6 | yes | exactly one | `people` |
 | `ratio` | one count as a share of another | 3 | 8 | 3 / 6 | yes | exactly two, in order | `logs`, `event` or a bare-name `people` |
+| `table` | one event's values by a field: events, people, share, and revenue when it carries money | 6 | 12 | 3 / 9 | yes | exactly one | `people` |
 
 The last column is load-bearing and the validator does not check it: a card
 whose ref carries the wrong source draws nothing at all, silently. A `logs`
@@ -128,7 +129,7 @@ the board would work out; it changes nothing about what is drawn. What
 |---|---|---|
 | `logs` | none | `service`; `level` (`info`, `warn`, `error`); `fingerprint`; `q`, a free-text match on the message; `attr.<key>` |
 | `check` | `response` (the average), `uptime`, `p50` or `p95` | `check`, the monitor's id |
-| `event` | the event name you passed to `track()` | the event's own fields, as text (below) |
+| `event` | the event name you passed to `track()`; with `"measure": "amount"` and a `"currency"` (`USD`) it sums the money the events carried instead of counting them (topic `wire`) | the event's own fields, as text (below) |
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
 | `people` | the event name, on a breakdown, an A/B test or the `heatmap` card, optionally on a retention grid, or alone for a unique count | the event's own fields, on a `name` alone (below); none on the rest. `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
@@ -146,6 +147,7 @@ reading:
 | `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. A `where` of that event's fields narrows the rows: `{ "source": "people", "name": "uc.pageview", "field": "from", "where": { "path": "/pricing" } }` is where visitors of /pricing came from, and `{ "source": "people", "name": "uc.pageview", "field": "path", "where": { "from": "/pricing" } }` where they went next. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
 | `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows; the card compares each arm with the one named `control`, and what it claims is topic `experiment` |
 | `heatmap` | `{ "source": "people", "name": "uc.pageview", "field": "path", "count": "events" }` - fixed: the web script's page views, nothing to pick |
+| `table` | `{ "source": "people", "name": "payment", "field": "plan", "measure": "amount", "currency": "USD" }` - a breakdown's ref; `measure` and `currency` add the Revenue column (money the event carried, topic `wire`), a `where` narrows the rows |
 
 The board counts three levels, folding every other one into `info`; a `level`
 outside the three is not a filter and the card draws every level.

@@ -563,10 +563,13 @@
 		var range = '';
 		var segment = ''; // the filters, '' for all; kept across loads and routes
 		var source = '';
+		var split = ''; // the deploy compared around, its `at`; '' for no comparison
 		var layers = { clicks: true, rage: false, dead: false, moves: false, scroll: false, forms: false };
 		var hm = null;
 		var stats = new Map(); // selector -> { clicks, rage, dead, hits }, sums of n
+		var beforeStats = new Map(); // the same, of hm.before
 		var formStats = new Map(); // selector -> its hm.forms entry
+		var beforeForms = new Map(); // selector -> its hm.before.forms entry
 		var tipSel = null;
 		var tipEl = null;
 		var tipEv = null;
@@ -626,6 +629,7 @@
 			'<select name="source" aria-label="Source"><option value="">All sources</option><option value="search">Search</option>' +
 			'<option value="social">Social</option><option value="campaign">Campaign</option><option value="referral">Referral</option>' +
 			'<option value="direct">Direct</option></select>' +
+			'<select name="compare" aria-label="Compare" hidden></select>' +
 			'</div>' +
 			'</div>';
 		var bar = shadow.querySelector('.bar');
@@ -636,6 +640,7 @@
 		var select = shadow.querySelector('select');
 		var segSelect = shadow.querySelector('select[name=segment]');
 		var srcSelect = shadow.querySelector('select[name=source]');
+		var cmpSelect = shadow.querySelector('select[name=compare]');
 		var head = shadow.querySelector('.head');
 		var pill = shadow.querySelector('.pill');
 		var outline = shadow.querySelector('.outline');
@@ -697,12 +702,39 @@
 			segSelect.value = segment;
 		}
 
+		// The deploys to compare around, plus the chosen one should it have dropped out.
+		function fillCompare() {
+			var list = (hm.deploys || []).slice();
+			if (split && !list.some(function (d) { return d.at === split; })) list.push({ at: split, label: 'deploy' });
+			cmpSelect.hidden = !list.length;
+			cmpSelect.textContent = '';
+			[{ at: '', label: '' }].concat(list).forEach(function (d) {
+				var o = document.createElement('option');
+				o.value = d.at;
+				o.textContent = d.at
+					? 'Before / after ' + d.label + ' \u00b7 ' +
+						new Date(d.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+					: 'No comparison';
+				cmpSelect.appendChild(o);
+			});
+			cmpSelect.value = split;
+		}
+
+		// Both windows have views: a difference of per-view rates means something.
+		function comparable() {
+			return hm.views > 0 && hm.before.views > 0;
+		}
+
 		function updateStatus() {
 			if (!hm) return;
 			var noHeat = !(hm.clicks || []).length && !(hm.rage || []).length &&
 				!(hm.moves || []).length && !(hm.scroll && hm.scroll[0]);
 			if (hm.heatPages != null && hm.views > 0 && noHeat) {
 				statusMain('This plan keeps heatmaps for its ' + hm.heatPages + ' busiest pages; this page is not among them.');
+			} else if (hm.before) {
+				statusMain(comparable()
+					? 'After: ' + fmt(hm.views) + ' views \u00b7 before: ' + fmt(hm.before.views) + ' views' + filters()
+					: 'Not enough views on both sides to compare.');
 			} else if (layers.forms && !hm.forms.length) {
 				statusMain('No form activity recorded yet.');
 			} else if (layers.scroll) {
@@ -724,7 +756,7 @@
 			fetch(base + '/w/heatmap?token=' + encodeURIComponent(token) +
 				'&path=' + encodeURIComponent(location.pathname) +
 				'&key=' + encodeURIComponent(key) +
-				'&w=' + innerWidth + (range ? '&range=' + range : '') +
+				'&w=' + innerWidth + (split ? '&split=' + encodeURIComponent(split) : range ? '&range=' + range : '') +
 				(segment ? '&segment=' + encodeURIComponent(segment) : '') +
 				(source ? '&source=' + source : ''), { credentials: 'omit' })
 				.then(function (res) {
@@ -749,23 +781,25 @@
 					if (!data) return;
 					hm = data;
 					hm.forms = hm.forms || [];
-					range = data.range;
-					select.value = range;
+					// While comparing, the range is the reader's choice for later, not this answer's.
+					if (!split) {
+						range = data.range;
+						select.value = range;
+					}
 					fillSegments();
+					fillCompare();
 					resolved = new Map();
-					['clicks', 'rage', 'dead', 'moves', 'forms'].forEach(function (k) {
-						(hm[k] || []).forEach(function (c) { resolved.set(c.selector, null); });
+					[hm, hm.before || {}].forEach(function (w) {
+						['clicks', 'rage', 'dead', 'moves', 'forms'].forEach(function (k) {
+							(w[k] || []).forEach(function (c) { resolved.set(c.selector, null); });
+						});
 					});
 					formStats = new Map();
 					hm.forms.forEach(function (f) { formStats.set(f.selector, f); });
-					stats = new Map();
-					['clicks', 'rage', 'dead', 'hits'].forEach(function (k) {
-						(hm[k] || []).forEach(function (c) {
-							var st = stats.get(c.selector);
-							if (!st) { st = { clicks: 0, rage: 0, dead: 0, hits: 0 }; stats.set(c.selector, st); }
-							st[k] += c.n;
-						});
-					});
+					beforeForms = new Map();
+					((hm.before && hm.before.forms) || []).forEach(function (f) { beforeForms.set(f.selector, f); });
+					stats = tally(hm);
+					beforeStats = tally(hm.before || {});
 					lastResolve = 0;
 					updateStatus();
 					schedule();
@@ -777,21 +811,61 @@
 				});
 		}
 
-		// 256 steps: transparent -> blue -> cyan -> lime -> yellow -> red.
-		var PAL = [];
-		(function () {
-			var stops = [[0, 0, 0], [0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0], [255, 0, 0]];
+		// A window's per-selector sums of n.
+		function tally(w) {
+			var m = new Map();
+			['clicks', 'rage', 'dead', 'hits'].forEach(function (k) {
+				(w[k] || []).forEach(function (c) {
+					var st = m.get(c.selector);
+					if (!st) { st = { clicks: 0, rage: 0, dead: 0, hits: 0 }; m.set(c.selector, st); }
+					st[k] += c.n;
+				});
+			});
+			return m;
+		}
+
+		// 256 steps between the stops.
+		function ramp(stops) {
+			var pal = [];
 			for (var i = 0; i < 256; i++) {
 				var t = i / 255 * (stops.length - 1);
 				var k = Math.min(Math.floor(t), stops.length - 2);
 				var u = t - k;
-				PAL.push([
+				pal.push([
 					Math.round(stops[k][0] + (stops[k + 1][0] - stops[k][0]) * u),
 					Math.round(stops[k][1] + (stops[k + 1][1] - stops[k][1]) * u),
 					Math.round(stops[k][2] + (stops[k + 1][2] - stops[k][2]) * u)
 				]);
 			}
-		})();
+			return pal;
+		}
+		// transparent -> blue -> cyan -> lime -> yellow -> red: the heat, and what grew.
+		var PAL = ramp([[0, 0, 0], [0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0], [255, 0, 0]]);
+		// transparent -> navy -> blue -> cyan: what shrank.
+		var COOL = ramp([[0, 0, 0], [0, 0, 128], [0, 0, 255], [0, 255, 255]]);
+
+		// The on click layers' cells, as after-rate minus before-rate per (selector, x, y):
+		// [grown, shrunk], each with n the size of its difference.
+		function diffCells() {
+			var m = new Map();
+			[[hm, 1], [hm.before, -1]].forEach(function (w) {
+				['clicks', 'rage', 'dead'].forEach(function (k) {
+					if (!layers[k]) return;
+					(w[0][k] || []).forEach(function (c) {
+						var id = c.selector + ' ' + c.x + ' ' + c.y;
+						var e = m.get(id);
+						if (!e) { e = { selector: c.selector, x: c.x, y: c.y, n: 0 }; m.set(id, e); }
+						e.n += w[1] * c.n / w[0].views;
+					});
+				});
+			});
+			var up = [], down = [];
+			m.forEach(function (e) {
+				if (e.n > 0) up.push(e);
+				else if (e.n < 0) down.push({ selector: e.selector, x: e.x, y: e.y, n: -e.n });
+			});
+			return [up, down];
+		}
 
 		// Returns how many of the cells' hits have no element with a box here.
 		// An element's box, or null when it is missing, display:none or
@@ -802,7 +876,8 @@
 			return r && r.width && r.height ? r : null;
 		}
 
-		function drawHeat(cells, radius) {
+		function drawHeat(cells, radius, pal) {
+			pal = pal || PAL;
 			var pts = [];
 			var maxN = 0;
 			cells.forEach(function (c) {
@@ -835,7 +910,7 @@
 			for (var i = 0; i < d.length; i += 4) {
 				var a = d[i + 3];
 				if (!a) continue;
-				var p = PAL[a];
+				var p = pal[a];
 				d[i] = p[0];
 				d[i + 1] = p[1];
 				d[i + 2] = p[2];
@@ -897,6 +972,7 @@
 			ctx.clearRect(0, 0, innerWidth, innerHeight);
 			badges.textContent = '';
 			if (!hm) return;
+			if (hm.before && !comparable()) { noteEl.hidden = true; return; }
 			// Late-rendered and replaced nodes: look again for what is missing,
 			// at most every 500 ms, and once more after the last throttled frame.
 			var now = Date.now();
@@ -912,11 +988,17 @@
 				retry = setTimeout(function () { retry = 0; schedule(); }, 500 - (now - lastResolve));
 			}
 			if (layers.scroll) drawScroll();
-			var heat = [];
-			if (layers.clicks) heat = heat.concat(hm.clicks || []);
-			if (layers.rage) heat = heat.concat(hm.rage || []);
-			if (layers.dead) heat = heat.concat(hm.dead || []);
-			if (heat.length) drawHeat(heat, 22);
+			if (hm.before) {
+				var diff = diffCells();
+				if (diff[0].length) drawHeat(diff[0], 22);
+				if (diff[1].length) drawHeat(diff[1], 22, COOL);
+			} else {
+				var heat = [];
+				if (layers.clicks) heat = heat.concat(hm.clicks || []);
+				if (layers.rage) heat = heat.concat(hm.rage || []);
+				if (layers.dead) heat = heat.concat(hm.dead || []);
+				if (heat.length) drawHeat(heat, 22);
+			}
 			if (layers.moves) drawHeat(hm.moves || [], 28);
 			if (layers.forms) {
 				hm.forms.forEach(function (f) {
@@ -950,27 +1032,55 @@
 			return n.toLocaleString('en-US');
 		}
 
-		// n of the views, as a whole percent; '<1%' for anything above 0 under 1.
-		function share(n) {
-			var p = hm.views > 0 ? n / hm.views * 100 : 0;
+		// n of the views (hm.views by default), as a whole percent; '<1%' for anything above 0 under 1.
+		function share(n, views) {
+			if (views == null) views = hm.views;
+			var p = views > 0 ? n / views * 100 : 0;
 			return p > 0 && p < 1 ? '<1%' : Math.round(p) + '%';
 		}
 
-		// A form's line, or a field's focus, fill and (when any) left-here parts.
+		// A form's line, or a field's focus, fill and (when any) left-here parts;
+		// while comparing, each number reads before -> after.
 		function formParts(f) {
-			if (f.submit > 0) return ['submitted ' + share(f.submit)];
-			var parts = ['focus ' + share(f.focus), 'fill ' + share(f.fill)];
-			if (f.left > 0) parts.push('left here ' + share(f.left));
+			var b = hm.before && (beforeForms.get(f.selector) || { focus: 0, fill: 0, submit: 0, left: 0 });
+			function s(k) { return b ? share(b[k], hm.before.views) + ' -> ' + share(f[k]) : share(f[k]); }
+			if (f.submit > 0) return ['submitted ' + s('submit')];
+			var parts = ['focus ' + s('focus'), 'fill ' + s('fill')];
+			if (f.left > 0) parts.push('left here ' + s('left'));
+			return parts;
+		}
+
+		// The element's numbers in both windows, before -> after.
+		function compareParts() {
+			var z = { clicks: 0, rage: 0, dead: 0, hits: 0 };
+			var a = stats.get(tipSel) || z, b = beforeStats.get(tipSel) || z;
+			var bv = hm.before.views, parts = [];
+			if (a.hits || b.hits) {
+				var pa = Math.round(a.hits / hm.views * 100), pb = Math.round(b.hits / bv * 100);
+				parts.push('CTR ' + pb + '% -> ' + pa + '% (' + (pa > pb ? '+' : '') + (pa - pb) + ' pts)');
+			}
+			if (a.clicks || b.clicks) parts.push('clicks ' + (b.clicks / bv).toFixed(2) + ' -> ' + (a.clicks / hm.views).toFixed(2) + ' per view');
+			if (a.rage || b.rage) parts.push('rage ' + fmt(b.rage) + ' -> ' + fmt(a.rage));
+			if (a.dead || b.dead) parts.push('dead ' + fmt(b.dead) + ' -> ' + fmt(a.dead));
 			return parts;
 		}
 
 		function tipText(y) {
 			if (!hm) return '';
+			if (hm.before && !comparable()) return '';
 			if (layers.scroll) {
 				var sc = hm.scroll || [];
 				if (!sc[0]) return '';
 				var band = Math.floor((scrollY + y) / (docHeight() / 20));
-				return Math.round((sc[band] || 0) / sc[0] * 100) + '% of views reached here';
+				var bs = (hm.before && hm.before.scroll) || [];
+				return (bs[0] ? Math.round((bs[band] || 0) / bs[0] * 100) + '% -> ' : '') +
+					Math.round((sc[band] || 0) / sc[0] * 100) + '% of views reached here';
+			}
+			if (hm.before) {
+				var cp = compareParts();
+				var cf = formStats.get(tipSel);
+				if (cf) cp = cp.concat(formParts(cf));
+				return cp.length ? cp.join(' \u00b7 ') : tipEl.closest(INTERACTIVE) ? 'No clicks before or after' : '';
 			}
 			var st = stats.get(tipSel);
 			var parts = [];
@@ -1114,6 +1224,11 @@
 		});
 		srcSelect.addEventListener('change', function () {
 			source = srcSelect.value;
+			load();
+		});
+		cmpSelect.addEventListener('change', function () {
+			split = cmpSelect.value;
+			select.disabled = !!split;
 			load();
 		});
 		// Capture: an app shell scrolls an inner container, not the window.
