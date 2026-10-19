@@ -4124,6 +4124,10 @@ export interface paths {
                     w: number;
                     /** @description Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used. */
                     range?: "24h" | "7d" | "31d";
+                    /** @description Only the views the site marked with this segment. Absent or empty: every view, marked or not. */
+                    segment?: string;
+                    /** @description Only the views whose page load came from this kind of source. Absent or empty: every view. */
+                    source?: "" | "search" | "social" | "campaign" | "referral" | "direct";
                 };
                 header?: never;
                 path?: never;
@@ -4833,7 +4837,7 @@ export interface components {
             source: "logs" | "check" | "event" | "metric" | "people" | "web";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path` and `where.device`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`. A web bucket older than the oldest one kept is null. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null. */
             name?: string;
             where?: {
                 [key: string]: string;
@@ -5233,6 +5237,13 @@ export interface components {
             q?: string;
             /** @description view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label. */
             f?: string;
+            /** @description view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment. */
+            g?: string;
+            /**
+             * @description view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+             * @enum {string}
+             */
+            o?: "search" | "social" | "campaign" | "referral" | "direct";
             /** @description heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes. */
             e?: number;
             /** @description heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view. */
@@ -5270,6 +5281,8 @@ export interface components {
             /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
             hits: components["schemas"]["HeatCell"][];
             dead: components["schemas"]["HeatCell"][];
+            /** @description The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by. */
+            segments: string[];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];
             /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */

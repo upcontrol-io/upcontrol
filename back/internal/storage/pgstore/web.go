@@ -98,9 +98,10 @@ func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, t
 		  INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
 		  SELECT $1, $2, $3::timestamptz, 'uc.pageview', $4::jsonb, $5 FROM seen WHERE n < $8
 		  RETURNING 1)
-		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, views)
-		SELECT $1, $2, $9, coalesce($4::jsonb->>'path', ''), coalesce($4::jsonb->>'device', ''), 1 FROM ins
-		ON CONFLICT (tenant_id, project_id, hour, path, device) DO UPDATE SET views = web_engage.views + 1`,
+		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, segment, source, views)
+		SELECT $1, $2, $9, coalesce($4::jsonb->>'path', ''), coalesce($4::jsonb->>'device', ''),
+		       coalesce($4::jsonb->>'segment', ''), coalesce($4::jsonb->>'source', ''), 1 FROM ins
+		ON CONFLICT (tenant_id, project_id, hour, path, device, segment, source) DO UPDATE SET views = web_engage.views + 1`,
 		tenantID, projectID, ts, jsonb(labels), actor, monthOf(ts), ts.Truncate(24*time.Hour), maxVisitViews, ts.Truncate(time.Hour))
 	return err
 }
@@ -113,15 +114,15 @@ type EngageAdd struct {
 
 // AddEngage adds a heat beacon's engaged time into its hour's row. One row per
 // statement, so there is no lock order to keep.
-func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device string, add EngageAdd) error {
+func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add EngageAdd) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, ms, r10, r30, r120, r300)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (tenant_id, project_id, hour, path, device) DO UPDATE SET
+		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, segment, source, ms, r10, r30, r120, r300)
+		VALUES ($1, $2, $3, $4, $5, $11, $12, $6, $7, $8, $9, $10)
+		ON CONFLICT (tenant_id, project_id, hour, path, device, segment, source) DO UPDATE SET
 		  ms = web_engage.ms + EXCLUDED.ms, r10 = web_engage.r10 + EXCLUDED.r10,
 		  r30 = web_engage.r30 + EXCLUDED.r30, r120 = web_engage.r120 + EXCLUDED.r120,
 		  r300 = web_engage.r300 + EXCLUDED.r300`,
-		tenantID, projectID, hour.UTC(), path, device, add.MS, add.R10, add.R30, add.R120, add.R300)
+		tenantID, projectID, hour.UTC(), path, device, add.MS, add.R10, add.R30, add.R120, add.R300, segment, source)
 	return err
 }
 
@@ -130,7 +131,9 @@ func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour t
 //   - a row older than a week folds into its ISO week's Monday row;
 //   - a completed day, a weekly bucket included, keeps its hottest
 //     MaxClickCells click and rage cells and MaxMoveCells move cells per
-//     path, device and kind (scroll is 21 rows at most and never pruned);
+//     path, device and kind, across every segment and source together, so
+//     a completed day costs no more rows with segments than without (scroll
+//     is never pruned);
 //   - a plan's web_heat_pages keeps the workspace's busiest paths by
 //     yesterday's views, read from the scroll rows because each view reports
 //     its scroll once, and drops every row of the rest. A dropped path lost
@@ -147,17 +150,17 @@ func (s *Store) CompactWeb(ctx context.Context, today time.Time) error {
 		{`WITH gone AS (
 		    DELETE FROM web_heat
 		     WHERE day < $1 AND day <> date_trunc('week', day)::date
-		    RETURNING tenant_id, project_id, day, path, device, kind, selector, fx, fy, n)
-		  INSERT INTO web_heat (tenant_id, project_id, day, path, device, kind, selector, fx, fy, n)
-		  SELECT tenant_id, project_id, date_trunc('week', day)::date, path, device, kind, selector, fx, fy, sum(n)
-		    FROM gone GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
-		  ON CONFLICT (tenant_id, project_id, path, device, day, kind, selector, fx, fy)
+		    RETURNING tenant_id, project_id, day, path, device, kind, segment, source, selector, fx, fy, n)
+		  INSERT INTO web_heat (tenant_id, project_id, day, path, device, kind, segment, source, selector, fx, fy, n)
+		  SELECT tenant_id, project_id, date_trunc('week', day)::date, path, device, kind, segment, source, selector, fx, fy, sum(n)
+		    FROM gone GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+		  ON CONFLICT (tenant_id, project_id, path, device, day, kind, segment, source, selector, fx, fy)
 		  DO UPDATE SET n = web_heat.n + EXCLUDED.n`, []any{today.AddDate(0, 0, -7)}},
 		{`DELETE FROM web_heat WHERE ctid IN (
 		    SELECT ctid FROM (
 		      SELECT ctid, kind, row_number() OVER (
 		               PARTITION BY tenant_id, project_id, path, device, day, kind
-		               ORDER BY n DESC, selector, fx, fy) AS pos
+		               ORDER BY n DESC, segment, source, selector, fx, fy) AS pos
 		        FROM web_heat WHERE day < $1 AND kind <> 'scroll') r
 		     WHERE pos > CASE kind WHEN 'move' THEN $3::int ELSE $2::int END)`,
 			[]any{today, MaxClickCells, MaxMoveCells}},
@@ -185,7 +188,7 @@ func (s *Store) CompactWeb(ctx context.Context, today time.Time) error {
 // guarantees no duplicate (kind, selector, fx, fy) keys in cells. The rows go
 // in key order, so two beacons sharing cells lock them in the same order; in
 // the caller's map order they deadlock.
-func (s *Store) AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device string, cells []HeatAdd) error {
+func (s *Store) AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []HeatAdd) error {
 	if len(cells) == 0 {
 		return nil
 	}
@@ -198,14 +201,53 @@ func (s *Store) AddHeat(ctx context.Context, tenantID, projectID int64, day time
 		kinds[i], sels[i], fx[i], fy[i], ns[i] = c.Kind, c.Selector, c.FX, c.FY, c.N
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO web_heat (tenant_id, project_id, day, path, device, kind, selector, fx, fy, n)
-		SELECT $1,$2,$3,$4,$5,k,s,x,y,n
+		INSERT INTO web_heat (tenant_id, project_id, day, path, device, kind, segment, source, selector, fx, fy, n)
+		SELECT $1,$2,$3,$4,$5,k,$11,$12,s,x,y,n
 		  FROM unnest($6::text[], $7::text[], $8::smallint[], $9::smallint[], $10::bigint[]) AS t(k,s,x,y,n)
 		 ORDER BY k, s, x, y
-		ON CONFLICT (tenant_id, project_id, path, device, day, kind, selector, fx, fy)
+		ON CONFLICT (tenant_id, project_id, path, device, day, kind, segment, source, selector, fx, fy)
 		DO UPDATE SET n = web_heat.n + EXCLUDED.n`,
-		tenantID, projectID, day, path, device, kinds, sels, fx, fy, ns)
+		tenantID, projectID, day, path, device, kinds, sels, fx, fy, ns, segment, source)
 	return err
+}
+
+// AdmitSegment answers whether name is one of the project's segments, making
+// it one while the project holds fewer than four, in one statement. The outer
+// read sees the snapshot from before the insert, so a name already there
+// answers through it and a new one through ins.
+//
+// ponytail: two racing first-time names may both pass the count and land a
+// fifth row; the cap bounds cardinality, it is not a promise.
+func (s *Store) AdmitSegment(ctx context.Context, projectID int64, name string) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		WITH ins AS (
+		  INSERT INTO web_segment (project_id, name)
+		  SELECT $1, $2 WHERE (SELECT count(*) FROM web_segment WHERE project_id = $1) < 4
+		  ON CONFLICT DO NOTHING RETURNING 1)
+		SELECT EXISTS (SELECT 1 FROM ins)
+		    OR EXISTS (SELECT 1 FROM web_segment WHERE project_id = $1 AND name = $2)`,
+		projectID, name).Scan(&ok)
+	return ok, err
+}
+
+// Segments lists the project's segments, oldest first.
+func (s *Store) Segments(ctx context.Context, projectID int64) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT name FROM web_segment WHERE project_id = $1 ORDER BY created_at, name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // DailySalt returns the day's visitor salt, minting it on first sight and
@@ -284,25 +326,29 @@ func (s *Store) ResolveHeatmapLink(ctx context.Context, tokenHash []byte) (tenan
 	return tenantID, projectID, true, nil
 }
 
-// PageviewCount counts the page views of one path on one device since `from`.
-func (s *Store) PageviewCount(ctx context.Context, tenantID, projectID int64, path, device string, from time.Time) (int64, error) {
+// PageviewCount counts the page views of one path on one device since `from`,
+// narrowed to one segment and one source when either is non-empty.
+func (s *Store) PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from time.Time) (int64, error) {
 	var n int64
 	err := s.pool.QueryRow(ctx,
 		`SELECT count(*) FROM events
 		  WHERE tenant_id=$1 AND project_id=$2 AND name='uc.pageview' AND actor <> ''
-		    AND labels->>'path'=$3 AND labels->>'device'=$4 AND ts >= $5`,
-		tenantID, projectID, path, device, from).Scan(&n)
+		    AND labels->>'path'=$3 AND labels->>'device'=$4 AND ts >= $5
+		    AND ($6 = '' OR labels->>'segment' = $6) AND ($7 = '' OR labels->>'source' = $7)`,
+		tenantID, projectID, path, device, from, segment, source).Scan(&n)
 	return n, err
 }
 
 // HeatCells reads one kind's cells since fromDay, busiest first, capped: a
-// map with thousands of cells is not a readable overlay.
-func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, device, kind string, fromDay time.Time, limit int) ([]HeatCell, error) {
+// map with thousands of cells is not a readable overlay. An empty segment or
+// source sums across all of them.
+func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay time.Time, limit int) ([]HeatCell, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT selector, fx, fy, sum(n) FROM web_heat
 		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND kind=$5 AND day >= $6
+		    AND ($8 = '' OR segment = $8) AND ($9 = '' OR source = $9)
 		  GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT $7`,
-		tenantID, projectID, path, device, kind, fromDay, limit)
+		tenantID, projectID, path, device, kind, fromDay, limit, segment, source)
 	if err != nil {
 		return nil, err
 	}
@@ -321,11 +367,12 @@ func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, 
 // ScrollReach reads the scroll fold as the overlay draws it: out[i] is the
 // page views whose deepest reach was at least i twentieths, cumulative from
 // the deepest.
-func (s *Store) ScrollReach(ctx context.Context, tenantID, projectID int64, path, device string, fromDay time.Time) ([21]int64, error) {
+func (s *Store) ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([21]int64, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT fy, sum(n) FROM web_heat
 		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND kind='scroll' AND day >= $5
-		  GROUP BY 1`, tenantID, projectID, path, device, fromDay)
+		    AND ($6 = '' OR segment = $6) AND ($7 = '' OR source = $7)
+		  GROUP BY 1`, tenantID, projectID, path, device, fromDay, segment, source)
 	if err != nil {
 		return [21]int64{}, err
 	}

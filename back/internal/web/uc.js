@@ -44,7 +44,12 @@
 		console.error('[upcontrol] data-key holds a SECRET key. Revoke it in the app now and use the public key from npx upcontrol web.');
 		return;
 	}
-	if (token) { overlay(token); return; }
+	if (token) {
+		// The site's own upcontrol() calls must not throw while the map is drawn.
+		window.upcontrol = function () {};
+		overlay(token);
+		return;
+	}
 
 	// --- collector ---------------------------------------------------------
 
@@ -65,6 +70,12 @@
 	var viewEngaged = 0; // engaged ms this view, for the cap and the thresholds
 	var THRESHOLDS = [10000, 30000, 120000, 300000];
 	var aSent = 0; // thresholds this view already reported
+	var segment = ''; // what the site says about the visitor, for g
+	var segWarned = false;
+	var SEARCH = ['google.', 'bing.com', 'duckduckgo.com', 'yahoo.', 'yandex.', 'baidu.com', 'ecosia.org', 'search.brave.com'];
+	var SOCIAL = ['facebook.com', 'instagram.com', 't.co', 'twitter.com', 'x.com', 'linkedin.com', 'lnkd.in',
+		'reddit.com', 'youtube.com', 'tiktok.com', 'pinterest.', 'vk.com', 't.me', 'threads.net', 'bsky.app'];
+	var source = sourceOf(); // the page load's, kept across SPA routes; '' is unknown
 
 	function post(json) {
 		fetch(base + '/w?key=' + encodeURIComponent(key), {
@@ -84,8 +95,49 @@
 			q: location.search
 		};
 		if (from) body.f = from;
+		mark(body);
 		post(JSON.stringify(body));
 		firstView = false;
+	}
+
+	function mark(body) {
+		if (segment) body.g = segment;
+		if (source) body.o = source;
+	}
+
+	// A host matches an entry when it is the entry or ends in .entry; an
+	// entry ending in a dot is a label prefix, so google. covers google.co.uk.
+	function listed(host, list) {
+		return list.some(function (d) {
+			if (d.slice(-1) === '.') return host.indexOf(d) === 0 || host.indexOf('.' + d) > 0;
+			return host === d || host.slice(-d.length - 1) === '.' + d;
+		});
+	}
+
+	// Worked out from this page load alone: nothing is kept on the device.
+	function sourceOf() {
+		var qs = new URLSearchParams(location.search);
+		if (qs.has('utm_source') || qs.has('utm_medium') || qs.has('utm_campaign')) return 'campaign';
+		if (!document.referrer) return 'direct';
+		var ref;
+		try { ref = new URL(document.referrer); } catch (e) { return ''; }
+		if (ref.origin === location.origin) return '';
+		var host = ref.hostname.toLowerCase().replace(/^www\./, '');
+		if (listed(host, SEARCH)) return 'search';
+		if (listed(host, SOCIAL)) return 'social';
+		return 'referral';
+	}
+
+	// The segment to keep: v when valid, '' for a clear, the current one
+	// (and one warning a page) otherwise. Same id rule as sel().
+	function segmentOf(v) {
+		if (v === '' || v == null) return '';
+		if (typeof v === 'string' && /^[a-z0-9_-]{1,24}$/.test(v) && !/\d{4}/.test(v)) return v;
+		if (!segWarned) {
+			segWarned = true;
+			console.warn('[upcontrol] segment must be 1-24 of a-z, 0-9, _ and -: ' + v);
+		}
+		return segment;
 	}
 
 	// Engaged: visible, with input in the last 30 s. Every input credits the
@@ -274,6 +326,7 @@
 		if (clicks.size === 0 && moves.size === 0 && dead.size === 0 && !hitNew.length &&
 			scrollSent && !e && !a.length) return;
 		var body = { v: 1, t: 'heat', p: path, w: innerWidth };
+		mark(body);
 		if (!scrollSent) {
 			scrollSent = true;
 			body.s = Math.round(maxReach * 1000) / 1000;
@@ -343,6 +396,21 @@
 		var ref = new URL(document.referrer);
 		if (ref.origin === location.origin) from = ref.pathname;
 	} catch (e) {}
+	// The tag's data-segment, then what the site queued before this script
+	// loaded, in order; from then on upcontrol() is this one.
+	segment = segmentOf(me.getAttribute('data-segment'));
+	var queued = (typeof window.upcontrol === 'function' && window.upcontrol.q) || [];
+	for (var qi = 0; qi < queued.length; qi++) {
+		if (queued[qi][0] === 'segment') segment = segmentOf(queued[qi][1]);
+	}
+	window.upcontrol = function (cmd, arg) {
+		if (cmd !== 'segment') return;
+		var next = segmentOf(arg);
+		if (next === segment) return;
+		// What was gathered under the old segment is reported under it.
+		flush();
+		segment = next;
+	};
 	view(from);
 
 	// Calls fn after every pushState and replaceState; returns the undo, which
@@ -367,6 +435,8 @@
 	function overlay(token) {
 		// Empty until the first answer: the server picks the deepest range the plan reaches.
 		var range = '';
+		var segment = ''; // the filters, '' for all; kept across loads and routes
+		var source = '';
 		var layers = { clicks: true, rage: false, dead: false, moves: false, scroll: false };
 		var hm = null;
 		var stats = new Map(); // selector -> { clicks, rage, dead, hits }, sums of n
@@ -422,6 +492,12 @@
 			'<button name="scroll" aria-pressed="false">Scroll</button>' +
 			'<select><option value="24h">1 day</option><option value="7d" selected>7 days</option><option value="31d">31 days</option></select>' +
 			'</div>' +
+			'<div class="row">' +
+			'<select name="segment" aria-label="Segment" hidden></select>' +
+			'<select name="source" aria-label="Source"><option value="">All sources</option><option value="search">Search</option>' +
+			'<option value="social">Social</option><option value="campaign">Campaign</option><option value="referral">Referral</option>' +
+			'<option value="direct">Direct</option></select>' +
+			'</div>' +
 			'</div>';
 		var bar = shadow.querySelector('.bar');
 		var pathEl = shadow.querySelector('.path');
@@ -429,6 +505,8 @@
 		var hintEl = shadow.querySelector('.hint');
 		var noteEl = shadow.querySelector('.note');
 		var select = shadow.querySelector('select');
+		var segSelect = shadow.querySelector('select[name=segment]');
+		var srcSelect = shadow.querySelector('select[name=source]');
 		var head = shadow.querySelector('.head');
 		var pill = shadow.querySelector('.pill');
 		var outline = shadow.querySelector('.outline');
@@ -469,6 +547,26 @@
 			return w < 768 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop';
 		}
 
+		function filters() {
+			return (segment ? ' \u00b7 ' + segment : '') + (source ? ' \u00b7 from ' + source : '');
+		}
+
+		// The project's segments, plus the chosen one should it have dropped out
+		// of the list, so the select never hides a filter in force.
+		function fillSegments() {
+			var list = (hm.segments || []).slice();
+			if (segment && list.indexOf(segment) < 0) list.push(segment);
+			segSelect.hidden = !list.length;
+			segSelect.textContent = '';
+			[''].concat(list).forEach(function (s) {
+				var o = document.createElement('option');
+				o.value = s;
+				o.textContent = s || 'All visitors';
+				segSelect.appendChild(o);
+			});
+			segSelect.value = segment;
+		}
+
 		function updateStatus() {
 			if (!hm) return;
 			var noHeat = !(hm.clicks || []).length && !(hm.rage || []).length &&
@@ -477,10 +575,10 @@
 				statusMain('This plan keeps heatmaps for its ' + hm.heatPages + ' busiest pages; this page is not among them.');
 			} else if (layers.scroll) {
 				statusMain(hm.scroll && hm.scroll[0]
-					? 'Scroll depth from ' + hm.scroll[0] + ' views'
+					? 'Scroll depth from ' + hm.scroll[0] + ' views' + filters()
 					: 'No scroll depth reported yet.');
 			} else {
-				statusMain(hm.views.toLocaleString('en-US') + ' ' + hm.device + ' views \u00b7 ' + label(range));
+				statusMain(hm.views.toLocaleString('en-US') + ' ' + hm.device + ' views \u00b7 ' + label(range) + filters());
 			}
 			hintEl.textContent = hm.device === 'mobile'
 				? 'Widen the window past 1024px to see desktop visitors.'
@@ -493,7 +591,9 @@
 			fetch(base + '/w/heatmap?token=' + encodeURIComponent(token) +
 				'&path=' + encodeURIComponent(location.pathname) +
 				'&key=' + encodeURIComponent(key) +
-				'&w=' + innerWidth + (range ? '&range=' + range : ''), { credentials: 'omit' })
+				'&w=' + innerWidth + (range ? '&range=' + range : '') +
+				(segment ? '&segment=' + encodeURIComponent(segment) : '') +
+				(source ? '&source=' + source : ''), { credentials: 'omit' })
 				.then(function (res) {
 					if (res.status === 401) {
 						statusMain('This heatmap link has expired. Open it again from UpControl.');
@@ -517,6 +617,7 @@
 					hm = data;
 					range = data.range;
 					select.value = range;
+					fillSegments();
 					resolved = new Map();
 					['clicks', 'rage', 'dead', 'moves'].forEach(function (k) {
 						(hm[k] || []).forEach(function (c) { resolved.set(c.selector, null); });
@@ -842,6 +943,14 @@
 		head.addEventListener('pointercancel', function () { drag = null; });
 		select.addEventListener('change', function () {
 			range = select.value;
+			load();
+		});
+		segSelect.addEventListener('change', function () {
+			segment = segSelect.value;
+			load();
+		});
+		srcSelect.addEventListener('change', function () {
+			source = srcSelect.value;
 			load();
 		});
 		// Capture: an app shell scrolls an inner container, not the window.

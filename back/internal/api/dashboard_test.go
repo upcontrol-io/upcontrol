@@ -779,6 +779,8 @@ func TestValidateSeries_Web(t *testing.T) {
 		{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: byPath},
 		{ID: "a", Source: "web", Range: "7d", Name: "dead", Group: byPath, Where: map[string]string{"device": "desktop"}},
 		{ID: "a", Source: "web", Range: "365d", Name: "clicks", Group: byPath},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"segment": "member", "source": "search"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: byPath, Where: map[string]string{"segment": "Not Even Valid", "source": ""}},
 	} {
 		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
 			t.Fatalf("%s %+v must be accepted; got %q", ok.Name, ok, msg)
@@ -798,6 +800,7 @@ func TestValidateSeries_Web(t *testing.T) {
 		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Steps: []string{"a"}},
 		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Cohort: "week"},
 		{ID: "q1", Source: "web", Range: "7d", Name: "rage", Group: byPath, Bucket: "day"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"source": "google"}},
 	} {
 		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in q1") {
 			t.Fatalf("%+v must be refused by name; got %q", bad, msg)

@@ -26,6 +26,9 @@ func validateWeb(q seriesQuery) string {
 	if len(q.Labels) > 0 || q.Count != "" {
 		return "labels and count are not for the web source in " + q.ID
 	}
+	if src := q.Where["source"]; src != "" && !webSources[src] {
+		return "where.source is search, social, campaign, referral or direct in " + q.ID
+	}
 	byPath := len(q.Group) == 1 && q.Group[0] == "path"
 	if len(q.Group) > 0 && !byPath {
 		return "the web source groups by path alone in " + q.ID
@@ -77,8 +80,8 @@ func (h *writeAPI) webSeries(ctx context.Context, tenantID, projectID int64, q s
 	if h.pgs == nil {
 		return nil, nil, nil, nil
 	}
-	path, device := q.Where["path"], q.Where["device"]
-	rows, err := h.pgs.EngageBuckets(ctx, tenantID, projectID, path, device, from, to, r.step)
+	path, device, segment, source := q.Where["path"], q.Where["device"], q.Where["segment"], q.Where["source"]
+	rows, err := h.pgs.EngageBuckets(ctx, tenantID, projectID, path, device, segment, source, from, to, r.step)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -96,7 +99,7 @@ func (h *writeAPI) webSeries(ctx context.Context, tenantID, projectID int64, q s
 		}
 	}
 	span := to.Sub(from)
-	prev, err := h.pgs.EngageBuckets(ctx, tenantID, projectID, path, device, from.Add(-span), from, int(span/time.Second))
+	prev, err := h.pgs.EngageBuckets(ctx, tenantID, projectID, path, device, segment, source, from.Add(-span), from, int(span/time.Second))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -114,17 +117,17 @@ func (h *writeAPI) webSeries(ctx context.Context, tenantID, projectID int64, q s
 func (h *writeAPI) webGroupedSeries(ctx context.Context, tenantID, projectID int64, q seriesQuery, from, to time.Time, r seriesRange) (map[string]any, error) {
 	rows := []any{}
 	if h.pgs != nil {
-		device := q.Where["device"]
+		device, segment, source := q.Where["device"], q.Where["segment"], q.Where["source"]
 		var sums []pgstore.LabelSum
 		var err error
 		if q.Name == "engaged" {
-			sums, err = h.pgs.EngagePaths(ctx, tenantID, projectID, device, from, to)
+			sums, err = h.pgs.EngagePaths(ctx, tenantID, projectID, device, segment, source, from, to)
 		} else {
 			fromDay := from.Truncate(24 * time.Hour)
 			if to.Sub(from) > 7*24*time.Hour {
 				fromDay = fromDay.AddDate(0, 0, -(int(fromDay.Weekday())+6)%7)
 			}
-			sums, err = h.pgs.HeatPaths(ctx, tenantID, projectID, webHeatKinds[q.Name], device, fromDay)
+			sums, err = h.pgs.HeatPaths(ctx, tenantID, projectID, webHeatKinds[q.Name], device, segment, source, fromDay)
 		}
 		if err != nil {
 			return nil, err

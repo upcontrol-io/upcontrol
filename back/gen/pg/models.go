@@ -476,6 +476,8 @@ type WebEngage struct {
 	R30       int64
 	R120      int64
 	R300      int64
+	Segment   string
+	Source    string
 }
 
 type WebEvent struct {
@@ -509,11 +511,19 @@ type WebHeat struct {
 	Fx        int16
 	Fy        int16
 	N         int64
+	Segment   string
+	Source    string
 }
 
 type WebSalt struct {
 	Day  pgtype.Date
 	Salt []byte
+}
+
+type WebSegment struct {
+	ProjectID int64
+	Name      string
+	CreatedAt pgtype.Timestamptz
 }
 
 type WebUsage struct {

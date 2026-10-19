@@ -22,16 +22,17 @@ type EngageBucket struct {
 }
 
 // EngageBuckets sums web_engage into buckets of stepSeconds over [from, to),
-// narrowed to one path and one device when either is non-empty.
-func (s *Store) EngageBuckets(ctx context.Context, tenantID, projectID int64, path, device string, from, to time.Time, stepSeconds int) ([]EngageBucket, error) {
+// narrowed to one path, device, segment and source when each is non-empty.
+func (s *Store) EngageBuckets(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from, to time.Time, stepSeconds int) ([]EngageBucket, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT floor((extract(epoch from hour)::float8 - $3) / $4)::bigint AS bucket,
 		       sum(views)::bigint, sum(ms)::bigint, sum(r10)::bigint, sum(r30)::bigint, sum(r120)::bigint, sum(r300)::bigint
 		  FROM web_engage
 		 WHERE tenant_id = $1 AND project_id = $2 AND hour >= $5 AND hour < $6
 		   AND ($7 = '' OR path = $7) AND ($8 = '' OR device = $8)
+		   AND ($9 = '' OR segment = $9) AND ($10 = '' OR source = $10)
 		 GROUP BY bucket ORDER BY bucket`,
-		tenantID, projectID, float64(from.Unix()), float64(stepSeconds), from, to, path, device)
+		tenantID, projectID, float64(from.Unix()), float64(stepSeconds), from, to, path, device, segment, source)
 	if err != nil {
 		return nil, err
 	}
@@ -49,26 +50,28 @@ func (s *Store) EngageBuckets(ctx context.Context, tenantID, projectID int64, pa
 
 // EngagePaths ranks the pages by average engaged seconds per view over
 // [from, to), only pages with a view, busiest first, capped at maxGroupRows.
-func (s *Store) EngagePaths(ctx context.Context, tenantID, projectID int64, device string, from, to time.Time) ([]LabelSum, error) {
+func (s *Store) EngagePaths(ctx context.Context, tenantID, projectID int64, device, segment, source string, from, to time.Time) ([]LabelSum, error) {
 	return pathSums(s.pool.Query(ctx, `
 		SELECT path, sum(ms)::float8 / sum(views)::float8 / 1000
 		  FROM web_engage
 		 WHERE tenant_id = $1 AND project_id = $2 AND hour >= $3 AND hour < $4 AND ($5 = '' OR device = $5)
+		   AND ($7 = '' OR segment = $7) AND ($8 = '' OR source = $8)
 		 GROUP BY path HAVING sum(views) > 0
 		 ORDER BY 2 DESC, path LIMIT $6`,
-		tenantID, projectID, from, to, device, maxGroupRows))
+		tenantID, projectID, from, to, device, maxGroupRows, segment, source))
 }
 
 // HeatPaths ranks the pages by one heat kind's summed n since fromDay. The
 // caller snaps fromDay to a Monday when the window reaches the weekly rows.
-func (s *Store) HeatPaths(ctx context.Context, tenantID, projectID int64, kind, device string, fromDay time.Time) ([]LabelSum, error) {
+func (s *Store) HeatPaths(ctx context.Context, tenantID, projectID int64, kind, device, segment, source string, fromDay time.Time) ([]LabelSum, error) {
 	return pathSums(s.pool.Query(ctx, `
 		SELECT path, sum(n)::float8
 		  FROM web_heat
 		 WHERE tenant_id = $1 AND project_id = $2 AND kind = $3 AND day >= $4 AND ($5 = '' OR device = $5)
+		   AND ($7 = '' OR segment = $7) AND ($8 = '' OR source = $8)
 		 GROUP BY path
 		 ORDER BY 2 DESC, path LIMIT $6`,
-		tenantID, projectID, kind, fromDay, device, maxGroupRows))
+		tenantID, projectID, kind, fromDay, device, maxGroupRows, segment, source))
 }
 
 // pathSums reads (path, value) rows into labelled sums keyed "path".

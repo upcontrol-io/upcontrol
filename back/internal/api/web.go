@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,21 +34,25 @@ import (
 // run the whole door against a fake.
 type webStore interface {
 	InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error
-	AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device string, cells []pgstore.HeatAdd) error
-	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device string, add pgstore.EngageAdd) error
+	AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []pgstore.HeatAdd) error
+	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) error
+	AdmitSegment(ctx context.Context, projectID int64, name string) (bool, error)
+	Segments(ctx context.Context, projectID int64) ([]string, error)
 	DailySalt(ctx context.Context, day time.Time) ([]byte, error)
 	PublicOrigins(ctx context.Context, tenantID, projectID int64) ([]string, error)
 	MintHeatmapLink(ctx context.Context, tokenHash []byte, tenantID, projectID int64, expires time.Time) error
 	ResolveHeatmapLink(ctx context.Context, tokenHash []byte) (tenantID, projectID int64, ok bool, err error)
-	PageviewCount(ctx context.Context, tenantID, projectID int64, path, device string, from time.Time) (int64, error)
-	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, kind string, fromDay time.Time, limit int) ([]pgstore.HeatCell, error)
-	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device string, fromDay time.Time) ([21]int64, error)
+	PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from time.Time) (int64, error)
+	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay time.Time, limit int) ([]pgstore.HeatCell, error)
+	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([21]int64, error)
 	HistoryRefusal(ctx context.Context, tenantID int64, days int) (msg, plan string, err error)
 	WebQuota(ctx context.Context, tenantID int64, now time.Time) (pgstore.WebQuota, error)
 }
 
 // webDoor is the /w handler pair. The day's visitor salt is cached per UTC
-// date: one database read per day, not one per beacon.
+// date: one database read per day, not one per beacon. Segment admissions are
+// cached per project and name for segmentTTL, refusals included, so a site
+// marking every beacon costs one query per name per ten minutes.
 type webDoor struct {
 	ing      *ingest.Ingester
 	store    webStore
@@ -55,10 +60,26 @@ type webDoor struct {
 	scrubOff bool
 	now      func() time.Time
 
-	mu      sync.Mutex
-	saltDay string
-	salt    []byte
+	mu       sync.Mutex
+	saltDay  string
+	salt     []byte
+	segments map[segmentKey]segmentAnswer
 }
+
+type segmentKey struct {
+	project int64
+	name    string
+}
+
+type segmentAnswer struct {
+	ok    bool
+	until time.Time
+}
+
+const (
+	segmentTTL       = 10 * time.Minute
+	maxSegmentCached = 10000
+)
 
 // webStorePool is the production webStore: the pgstore methods plus the
 // history wall, read from the same pool every other door reads.
@@ -168,6 +189,51 @@ func utmLabels(q string, scrubOff bool) map[string]string {
 	return out
 }
 
+// webSources are the source classes uc.js works out for a page load.
+var webSources = map[string]bool{"search": true, "social": true, "campaign": true, "referral": true, "direct": true}
+
+// validSegment is a segment's shape: 1-24 of a-z, 0-9, _ and -, never four
+// digits in a row, so it can name a group of visitors and never carry an id.
+func validSegment(s string) bool {
+	return segmentShape.MatchString(s) && !fourDigits.MatchString(s)
+}
+
+var (
+	segmentShape = regexp.MustCompile(`^[a-z0-9_-]{1,24}$`)
+	fourDigits   = regexp.MustCompile(`[0-9]{4}`)
+)
+
+// segment answers the beacon's g as stored: itself when valid and one of the
+// project's segments, empty otherwise. The store is asked outside the lock.
+func (d *webDoor) segment(ctx context.Context, now time.Time, projectID int64, g string) (string, error) {
+	if !validSegment(g) {
+		return "", nil
+	}
+	key := segmentKey{projectID, g}
+	d.mu.Lock()
+	a, hit := d.segments[key]
+	d.mu.Unlock()
+	if !hit || now.After(a.until) {
+		ok, err := d.store.AdmitSegment(ctx, projectID, g)
+		if err != nil {
+			return "", err
+		}
+		a = segmentAnswer{ok: ok, until: now.Add(segmentTTL)}
+		d.mu.Lock()
+		// ponytail: the whole cache drops at the bound; per-entry eviction if
+		// a deployment ever holds that many live names.
+		if d.segments == nil || len(d.segments) >= maxSegmentCached {
+			d.segments = map[segmentKey]segmentAnswer{}
+		}
+		d.segments[key] = a
+		d.mu.Unlock()
+	}
+	if !a.ok {
+		return "", nil
+	}
+	return g, nil
+}
+
 // rangeDaysWeb normalises the heatmap range enum to whole days, the unit the
 // history axis sells; "" is valid and resolved by deepestRange.
 var rangeDaysWeb = map[string]int{"": 0, "24h": 1, "7d": 7, "31d": 31}
@@ -183,6 +249,8 @@ type beaconBody struct {
 	R string              `json:"r"`
 	Q string              `json:"q"`
 	F string              `json:"f"`
+	G string              `json:"g"`
+	O string              `json:"o"`
 	S *float64            `json:"s"`
 	E json.RawMessage     `json:"e"`
 	A json.RawMessage     `json:"a"`
@@ -257,9 +325,26 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip, ua := analytics.ClientIP(r), r.UserAgent()
+	// A segment or source the door cannot keep is stored as none, never a 400:
+	// the visitor's browser has nothing to be told.
+	segment, err := d.segment(ctx, now, t.ProjectID, b.G)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	source := b.O
+	if !webSources[source] {
+		source = ""
+	}
 
 	if b.T == "view" {
 		labels := map[string]string{"path": path, "device": device}
+		if segment != "" {
+			labels["segment"] = segment
+		}
+		if source != "" {
+			labels["source"] = source
+		}
 		// The gate passed, so the Origin header IS the matched origin; its
 		// host is what a self-referral is dropped against.
 		if b.R != "" {
@@ -390,7 +475,7 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		for k, n := range cells {
 			list = append(list, pgstore.HeatAdd{Kind: k.kind, Selector: k.sel, FX: k.fx, FY: k.fy, N: n})
 		}
-		if err := d.store.AddHeat(ctx, t.TenantID, t.ProjectID, now.Truncate(24*time.Hour), path, device, list); err != nil {
+		if err := d.store.AddHeat(ctx, t.TenantID, t.ProjectID, now.Truncate(24*time.Hour), path, device, segment, source, list); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -398,7 +483,7 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 	if engage != (pgstore.EngageAdd{}) {
 		// ponytail: the beacon's own hour, which may be the hour after its
 		// view; the reads divide by views across that edge.
-		if err := d.store.AddEngage(ctx, t.TenantID, t.ProjectID, now.Truncate(time.Hour), path, device, engage); err != nil {
+		if err := d.store.AddEngage(ctx, t.TenantID, t.ProjectID, now.Truncate(time.Hour), path, device, segment, source, engage); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -461,6 +546,8 @@ type heatOut struct {
 	Hits   []pgstore.HeatCell `json:"hits"`
 	Dead   []pgstore.HeatCell `json:"dead"`
 	Scroll []int64            `json:"scroll"`
+	// The project's segments, oldest first: what the overlay filters by.
+	Segments []string `json:"segments"`
 	// The plan's heatmap pages; absent when unlimited.
 	HeatPages *int32 `json:"heatPages,omitempty"`
 }
@@ -515,7 +602,11 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 	width, errWidth := strconv.Atoi(q.Get("w"))
 	rng := q.Get("range")
 	days, okRange := rangeDaysWeb[rng]
-	if !okPath || errWidth != nil || width <= 0 || !okRange {
+	// A reader's typo is not data: an invalid filter is a 400 here, where a
+	// beacon's would be stored as none.
+	segment, source := q.Get("segment"), q.Get("source")
+	okFilter := (segment == "" || validSegment(segment)) && (source == "" || webSources[source])
+	if !okPath || errWidth != nil || width <= 0 || !okRange || !okFilter {
 		writeAPIErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
@@ -542,7 +633,7 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fromDay := now.Truncate(24*time.Hour).AddDate(0, 0, -days)
-	views, err := d.store.PageviewCount(ctx, tenantID, projectID, path, device, fromDay)
+	views, err := d.store.PageviewCount(ctx, tenantID, projectID, path, device, segment, source, fromDay)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -553,7 +644,7 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		fromDay = fromDay.AddDate(0, 0, -(int(fromDay.Weekday())+6)%7)
 	}
 	read := func(kind string) ([]pgstore.HeatCell, bool) {
-		cells, err := d.store.HeatCells(ctx, tenantID, projectID, path, device, kind, fromDay, maxHeatRead)
+		cells, err := d.store.HeatCells(ctx, tenantID, projectID, path, device, segment, source, kind, fromDay, maxHeatRead)
 		return cells, err == nil
 	}
 	clicks, okClicks := read("click")
@@ -565,7 +656,12 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	scroll, err := d.store.ScrollReach(ctx, tenantID, projectID, path, device, fromDay)
+	scroll, err := d.store.ScrollReach(ctx, tenantID, projectID, path, device, segment, source, fromDay)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	segments, err := d.store.Segments(ctx, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
@@ -581,6 +677,7 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		Hits:      hits,
 		Dead:      dead,
 		Scroll:    scroll[:],
+		Segments:  segments,
 		HeatPages: quota.HeatPages,
 	})
 }

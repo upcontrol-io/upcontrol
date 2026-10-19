@@ -584,7 +584,7 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 			if err := s.InsertPageview(ctx, tenantID, projectID, ts, map[string]string{"path": "/"}, "v"); err != nil {
 				t.Fatalf("seed page view on %s: %v", plan, err)
 			}
-			if err := s.AddHeat(ctx, tenantID, projectID, ts.Truncate(24*time.Hour), "/", "desktop",
+			if err := s.AddHeat(ctx, tenantID, projectID, ts.Truncate(24*time.Hour), "/", "desktop", "", "",
 				[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
 				t.Fatalf("seed heat on %s: %v", plan, err)
 			}
@@ -596,7 +596,7 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 	self, selfProject := seed("Self-hosted") // NULL = unlimited
 	// A weekly bucket whose Monday is 33 days old still holds days inside the
 	// 31: it goes once its last day does.
-	if err := s.AddHeat(ctx, agency, agencyProject, now.AddDate(0, 0, -33).Truncate(24*time.Hour), "/week", "desktop",
+	if err := s.AddHeat(ctx, agency, agencyProject, now.AddDate(0, 0, -33).Truncate(24*time.Hour), "/week", "desktop", "", "",
 		[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
 		t.Fatalf("seed Agency's straddling bucket: %v", err)
 	}

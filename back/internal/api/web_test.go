@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,13 +47,19 @@ type fakeWebStore struct {
 		tenant, project int64
 		day             time.Time
 		path, device    string
+		segment, source string
 		cells           []pgstore.HeatAdd
 	}
 	engageCalls []struct {
-		hour         time.Time
-		path, device string
-		add          pgstore.EngageAdd
+		hour            time.Time
+		path, device    string
+		segment, source string
+		add             pgstore.EngageAdd
 	}
+
+	admitted   []string // the project's segments, first come, at most 4
+	admitCalls int
+	readFilter [2]string // the segment and source the last read was narrowed to
 
 	salt      []byte
 	origins   []string
@@ -81,23 +88,41 @@ func (f *fakeWebStore) InsertPageview(_ context.Context, tenantID, projectID int
 	return nil
 }
 
-func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day time.Time, path, device string, cells []pgstore.HeatAdd) error {
+func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []pgstore.HeatAdd) error {
 	f.heatCalls = append(f.heatCalls, struct {
 		tenant, project int64
 		day             time.Time
 		path, device    string
+		segment, source string
 		cells           []pgstore.HeatAdd
-	}{tenantID, projectID, day, path, device, cells})
+	}{tenantID, projectID, day, path, device, segment, source, cells})
 	return nil
 }
 
-func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device string, add pgstore.EngageAdd) error {
+func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) error {
 	f.engageCalls = append(f.engageCalls, struct {
-		hour         time.Time
-		path, device string
-		add          pgstore.EngageAdd
-	}{hour, path, device, add})
+		hour            time.Time
+		path, device    string
+		segment, source string
+		add             pgstore.EngageAdd
+	}{hour, path, device, segment, source, add})
 	return nil
+}
+
+func (f *fakeWebStore) AdmitSegment(_ context.Context, _ int64, name string) (bool, error) {
+	f.admitCalls++
+	if slices.Contains(f.admitted, name) {
+		return true, nil
+	}
+	if len(f.admitted) >= 4 {
+		return false, nil
+	}
+	f.admitted = append(f.admitted, name)
+	return true, nil
+}
+
+func (f *fakeWebStore) Segments(context.Context, int64) ([]string, error) {
+	return append([]string{}, f.admitted...), nil
 }
 
 func (f *fakeWebStore) DailySalt(_ context.Context, _ time.Time) ([]byte, error) {
@@ -122,17 +147,20 @@ func (f *fakeWebStore) ResolveHeatmapLink(_ context.Context, _ []byte) (int64, i
 	return 7, 9, true, nil
 }
 
-func (f *fakeWebStore) PageviewCount(context.Context, int64, int64, string, string, time.Time) (int64, error) {
+func (f *fakeWebStore) PageviewCount(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) (int64, error) {
+	f.readFilter = [2]string{segment, source}
 	return f.views, nil
 }
 
 // HeatCells answers [] for a kind with no cells, never nil, as the real store does.
-func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, kind string, fromDay time.Time, _ int) ([]pgstore.HeatCell, error) {
+func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, segment, source, kind string, fromDay time.Time, _ int) ([]pgstore.HeatCell, error) {
 	f.heatFrom = fromDay
+	f.readFilter = [2]string{segment, source}
 	return append([]pgstore.HeatCell{}, f.cells[kind]...), nil
 }
 
-func (f *fakeWebStore) ScrollReach(context.Context, int64, int64, string, string, time.Time) ([21]int64, error) {
+func (f *fakeWebStore) ScrollReach(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) ([21]int64, error) {
+	f.readFilter = [2]string{segment, source}
 	return f.scroll, nil
 }
 
@@ -723,5 +751,105 @@ func TestCollectEngage(t *testing.T) {
 	postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/","w":1200,"e":0,"s":0.5}`, origin)
 	if len(store.engageCalls) != 0 || len(store.heatCalls) != 1 {
 		t.Errorf("%d AddEngage, %d AddHeat calls; want none and the scroll", len(store.engageCalls), len(store.heatCalls))
+	}
+}
+
+func TestValidSegment(t *testing.T) {
+	for s, want := range map[string]bool{
+		"member": true, "trial_2": true, "a-b": true, "abc123": true, strings.Repeat("a", 24): true,
+		"": false, strings.Repeat("a", 25): false, "Member": false, "a b": false, "pro.": false,
+		"u1234": false, "2026": false, "x123y456": true,
+	} {
+		if got := validSegment(s); got != want {
+			t.Errorf("validSegment(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// g and o ride a view's labels and every heat and engage write; an invalid
+// one, or a segment past the project's four, is stored as none, never a 400.
+func TestCollectSegmentAndSource(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct {
+		name, g, o           string
+		admitted             []string
+		wantSegment, wantSrc string
+	}{
+		{"admitted", "member", "search", nil, "member", "search"},
+		{"invalid g and o", "user_12345", "google", nil, "", ""},
+		{"a fifth name", "fifth", "direct", []string{"a", "b", "c", "d"}, "", "direct"},
+		{"one of the four", "c", "", []string{"a", "b", "c", "d"}, "c", ""},
+	} {
+		store := &fakeWebStore{admitted: tc.admitted}
+		d := newTestDoor(publicWebTenant(), store, nil)
+		view := fmt.Sprintf(`{"v":2,"t":"view","p":"/","w":1200,"g":%q,"o":%q}`, tc.g, tc.o)
+		heat := fmt.Sprintf(`{"v":2,"t":"heat","p":"/","w":1200,"g":%q,"o":%q,"s":0.5,"e":1000}`, tc.g, tc.o)
+		for _, body := range []string{view, heat} {
+			if rr := postBeacon(t, d, body, origin); rr.Code != http.StatusNoContent {
+				t.Fatalf("%s: status %d: %s", tc.name, rr.Code, rr.Body.String())
+			}
+		}
+		labels := store.pageviews[0].labels
+		if got, ok := labels["segment"]; got != tc.wantSegment || ok != (tc.wantSegment != "") {
+			t.Errorf("%s: labels segment = %q (%v), want %q", tc.name, got, ok, tc.wantSegment)
+		}
+		if got, ok := labels["source"]; got != tc.wantSrc || ok != (tc.wantSrc != "") {
+			t.Errorf("%s: labels source = %q (%v), want %q", tc.name, got, ok, tc.wantSrc)
+		}
+		h, e := store.heatCalls[0], store.engageCalls[0]
+		if h.segment != tc.wantSegment || h.source != tc.wantSrc || e.segment != tc.wantSegment || e.source != tc.wantSrc {
+			t.Errorf("%s: heat (%q, %q), engage (%q, %q), want (%q, %q)", tc.name, h.segment, h.source, e.segment, e.source, tc.wantSegment, tc.wantSrc)
+		}
+	}
+}
+
+// A site marking every beacon asks the store once per name per ten minutes,
+// refusals included.
+func TestCollectCachesSegmentAdmission(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	store := &fakeWebStore{admitted: []string{"a", "b", "c", "d"}}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	clock := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	for range 5 {
+		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
+		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"fifth"}`, origin)
+	}
+	if store.admitCalls != 2 {
+		t.Fatalf("%d AdmitSegment calls for 10 beacons of two names, want 2", store.admitCalls)
+	}
+	clock = clock.Add(segmentTTL + time.Second)
+	postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
+	if store.admitCalls != 3 {
+		t.Fatalf("%d AdmitSegment calls past the TTL, want the name asked again", store.admitCalls)
+	}
+}
+
+// The read narrows by segment and source, lists the project's segments, and
+// refuses a filter it could never match.
+func TestHeatmapSegmentAndSource(t *testing.T) {
+	store := fakeReadStore()
+	store.admitted = []string{"member", "anon"}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+	rr := getHeatmap(t, d, base+"&segment=member&source=social", nil)
+	var out heatOut
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &out) != nil {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if store.readFilter != [2]string{"member", "social"} {
+		t.Errorf("reads narrowed to %v, want member, social", store.readFilter)
+	}
+	if !slices.Equal(out.Segments, []string{"member", "anon"}) {
+		t.Errorf("segments = %v, want the project's two, oldest first", out.Segments)
+	}
+	store.admitted = nil
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"segments":[]`) || store.readFilter != [2]string{} {
+		t.Errorf("no filter: %s, reads narrowed to %v; want segments [] and no filter", rr.Body.String(), store.readFilter)
+	}
+	for _, bad := range []string{"&segment=Member", "&segment=u12345", "&source=google"} {
+		if rr := getHeatmap(t, d, base+bad, nil); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "bad_request") {
+			t.Errorf("%s: %d %s, want 400 bad_request", bad, rr.Code, rr.Body.String())
+		}
 	}
 }

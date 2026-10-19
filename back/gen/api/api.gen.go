@@ -948,6 +948,33 @@ func (e WatchStatus) Valid() bool {
 	}
 }
 
+// Defines values for WebBeaconO.
+const (
+	WebBeaconOCampaign WebBeaconO = "campaign"
+	WebBeaconODirect   WebBeaconO = "direct"
+	WebBeaconOReferral WebBeaconO = "referral"
+	WebBeaconOSearch   WebBeaconO = "search"
+	WebBeaconOSocial   WebBeaconO = "social"
+)
+
+// Valid indicates whether the value is a known member of the WebBeaconO enum.
+func (e WebBeaconO) Valid() bool {
+	switch e {
+	case WebBeaconOCampaign:
+		return true
+	case WebBeaconODirect:
+		return true
+	case WebBeaconOReferral:
+		return true
+	case WebBeaconOSearch:
+		return true
+	case WebBeaconOSocial:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for WebBeaconT.
 const (
 	Heat WebBeaconT = "heat"
@@ -1083,6 +1110,36 @@ func (e GetWHeatmapParamsRange) Valid() bool {
 	case GetWHeatmapParamsRangeN31d:
 		return true
 	case GetWHeatmapParamsRangeN7d:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetWHeatmapParamsSource.
+const (
+	GetWHeatmapParamsSourceCampaign GetWHeatmapParamsSource = "campaign"
+	GetWHeatmapParamsSourceDirect   GetWHeatmapParamsSource = "direct"
+	GetWHeatmapParamsSourceEmpty    GetWHeatmapParamsSource = ""
+	GetWHeatmapParamsSourceReferral GetWHeatmapParamsSource = "referral"
+	GetWHeatmapParamsSourceSearch   GetWHeatmapParamsSource = "search"
+	GetWHeatmapParamsSourceSocial   GetWHeatmapParamsSource = "social"
+)
+
+// Valid indicates whether the value is a known member of the GetWHeatmapParamsSource enum.
+func (e GetWHeatmapParamsSource) Valid() bool {
+	switch e {
+	case GetWHeatmapParamsSourceCampaign:
+		return true
+	case GetWHeatmapParamsSourceDirect:
+		return true
+	case GetWHeatmapParamsSourceEmpty:
+		return true
+	case GetWHeatmapParamsSourceReferral:
+		return true
+	case GetWHeatmapParamsSourceSearch:
+		return true
+	case GetWHeatmapParamsSourceSocial:
 		return true
 	default:
 		return false
@@ -1536,6 +1593,9 @@ type Heatmap struct {
 
 	// Scroll 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %.
 	Scroll []int `json:"scroll"`
+
+	// Segments The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by.
+	Segments []string `json:"segments"`
 
 	// Views Page views of this path on this device in the range: what every other number is read against.
 	Views int `json:"views"`
@@ -2171,7 +2231,7 @@ type SeriesQuery struct {
 	// Labels Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
 	Labels *map[string]string `json:"labels,omitempty"`
 
-	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path` and `where.device`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`. A web bucket older than the oldest one kept is null.
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null.
 	Name  *string          `json:"name,omitempty"`
 	Range SeriesQueryRange `json:"range"`
 
@@ -2490,11 +2550,17 @@ type WebBeacon struct {
 	// F view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label.
 	F *string `json:"f,omitempty"`
 
+	// G view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment.
+	G *string `json:"g,omitempty"`
+
 	// H heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element.
 	H *[]string `json:"h,omitempty"`
 
 	// M heat: at most 600 mouse cells as [selector, fx, fy, samples], sampled every 100 ms on a fine pointer that can hover.
 	M *[][]interface{} `json:"m,omitempty"`
+
+	// O view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+	O *WebBeaconO `json:"o,omitempty"`
 
 	// P location.pathname, at most 256 bytes.
 	P string `json:"p"`
@@ -2515,6 +2581,9 @@ type WebBeacon struct {
 	// W window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop.
 	W int `json:"w"`
 }
+
+// WebBeaconO view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+type WebBeaconO string
 
 // WebBeaconT defines model for WebBeacon.T.
 type WebBeaconT string
@@ -2763,10 +2832,19 @@ type GetWHeatmapParams struct {
 
 	// Range Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used.
 	Range *GetWHeatmapParamsRange `form:"range,omitempty" json:"range,omitempty"`
+
+	// Segment Only the views the site marked with this segment. Absent or empty: every view, marked or not.
+	Segment *string `form:"segment,omitempty" json:"segment,omitempty"`
+
+	// Source Only the views whose page load came from this kind of source. Absent or empty: every view.
+	Source *GetWHeatmapParamsSource `form:"source,omitempty" json:"source,omitempty"`
 }
 
 // GetWHeatmapParamsRange defines parameters for GetWHeatmap.
 type GetWHeatmapParamsRange string
+
+// GetWHeatmapParamsSource defines parameters for GetWHeatmap.
+type GetWHeatmapParamsSource string
 
 // PostHooksProviderJSONRequestBody defines body for PostHooksProvider for application/json ContentType.
 type PostHooksProviderJSONRequestBody PostHooksProviderJSONBody

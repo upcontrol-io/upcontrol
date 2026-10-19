@@ -70,6 +70,32 @@ Never add the tag twice, never in a component that mounts per page, never
 behind a consent gate that does not exist. The script sets no cookies and
 stores nothing, so it needs no banner of its own.
 
+## Mark signed-in visitors (when the site has sign-in)
+
+The script cannot tell a member from a stranger, or new from returning: it
+keeps nothing on the device. If the site has accounts, tell it, so the owner
+can read the map of members and of anonymous visitors apart:
+
+- A server-rendered layout that knows the session: add
+  `data-segment="member"` or `data-segment="anon"` to the same tag.
+- A single-page app: put the queue stub before the tag, then call it when the
+  session is known and again on sign-in and sign-out:
+
+  ```html
+  <script>window.upcontrol=window.upcontrol||function(){(upcontrol.q=upcontrol.q||[]).push(arguments)};</script>
+  ```
+
+  ```js
+  upcontrol('segment', user ? 'member' : 'anon');
+  ```
+
+A segment is 1-24 of `a-z`, `0-9`, `_` and `-`, never an id, an email or a
+name, and a project keeps its first four, so pick them on purpose (`member`,
+`anon`, `trial`, `new` for an account younger than a week). Never send a test
+value from a dev machine: it takes one of the four for good. The source of a
+visit (search, social, campaign, referral, direct) is worked out by the script
+itself and needs nothing.
+
 ## Verify
 
 Ask the user to open the site once in their own browser, then run
@@ -99,7 +125,8 @@ countries, devices, the page each view came from, and engaged time per page
 (the tab visible and in use); heatmaps of clicks, rage clicks, dead clicks,
 mouse movement and scroll depth per page and device, opened from the Heatmap
 card onto the live site, where hovering an element shows how many views
-clicked it.
+clicked it, and where the map filters by segment (when the site marks them)
+and by the kind of source the visit came from.
 A plan records a number of visits a month: past it the tag records nothing
 until the next month and the app says so. Heatmaps are kept for the plan's
 busiest pages.

@@ -21,6 +21,8 @@ type Beacon = {
 	r?: string;
 	q?: string;
 	f?: string;
+	g?: string;
+	o?: string;
 	e?: number;
 	a?: number[];
 	h?: string[];
@@ -30,14 +32,17 @@ type Beacon = {
 	m?: MoveCell[];
 };
 
-const site = (body: string) =>
-	`<!doctype html><html><head>` +
-	`<script defer src="https://api.test/uc.js" data-key="uc_pub_test"></script>` +
+// attrs go on the script tag; head is markup before it.
+type SiteOpts = { attrs?: string; head?: string };
+
+const site = (body: string, { attrs = "", head = "" }: SiteOpts = {}) =>
+	`<!doctype html><html><head>${head}` +
+	`<script defer src="https://api.test/uc.js" data-key="uc_pub_test"${attrs}></script>` +
 	`</head><body>${body}</body></html>`;
 
 // Serve the script, capture every /w beacon, and host the given page body on
 // https://site.test/. Returns the beacon list the tests poll.
-async function serve(page: Page, body: string) {
+async function serve(page: Page, body: string, opts?: SiteOpts) {
 	const beacons: Beacon[] = [];
 	await page.route("https://api.test/uc.js", (route) =>
 		route.fulfill({ contentType: "text/javascript", body: SCRIPT }));
@@ -46,7 +51,7 @@ async function serve(page: Page, body: string) {
 		return route.fulfill({ status: 204 });
 	});
 	await page.route("https://site.test/**", (route) =>
-		route.fulfill({ contentType: "text/html", body: site(body) }));
+		route.fulfill({ contentType: "text/html", body: site(body, opts) }));
 	return beacons;
 }
 
@@ -415,5 +420,142 @@ test("hovering under the overlay names an element's numbers", async ({ page }) =
 	await page.locator("#buy").hover();
 	await expect(page.getByText(/% of views reached here/)).toBeVisible();
 	expect(beacons).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("data-segment on the tag marks the view", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>", { attrs: ' data-segment="member"' });
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	expect(beacons[0].g).toBe("member");
+	expect(errors).toEqual([]);
+});
+
+test("a segment queued before the script loads marks the first view", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>", {
+		head:
+			"<script>window.upcontrol=window.upcontrol||function(){(upcontrol.q=upcontrol.q||[]).push(arguments)};" +
+			"upcontrol('nonsense', 1);upcontrol('segment','trial');</script>",
+	});
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	expect(beacons[0].g).toBe("trial");
+	expect(errors).toEqual([]);
+});
+
+test("a segment change reports the heat gathered before it under the old one", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<button id="a">A</button> <button id="b">B</button>');
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	await page.locator("#a").click();
+	await page.evaluate(() =>
+		(window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol("segment", "member"));
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	await page.locator("#b").click();
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(2);
+	const [before, after] = heats(beacons);
+	expect(before.g).toBeUndefined();
+	expect(before.c!.map((c) => c[0])).toEqual(["#a"]);
+	expect(after.g).toBe("member");
+	expect(after.c!.map((c) => c[0])).toEqual(["#b"]);
+	expect(beacons.filter((b) => b.t === "view")).toHaveLength(1); // the view is not re-sent
+	expect(errors).toEqual([]);
+});
+
+test("an invalid segment is ignored with one warning", async ({ page }) => {
+	const errors = watch(page);
+	const warnings: string[] = [];
+	page.on("console", (m) => { if (m.type() === "warning") warnings.push(m.text()); });
+	const beacons = await serve(page, '<button id="a">A</button>', { attrs: ' data-segment="member"' });
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	await page.evaluate(() => {
+		const uc = (window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol;
+		uc("segment", "User_12345");
+		uc("segment", "Member");
+	});
+	await page.locator("#a").click();
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	expect(heats(beacons)[0].g).toBe("member");
+	expect(warnings).toEqual(["[upcontrol] segment must be 1-24 of a-z, 0-9, _ and -: User_12345"]);
+	expect(errors).toEqual([]);
+});
+
+for (const [name, url, referer, o] of [
+	["a search engine", "https://site.test/", "https://www.google.com/", "search"],
+	["a UTM tag", "https://site.test/?utm_source=x", "https://www.google.com/", "campaign"],
+	["no referrer", "https://site.test/", undefined, "direct"],
+	["another site", "https://site.test/", "https://news.example/", "referral"],
+] as const) {
+	test(`the source of a load from ${name} is ${o}, on views and heat`, async ({ page }) => {
+		const errors = watch(page);
+		const beacons = await serve(page, '<button id="a">A</button>');
+		await page.goto(url, { referer });
+		await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+		expect(beacons[0].o).toBe(o);
+		await page.locator("#a").click();
+		await hide(page);
+		await expect.poll(() => heats(beacons)).toHaveLength(1);
+		expect(heats(beacons)[0].o).toBe(o);
+		expect(errors).toEqual([]);
+	});
+}
+
+async function heatmapWith(page: Page, segments: string[]) {
+	const urls: string[] = [];
+	await page.route(/api\.test\/w\/heatmap/, (route) => {
+		urls.push(route.request().url());
+		return route.fulfill({
+			contentType: "application/json",
+			headers: { "Access-Control-Allow-Origin": "https://site.test" },
+			body: JSON.stringify({
+				path: "/", device: "desktop", range: "7d", views: 1234,
+				clicks: [], rage: [], moves: [], hits: [], dead: [], segments,
+				scroll: Array.from({ length: 21 }, () => 0),
+			}),
+		});
+	});
+	return urls;
+}
+
+test("the overlay filters by segment and source", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<button id="buy">Buy</button>');
+	const urls = await heatmapWith(page, ["member", "anon"]);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	expect(urls[0]).not.toContain("segment=");
+	expect(urls[0]).not.toContain("source=");
+	await page.getByRole("combobox", { name: "Segment" }).selectOption("member");
+	await expect(page.getByText("1,234 desktop views · 7 days · member")).toBeVisible();
+	expect(urls.at(-1)).toContain("segment=member");
+	await page.getByRole("combobox", { name: "Source" }).selectOption("campaign");
+	await expect(page.getByText("1,234 desktop views · 7 days · member · from campaign")).toBeVisible();
+	expect(urls.at(-1)).toContain("segment=member");
+	expect(urls.at(-1)).toContain("source=campaign");
+	// A route change keeps both filters.
+	await page.evaluate(() => history.pushState({}, "", "/next"));
+	await expect.poll(() => urls.at(-1)).toContain("path=%2Fnext");
+	expect(urls.at(-1)).toContain("segment=member");
+	expect(urls.at(-1)).toContain("source=campaign");
+	expect(beacons).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("the overlay offers no segment filter for a site that sets none", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button>');
+	await heatmapWith(page, []);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	await expect(page.getByRole("combobox", { name: "Segment" })).toHaveCount(0);
+	await expect(page.getByRole("combobox", { name: "Source" })).toBeVisible();
+	await page.evaluate(() =>
+		(window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol("segment", "member"));
 	expect(errors).toEqual([]);
 });

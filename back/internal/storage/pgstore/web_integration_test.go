@@ -88,7 +88,7 @@ func TestCompactWeb(t *testing.T) {
 	date := func(d int) time.Time { return time.Date(2026, 9, d, 0, 0, 0, 0, time.UTC) }
 	heat := func(tenant, project int64, day time.Time, path string, cells ...HeatAdd) {
 		t.Helper()
-		if err := s.AddHeat(ctx, tenant, project, day, path, "desktop", cells); err != nil {
+		if err := s.AddHeat(ctx, tenant, project, day, path, "desktop", "", "", cells); err != nil {
 			t.Fatalf("seed heat: %v", err)
 		}
 	}
@@ -197,7 +197,7 @@ func TestCompactWeb(t *testing.T) {
 		from time.Time
 		want int64
 	}{{date(7), 12}, {date(8), 5}} {
-		cells, err := s.HeatCells(ctx, agency, site, "/", "desktop", "click", c.from, 10)
+		cells, err := s.HeatCells(ctx, agency, site, "/", "desktop", "", "", "click", c.from, 10)
 		if err != nil || len(cells) != 1 || cells[0].N != c.want {
 			t.Fatalf("HeatCells from %s = %+v (%v), want one cell of %d", c.from.Format(time.DateOnly), cells, err, c.want)
 		}
@@ -220,7 +220,7 @@ func TestWebEngageCountsStoredViewsAndSums(t *testing.T) {
 		}
 	}
 	for _, add := range []EngageAdd{{MS: 4000, R10: 1}, {MS: 26000, R10: 0, R30: 1}} {
-		if err := s.AddEngage(ctx, tenant, project, hour, "/docs", "mobile", add); err != nil {
+		if err := s.AddEngage(ctx, tenant, project, hour, "/docs", "mobile", "", "", add); err != nil {
 			t.Fatalf("engage: %v", err)
 		}
 	}
@@ -252,7 +252,7 @@ func TestWebSeriesReads(t *testing.T) {
 	}
 	engage := func(at time.Time, path, device string, add EngageAdd) {
 		t.Helper()
-		if err := s.AddEngage(ctx, tenant, project, at.Truncate(time.Hour), path, device, add); err != nil {
+		if err := s.AddEngage(ctx, tenant, project, at.Truncate(time.Hour), path, device, "", "", add); err != nil {
 			t.Fatalf("engage: %v", err)
 		}
 	}
@@ -265,7 +265,7 @@ func TestWebSeriesReads(t *testing.T) {
 	view(h5, "/docs", "mobile")
 	engage(h5, "/docs", "mobile", EngageAdd{MS: 90000, R10: 1, R30: 1})
 
-	all, err := s.EngageBuckets(ctx, tenant, project, "", "", from, from.Add(6*time.Hour), 3600)
+	all, err := s.EngageBuckets(ctx, tenant, project, "", "", "", "", from, from.Add(6*time.Hour), 3600)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("buckets = %+v (%v), want hours 2 and 5", all, err)
 	}
@@ -275,14 +275,14 @@ func TestWebSeriesReads(t *testing.T) {
 	if b := all[1]; b.Index != 5 || b.Views != 1 || b.MS != 90000 || b.R != [4]int64{1, 1, 0, 0} {
 		t.Errorf("hour 5 = %+v", b)
 	}
-	if mobile, err := s.EngageBuckets(ctx, tenant, project, "", "mobile", from, from.Add(6*time.Hour), 3600); err != nil || len(mobile) != 1 || mobile[0].Index != 5 {
+	if mobile, err := s.EngageBuckets(ctx, tenant, project, "", "mobile", "", "", from, from.Add(6*time.Hour), 3600); err != nil || len(mobile) != 1 || mobile[0].Index != 5 {
 		t.Errorf("mobile buckets = %+v (%v), want hour 5 alone", mobile, err)
 	}
-	if one, err := s.EngageBuckets(ctx, tenant, project, "/", "", from, from.Add(6*time.Hour), 6*3600); err != nil || len(one) != 1 || one[0].Views != 2 {
+	if one, err := s.EngageBuckets(ctx, tenant, project, "/", "", "", "", from, from.Add(6*time.Hour), 6*3600); err != nil || len(one) != 1 || one[0].Views != 2 {
 		t.Errorf("/ in one bucket = %+v (%v), want its 2 views", one, err)
 	}
 
-	paths, err := s.EngagePaths(ctx, tenant, project, "", from, from.Add(6*time.Hour))
+	paths, err := s.EngagePaths(ctx, tenant, project, "", "", "", from, from.Add(6*time.Hour))
 	if err != nil || len(paths) != 2 || paths[0].Labels["path"] != "/docs" || paths[0].Sum != 90 || paths[1].Sum != 15 {
 		t.Fatalf("engaged pages = %+v (%v), want /docs at 90 s then / at 15 s", paths, err)
 	}
@@ -292,18 +292,18 @@ func TestWebSeriesReads(t *testing.T) {
 		path string
 		n    int64
 	}{{from, "/", 2}, {from, "/docs", 5}, {from.AddDate(0, 0, -1), "/", 10}} {
-		if err := s.AddHeat(ctx, tenant, project, c.day, c.path, "desktop", []HeatAdd{{Kind: "rage", Selector: "a", N: c.n}, {Kind: "click", Selector: "a", N: 100}}); err != nil {
+		if err := s.AddHeat(ctx, tenant, project, c.day, c.path, "desktop", "", "", []HeatAdd{{Kind: "rage", Selector: "a", N: c.n}, {Kind: "click", Selector: "a", N: 100}}); err != nil {
 			t.Fatalf("heat: %v", err)
 		}
 	}
-	rage, err := s.HeatPaths(ctx, tenant, project, "rage", "", from)
+	rage, err := s.HeatPaths(ctx, tenant, project, "rage", "", "", "", from)
 	if err != nil || len(rage) != 2 || rage[0].Labels["path"] != "/docs" || rage[0].Sum != 5 || rage[1].Sum != 2 {
 		t.Fatalf("rage pages from the day = %+v (%v), want /docs 5 then / 2", rage, err)
 	}
-	if rage, err = s.HeatPaths(ctx, tenant, project, "rage", "", from.AddDate(0, 0, -1)); err != nil || rage[0].Labels["path"] != "/" || rage[0].Sum != 12 {
+	if rage, err = s.HeatPaths(ctx, tenant, project, "rage", "", "", "", from.AddDate(0, 0, -1)); err != nil || rage[0].Labels["path"] != "/" || rage[0].Sum != 12 {
 		t.Fatalf("rage pages from the day before = %+v (%v), want / at 12 first", rage, err)
 	}
-	if mobile, err := s.HeatPaths(ctx, tenant, project, "rage", "mobile", from); err != nil || len(mobile) != 0 {
+	if mobile, err := s.HeatPaths(ctx, tenant, project, "rage", "mobile", "", "", from); err != nil || len(mobile) != 0 {
 		t.Fatalf("mobile rage pages = %+v (%v), want none", mobile, err)
 	}
 }
@@ -316,7 +316,7 @@ func TestTrimHistoryDropsOldWebEngage(t *testing.T) {
 	tenant, project := seedWebTenant(t, pool, "Agency") // 365 days, 31 on the web
 	now := time.Now().UTC().Truncate(time.Hour)
 	for _, hour := range []time.Time{now.AddDate(0, 0, -40), now.Add(-time.Hour)} {
-		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", EngageAdd{MS: 1000}); err != nil {
+		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", "", "", EngageAdd{MS: 1000}); err != nil {
 			t.Fatalf("engage: %v", err)
 		}
 	}
@@ -330,5 +330,180 @@ func TestTrimHistoryDropsOldWebEngage(t *testing.T) {
 	}
 	if left != 1 || !oldest.Equal(now.Add(-time.Hour)) {
 		t.Fatalf("%d rows left from %v, want the fresh one alone", left, oldest)
+	}
+}
+
+// A project keeps its first four segments: a fifth is refused, an admitted
+// one answers yes again, and the list reads oldest first.
+func TestAdmitSegment(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	_, project := seedWebTenant(t, pool, "Agency")
+	_, other := seedWebTenant(t, pool, "Agency")
+	for _, name := range []string{"zeta", "alpha", "mid", "beta"} {
+		if ok, err := s.AdmitSegment(ctx, project, name); err != nil || !ok {
+			t.Fatalf("admit %s = %v (%v), want admitted", name, ok, err)
+		}
+	}
+	if ok, err := s.AdmitSegment(ctx, project, "fifth"); err != nil || ok {
+		t.Fatalf("a fifth name = %v (%v), want refused", ok, err)
+	}
+	if ok, err := s.AdmitSegment(ctx, project, "alpha"); err != nil || !ok {
+		t.Fatalf("an admitted name again = %v (%v), want admitted", ok, err)
+	}
+	if ok, err := s.AdmitSegment(ctx, other, "fifth"); err != nil || !ok {
+		t.Fatalf("another project's first name = %v (%v), want admitted: the cap is per project", ok, err)
+	}
+	got, err := s.Segments(ctx, project)
+	if err != nil || fmt.Sprint(got) != "[zeta alpha mid beta]" {
+		t.Fatalf("segments = %v (%v), want the four oldest first", got, err)
+	}
+	if none, err := s.Segments(ctx, 0); err != nil || none == nil || len(none) != 0 {
+		t.Fatalf("no segments = %#v (%v), want []", none, err)
+	}
+}
+
+// The heatmap reads narrow by segment and source when asked, and sum across
+// every one of them when not.
+func TestHeatReadsBySegment(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	day := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	for i, v := range []struct{ segment, source string }{{"member", "search"}, {"member", ""}, {"", "search"}} {
+		labels := map[string]string{"path": "/", "device": "desktop"}
+		if v.segment != "" {
+			labels["segment"] = v.segment
+		}
+		if v.source != "" {
+			labels["source"] = v.source
+		}
+		if err := s.InsertPageview(ctx, tenant, project, day.Add(time.Hour), labels, fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+		if err := s.AddHeat(ctx, tenant, project, day, "/", "desktop", v.segment, v.source, []HeatAdd{
+			{Kind: "click", Selector: "a", FX: 1, FY: 1, N: int64(i + 1)},
+			{Kind: "scroll", FY: 20, N: 1},
+		}); err != nil {
+			t.Fatalf("heat: %v", err)
+		}
+	}
+	for _, c := range []struct {
+		segment, source   string
+		views, clicks, sc int64
+	}{{"", "", 3, 6, 3}, {"member", "", 2, 3, 2}, {"", "search", 2, 4, 2}, {"member", "search", 1, 1, 1}, {"anon", "", 0, 0, 0}} {
+		views, err := s.PageviewCount(ctx, tenant, project, "/", "desktop", c.segment, c.source, day)
+		if err != nil || views != c.views {
+			t.Errorf("(%q, %q) views = %d (%v), want %d", c.segment, c.source, views, err, c.views)
+		}
+		cells, err := s.HeatCells(ctx, tenant, project, "/", "desktop", c.segment, c.source, "click", day, 10)
+		var clicks int64
+		for _, cell := range cells {
+			clicks += cell.N
+		}
+		if err != nil || clicks != c.clicks || len(cells) > 1 {
+			t.Errorf("(%q, %q) clicks = %+v (%v), want one cell of %d", c.segment, c.source, cells, err, c.clicks)
+		}
+		reach, err := s.ScrollReach(ctx, tenant, project, "/", "desktop", c.segment, c.source, day)
+		if err != nil || reach[0] != c.sc {
+			t.Errorf("(%q, %q) scroll reach = %d (%v), want %d", c.segment, c.source, reach[0], err, c.sc)
+		}
+	}
+}
+
+// The weekly fold keeps segments apart, and a completed day's cell cap counts
+// every segment together: two segments cost no more rows than one.
+func TestCompactWebKeepsSegmentsApartAndCapsAcross(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	today := time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC)
+	date := func(d int) time.Time { return time.Date(2026, 9, d, 0, 0, 0, 0, time.UTC) }
+	heat := func(day time.Time, path, segment string, cells ...HeatAdd) {
+		t.Helper()
+		if err := s.AddHeat(ctx, tenant, project, day, path, "desktop", segment, "", cells); err != nil {
+			t.Fatalf("seed heat: %v", err)
+		}
+	}
+	with := func(n int64) HeatAdd { return HeatAdd{Kind: "click", Selector: "a", FX: 1, FY: 1, N: n} }
+	heat(date(7), "/", "member", with(4))
+	heat(date(8), "/", "anon", with(1))
+	heat(date(10), "/", "member", with(2))
+	// 2 x MaxClickCells cells, interleaved by n across the two segments.
+	var member, anon []HeatAdd
+	for i := range MaxClickCells {
+		member = append(member, HeatAdd{Kind: "click", Selector: fmt.Sprintf("m%d", i), N: int64(2*i + 2)})
+		anon = append(anon, HeatAdd{Kind: "click", Selector: fmt.Sprintf("a%d", i), N: int64(2*i + 1)})
+	}
+	heat(date(18), "/capped", "member", member...)
+	heat(date(18), "/capped", "anon", anon...)
+
+	for run := 1; run <= 2; run++ {
+		if err := s.CompactWeb(ctx, today); err != nil {
+			t.Fatalf("run %d: compact: %v", run, err)
+		}
+		var buckets string
+		if err := pool.QueryRow(ctx, `SELECT string_agg(segment || '=' || n, ',' ORDER BY segment) FROM web_heat
+			WHERE tenant_id = $1 AND path = '/' AND day = $2`, tenant, date(7)).Scan(&buckets); err != nil || buckets != "anon=1,member=6" {
+			t.Fatalf("run %d: Monday's buckets = %q (%v), want anon 1 and member 4+2 apart", run, buckets, err)
+		}
+		var kept, coldest int64
+		if err := pool.QueryRow(ctx, `SELECT count(*), coalesce(min(n), 0) FROM web_heat WHERE tenant_id = $1 AND path = '/capped' AND day = $2`,
+			tenant, date(18)).Scan(&kept, &coldest); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if kept != MaxClickCells || coldest != MaxClickCells+1 {
+			t.Fatalf("run %d: %d cells left, coldest %d; want the %d hottest across both segments, from %d", run, kept, coldest, MaxClickCells, MaxClickCells+1)
+		}
+	}
+}
+
+// A page view's engage row and the heat beacon's engaged time land on the same
+// row per segment and source, and the reads narrow by them.
+func TestWebEngageSplitsBySegmentAndSource(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	at := time.Date(2026, 9, 18, 10, 20, 0, 0, time.UTC)
+	hour := at.Truncate(time.Hour)
+	for i, v := range []struct{ segment, source string }{{"member", "search"}, {"member", "search"}, {"", ""}} {
+		labels := map[string]string{"path": "/", "device": "desktop"}
+		if v.segment != "" {
+			labels["segment"], labels["source"] = v.segment, v.source
+		}
+		if err := s.InsertPageview(ctx, tenant, project, at, labels, fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", v.segment, v.source, EngageAdd{MS: 10000, R10: 1}); err != nil {
+			t.Fatalf("engage: %v", err)
+		}
+	}
+	var rows int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM web_engage WHERE tenant_id = $1`, tenant).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("%d engage rows (%v), want one per segment and source", rows, err)
+	}
+	for _, c := range []struct {
+		segment, source string
+		views, ms       int64
+	}{{"", "", 3, 30000}, {"member", "", 2, 20000}, {"", "search", 2, 20000}, {"anon", "", 0, 0}} {
+		b, err := s.EngageBuckets(ctx, tenant, project, "", "", c.segment, c.source, hour, hour.Add(time.Hour), 3600)
+		var views, ms int64
+		for _, x := range b {
+			views, ms = views+x.Views, ms+x.MS
+		}
+		if err != nil || views != c.views || ms != c.ms {
+			t.Errorf("(%q, %q) = %d views %d ms (%v), want %d and %d", c.segment, c.source, views, ms, err, c.views, c.ms)
+		}
+	}
+	if paths, err := s.EngagePaths(ctx, tenant, project, "", "member", "search", hour, hour.Add(time.Hour)); err != nil || len(paths) != 1 || paths[0].Sum != 10 {
+		t.Errorf("member engaged pages = %+v (%v), want / at 10 s", paths, err)
+	}
+	if err := s.AddHeat(ctx, tenant, project, hour.Truncate(24*time.Hour), "/", "desktop", "member", "", []HeatAdd{{Kind: "rage", Selector: "a", N: 3}}); err != nil {
+		t.Fatalf("heat: %v", err)
+	}
+	for seg, want := range map[string]int{"member": 1, "anon": 0, "": 1} {
+		if rage, err := s.HeatPaths(ctx, tenant, project, "rage", "", seg, "", hour.Truncate(24*time.Hour)); err != nil || len(rage) != want {
+			t.Errorf("%q rage pages = %+v (%v), want %d", seg, rage, err, want)
+		}
 	}
 }
