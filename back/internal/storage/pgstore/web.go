@@ -384,6 +384,47 @@ func (s *Store) HeatCells(ctx context.Context, tenantID, projectID int64, path, 
 	return out, rows.Err()
 }
 
+// FormStat is one form field or form a heatmap read answers: the views that
+// focused, filled, submitted and left it, in the FormField contract's shape.
+type FormStat struct {
+	Selector string `json:"selector"`
+	Focus    int64  `json:"focus"`
+	Fill     int64  `json:"fill"`
+	Submit   int64  `json:"submit"`
+	Left     int64  `json:"left"`
+}
+
+// FormStats reads the form items since fromDay, one row per selector, most
+// focused first, capped at 200. An empty segment or source sums across all
+// of them.
+func (s *Store) FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([]FormStat, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT selector,
+		        coalesce(sum(n) FILTER (WHERE kind = 'ffocus'), 0),
+		        coalesce(sum(n) FILTER (WHERE kind = 'ffill'), 0),
+		        coalesce(sum(n) FILTER (WHERE kind = 'fsubmit'), 0),
+		        coalesce(sum(n) FILTER (WHERE kind = 'fleft'), 0)
+		   FROM web_heat
+		  WHERE tenant_id=$1 AND project_id=$2 AND path=$3 AND device=$4 AND day >= $5
+		    AND kind IN ('ffocus', 'ffill', 'fsubmit', 'fleft')
+		    AND ($6 = '' OR segment = $6) AND ($7 = '' OR source = $7)
+		  GROUP BY 1 ORDER BY 2 DESC, selector COLLATE "C" LIMIT 200`,
+		tenantID, projectID, path, device, fromDay, segment, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FormStat{}
+	for rows.Next() {
+		var f FormStat
+		if err := rows.Scan(&f.Selector, &f.Focus, &f.Fill, &f.Submit, &f.Left); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // ScrollReach reads the scroll fold as the overlay draws it: out[i] is the
 // page views whose deepest reach was at least i twentieths, cumulative from
 // the deepest.

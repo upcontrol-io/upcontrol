@@ -1560,6 +1560,19 @@ type Error struct {
 	} `json:"error"`
 }
 
+// FormField defines model for FormField.
+type FormField struct {
+	Fill  int `json:"fill"`
+	Focus int `json:"focus"`
+
+	// Left The views whose last focused field in an unsubmitted form was this one.
+	Left     int    `json:"left"`
+	Selector string `json:"selector"`
+
+	// Submit Non-zero on a form element: the views that submitted it.
+	Submit int `json:"submit"`
+}
+
 // HealthLine defines model for HealthLine.
 type HealthLine struct {
 	Segments    []HealthStatus `json:"segments"`
@@ -1586,6 +1599,9 @@ type Heatmap struct {
 	Clicks []HeatCell    `json:"clicks"`
 	Dead   []HeatCell    `json:"dead"`
 	Device HeatmapDevice `json:"device"`
+
+	// Forms Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`.
+	Forms []FormField `json:"forms"`
 
 	// HeatPages How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them.
 	HeatPages *int `json:"heatPages,omitempty"`
@@ -2562,6 +2578,9 @@ type WebBeacon struct {
 
 	// F view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label.
 	F *string `json:"f,omitempty"`
+
+	// Fm heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent.
+	Fm *[][]string `json:"fm,omitempty"`
 
 	// G view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment.
 	G *string `json:"g,omitempty"`

@@ -75,6 +75,7 @@ type fakeWebStore struct {
 	views     int64
 	cells     map[string][]pgstore.HeatCell
 	scroll    [21]int64
+	forms     []pgstore.FormStat
 	quota     pgstore.WebQuota
 	heatFrom  time.Time // the fromDay HeatCells was last asked for
 }
@@ -176,6 +177,12 @@ func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, segment, s
 func (f *fakeWebStore) ScrollReach(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) ([21]int64, error) {
 	f.readFilter = [2]string{segment, source}
 	return f.scroll, nil
+}
+
+// FormStats answers [] for no rows, never nil, as the real store does.
+func (f *fakeWebStore) FormStats(_ context.Context, _, _ int64, _, _, segment, source string, _ time.Time) ([]pgstore.FormStat, error) {
+	f.readFilter = [2]string{segment, source}
+	return append([]pgstore.FormStat{}, f.forms...), nil
 }
 
 func (f *fakeWebStore) HistoryRefusal(_ context.Context, _ int64, days int) (string, string, error) {
@@ -967,5 +974,62 @@ func TestCollectEventOverTheVisitCapStoresNothingQuietly(t *testing.T) {
 		map[string]string{"Origin": "https://example.com"})
 	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 || len(store.events) != 0 {
 		t.Errorf("%d %q, %d events; want a bare 204 storing nothing", rr.Code, rr.Body.String(), len(store.events))
+	}
+}
+
+// fm items land in web_heat under their f-kinds, one per kind and selector a
+// beacon; a malformed item is skipped, and the 101st is never read.
+func TestCollectFormItems(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	store := &fakeWebStore{}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/signup","w":1200,"fm":[
+		["focus","#email"],["focus","#email"],["fill","#email"],["submit","form#signup"],["left","#name"],
+		["blur","#email"],["focus",""],["focus"],["focus","#a","x"],[1,"#b"],["fill",2]
+	]}`, origin)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	for kind, want := range map[string]string{"ffocus": "#email", "ffill": "#email", "fsubmit": "form#signup", "fleft": "#name"} {
+		cells := heatCellsOf(t, store, kind)
+		if len(cells) != 1 || cells[0].Selector != want || cells[0].N != 1 || cells[0].FX != 0 || cells[0].FY != 0 {
+			t.Errorf("%s = %+v, want %s once at 0,0", kind, cells, want)
+		}
+	}
+	if n := len(store.heatCalls[0].cells); n != 4 {
+		t.Errorf("%d cells, want the 4 valid items: %+v", n, store.heatCalls[0].cells)
+	}
+
+	var b strings.Builder
+	b.WriteString(`{"v":2,"t":"heat","p":"/","w":1200,"fm":[`)
+	for i := range maxFormItems + 1 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `["focus","#f%d"]`, i)
+	}
+	b.WriteString(`]}`)
+	store = &fakeWebStore{}
+	postBeacon(t, newTestDoor(publicWebTenant(), store, nil), b.String(), origin)
+	if got := len(heatCellsOf(t, store, "ffocus")); got != maxFormItems {
+		t.Errorf("%d focus cells, want the %d cap", got, maxFormItems)
+	}
+}
+
+// The read answers the store's form stats under the same filters as the
+// heat, and [] when there are none.
+func TestHeatmapAnswersForms(t *testing.T) {
+	store := fakeReadStore()
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"forms":[]`) {
+		t.Errorf("no forms: %s, want forms as [] on the wire", rr.Body.String())
+	}
+	store.forms = []pgstore.FormStat{{Selector: "#email", Focus: 10, Fill: 8, Left: 2}}
+	rr := getHeatmap(t, d, base+"&segment=member&source=search", nil)
+	if !strings.Contains(rr.Body.String(), `"forms":[{"selector":"#email","focus":10,"fill":8,"submit":0,"left":2}]`) {
+		t.Errorf("body %s, want the store's one form field", rr.Body.String())
+	}
+	if store.readFilter != [2]string{"member", "search"} {
+		t.Errorf("form read narrowed to %v, want member, search", store.readFilter)
 	}
 }

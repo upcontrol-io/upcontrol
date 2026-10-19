@@ -65,6 +65,10 @@
 	var check = null; // the one dead-click candidate being watched
 	var hitSeen = new Set(); // selectors this view clicked
 	var hitNew = []; // of those, the ones not yet reported
+	var formSeen = new Set(); // 'kind selector' this view reported
+	var formNew = []; // of those, the [kind, selector] pairs not yet reported
+	var formLast = new Map(); // form -> the last field focused in it, this view
+	var formDone = new Set(); // forms this view submitted
 	var visible = document.visibilityState === 'visible';
 	var lastInput = performance.now(); // the page load counts as input
 	var engaged = 0; // engaged ms not yet reported
@@ -343,6 +347,56 @@
 		recent = live;
 	}, { capture: true, passive: true });
 
+	// Form analytics: which fields a view focused and filled, which form it
+	// submitted, and the field it left an unsubmitted form from. Only ever
+	// whether a field holds something, never what.
+	function field(t) {
+		if (!(t instanceof Element) || !t.matches('input,select,textarea')) return null;
+		if (t.localName === 'input' && /^(hidden|submit|button|reset|image)$/.test(t.type)) return null;
+		return formOf(t) ? t : null;
+	}
+
+	function formOf(el) {
+		return el.form || el.closest('form');
+	}
+
+	function formHit(kind, el) {
+		var s = sel(el);
+		if (!s) return;
+		var k = kind + ' ' + s;
+		if (formSeen.has(k) || formSeen.size >= 300) return;
+		formSeen.add(k);
+		formNew.push([kind, s]);
+	}
+
+	function onFill(e) {
+		var f = field(e.target);
+		if (!f) return;
+		if (f.type === 'checkbox' || f.type === 'radio' ? f.checked : f.value !== '') formHit('fill', f);
+	}
+
+	document.addEventListener('focusin', function (e) {
+		var f = field(e.target);
+		if (!f) return;
+		formHit('focus', f);
+		formLast.set(formOf(f), f);
+	}, true);
+	document.addEventListener('focusout', onFill, true);
+	document.addEventListener('change', onFill, true);
+	document.addEventListener('submit', function (e) {
+		if (!(e.target instanceof HTMLFormElement)) return;
+		formDone.add(e.target);
+		formHit('submit', e.target);
+	}, true);
+
+	// Abandonment, on a page close or a route change only: a reader who
+	// leaves the tab for a code in an email and comes back has not left.
+	function leave() {
+		formLast.forEach(function (f, form) {
+			if (!formDone.has(form)) formHit('left', f);
+		});
+	}
+
 	var lastMove = 0;
 	if (matchMedia('(hover: hover) and (pointer: fine)').matches) {
 		document.addEventListener('mousemove', function (e) {
@@ -384,7 +438,7 @@
 		var a = [];
 		while (aSent < THRESHOLDS.length && viewEngaged >= THRESHOLDS[aSent]) a.push(aSent++);
 		if (clicks.size === 0 && moves.size === 0 && dead.size === 0 && !hitNew.length &&
-			scrollSent && !e && !a.length) return;
+			!formNew.length && scrollSent && !e && !a.length) return;
 		var body = { v: 1, t: 'heat', p: path, w: innerWidth };
 		mark(body);
 		if (!scrollSent) {
@@ -394,6 +448,7 @@
 		if (e) { body.e = e; engaged -= e; }
 		if (a.length) body.a = a;
 		if (hitNew.length) body.h = hitNew;
+		if (formNew.length) body.fm = formNew.splice(0, 100);
 		var cArr = [], mArr = [], dArr = [];
 		clicks.forEach(function (v) { cArr.push(v); });
 		moves.forEach(function (v) { mArr.push(v); });
@@ -411,7 +466,7 @@
 			return true;
 		}
 		var json = JSON.stringify(body);
-		while (json.length > 30000 && (halve('m') || halve('d') || halve('c') || halve('h'))) {
+		while (json.length > 30000 && (halve('m') || halve('d') || halve('c') || halve('h') || halve('fm'))) {
 			json = JSON.stringify(body);
 		}
 		post(json);
@@ -430,11 +485,12 @@
 			lastInput = performance.now();
 		}
 	});
-	addEventListener('pagehide', flush);
+	addEventListener('pagehide', function () { leave(); flush(); });
 
 	function onRoute() {
 		if (location.pathname === path) return;
 		var from = path;
+		leave();
 		flush();
 		path = location.pathname;
 		scrollSent = false;
@@ -444,6 +500,10 @@
 		aSent = 0;
 		hitSeen.clear();
 		hitNew = [];
+		formSeen.clear();
+		formNew = [];
+		formLast.clear();
+		formDone.clear();
 		dead.clear();
 		lastInput = performance.now();
 		view(from);
@@ -503,9 +563,10 @@
 		var range = '';
 		var segment = ''; // the filters, '' for all; kept across loads and routes
 		var source = '';
-		var layers = { clicks: true, rage: false, dead: false, moves: false, scroll: false };
+		var layers = { clicks: true, rage: false, dead: false, moves: false, scroll: false, forms: false };
 		var hm = null;
 		var stats = new Map(); // selector -> { clicks, rage, dead, hits }, sums of n
+		var formStats = new Map(); // selector -> its hm.forms entry
 		var tipSel = null;
 		var tipEl = null;
 		var tipEv = null;
@@ -543,8 +604,9 @@
 			'a{color:#7ab0ff}' +
 			'.pill{position:fixed;z-index:2147483646;padding:3px 8px;border-radius:6px;background:rgba(22,24,29,.92);color:#f4f5f7;font:12px system-ui,sans-serif;white-space:nowrap;pointer-events:none}' +
 			'.outline{position:fixed;z-index:2147483646;box-sizing:border-box;border:1px dashed rgba(255,255,255,.9);box-shadow:0 0 0 1px rgba(0,0,0,.6);pointer-events:none}' +
+			'.badge{position:fixed;z-index:2147483646;transform:translateX(-100%);padding:2px 6px;border-radius:4px;background:rgba(22,24,29,.92);color:#f4f5f7;font:11px/1.35 system-ui,sans-serif;white-space:pre;pointer-events:none}' +
 			'</style>' +
-			'<div class="outline" hidden></div><div class="pill" hidden></div>' +
+			'<div class="outline" hidden></div><div class="pill" hidden></div><div class="badges"></div>' +
 			'<div class="bar">' +
 			'<div class="row head"><span class="title">UpControl heatmap</span><span class="path"></span>' +
 			'<button name="close" class="x" aria-label="Close">&#215;</button></div>' +
@@ -556,6 +618,7 @@
 			'<button name="dead" aria-pressed="false">Dead</button>' +
 			'<button name="moves" aria-pressed="false">Moves</button>' +
 			'<button name="scroll" aria-pressed="false">Scroll</button>' +
+			'<button name="forms" aria-pressed="false">Forms</button>' +
 			'<select><option value="24h">1 day</option><option value="7d" selected>7 days</option><option value="31d">31 days</option></select>' +
 			'</div>' +
 			'<div class="row">' +
@@ -576,6 +639,7 @@
 		var head = shadow.querySelector('.head');
 		var pill = shadow.querySelector('.pill');
 		var outline = shadow.querySelector('.outline');
+		var badges = shadow.querySelector('.badges');
 		pathEl.textContent = path;
 
 		var canvas = document.createElement('canvas');
@@ -639,6 +703,8 @@
 				!(hm.moves || []).length && !(hm.scroll && hm.scroll[0]);
 			if (hm.heatPages != null && hm.views > 0 && noHeat) {
 				statusMain('This plan keeps heatmaps for its ' + hm.heatPages + ' busiest pages; this page is not among them.');
+			} else if (layers.forms && !hm.forms.length) {
+				statusMain('No form activity recorded yet.');
 			} else if (layers.scroll) {
 				statusMain(hm.scroll && hm.scroll[0]
 					? 'Scroll depth from ' + hm.scroll[0] + ' views' + filters()
@@ -653,6 +719,7 @@
 
 		function load() {
 			hm = null;
+			badges.textContent = '';
 			statusMain('Loading\u2026');
 			fetch(base + '/w/heatmap?token=' + encodeURIComponent(token) +
 				'&path=' + encodeURIComponent(location.pathname) +
@@ -681,13 +748,16 @@
 				.then(function (data) {
 					if (!data) return;
 					hm = data;
+					hm.forms = hm.forms || [];
 					range = data.range;
 					select.value = range;
 					fillSegments();
 					resolved = new Map();
-					['clicks', 'rage', 'dead', 'moves'].forEach(function (k) {
+					['clicks', 'rage', 'dead', 'moves', 'forms'].forEach(function (k) {
 						(hm[k] || []).forEach(function (c) { resolved.set(c.selector, null); });
 					});
+					formStats = new Map();
+					hm.forms.forEach(function (f) { formStats.set(f.selector, f); });
 					stats = new Map();
 					['clicks', 'rage', 'dead', 'hits'].forEach(function (k) {
 						(hm[k] || []).forEach(function (c) {
@@ -825,6 +895,7 @@
 			raf = false;
 			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 			ctx.clearRect(0, 0, innerWidth, innerHeight);
+			badges.textContent = '';
 			if (!hm) return;
 			// Late-rendered and replaced nodes: look again for what is missing,
 			// at most every 500 ms, and once more after the last throttled frame.
@@ -847,6 +918,19 @@
 			if (layers.dead) heat = heat.concat(hm.dead || []);
 			if (heat.length) drawHeat(heat, 22);
 			if (layers.moves) drawHeat(hm.moves || [], 28);
+			if (layers.forms) {
+				hm.forms.forEach(function (f) {
+					var r = box(f.selector);
+					if (!r) return;
+					var parts = formParts(f);
+					var b = document.createElement('div');
+					b.className = 'badge';
+					b.textContent = f.submit > 0 ? parts[0] : parts.slice(0, 2).join(' \u00b7 ') + (parts[2] ? '\n' + parts[2] : '');
+					b.style.left = r.right + 'px';
+					b.style.top = r.top + 'px';
+					badges.appendChild(b);
+				});
+			}
 			// Counted from one layer: a rage or dead click is a click too.
 			var lost = 0;
 			var layer = layers.clicks ? 'clicks' : layers.rage ? 'rage' : layers.dead ? 'dead' : '';
@@ -866,6 +950,20 @@
 			return n.toLocaleString('en-US');
 		}
 
+		// n of the views, as a whole percent; '<1%' for anything above 0 under 1.
+		function share(n) {
+			var p = hm.views > 0 ? n / hm.views * 100 : 0;
+			return p > 0 && p < 1 ? '<1%' : Math.round(p) + '%';
+		}
+
+		// A form's line, or a field's focus, fill and (when any) left-here parts.
+		function formParts(f) {
+			if (f.submit > 0) return ['submitted ' + share(f.submit)];
+			var parts = ['focus ' + share(f.focus), 'fill ' + share(f.fill)];
+			if (f.left > 0) parts.push('left here ' + share(f.left));
+			return parts;
+		}
+
 		function tipText(y) {
 			if (!hm) return '';
 			if (layers.scroll) {
@@ -877,14 +975,13 @@
 			var st = stats.get(tipSel);
 			var parts = [];
 			if (st) {
-				if (st.hits > 0 && hm.views > 0) {
-					var pct = st.hits / hm.views * 100;
-					parts.push(fmt(st.hits) + ' views clicked', pct < 1 ? '<1%' : Math.round(pct) + '%');
-				}
+				if (st.hits > 0 && hm.views > 0) parts.push(fmt(st.hits) + ' views clicked', share(st.hits));
 				if (st.clicks > 0) parts.push(fmt(st.clicks) + ' clicks');
 				if (st.rage > 0) parts.push(fmt(st.rage) + ' rage');
 				if (st.dead > 0) parts.push(fmt(st.dead) + ' dead');
 			}
+			var fe = formStats.get(tipSel);
+			if (fe) parts = parts.concat(formParts(fe));
 			if (parts.length) return parts.join(' \u00b7 ');
 			return tipEl.closest(INTERACTIVE) ? 'No clicks \u00b7 ' + label(range) : '';
 		}

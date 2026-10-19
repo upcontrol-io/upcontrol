@@ -48,6 +48,7 @@ type webStore interface {
 	PageviewCount(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, from time.Time) (int64, error)
 	HeatCells(ctx context.Context, tenantID, projectID int64, path, device, segment, source, kind string, fromDay time.Time, limit int) ([]pgstore.HeatCell, error)
 	ScrollReach(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([21]int64, error)
+	FormStats(ctx context.Context, tenantID, projectID int64, path, device, segment, source string, fromDay time.Time) ([]pgstore.FormStat, error)
 	HistoryRefusal(ctx context.Context, tenantID int64, days int) (msg, plan string, err error)
 	WebQuota(ctx context.Context, tenantID int64, now time.Time) (pgstore.WebQuota, error)
 }
@@ -281,6 +282,12 @@ func (d *webDoor) segment(ctx context.Context, now time.Time, projectID int64, g
 // history axis sells; "" is valid and resolved by deepestRange.
 var rangeDaysWeb = map[string]int{"": 0, "24h": 1, "7d": 7, "31d": 31}
 
+// formKinds maps a beacon's form item kind to its web_heat kind; maxFormItems
+// caps the items one beacon sends.
+var formKinds = map[string]string{"focus": "ffocus", "fill": "ffill", "submit": "fsubmit", "left": "fleft"}
+
+const maxFormItems = 100
+
 // beaconBody is what uc.js sends. The cell entries ride json.RawMessage so a
 // malformed one is skipped, never a 400 for the whole batch; e and a are raw
 // whole, so a wrong-typed one is ignored.
@@ -303,6 +310,8 @@ type beaconBody struct {
 	C [][]json.RawMessage `json:"c"`
 	M [][]json.RawMessage `json:"m"`
 	D [][]json.RawMessage `json:"d"`
+	// Fm is [kind, selector] pairs: the form items the view touched.
+	Fm [][]json.RawMessage `json:"fm"`
 }
 
 // rawCellString and rawCellInt decode one beacon cell element; false when the
@@ -522,6 +531,25 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		hits[sel] = true
 		add("hit", sel, 0, 0, 1)
 	}
+	// A form item is one view that touched a field or form: one per kind and
+	// selector a beacon, like a hit.
+	forms := map[[2]string]bool{}
+	for i, entry := range b.Fm {
+		if i >= maxFormItems {
+			break
+		}
+		if len(entry) != 2 {
+			continue
+		}
+		k, okKind := rawCellString(entry[0])
+		sel, okSel := rawCellString(entry[1])
+		kind := formKinds[k]
+		if !okKind || !okSel || kind == "" || sel == "" || len(sel) > maxHeatSelector || forms[[2]string{kind, sel}] {
+			continue
+		}
+		forms[[2]string{kind, sel}] = true
+		add(kind, sel, 0, 0, 1)
+	}
 	if b.S != nil {
 		// fy = int(s * 20): a full-page reach lands on 20, the scroll fold's
 		// 21st bucket.
@@ -617,6 +645,7 @@ type heatOut struct {
 	Hits   []pgstore.HeatCell `json:"hits"`
 	Dead   []pgstore.HeatCell `json:"dead"`
 	Scroll []int64            `json:"scroll"`
+	Forms  []pgstore.FormStat `json:"forms"`
 	// The project's segments, oldest first: what the overlay filters by.
 	Segments []string `json:"segments"`
 	// The plan's heatmap pages; absent when unlimited.
@@ -732,6 +761,11 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	forms, err := d.store.FormStats(ctx, tenantID, projectID, path, device, segment, source, fromDay)
+	if err != nil {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	segments, err := d.store.Segments(ctx, projectID)
 	if err != nil {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
@@ -748,6 +782,7 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		Hits:      hits,
 		Dead:      dead,
 		Scroll:    scroll[:],
+		Forms:     forms,
 		Segments:  segments,
 		HeatPages: quota.HeatPages,
 	})

@@ -1900,6 +1900,10 @@ components:
         q: { type: string, description: "view: location.search. Only utm_source, utm_medium and utm_campaign are kept." }
         f: { type: string, description: "view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label." }
         g: { type: string, description: "view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment." }
+        fm:
+          type: array
+          description: "heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent."
+          items: { type: array, items: { type: string } }
         o: { type: string, enum: [search, social, campaign, referral, direct], description: "view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site)." }
         e: { type: integer, description: "heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes." }
         a:
@@ -1933,7 +1937,7 @@ components:
         n: { type: integer }
     Heatmap:
       type: object
-      required: [path, device, range, views, clicks, rage, moves, scroll, hits, dead, segments]
+      required: [path, device, range, views, clicks, rage, moves, scroll, hits, dead, segments, forms]
       properties:
         path: { type: string }
         device: { type: string, enum: [mobile, tablet, desktop] }
@@ -1949,6 +1953,10 @@ components:
           description: "One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through."
           items: { $ref: "#/components/schemas/HeatCell" }
         dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        forms:
+          type: array
+          description: "Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`."
+          items: { $ref: "#/components/schemas/FormField" }
         segments:
           type: array
           description: "The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by."
@@ -1963,6 +1971,15 @@ components:
             How many pages this plan keeps a heatmap for, its busiest by views.
             Absent when unlimited. A page with views and no heat is one outside
             them.
+    FormField:
+      type: object
+      required: [selector, focus, fill, submit, left]
+      properties:
+        selector: { type: string }
+        focus: { type: integer }
+        fill: { type: integer }
+        submit: { type: integer, description: "Non-zero on a form element: the views that submitted it." }
+        left: { type: integer, description: "The views whose last focused field in an unsubmitted form was this one." }
     HeatmapLinkRequest:
       type: object
       required: [path]

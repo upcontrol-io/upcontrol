@@ -32,6 +32,7 @@ type Beacon = {
 	s?: number;
 	c?: ClickCell[];
 	m?: MoveCell[];
+	fm?: [string, string][]; // [kind, selector]
 };
 
 // attrs go on the script tag; head is markup before it.
@@ -662,3 +663,121 @@ for (const [url, want] of [
 		expect(errors).toEqual([]);
 	});
 }
+
+const fm = (beacons: Beacon[]) => heats(beacons).flatMap((b) => b.fm ?? []);
+const pagehide = (page: Page) => page.evaluate(() => dispatchEvent(new Event("pagehide")));
+
+test("form fields report focus and fill, and never their value", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<form id="f"><input id="name"><input id="mail"></form>');
+	const raw: string[] = [];
+	page.on("request", (r) => { if (/api\.test\/w\?/.test(r.url())) raw.push(r.postData() ?? ""); });
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.locator("#name").click();
+	await page.keyboard.type("s3cret-Ada");
+	await page.locator("#mail").click();
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	// A tab hide is not abandonment: no left.
+	expect(fm(beacons)).toEqual([["focus", "#name"], ["fill", "#name"], ["focus", "#mail"]]);
+	expect(raw.length).toBeGreaterThanOrEqual(2);
+	for (const body of raw) expect(body).not.toContain("s3cret");
+	expect(errors).toEqual([]);
+});
+
+test("a submitted form is reported and never counted as left", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page,
+		'<form id="f" onsubmit="event.preventDefault()"><input id="q"><button id="go">Go</button></form>');
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.locator("#q").click();
+	await page.keyboard.type("x");
+	await page.locator("#go").click();
+	await pagehide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	expect(fm(beacons)).toContainEqual(["submit", "#f"]);
+	expect(fm(beacons).filter((e) => e[0] === "left")).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("a route change from an unsubmitted form reports the field it was left from", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<form id="f"><input id="a"><input id="b"></form>');
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.locator("#a").click();
+	await page.locator("#b").click();
+	await page.evaluate(() => history.pushState({}, "", "/next"));
+	await expect.poll(() => views(beacons).filter((b) => b.p === "/next")).toHaveLength(1);
+	const left = heats(beacons).filter((b) => b.p === "/").flatMap((b) => b.fm ?? []).filter((e) => e[0] === "left");
+	expect(left).toEqual([["left", "#b"]]);
+	expect(errors).toEqual([]);
+});
+
+test("a checked checkbox is filled, and a hidden input is never reported", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<form id="f"><input type="hidden" id="h" value="x"><input type="checkbox" id="c"></form>');
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.locator("#c").check();
+	await page.evaluate(() => {
+		const h = document.getElementById("h")!;
+		for (const t of ["focusin", "change", "focusout"]) h.dispatchEvent(new Event(t, { bubbles: true }));
+	});
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	expect(fm(beacons)).toContainEqual(["fill", "#c"]);
+	expect(fm(beacons).filter((e) => e[1] === "#h")).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("the Forms layer badges a field and its form, and the pill carries the field's numbers", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page,
+		'<form id="f" style="padding:24px"><input id="email"> <button id="go" type="button">Go</button></form>');
+	await page.route(/api\.test\/w\/heatmap/, (route) =>
+		route.fulfill({
+			contentType: "application/json",
+			headers: { "Access-Control-Allow-Origin": "https://site.test" },
+			body: JSON.stringify({
+				path: "/", device: "desktop", range: "7d", views: 1000,
+				clicks: [], rage: [], moves: [], hits: [], dead: [],
+				scroll: Array.from({ length: 21 }, () => 0),
+				forms: [
+					{ selector: "#email", focus: 800, fill: 600, submit: 0, left: 340 },
+					{ selector: "#f", focus: 0, fill: 0, submit: 200, left: 0 },
+				],
+			}),
+		}));
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,000 desktop views · 7 days")).toBeVisible();
+	const badges = page.locator("[data-uc-heatmap] .badge");
+	await expect(badges).toHaveCount(0);
+	const forms = page.getByRole("button", { name: "Forms" });
+	await forms.click();
+	await expect(badges).toHaveCount(2);
+	await expect(badges.filter({ hasText: "focus 80% · fill 60%" })).toContainText("left here 34%");
+	await expect(badges.filter({ hasText: "submitted 20%" })).toHaveCount(1);
+	await forms.click();
+	await expect(badges).toHaveCount(0);
+	if (test.info().project.name !== "mobile") {
+		await page.locator("#email").hover();
+		await expect(page.locator("[data-uc-heatmap] .pill")).toHaveText("focus 80% · fill 60% · left here 34%");
+	}
+	expect(beacons).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+test("the Forms layer says so when no form activity is recorded", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<form id="f"><input id="email"></form>');
+	await heatmapWith(page, []);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	await page.getByRole("button", { name: "Forms" }).click();
+	await expect(page.getByText("No form activity recorded yet.")).toBeVisible();
+	await expect(page.locator("[data-uc-heatmap] .badge")).toHaveCount(0);
+	expect(errors).toEqual([]);
+});

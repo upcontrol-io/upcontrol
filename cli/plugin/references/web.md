@@ -143,7 +143,8 @@ project's first board instead.
 Page views, visitors (a daily-rotating hash, no cookie), referrers, UTM tags,
 countries, devices, the page each view came from, and engaged time per page
 (the tab visible and in use); heatmaps of clicks, rage clicks, dead clicks,
-mouse movement and scroll depth per page and device, opened from the Heatmap
+mouse movement, scroll depth and form fields (focused, filled, left from,
+submitted; never the values) per page and device, opened from the Heatmap
 card onto the live site, where hovering an element shows how many views
 clicked it, and where the map filters by segment (when the site marks them)
 and by the kind of source the visit came from.

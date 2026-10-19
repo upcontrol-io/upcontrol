@@ -8,6 +8,7 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -542,5 +543,38 @@ func TestWebEngageSplitsBySegmentAndSource(t *testing.T) {
 		if rage, err := s.HeatPaths(ctx, tenant, project, "rage", "", seg, "", hour.Truncate(24*time.Hour)); err != nil || len(rage) != want {
 			t.Errorf("%q rage pages = %+v (%v), want %d", seg, rage, err, want)
 		}
+	}
+}
+
+// FormStats sums each selector's form items across days and segments, and
+// narrows by segment when asked.
+func TestFormStats(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Free")
+	day := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	for i, segment := range []string{"member", "", "member"} {
+		if err := s.AddHeat(ctx, tenant, project, day.AddDate(0, 0, i), "/signup", "desktop", segment, "", []HeatAdd{
+			{Kind: "ffocus", Selector: "#email", N: 1},
+			{Kind: "ffill", Selector: "#email", N: 1},
+			{Kind: "fleft", Selector: "#name", N: 1},
+			{Kind: "fsubmit", Selector: "form", N: 1},
+			{Kind: "click", Selector: "#email", N: 5},
+		}); err != nil {
+			t.Fatalf("add heat: %v", err)
+		}
+	}
+	all, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "", "", day)
+	want := []FormStat{{"#email", 3, 3, 0, 0}, {"#name", 0, 0, 0, 3}, {"form", 0, 0, 3, 0}}
+	if err != nil || !slices.Equal(all, want) {
+		t.Fatalf("all = %+v (%v), want %+v", all, err, want)
+	}
+	member, err := s.FormStats(ctx, tenant, project, "/signup", "desktop", "member", "", day)
+	if err != nil || len(member) != 3 || member[0] != (FormStat{"#email", 2, 2, 0, 0}) {
+		t.Fatalf("member = %+v (%v), want #email at 2 focus 2 fill first", member, err)
+	}
+	none, err := s.FormStats(ctx, tenant, project, "/other", "desktop", "", "", day)
+	if err != nil || none == nil || len(none) != 0 {
+		t.Fatalf("another path = %#v (%v), want []", none, err)
 	}
 }

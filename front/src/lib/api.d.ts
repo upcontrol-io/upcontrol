@@ -5257,6 +5257,8 @@ export interface components {
             f?: string;
             /** @description view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment. */
             g?: string;
+            /** @description heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent. */
+            fm?: string[][];
             /**
              * @description view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
              * @enum {string}
@@ -5299,12 +5301,23 @@ export interface components {
             /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
             hits: components["schemas"]["HeatCell"][];
             dead: components["schemas"]["HeatCell"][];
+            /** @description Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`. */
+            forms: components["schemas"]["FormField"][];
             /** @description The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by. */
             segments: string[];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];
             /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */
             heatPages?: number;
+        };
+        FormField: {
+            selector: string;
+            focus: number;
+            fill: number;
+            /** @description Non-zero on a form element: the views that submitted it. */
+            submit: number;
+            /** @description The views whose last focused field in an unsubmitted form was this one. */
+            left: number;
         };
         HeatmapLinkRequest: {
             /** @description Starts with /, at most 256 bytes. */
