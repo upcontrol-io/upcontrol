@@ -33,7 +33,6 @@ window's width, and the strip's axis can label a month. No migration.
   the next. The tick ladder now steps through 2, 3, 7, 14 and 30 days, and the strip reads the
   map's bucket width for its domain, zoom floor and column step.
 
-
 ## [0.41.1] — 2026-10-16
 
 ### Removed
