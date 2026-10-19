@@ -6,6 +6,33 @@ All notable changes to the self-hosted package. The format follows
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-10-19
+
+Every `/v1/logs` read stops at the plan's log window, the volume map is bucketed to that
+window's width, and the strip's axis can label a month. No migration.
+
+### Changed
+- **Every part of `GET /v1/logs` is floored at the plan's `window_hours`**: `lines`, `total`,
+  `services`, `volume` and `detail` alike, and a `from` below the floor is raised to it, never
+  honoured. The day partitions keep the widest plan's month for every project, so until now a
+  Free project read 31 days of its own logs.
+- **`volume` is bucketed to the window.** The map groups at the finest of 60, 120, 300, 600,
+  900, 1800 and 3600 seconds that keeps the plan window within 1440 buckets (Free a minute,
+  Indie two, Growth ten, Agency and Self-hosted thirty), and the answer names the width in the
+  new `volumeBucketSeconds`. `VolumeBucket.minute` keeps its name and is the bucket's start. A
+  month of minutes was about 90k rows on every read.
+- **`detail` reaches past a minute.** Its ladder runs from 1 s to 1800 s, at most 600 buckets,
+  and it is served only when finer than the map. The OSS app asks for it on any held range
+  instead of stopping at an hour.
+
+### Added
+- `LogsResponse.volumeBucketSeconds`: the width of every `volume` bucket; absent means 60.
+
+### Fixed
+- **The strip's axis over a window longer than a day** printed one label per day on top of
+  the next. The tick ladder now steps through 2, 3, 7, 14 and 30 days, and the strip reads the
+  map's bucket width for its domain, zoom floor and column step.
+
 ## [0.41.1] — 2026-10-16
 
 ### Removed

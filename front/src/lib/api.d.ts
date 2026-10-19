@@ -2031,7 +2031,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** A bounded window of logs, not an explorer (product-plan). */
+        /**
+         * A bounded window of logs, not an explorer (product-plan).
+         * @description Every part of the answer stops at the plan's log window (`window_hours` back from now): a `from` below it is raised to it, never honoured.
+         */
         get: {
             parameters: {
                 query?: {
@@ -2046,7 +2049,7 @@ export interface paths {
                     q?: string;
                     /** @description Repeatable. The window narrows to lines from any of the named services; an empty value means the unlabelled service. Absent means every service. */
                     service?: string[];
-                    /** @description Ask for sub-minute resolution inside `from`/`to`, returned as `detail`. Both bounds are required — detail is what one minute of the map is made of, so there has to be a minute it belongs to. The value is a request, not a promise: the server snaps it up to a width it can draw and answers with the one it used, and omits `detail` entirely when every width it could offer would be coarser than the minute `volume` already carries. Anything unparseable or not positive means no detail, which is also what a client that never asked receives. */
+                    /** @description Ask for a finer resolution inside `from`/`to`, returned as `detail`. Both bounds are required: detail is what one bucket of the map is made of, so there has to be a bucket it belongs to. The value is a request, not a promise: the server snaps it up to a width it can draw and answers with the one it used, and omits `detail` entirely when that width is not finer than the `volumeBucketSeconds` `volume` already carries. Anything unparseable or not positive means no detail, which is also what a client that never asked receives. */
                     bucketSeconds?: number;
                 };
                 header?: never;
@@ -4602,7 +4605,10 @@ export interface components {
             message: string;
         };
         VolumeBucket: {
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Start of the bucket, `volumeBucketSeconds` wide. The name is kept from when every bucket was a minute.
+             */
             minute: string;
             level: components["schemas"]["LogLevel"];
             lines: number;
@@ -4624,7 +4630,9 @@ export interface components {
         LogsResponse: {
             lines: components["schemas"]["LogLine"][];
             volume: components["schemas"]["VolumeBucket"][];
-            /** @description Sub-minute counts inside `from`/`to`, present only when `bucketSeconds` asked for a width finer than the minute `volume` carries. It never replaces `volume`: that one spans the whole ring and is the map the range was picked on, and a map narrowed to the territory already chosen cannot get the reader back. */
+            /** @description The width of every `volume` bucket: the finest of 60, 120, 300, 600, 900, 1800 and 3600 seconds that keeps the plan's window within 1440 buckets. Absent means 60. */
+            volumeBucketSeconds?: number;
+            /** @description Finer counts inside `from`/`to`, present only when `bucketSeconds` asked for a width finer than the `volumeBucketSeconds` `volume` carries. It never replaces `volume`: that one spans the whole plan window and is the map the range was picked on, and a map narrowed to the territory already chosen cannot get the reader back. */
             detail?: components["schemas"]["VolumeDetail"];
             /** @description Lines in the window before the stream limit. The panel prints 'showing N of total' rather than implying the window is what fits on screen. */
             total?: number;

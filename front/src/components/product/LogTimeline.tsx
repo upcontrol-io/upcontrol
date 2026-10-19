@@ -35,8 +35,10 @@ export interface LogRange {
 interface LogTimelineProps {
 	buckets: LogVolumeBucket[];
 	// Finer counts for the committed range; never a replacement for `buckets`
-	// (the whole-ring map), only consulted below a minute.
+	// (the whole-ring map), only consulted below the map's bucket.
 	detail?: LogVolumeDetail;
+	/** The width of every `buckets` row, which the server coarsens on a long window. */
+	volumeBucketSeconds?: number;
 	// Fires on settle (pointer up, key, chip), never mid-drag: the committed
 	// range is a different value from the dragged one. null: whole window.
 	onRangeChange?: (range: LogRange | null) => void;
@@ -65,11 +67,12 @@ const SECOND = 1_000;
 const STEPS = [
 	...[1, 2, 5, 10, 15, 30].map((s) => s * SECOND),
 	...[1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * MINUTE),
+	...[2, 3, 7, 14, 30].map((d) => d * DAY),
 ];
 
-/** The tightest zoom from minutes alone: below five of them there is no new
- *  information, only magnification. */
-const MIN_SPAN = 5 * MINUTE;
+/** The tightest zoom from the map alone, in its buckets: below five of them
+ *  there is no new information, only magnification. */
+const MIN_MAP_COLUMNS = 5;
 
 /** The same rule one rung down: the floor is ten detail buckets, so zooming
  *  stops where the measurements stop. */
@@ -204,7 +207,13 @@ function sumBetween(source: Column[], from: number, to: number): Column {
 
 /** The window's volume as a drivable timeline: ring as domain, picture as
  *  viewport (pan, zoom, select). Gestures clamp to the ring's finite edges. */
-export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps) {
+export function LogTimeline({
+	buckets,
+	detail,
+	volumeBucketSeconds = 60,
+	onRangeChange,
+}: LogTimelineProps) {
+	const bucket = volumeBucketSeconds * SECOND;
 	// One row per source bucket; `debug` and other labels fold into `info` so a
 	// debug-only minute is not an empty column.
 	const map = useMemo(
@@ -222,14 +231,14 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 	// reader zoomed into their own pick..
 	const domain = useMemo<LogRange | null>(() => {
 		if (map.length === 0) return null;
-		return { from: map[0].t, to: map[map.length - 1].t + MINUTE };
-	}, [map]);
+		return { from: map[0].t, to: map[map.length - 1].t + bucket };
+	}, [map, bucket]);
 	const hasDomain = domain !== null;
 
 	// Nothing below this was measured, so nothing below it is drawn: the width
 	// the server used, never the one asked for..
-	const finest = fine.length > 0 && detail ? detail.bucketSeconds * SECOND : MINUTE;
-	const minSpan = fine.length > 0 ? finest * MIN_DETAIL_COLUMNS : MIN_SPAN;
+	const finest = fine.length > 0 && detail ? detail.bucketSeconds * SECOND : bucket;
+	const minSpan = fine.length > 0 ? finest * MIN_DETAIL_COLUMNS : MIN_MAP_COLUMNS * bucket;
 	const clamp = useCallback(
 		(range: LogRange, dom: LogRange) => clampRange(range, dom, minSpan),
 		[minSpan],
@@ -253,7 +262,7 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 	const [ringed, setRinged] = useState(false);
 
 	const bodyRef = useRef<HTMLDivElement>(null);
-	const effective: LogRange = view ?? domain ?? { from: 0, to: MIN_SPAN };
+	const effective: LogRange = view ?? domain ?? { from: 0, to: minSpan };
 	const span = effective.to - effective.from;
 
 	// New data lands under a reader who may be looking somewhere else.
@@ -264,7 +273,7 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 			const held = current.to - current.from;
 			// Parked at the live edge → follow. Anchored in the past → stay put, or
 			// every arriving line drags the reader off the thing they were reading.
-			const atEdge = current.to >= domain.to - MINUTE;
+			const atEdge = current.to >= domain.to - bucket;
 			const wanted = atEdge ? { from: domain.to - held, to: domain.to } : current;
 			const next = clamp(wanted, domain);
 			return next.from === current.from && next.to === current.to ? current : next;
@@ -284,17 +293,22 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 	}, [hasDomain]);
 
 	// Level of detail: the finest bucket whose columns clear COL_MIN, floored
-	// at `finest`..
+	// at `finest` and divisible by its source (else uneven counts draw a sawtooth).
 	const step = useMemo(() => {
 		const room = Math.max(1, Math.floor(width / COL_MIN));
 		return (
-			STEPS.find((s) => s >= finest && span / s <= room) ?? STEPS[STEPS.length - 1]
+			STEPS.find(
+				(s) =>
+					s >= finest &&
+					s % (s < bucket ? finest : bucket) === 0 &&
+					span / s <= room,
+			) ?? STEPS[STEPS.length - 1]
 		);
-	}, [span, width, finest]);
+	}, [span, width, finest, bucket]);
 
-	// Below a minute only the fine rows can answer; at a minute and above the map
-	// is both complete and the only thing that covers the whole ring.
-	const source = step < MINUTE ? fine : map;
+	// Below the map's bucket only the fine rows can answer; at it and above the
+	// map is both complete and the only thing that covers the whole ring.
+	const source = step < bucket ? fine : map;
 
 	const columns = useMemo(() => {
 		const out: Column[] = [];
@@ -540,7 +554,7 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 
 	const full = domain.to - domain.from;
 	const atStart = effective.from <= domain.from;
-	const atEdge = effective.to >= domain.to - MINUTE;
+	const atEdge = effective.to >= domain.to - bucket;
 	const atFull = span >= full - 1;
 	const centre = effective.from + span / 2;
 	const hovered = hover !== null && hover < columns.length ? columns[hover] : null;
@@ -586,7 +600,7 @@ export function LogTimeline({ buckets, detail, onRangeChange }: LogTimelineProps
 						type="button"
 						className={styles.step}
 						onClick={() => commit(zoom(effective, domain, centre, 0.6))}
-						disabled={span <= MIN_SPAN}
+						disabled={span <= minSpan}
 						aria-label="Zoom in"
 					>
 						+

@@ -1697,6 +1697,9 @@ type LogsResponse struct {
 	// Total Lines in the window before the stream limit. The panel prints 'showing N of total' rather than implying the window is what fits on screen.
 	Total  *int           `json:"total,omitempty"`
 	Volume []VolumeBucket `json:"volume"`
+
+	// VolumeBucketSeconds The width of every `volume` bucket: the finest of 60, 120, 300, 600, 900, 1800 and 3600 seconds that keeps the plan's window within 1440 buckets. Absent means 60.
+	VolumeBucketSeconds *int `json:"volumeBucketSeconds,omitempty"`
 }
 
 // MagicLinkRedeemed defines model for MagicLinkRedeemed.
@@ -2357,8 +2360,10 @@ type UsedMax struct {
 
 // VolumeBucket defines model for VolumeBucket.
 type VolumeBucket struct {
-	Level  LogLevel  `json:"level"`
-	Lines  int       `json:"lines"`
+	Level LogLevel `json:"level"`
+	Lines int      `json:"lines"`
+
+	// Minute Start of the bucket, `volumeBucketSeconds` wide. The name is kept from when every bucket was a minute.
 	Minute time.Time `json:"minute"`
 }
 
@@ -2660,7 +2665,7 @@ type GetV1LogsParams struct {
 	// Service Repeatable. The window narrows to lines from any of the named services; an empty value means the unlabelled service. Absent means every service.
 	Service *[]string `form:"service,omitempty" json:"service,omitempty"`
 
-	// BucketSeconds Ask for sub-minute resolution inside `from`/`to`, returned as `detail`. Both bounds are required — detail is what one minute of the map is made of, so there has to be a minute it belongs to. The value is a request, not a promise: the server snaps it up to a width it can draw and answers with the one it used, and omits `detail` entirely when every width it could offer would be coarser than the minute `volume` already carries. Anything unparseable or not positive means no detail, which is also what a client that never asked receives.
+	// BucketSeconds Ask for a finer resolution inside `from`/`to`, returned as `detail`. Both bounds are required: detail is what one bucket of the map is made of, so there has to be a bucket it belongs to. The value is a request, not a promise: the server snaps it up to a width it can draw and answers with the one it used, and omits `detail` entirely when that width is not finer than the `volumeBucketSeconds` `volume` already carries. Anything unparseable or not positive means no detail, which is also what a client that never asked receives.
 	BucketSeconds *int `form:"bucketSeconds,omitempty" json:"bucketSeconds,omitempty"`
 }
 
