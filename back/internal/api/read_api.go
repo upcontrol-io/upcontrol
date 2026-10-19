@@ -140,6 +140,12 @@ func (h *readAPI) plan(w http.ResponseWriter, r *http.Request, s sqlc.Session) {
 		}
 		resp["dashboards"] = dashboards
 	}
+	// Product alert rules across the workspace, absent when unlimited.
+	if ent.ProductAlerts != nil {
+		var rules int
+		_ = h.pool.Raw().QueryRow(ctx, `SELECT count(*) FROM product_alert WHERE tenant_id = $1`, tenantID).Scan(&rules)
+		resp["productAlerts"] = map[string]int{"used": rules, "max": int(*ent.ProductAlerts)}
+	}
 	// The web visits, absent when unlimited like projects: the
 	// workspace's this UTC month, across its projects.
 	if ent.WebVisitsMonth != nil {

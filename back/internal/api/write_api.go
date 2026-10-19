@@ -328,6 +328,16 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/v1/dashboards/") && r.Method == http.MethodDelete:
 		h.deleteBoard(w, r, h.sessionBoards(r, s))
 
+	// Product alert rules: session doors only, a key never reaches them.
+	case r.URL.Path == "/v1/product-alerts" && r.Method == http.MethodGet:
+		h.listProductAlerts(w, r, s)
+	case r.URL.Path == "/v1/product-alerts" && r.Method == http.MethodPost:
+		h.createProductAlert(w, r, s)
+	case strings.HasPrefix(r.URL.Path, "/v1/product-alerts/") && r.Method == http.MethodPatch:
+		h.patchProductAlert(w, r, s)
+	case strings.HasPrefix(r.URL.Path, "/v1/product-alerts/") && r.Method == http.MethodDelete:
+		h.deleteProductAlert(w, r, s)
+
 	case strings.HasPrefix(r.URL.Path, "/v1/incidents/") && r.Method == http.MethodGet:
 		h.getIncident(w, r, tenantID)
 

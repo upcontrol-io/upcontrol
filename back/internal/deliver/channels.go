@@ -54,6 +54,10 @@ type AlertPayload struct {
 	Group bool `json:"group,omitempty"`
 }
 
+// DetectorProductAlert marks a product alert's ticket, whose closing link is
+// the board the rule watches rather than a log group.
+const DetectorProductAlert = "product_alert"
+
 // actionButton is an inline button (Telegram) or link (email/discord/slack).
 type actionButton struct {
 	Label string `json:"label"`
@@ -316,6 +320,9 @@ func alertLink(p AlertPayload, appURL string) (href, label string) {
 	case "test":
 		return appURL + "/alerts", "Alert settings"
 	case "ticket":
+		if p.Detector == DetectorProductAlert {
+			return appURL + "/dashboard", "Open the dashboard"
+		}
 		return appURL, "Open this log group"
 	}
 	if p.IncidentID == "" {

@@ -231,3 +231,15 @@ func TestEmailChannelNetworkErrorReturnsZero(t *testing.T) {
 		t.Fatalf("Send = (%d, %v), want (0, non-nil error)", code, err)
 	}
 }
+
+// A product alert is a ticket with no log group behind it: its link is the
+// dashboard the rule was set on, not the log group an error ticket opens.
+func TestAlertLinkProductAlertOpensTheDashboard(t *testing.T) {
+	href, label := alertLink(AlertPayload{Class: "ticket", Detector: DetectorProductAlert}, "https://app.test/app")
+	if href != "https://app.test/app/dashboard" || label != "Open the dashboard" {
+		t.Fatalf("alertLink = %q %q, want the dashboard", href, label)
+	}
+	if _, label := alertLink(AlertPayload{Class: "ticket"}, "https://app.test/app"); label != "Open this log group" {
+		t.Fatalf("an error ticket's link = %q, want the log group", label)
+	}
+}

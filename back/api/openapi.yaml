@@ -1221,6 +1221,52 @@ components:
         value: { type: number }
 
     # --- plan ---------------------------------------------------------------
+    ProductAlert:
+      type: object
+      description: "A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window."
+      required: [id, event, kind, windowHours, state, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string, description: "What the messages call it; the event name when empty." }
+        event: { type: string, description: "The event name the rule counts." }
+        labels:
+          type: object
+          maxProperties: 3
+          additionalProperties: { type: string, maxLength: 256 }
+          description: "Count only the rows whose labels hold every pair, under the series `labels` rules."
+        measure: { type: string, enum: [amount], description: "Sum the money in `currency` instead of counting." }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        kind: { type: string, enum: [change, silence] }
+        direction: { type: string, enum: [down, up, any], description: "`change` only." }
+        percent: { type: integer, minimum: 10, maximum: 1000, description: "`change` only: how far from the same hours a week ago, in percent." }
+        windowHours: { type: integer, minimum: 1, maximum: 24, description: "One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago." }
+        widgetId: { type: string, description: "The board card it was made from, so the card can show it. Optional." }
+        paused: { type: boolean }
+        state:
+          type: string
+          enum: [ok, firing, learning, frozen, paused]
+          description: "`learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count."
+        lastFiredAt: { type: string, format: date-time }
+        lastCheckedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    ProductAlertWrite:
+      type: object
+      description: "Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset."
+      properties:
+        name: { type: string, maxLength: 80 }
+        event: { type: string, maxLength: 40 }
+        labels:
+          type: object
+          maxProperties: 3
+          additionalProperties: { type: string, maxLength: 256 }
+        measure: { type: string, enum: [amount] }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        kind: { type: string, enum: [change, silence] }
+        direction: { type: string, enum: [down, up, any] }
+        percent: { type: integer, minimum: 10, maximum: 1000 }
+        windowHours: { type: integer, minimum: 1, maximum: 24, description: "One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago." }
+        widgetId: { type: string, maxLength: 64 }
+        paused: { type: boolean }
     UsedMax:
       type: object
       required: [used, max]
@@ -1294,6 +1340,13 @@ components:
             A depth, not a consumption: the client renders it as a sentence,
             and it counts from the day a plan is switched, since what an
             earlier plan did not keep cannot be sold back.
+        productAlerts:
+          allOf: [{ $ref: "#/components/schemas/UsedMax" }]
+          description: >
+            Product alert rules across the workspace (plan_entitlement.product_alerts):
+            `used` counts every rule, `max` is the plan's. Absent when the plan is
+            unlimited (every paid plan and Self-hosted). Rules past `max` after a
+            downgrade are kept and frozen, newest first, never deleted.
         dashboards:
           type: object
           description: >
@@ -4295,6 +4348,66 @@ paths:
                         count: { type: integer }
                         lastAt: { type: string, format: date-time }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/product-alerts:
+    get:
+      tags: [alerts]
+      summary: The current project's product alert rules, oldest first, each with its state.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ProductAlert" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [alerts]
+      summary: |
+        Add a rule to the current project. Any member who can sign in may. The
+        workspace's rule count is a plan axis (Free 2, paid unlimited): past it
+        the answer is a 402 naming the plan that lifts it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductAlertWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAlert" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/product-alerts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [alerts]
+      summary: Change a rule of the current project; a change resets its episode.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductAlertWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAlert" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [alerts]
+      summary: Delete a rule of the current project.
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/heatmap/link:
     post:

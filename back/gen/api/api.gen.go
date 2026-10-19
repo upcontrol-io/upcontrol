@@ -726,6 +726,141 @@ func (e ProbeStageLabel) Valid() bool {
 	}
 }
 
+// Defines values for ProductAlertDirection.
+const (
+	ProductAlertDirectionAny  ProductAlertDirection = "any"
+	ProductAlertDirectionDown ProductAlertDirection = "down"
+	ProductAlertDirectionUp   ProductAlertDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertDirection enum.
+func (e ProductAlertDirection) Valid() bool {
+	switch e {
+	case ProductAlertDirectionAny:
+		return true
+	case ProductAlertDirectionDown:
+		return true
+	case ProductAlertDirectionUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertKind.
+const (
+	ProductAlertKindChange  ProductAlertKind = "change"
+	ProductAlertKindSilence ProductAlertKind = "silence"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertKind enum.
+func (e ProductAlertKind) Valid() bool {
+	switch e {
+	case ProductAlertKindChange:
+		return true
+	case ProductAlertKindSilence:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertMeasure.
+const (
+	ProductAlertMeasureAmount ProductAlertMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertMeasure enum.
+func (e ProductAlertMeasure) Valid() bool {
+	switch e {
+	case ProductAlertMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertState.
+const (
+	ProductAlertStateFiring   ProductAlertState = "firing"
+	ProductAlertStateFrozen   ProductAlertState = "frozen"
+	ProductAlertStateLearning ProductAlertState = "learning"
+	ProductAlertStateOk       ProductAlertState = "ok"
+	ProductAlertStatePaused   ProductAlertState = "paused"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertState enum.
+func (e ProductAlertState) Valid() bool {
+	switch e {
+	case ProductAlertStateFiring:
+		return true
+	case ProductAlertStateFrozen:
+		return true
+	case ProductAlertStateLearning:
+		return true
+	case ProductAlertStateOk:
+		return true
+	case ProductAlertStatePaused:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteDirection.
+const (
+	ProductAlertWriteDirectionAny  ProductAlertWriteDirection = "any"
+	ProductAlertWriteDirectionDown ProductAlertWriteDirection = "down"
+	ProductAlertWriteDirectionUp   ProductAlertWriteDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteDirection enum.
+func (e ProductAlertWriteDirection) Valid() bool {
+	switch e {
+	case ProductAlertWriteDirectionAny:
+		return true
+	case ProductAlertWriteDirectionDown:
+		return true
+	case ProductAlertWriteDirectionUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteKind.
+const (
+	ProductAlertWriteKindChange  ProductAlertWriteKind = "change"
+	ProductAlertWriteKindSilence ProductAlertWriteKind = "silence"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteKind enum.
+func (e ProductAlertWriteKind) Valid() bool {
+	switch e {
+	case ProductAlertWriteKindChange:
+		return true
+	case ProductAlertWriteKindSilence:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteMeasure.
+const (
+	ProductAlertWriteMeasureAmount ProductAlertWriteMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteMeasure enum.
+func (e ProductAlertWriteMeasure) Valid() bool {
+	switch e {
+	case ProductAlertWriteMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PublicStatusResponseStateKind.
 const (
 	PublicStatusResponseStateKindCouldNotMeasure PublicStatusResponseStateKind = "could_not_measure"
@@ -2085,6 +2220,9 @@ type PlanResponse struct {
 	Owned *bool `json:"owned,omitempty"`
 	Plan  Plan  `json:"plan"`
 
+	// ProductAlerts Product alert rules across the workspace (plan_entitlement.product_alerts): `used` counts every rule, `max` is the plan's. Absent when the plan is unlimited (every paid plan and Self-hosted). Rules past `max` after a downgrade are kept and frozen, newest first, never deleted.
+	ProductAlerts *UsedMax `json:"productAlerts,omitempty"`
+
 	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. `used` counts LIVE projects only, because live projects are what a plan buys.
 	Projects *struct {
 		// Frozen The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero.
@@ -2120,6 +2258,82 @@ type ProbeStage struct {
 
 // ProbeStageLabel `wait` is the server thinking once the connection exists, NOT time-to-first-byte: TTFB is measured from the start of the request and already contains dns+tcp+tls, so emitting it here would make the bars sum past the total. Derived as ttfb-(dns+tcp+tls); `html` is the tail after the first byte. The stages sum to probe.total_ms.
 type ProbeStageLabel string
+
+// ProductAlert A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window.
+type ProductAlert struct {
+	CreatedAt time.Time `json:"createdAt"`
+	Currency  *string   `json:"currency,omitempty"`
+
+	// Direction `change` only.
+	Direction *ProductAlertDirection `json:"direction,omitempty"`
+
+	// Event The event name the rule counts.
+	Event string           `json:"event"`
+	Id    string           `json:"id"`
+	Kind  ProductAlertKind `json:"kind"`
+
+	// Labels Count only the rows whose labels hold every pair, under the series `labels` rules.
+	Labels        *map[string]string `json:"labels,omitempty"`
+	LastCheckedAt *time.Time         `json:"lastCheckedAt,omitempty"`
+	LastFiredAt   *time.Time         `json:"lastFiredAt,omitempty"`
+
+	// Measure Sum the money in `currency` instead of counting.
+	Measure *ProductAlertMeasure `json:"measure,omitempty"`
+
+	// Name What the messages call it; the event name when empty.
+	Name   *string `json:"name,omitempty"`
+	Paused *bool   `json:"paused,omitempty"`
+
+	// Percent `change` only: how far from the same hours a week ago, in percent.
+	Percent *int `json:"percent,omitempty"`
+
+	// State `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+	State ProductAlertState `json:"state"`
+
+	// WidgetId The board card it was made from, so the card can show it. Optional.
+	WidgetId *string `json:"widgetId,omitempty"`
+
+	// WindowHours One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago.
+	WindowHours int `json:"windowHours"`
+}
+
+// ProductAlertDirection `change` only.
+type ProductAlertDirection string
+
+// ProductAlertKind defines model for ProductAlert.Kind.
+type ProductAlertKind string
+
+// ProductAlertMeasure Sum the money in `currency` instead of counting.
+type ProductAlertMeasure string
+
+// ProductAlertState `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+type ProductAlertState string
+
+// ProductAlertWrite Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset.
+type ProductAlertWrite struct {
+	Currency  *string                     `json:"currency,omitempty"`
+	Direction *ProductAlertWriteDirection `json:"direction,omitempty"`
+	Event     *string                     `json:"event,omitempty"`
+	Kind      *ProductAlertWriteKind      `json:"kind,omitempty"`
+	Labels    *map[string]string          `json:"labels,omitempty"`
+	Measure   *ProductAlertWriteMeasure   `json:"measure,omitempty"`
+	Name      *string                     `json:"name,omitempty"`
+	Paused    *bool                       `json:"paused,omitempty"`
+	Percent   *int                        `json:"percent,omitempty"`
+	WidgetId  *string                     `json:"widgetId,omitempty"`
+
+	// WindowHours One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago.
+	WindowHours *int `json:"windowHours,omitempty"`
+}
+
+// ProductAlertWriteDirection defines model for ProductAlertWrite.Direction.
+type ProductAlertWriteDirection string
+
+// ProductAlertWriteKind defines model for ProductAlertWrite.Kind.
+type ProductAlertWriteKind string
+
+// ProductAlertWriteMeasure defines model for ProductAlertWrite.Measure.
+type ProductAlertWriteMeasure string
 
 // Project defines model for Project.
 type Project struct {
@@ -3050,6 +3264,12 @@ type PostV1MonitorsJSONRequestBody = MonitorCreate
 
 // PatchV1MonitorsIdJSONRequestBody defines body for PatchV1MonitorsId for application/json ContentType.
 type PatchV1MonitorsIdJSONRequestBody = MonitorPatch
+
+// PostV1ProductAlertsJSONRequestBody defines body for PostV1ProductAlerts for application/json ContentType.
+type PostV1ProductAlertsJSONRequestBody = ProductAlertWrite
+
+// PatchV1ProductAlertsIdJSONRequestBody defines body for PatchV1ProductAlertsId for application/json ContentType.
+type PatchV1ProductAlertsIdJSONRequestBody = ProductAlertWrite
 
 // PostV1ProjectSwitchJSONRequestBody defines body for PostV1ProjectSwitch for application/json ContentType.
 type PostV1ProjectSwitchJSONRequestBody PostV1ProjectSwitchJSONBody

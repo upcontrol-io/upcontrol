@@ -3621,6 +3621,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/product-alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The current project's product alert rules, oldest first, each with its state. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"][];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        /**
+         * Add a rule to the current project. Any member who can sign in may. The
+         *     workspace's rule count is a plan axis (Free 2, paid unlimited): past it
+         *     the answer is a 402 naming the plan that lifts it.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProductAlertWrite"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product-alerts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a rule of the current project. */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Change a rule of the current project; a change resets its episode. */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProductAlertWrite"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
     "/v1/heatmap/link": {
         parameters: {
             query?: never;
@@ -4925,6 +5062,69 @@ export interface components {
             };
             value: number;
         };
+        /** @description A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window. */
+        ProductAlert: {
+            id: string;
+            /** @description What the messages call it; the event name when empty. */
+            name?: string;
+            /** @description The event name the rule counts. */
+            event: string;
+            /** @description Count only the rows whose labels hold every pair, under the series `labels` rules. */
+            labels?: {
+                [key: string]: string;
+            };
+            /**
+             * @description Sum the money in `currency` instead of counting.
+             * @enum {string}
+             */
+            measure?: "amount";
+            currency?: string;
+            /** @enum {string} */
+            kind: "change" | "silence";
+            /**
+             * @description `change` only.
+             * @enum {string}
+             */
+            direction?: "down" | "up" | "any";
+            /** @description `change` only: how far from the same hours a week ago, in percent. */
+            percent?: number;
+            /** @description One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago. */
+            windowHours: number;
+            /** @description The board card it was made from, so the card can show it. Optional. */
+            widgetId?: string;
+            paused?: boolean;
+            /**
+             * @description `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+             * @enum {string}
+             */
+            state: "ok" | "firing" | "learning" | "frozen" | "paused";
+            /** Format: date-time */
+            lastFiredAt?: string;
+            /** Format: date-time */
+            lastCheckedAt?: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset. */
+        ProductAlertWrite: {
+            name?: string;
+            event?: string;
+            labels?: {
+                [key: string]: string;
+            };
+            /** @enum {string} */
+            measure?: "amount";
+            currency?: string;
+            /** @enum {string} */
+            kind?: "change" | "silence";
+            /** @enum {string} */
+            direction?: "down" | "up" | "any";
+            percent?: number;
+            /** @description One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago. */
+            windowHours?: number;
+            widgetId?: string;
+            paused?: boolean;
+        };
         UsedMax: {
             used: number;
             max: number;
@@ -4953,6 +5153,8 @@ export interface components {
             incidentHistoryDays: number;
             /** @description How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back. */
             historyDays?: number;
+            /** @description Product alert rules across the workspace (plan_entitlement.product_alerts): `used` counts every rule, `max` is the plan's. Absent when the plan is unlimited (every paid plan and Self-hosted). Rules past `max` after a downgrade are kept and frozen, newest first, never deleted. */
+            productAlerts?: components["schemas"]["UsedMax"];
             /** @description Boards per project (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted). A per-project axis, so it has no workspace-wide remainder to draw: the client renders `max` as a sentence, never a bar. */
             dashboards?: {
                 /** @description Boards ONE project may hold. */
