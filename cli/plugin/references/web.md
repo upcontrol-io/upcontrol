@@ -96,6 +96,26 @@ value from a dev machine: it takes one of the four for good. The source of a
 visit (search, social, campaign, referral, direct) is worked out by the script
 itself and needs nothing.
 
+## Name the clicks that matter (optional)
+
+A funnel from a page to an action needs the action as an event. On the
+control itself, nothing else:
+
+```html
+<a href="/signup" data-uc-event="cta_click" data-uc-plan="pro">Start free trial</a>
+```
+
+or from code, `upcontrol('track', 'cta_click', { plan: 'pro' })` (the queue
+stub above makes it safe before the script loads). These share the page view's
+visitor, so `Page /pricing → cta_click` is one funnel within a day. Names are
+1-40 characters, never `uc.`; fields are short strings, never an email.
+
+To credit signups and payments to a campaign, have the signup form carry
+`upcontrol('source')` (it returns the visit's `source`, `utm_*` and `landing`)
+to the backend, and send it on the server's own event:
+`track('signup', { source, campaign: utm_campaign })`. The visit and the
+account are never joined; the event carries where it came from.
+
 ## Verify
 
 Ask the user to open the site once in their own browser, then run

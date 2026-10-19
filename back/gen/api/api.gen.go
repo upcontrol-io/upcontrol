@@ -977,16 +977,19 @@ func (e WebBeaconO) Valid() bool {
 
 // Defines values for WebBeaconT.
 const (
-	Heat WebBeaconT = "heat"
-	View WebBeaconT = "view"
+	WebBeaconTEvent WebBeaconT = "event"
+	WebBeaconTHeat  WebBeaconT = "heat"
+	WebBeaconTView  WebBeaconT = "view"
 )
 
 // Valid indicates whether the value is a known member of the WebBeaconT enum.
 func (e WebBeaconT) Valid() bool {
 	switch e {
-	case Heat:
+	case WebBeaconTEvent:
 		return true
-	case View:
+	case WebBeaconTHeat:
+		return true
+	case WebBeaconTView:
 		return true
 	default:
 		return false
@@ -1455,6 +1458,9 @@ type DashboardMetricRef struct {
 	Label  *string                  `json:"label,omitempty"`
 	Name   *string                  `json:"name,omitempty"`
 	Source DashboardMetricRefSource `json:"source"`
+
+	// StepWhere `people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{"path": "/pricing"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`.
+	StepWhere *[]map[string]string `json:"stepWhere,omitempty"`
 
 	// Steps `people` only: a funnel's step event names, in journey order. The card is the journey's one definition.
 	Steps *[]string          `json:"steps,omitempty"`
@@ -2228,7 +2234,7 @@ type SeriesQuery struct {
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
 	Id string `json:"id"`
 
-	// Labels Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
+	// Labels Event reads, bare-name people reads and one-key people folds (a breakdown) only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). On a breakdown of `uc.pageview` by `from` with `{"path": "/pricing"}` it answers where the views of /pricing came from; by `path` with `{"from": "/pricing"}`, where they went next. A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
 	Labels *map[string]string `json:"labels,omitempty"`
 
 	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null.
@@ -2237,6 +2243,9 @@ type SeriesQuery struct {
 
 	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`.
 	Source SeriesQuerySource `json:"source"`
+
+	// StepLabels `people` funnels only, at most as many entries as `steps`: entry i narrows step i to the rows whose labels hold every pair, under the `labels` rules (at most 3 pairs). An empty object is no filter. Two steps may then share a name, and each is counted on its own.
+	StepLabels *[]map[string]string `json:"stepLabels,omitempty"`
 
 	// Steps `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order.
 	Steps *[]string          `json:"steps,omitempty"`
@@ -2532,8 +2541,12 @@ type WatchStatus string
 // WebBeacon One request from `uc.js`. `t: view` is a page view, sent on load and on
 // every path change. `t: heat` is everything one page view did,
 // aggregated in the page and sent once, when the tab hides or the path
-// changes. Selectors are CSS paths the script builds from ids and
-// `:nth-of-type`, never from class names, which a build re-hashes.
+// changes. `t: event` is a named event the page sent (`upcontrol('track',
+// name, fields)`, or a click on an element carrying `data-uc-event`),
+// stored as an events row with the same visitor as the page views, so a
+// funnel can run from a page view to a click within a day. Selectors are
+// CSS paths the script builds from ids and `:nth-of-type`, never from
+// class names, which a build re-hashes.
 type WebBeacon struct {
 	// A heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view.
 	A *[]int `json:"a,omitempty"`
@@ -2556,8 +2569,14 @@ type WebBeacon struct {
 	// H heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element.
 	H *[]string `json:"h,omitempty"`
 
+	// L event: the event's fields, at most 10, keys 1-60 bytes not starting `uc.`, values at most 100 bytes. The page's `path`, `device`, `segment` and `source` are added by the server and win over a field of the same name.
+	L *map[string]string `json:"l,omitempty"`
+
 	// M heat: at most 600 mouse cells as [selector, fx, fy, samples], sampled every 100 ms on a fine pointer that can hover.
 	M *[][]interface{} `json:"m,omitempty"`
+
+	// N event: the event name, 1-40 bytes, lowercased by the server; a name starting `uc.` is refused (the server's own).
+	N *string `json:"n,omitempty"`
 
 	// O view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
 	O *WebBeaconO `json:"o,omitempty"`

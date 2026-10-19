@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.upcontrol.io/back/internal/analytics"
 	"go.upcontrol.io/back/internal/ingest"
@@ -34,6 +36,7 @@ import (
 // run the whole door against a fake.
 type webStore interface {
 	InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error
+	InsertWebEvent(ctx context.Context, tenantID, projectID int64, ts time.Time, name string, labels map[string]string, actor string) error
 	AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []pgstore.HeatAdd) error
 	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) error
 	AdmitSegment(ctx context.Context, projectID int64, name string) (bool, error)
@@ -169,21 +172,61 @@ func utmLabels(q string, scrubOff bool) map[string]string {
 	}
 	var out map[string]string
 	for _, key := range [...]string{"utm_source", "utm_medium", "utm_campaign"} {
-		v := vals.Get(key)
-		if v == "" {
-			continue
-		}
-		if !scrubOff {
-			v = scrub.Scrub(v).Cleaned
-		}
-		if len(v) > 100 {
-			v = v[:100]
-		}
-		if v != "" {
+		if v := pageValue(vals.Get(key), scrubOff); v != "" {
 			if out == nil {
 				out = map[string]string{}
 			}
 			out[key] = v
+		}
+	}
+	return out
+}
+
+// pageValue is a page-sent label value as stored: scrubbed, then cut to 100
+// bytes.
+func pageValue(v string, scrubOff bool) string {
+	if !scrubOff {
+		v = scrub.Scrub(v).Cleaned
+	}
+	if len(v) > 100 {
+		v = v[:100]
+	}
+	return v
+}
+
+// eventName is an event beacon's n as stored: trimmed and lowercased, 1-40
+// bytes, no control characters, never one of the server's own uc. names.
+func eventName(n string) (string, bool) {
+	n = strings.ToLower(strings.TrimSpace(n))
+	if n == "" || len(n) > 40 || strings.HasPrefix(n, "uc.") || strings.ContainsFunc(n, unicode.IsControl) {
+		return "", false
+	}
+	return n, true
+}
+
+// webServerLabels are the labels the door writes on an event itself; a page
+// field of the same name is dropped.
+var webServerLabels = map[string]bool{"path": true, "device": true, "segment": true, "source": true}
+
+// eventFields keeps an event beacon's string fields: keys 1-60 bytes, never
+// uc. or a server label, values through pageValue, the first 10 keys in sorted
+// order. Anything else in l, l itself included, is ignored, never a 400.
+func eventFields(raw json.RawMessage, scrubOff bool) map[string]string {
+	// raw parsed with the body, so the one error left is l not being an
+	// object, which leaves in empty.
+	var in map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &in)
+	out := map[string]string{}
+	for _, k := range slices.Sorted(maps.Keys(in)) {
+		if len(out) == 10 {
+			break
+		}
+		v, ok := rawCellString(in[k])
+		if !ok || k == "" || len(k) > 60 || strings.HasPrefix(k, "uc.") || webServerLabels[k] {
+			continue
+		}
+		if v = pageValue(v, scrubOff); v != "" {
+			out[k] = v
 		}
 	}
 	return out
@@ -251,6 +294,8 @@ type beaconBody struct {
 	F string              `json:"f"`
 	G string              `json:"g"`
 	O string              `json:"o"`
+	N string              `json:"n"`
+	L json.RawMessage     `json:"l"`
 	S *float64            `json:"s"`
 	E json.RawMessage     `json:"e"`
 	A json.RawMessage     `json:"a"`
@@ -307,7 +352,10 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(body, &b) == nil {
 		path, ok = webPath(b.P, d.scrubOff)
 	}
-	if !ok || (b.T != "view" && b.T != "heat") || b.W <= 0 {
+	// An event's bad name is the page's own bug, so it is a 400 the page's
+	// network tab shows.
+	name, okName := eventName(b.N)
+	if !ok || (b.T != "view" && b.T != "heat" && (b.T != "event" || !okName)) || b.W <= 0 {
 		writeAPIErr(w, http.StatusBadRequest, "bad_beacon")
 		return
 	}
@@ -335,6 +383,28 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 	source := b.O
 	if !webSources[source] {
 		source = ""
+	}
+
+	if b.T == "event" {
+		labels := eventFields(b.L, d.scrubOff)
+		labels["path"], labels["device"] = path, device
+		if segment != "" {
+			labels["segment"] = segment
+		}
+		if source != "" {
+			labels["source"] = source
+		}
+		actor, err := d.visitor(ctx, now, t.ProjectID, ip, ua)
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		if err := d.store.InsertWebEvent(ctx, t.TenantID, t.ProjectID, now, name, labels, actor); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	if b.T == "view" {
@@ -510,7 +580,8 @@ func (d *webDoor) deepestRange(ctx context.Context, tenantID int64) (string, int
 // visitor hashes a page view's visitor for one UTC day: the day's salt, the
 // project and the address+browser pair. A visitor is countable without a
 // cookie, and the salt's daily death makes the hash useless for following
-// them tomorrow.
+// them tomorrow. The "w:" prefix marks that daily identity, so a read across
+// days (retention) can leave it out.
 func (d *webDoor) visitor(ctx context.Context, now time.Time, projectID int64, ip, ua string) (string, error) {
 	day := now.Truncate(24 * time.Hour)
 	d.mu.Lock()
@@ -530,7 +601,7 @@ func (d *webDoor) visitor(ctx context.Context, now time.Time, projectID int64, i
 	h.Write([]byte(ip))
 	h.Write([]byte{0})
 	h.Write([]byte(ua))
-	return hex.EncodeToString(h.Sum(nil)[:8]), nil
+	return "w:" + hex.EncodeToString(h.Sum(nil)[:8]), nil
 }
 
 // heatOut is the /w/heatmap answer, the Heatmap contract's shape; empty lists

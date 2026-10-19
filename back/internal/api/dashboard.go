@@ -171,13 +171,16 @@ type seriesQuery struct {
 	// and the retention grid's unit.
 	Steps  []string `json:"steps"`
 	Cohort string   `json:"cohort"`
+	// StepLabels narrows a funnel's step i to the rows whose labels hold entry
+	// i's pairs; a missing or empty entry is no filter.
+	StepLabels []map[string]string `json:"stepLabels"`
 	// Count is what a one-key people fold counts: "" and "people" are distinct
 	// actors, "events" is rows. A dimension nobody is behind — a delivery
 	// outcome, an HTTP status — has no actors at all, and every people read
 	// filters them out, so without this such a card reads 0 and says nothing
 	// about why.
 	Count string `json:"count"`
-	// Labels narrows an event read, or a bare-name people read, to the rows
+	// Labels narrows an event read, a bare-name people read or a breakdown to the rows
 	// whose labels hold every pair. A field of its own rather than a `where`
 	// key, so a core that predates it refuses the query as an unknown field
 	// instead of answering the unfiltered count under a filtered caption.
@@ -210,6 +213,24 @@ func rebucket(r seriesRange, bucket string) seriesRange {
 
 type seriesRequest struct {
 	Queries []seriesQuery `json:"queries"`
+}
+
+// labelsMsg checks one label filter against the contract's caps: "" when it
+// may be read, else the refusal naming the query.
+func labelsMsg(labels map[string]string, id string) string {
+	if len(labels) > 3 {
+		return fmt.Sprintf("at most 3 labels per query, got %d in %s", len(labels), id)
+	}
+	for k, v := range labels {
+		// Postgres refuses a NUL inside jsonb with an error, which would
+		// answer the whole board with a 500; refused here it is a 400
+		// that names the query. Tab and newline go with it: no label
+		// worth filtering on holds one.
+		if k == "" || len(k) > 60 || len(v) > 256 || strings.ContainsFunc(k+v, unicode.IsControl) {
+			return "a label key is 1 to 60 bytes and its value at most 256, with no control characters, in " + id
+		}
+	}
+	return ""
 }
 
 // validateSeries returns "" when the whole batch is answerable, else the
@@ -254,6 +275,19 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		if q.Source != "people" && (len(q.Steps) > 0 || q.Cohort != "") {
 			return "steps and cohort are only for the people source in " + q.ID
+		}
+		if len(q.StepLabels) > 0 {
+			if q.Source != "people" || len(q.Steps) == 0 {
+				return "stepLabels are only for a people funnel in " + q.ID
+			}
+			if len(q.StepLabels) > len(q.Steps) {
+				return fmt.Sprintf("stepLabels holds %d entries for %d steps in %s", len(q.StepLabels), len(q.Steps), q.ID)
+			}
+			for _, l := range q.StepLabels {
+				if msg := labelsMsg(l, q.ID); msg != "" {
+					return msg
+				}
+			}
 		}
 		if q.Cohort != "" && q.Cohort != "week" {
 			return "unknown cohort " + q.Cohort + " in " + q.ID
@@ -313,22 +347,16 @@ func validateSeries(qs []seriesQuery) string {
 			}
 		}
 		if len(q.Labels) > 0 {
-			// The two reads of one event name over time. Every other shape folds
-			// or groups, where a filter would need a meaning of its own.
-			if q.Source != "event" && !q.bareName() {
-				return "labels are only for an event read or a people read of one name in " + q.ID
+			// The two reads of one event name over time, and a breakdown, which
+			// folds only the rows the filter leaves. A funnel filters per step
+			// (stepLabels); retention and an A/B test would need a meaning of
+			// their own.
+			breakdown := q.Source == "people" && len(q.Steps) == 0 && q.Cohort == "" && len(q.Group) == 1
+			if q.Source != "event" && !q.bareName() && !breakdown {
+				return "labels are only for an event read, a people read of one name or a breakdown in " + q.ID
 			}
-			if len(q.Labels) > 3 {
-				return fmt.Sprintf("at most 3 labels per query, got %d in %s", len(q.Labels), q.ID)
-			}
-			for k, v := range q.Labels {
-				// Postgres refuses a NUL inside jsonb with an error, which would
-				// answer the whole board with a 500; refused here it is a 400
-				// that names the query. Tab and newline go with it: no label
-				// worth filtering on holds one.
-				if k == "" || len(k) > 60 || len(v) > 256 || strings.ContainsFunc(k+v, unicode.IsControl) {
-					return "a label key is 1 to 60 bytes and its value at most 256, with no control characters, in " + q.ID
-				}
+			if msg := labelsMsg(q.Labels, q.ID); msg != "" {
+				return msg
 			}
 		}
 		// A fold of one label may count rows instead of actors; nothing else may.
@@ -734,11 +762,11 @@ func (h *writeAPI) peopleSeries(ctx context.Context, tenantID, projectID int64, 
 		)
 		switch {
 		case len(q.Steps) > 0:
-			sums, err = h.pgs.FunnelSteps(ctx, tenantID, projectID, q.Steps, from, to)
+			sums, err = h.pgs.FunnelSteps(ctx, tenantID, projectID, q.Steps, q.StepLabels, from, to)
 		case q.Cohort == "week":
 			sums, err = h.pgs.RetentionCohorts(ctx, tenantID, projectID, q.Name, from, to)
 		case len(q.Group) == 1:
-			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], q.Count == "events", from, to)
+			sums, err = h.pgs.BreakdownValues(ctx, tenantID, projectID, q.Name, q.Group[0], q.Labels, q.Count == "events", from, to)
 		default: // two group keys: validateSeries refused every other shape
 			sums, err = h.pgs.ExperimentArms(ctx, tenantID, projectID, q.Name, q.Group[0], q.Group[1], from, to)
 		}
@@ -2296,6 +2324,14 @@ func validateLayout(doc apigen.DashboardLayout) string {
 			// count on read, and a mistyped one would vanish on the next Save.
 			if m.Count != nil && !m.Count.Valid() {
 				return fmt.Sprintf("widget %q counts an unknown %q", wd.Id, string(*m.Count))
+			}
+			// A stored board never carries a filter for a step it lacks.
+			steps := 0
+			if m.Steps != nil {
+				steps = len(*m.Steps)
+			}
+			if m.StepWhere != nil && len(*m.StepWhere) > steps {
+				return fmt.Sprintf("widget %q narrows more steps than it has", wd.Id)
 			}
 		}
 	}

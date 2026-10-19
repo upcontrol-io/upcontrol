@@ -81,6 +81,43 @@ func TestInsertPageviewCountsVisits(t *testing.T) {
 	}
 }
 
+// One visitor's named events in a day stop at maxVisitEvents; page views do
+// not count toward it, and an event counts no visit.
+func TestInsertWebEventCapsOneVisitorsDay(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	at := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	for range 5 {
+		if err := s.InsertPageview(ctx, tenant, project, at, map[string]string{"path": "/"}, "w:v"); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+	}
+	for range maxVisitEvents + 1 {
+		if err := s.InsertWebEvent(ctx, tenant, project, at.Add(time.Minute), "signup", map[string]string{"path": "/"}, "w:v"); err != nil {
+			t.Fatalf("event: %v", err)
+		}
+	}
+	var events, views int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE name = 'signup'), count(*) FILTER (WHERE name = 'uc.pageview')
+		FROM events WHERE tenant_id = $1 AND actor = 'w:v'`, tenant).Scan(&events, &views); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if events != maxVisitEvents || views != 5 {
+		t.Fatalf("%d events and %d page views stored, want %d and 5", events, views, maxVisitEvents)
+	}
+	// The next UTC day starts a fresh budget.
+	if err := s.InsertWebEvent(ctx, tenant, project, at.AddDate(0, 0, 1), "signup", map[string]string{"path": "/"}, "w:v"); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE tenant_id = $1 AND name = 'signup'`, tenant).Scan(&events); err != nil || events != maxVisitEvents+1 {
+		t.Fatalf("%d events after a new day (%v), want %d", events, err, maxVisitEvents+1)
+	}
+	if q, _ := s.WebQuota(ctx, tenant, at); q.Visits != 1 {
+		t.Fatalf("%d visits, want the page views' 1: an event counts no visit", q.Visits)
+	}
+}
+
 func TestCompactWeb(t *testing.T) {
 	s, pool := openStore(t)
 	ctx := context.Background()

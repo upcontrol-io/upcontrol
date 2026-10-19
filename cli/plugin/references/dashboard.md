@@ -141,9 +141,9 @@ reading:
 
 | card | ref |
 |---|---|
-| `funnel` | `{ "source": "people", "steps": ["visit", "signup", "payment.succeeded"] }` - the step event names, in journey order, 2 to 12 |
+| `funnel` | `{ "source": "people", "steps": ["visit", "signup", "payment.succeeded"] }` - the step event names, in journey order, 2 to 12. A step can be one page: `{ "source": "people", "steps": ["uc.pageview", "cta_click", "uc.pageview"], "stepWhere": [{ "path": "/pricing" }, {}, { "path": "/signup" }] }` - one object per step, an empty object for none, at most 3 fields each |
 | `retention` | `{ "source": "people", "cohort": "week" }` - every event the project sent. `name` is optional: `{ "source": "people", "cohort": "week", "name": "<event>" }` counts only the people of that one event, the name `retention()` was given. Their first such event is the cohort, and the same event in a later week a return. A name starting `uc.` reads nothing |
-| `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
+| `breakdown` | `{ "source": "people", "name": "<event>", "field": "<a field of that event>" }` - `value`, as the SDK's `breakdown()` sends it. A `where` of that event's fields narrows the rows: `{ "source": "people", "name": "uc.pageview", "field": "from", "where": { "path": "/pricing" } }` is where visitors of /pricing came from, and `{ "source": "people", "name": "uc.pageview", "field": "path", "where": { "from": "/pricing" } }` where they went next. Add `"count": "events"` when nobody is behind the dimension - a delivery outcome, an HTTP status - or the card counts distinct people and reads 0. |
 | `experiment` | `{ "source": "people", "name": "<event>" }` - the arms come from `uc.variant` and `uc.stat` on that event's rows; the card compares each arm with the one named `control`, and what it claims is topic `experiment` |
 | `heatmap` | `{ "source": "people", "name": "uc.pageview", "field": "path", "count": "events" }` - fixed: the web script's page views, nothing to pick |
 

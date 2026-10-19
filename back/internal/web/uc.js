@@ -1,6 +1,7 @@
 // upcontrol uc.js: the script behind
 // <script defer src=".../uc.js" data-key="uc_pub_..."></script>.
-// It records page views and interaction heat for the public key in data-key,
+// It records page views, interaction heat and the page's named events
+// (upcontrol('track', ...), data-uc-event) for the public key in data-key,
 // or, opened through a heatmap link (#uc-heatmap=<token>), it records nothing
 // and draws the page's heatmap over the page instead. Served verbatim:
 // no build, no dependency, ES2017, one IIFE. ASCII only: a page or a CDN that
@@ -76,6 +77,10 @@
 	var SOCIAL = ['facebook.com', 'instagram.com', 't.co', 'twitter.com', 'x.com', 'linkedin.com', 'lnkd.in',
 		'reddit.com', 'youtube.com', 'tiktok.com', 'pinterest.', 'vk.com', 't.me', 'threads.net', 'bsky.app'];
 	var source = sourceOf(); // the page load's, kept across SPA routes; '' is unknown
+	var loadQuery = new URLSearchParams(location.search); // the page load's, for upcontrol('source')
+	var landing = location.pathname;
+	var tracked = 0; // events this page load sent, at most 200
+	var trackWarned = false;
 
 	function post(json) {
 		fetch(base + '/w?key=' + encodeURIComponent(key), {
@@ -103,6 +108,60 @@
 	function mark(body) {
 		if (segment) body.g = segment;
 		if (source) body.o = source;
+	}
+
+	// A named event: sent at once, never batched with the heat. Same name and
+	// field rules as the server's, so a refused event is never sent.
+	function track(name, fields) {
+		if (typeof name === 'string') name = name.trim();
+		if (typeof name !== 'string' || !name || name.length > 40 || name.slice(0, 3).toLowerCase() === 'uc.') {
+			if (!trackWarned) {
+				trackWarned = true;
+				console.warn('[upcontrol] track needs an event name of 1-40 characters, not starting uc.');
+			}
+			return;
+		}
+		if (tracked >= 200) return;
+		tracked++;
+		var body = { v: 1, t: 'event', p: path, w: innerWidth, n: name };
+		if (Object.prototype.toString.call(fields) === '[object Object]') {
+			var l = {}, kept = 0, keys = Object.keys(fields);
+			for (var i = 0; i < keys.length && kept < 10; i++) {
+				var k = keys[i], v = fields[k], tv = typeof v;
+				if (!k || k.length > 60 || k.slice(0, 3).toLowerCase() === 'uc.') continue;
+				if (tv !== 'string' && tv !== 'number' && tv !== 'boolean') continue;
+				l[k] = String(v).slice(0, 100);
+				kept++;
+			}
+			if (kept) body.l = l;
+		}
+		mark(body);
+		post(JSON.stringify(body));
+	}
+
+	// The nearest element carrying data-uc-event sends it, its other
+	// data-uc-* attributes as the fields.
+	function trackNamed(t) {
+		var el = t instanceof Element && t.closest('[data-uc-event]');
+		if (!el) return;
+		var fields = {};
+		for (var i = 0; i < el.attributes.length; i++) {
+			var a = el.attributes[i].name;
+			if (a.indexOf('data-uc-') === 0 && a !== 'data-uc-event') fields[a.slice(8)] = el.attributes[i].value;
+		}
+		track(el.getAttribute('data-uc-event'), fields);
+	}
+
+	// What the page load came from, only the keys it has.
+	function sourceInfo() {
+		var out = {};
+		if (source) out.source = source;
+		['utm_source', 'utm_medium', 'utm_campaign'].forEach(function (k) {
+			var v = loadQuery.get(k);
+			if (v) out[k] = v;
+		});
+		if (landing) out.landing = landing;
+		return out;
 	}
 
 	// A host matches an entry when it is the entry or ends in .entry; an
@@ -239,6 +298,7 @@
 	}
 
 	document.addEventListener('click', function (e) {
+		trackNamed(e.target); // a named control pressed by keyboard is still pressed
 		if (e.detail === 0) return; // keyboard activation carries no position
 		var el = norm(e.target);
 		if (!el) return;
@@ -403,7 +463,9 @@
 	for (var qi = 0; qi < queued.length; qi++) {
 		if (queued[qi][0] === 'segment') segment = segmentOf(queued[qi][1]);
 	}
-	window.upcontrol = function (cmd, arg) {
+	window.upcontrol = function (cmd, arg, fields) {
+		if (cmd === 'track') { track(arg, fields); return; }
+		if (cmd === 'source') return sourceInfo();
 		if (cmd !== 'segment') return;
 		var next = segmentOf(arg);
 		if (next === segment) return;
@@ -412,6 +474,10 @@
 		segment = next;
 	};
 	view(from);
+	// Queued events after the first view, so a funnel's page view precedes them.
+	for (qi = 0; qi < queued.length; qi++) {
+		if (queued[qi][0] === 'track') track(queued[qi][1], queued[qi][2]);
+	}
 
 	// Calls fn after every pushState and replaceState; returns the undo, which
 	// puts the originals back.

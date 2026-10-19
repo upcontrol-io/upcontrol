@@ -15,9 +15,11 @@ type ClickCell = [string, number, number, number, number]; // [sel, fx, fy, clic
 type MoveCell = [string, number, number, number]; // [sel, fx, fy, samples]
 type Beacon = {
 	v: number;
-	t: "view" | "heat";
+	t: "view" | "heat" | "event";
 	p: string;
 	w: number;
+	n?: string;
+	l?: Record<string, string>;
 	r?: string;
 	q?: string;
 	f?: string;
@@ -559,3 +561,104 @@ test("the overlay offers no segment filter for a site that sets none", async ({ 
 		(window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol("segment", "member"));
 	expect(errors).toEqual([]);
 });
+
+type Uc = (cmd: string, ...args: unknown[]) => unknown;
+const uc = (page: Page, cmd: string, ...args: unknown[]) =>
+	page.evaluate(([c, a]) => (window as unknown as { upcontrol: Uc }).upcontrol(c as string, ...(a as unknown[])),
+		[cmd, args] as const);
+const events = (beacons: Beacon[]) => beacons.filter((b) => b.t === "event");
+const views = (beacons: Beacon[]) => beacons.filter((b) => b.t === "view");
+
+test("track sends a named event with its fields, path and marks", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>", { attrs: ' data-segment="member"' });
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await uc(page, "track", "signup_click", { plan: "pro", n: 3 });
+	await expect.poll(() => events(beacons)).toHaveLength(1);
+	const ev = events(beacons)[0];
+	expect(ev).toMatchObject({ v: 1, p: "/", n: "signup_click", l: { plan: "pro", n: "3" }, g: "member", o: "direct" });
+	expect(ev.w).toBe(await page.evaluate(() => innerWidth));
+	expect(errors).toEqual([]);
+});
+
+test("an invalid event name sends nothing and warns once", async ({ page }) => {
+	const errors = watch(page);
+	const warnings: string[] = [];
+	page.on("console", (m) => { if (m.type() === "warning") warnings.push(m.text()); });
+	const beacons = await serve(page, "<h1>Hello</h1>");
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await uc(page, "track", "");
+	await uc(page, "track", "uc.x");
+	await uc(page, "track", "UC.pageview");
+	await uc(page, "track", "a".repeat(41));
+	await uc(page, "track", "ok");
+	await expect.poll(() => events(beacons)).toHaveLength(1);
+	expect(events(beacons)[0].n).toBe("ok");
+	expect(warnings).toEqual(["[upcontrol] track needs an event name of 1-40 characters, not starting uc."]);
+	expect(errors).toEqual([]);
+});
+
+test("a track queued before the script loads is sent after the first view, in order", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>", {
+		head:
+			"<script>window.upcontrol=window.upcontrol||function(){(upcontrol.q=upcontrol.q||[]).push(arguments)};" +
+			"upcontrol('track','first');upcontrol('track','second',{x:1});</script>",
+	});
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons).toHaveLength(3);
+	expect(beacons.map((b) => b.n ?? b.t)).toEqual(["view", "first", "second"]);
+	expect(beacons[2].l).toEqual({ x: "1" });
+	expect(errors).toEqual([]);
+});
+
+test("a press on a data-uc-event element sends it, by pointer or keyboard", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page,
+		'<button id="cta" data-uc-event="cta" data-uc-plan="pro"><span id="inner">Start</span> now</button>');
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.locator("#cta").click({ position: { x: 2, y: 2 } });
+	await page.locator("#inner").click();
+	await page.locator("#cta").focus();
+	await page.keyboard.press("Enter");
+	await expect.poll(() => events(beacons)).toHaveLength(3);
+	for (const ev of events(beacons)) {
+		expect(ev.n).toBe("cta");
+		expect(ev.l).toEqual({ plan: "pro" });
+	}
+	expect(errors).toEqual([]);
+});
+
+test("the 201st event on one page is dropped", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>");
+	await page.goto("https://site.test/");
+	await expect.poll(() => views(beacons)).toHaveLength(1);
+	await page.evaluate(() => {
+		const up = (window as unknown as { upcontrol: Uc }).upcontrol;
+		for (let i = 0; i < 201; i++) up("track", "e" + i);
+	});
+	await expect.poll(() => events(beacons)).toHaveLength(200);
+	await page.waitForTimeout(300);
+	expect(events(beacons)).toHaveLength(200);
+	expect(events(beacons).some((b) => b.n === "e200")).toBe(false);
+	expect(errors).toEqual([]);
+});
+
+for (const [url, want] of [
+	["https://site.test/?utm_source=news&utm_campaign=oct",
+		{ source: "campaign", utm_source: "news", utm_campaign: "oct", landing: "/" }],
+	["https://site.test/", { source: "direct", landing: "/" }],
+] as const) {
+	test(`upcontrol('source') hands the page its visit's source: ${want.source}`, async ({ page }) => {
+		const errors = watch(page);
+		const beacons = await serve(page, "<h1>Hello</h1>");
+		await page.goto(url);
+		await expect.poll(() => views(beacons)).toHaveLength(1);
+		expect(await uc(page, "source")).toEqual(want);
+		expect(errors).toEqual([]);
+	});
+}

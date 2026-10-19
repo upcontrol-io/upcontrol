@@ -43,6 +43,11 @@ type fakeWebStore struct {
 		labels          map[string]string
 		actor           string
 	}
+	events []struct {
+		name   string
+		labels map[string]string
+		actor  string
+	}
 	heatCalls []struct {
 		tenant, project int64
 		day             time.Time
@@ -85,6 +90,15 @@ func (f *fakeWebStore) InsertPageview(_ context.Context, tenantID, projectID int
 		labels          map[string]string
 		actor           string
 	}{tenantID, projectID, ts, labels, actor})
+	return nil
+}
+
+func (f *fakeWebStore) InsertWebEvent(_ context.Context, _, _ int64, _ time.Time, name string, labels map[string]string, actor string) error {
+	f.events = append(f.events, struct {
+		name   string
+		labels map[string]string
+		actor  string
+	}{name, labels, actor})
 	return nil
 }
 
@@ -193,7 +207,7 @@ func postBeacon(t *testing.T, d *webDoor, body string, headers map[string]string
 	return rr
 }
 
-var webActorHex = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var webActorHex = regexp.MustCompile(`^w:[0-9a-f]{16}$`)
 
 func TestDeviceFor(t *testing.T) {
 	for _, c := range []struct {
@@ -338,7 +352,7 @@ func TestCollectView(t *testing.T) {
 		}
 	}
 	if !webActorHex.MatchString(pv.actor) {
-		t.Errorf("actor %q is not 16 hex chars", pv.actor)
+		t.Errorf("actor %q is not w: and 16 hex chars", pv.actor)
 	}
 	if !pv.ts.Equal(time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)) {
 		t.Errorf("ts %v, want the door's clock", pv.ts)
@@ -851,5 +865,107 @@ func TestHeatmapSegmentAndSource(t *testing.T) {
 		if rr := getHeatmap(t, d, base+bad, nil); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "bad_request") {
 			t.Errorf("%s: %d %s, want 400 bad_request", bad, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+// An event beacon is an events row under the same visitor as the request's
+// page view: its name lowercased, its string fields filtered, capped and
+// scrubbed, and the server's own labels winning over a field of that name.
+func TestCollectEvent(t *testing.T) {
+	headers := map[string]string{"Origin": "https://example.com", "User-Agent": "Mozilla/5.0"}
+	store := &fakeWebStore{}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	if rr := postBeacon(t, d, `{"v":2,"t":"view","p":"/pricing","w":1200,"g":"member","o":"search"}`, headers); rr.Code != http.StatusNoContent {
+		t.Fatalf("view: %d %s", rr.Code, rr.Body.String())
+	}
+	fields := map[string]any{
+		"plan": "pro", "email": "anna@example.com", "long": strings.Repeat("a", 150),
+		"n": 3, "obj": map[string]any{"x": 1}, "uc.stat": "x", "": "empty-key",
+		strings.Repeat("k", 61): "long-key", "path": "/forged", "device": "forged", "segment": "forged", "source": "forged",
+	}
+	for i := range 12 {
+		fields[fmt.Sprintf("z%02d", i)] = "v"
+	}
+	l, _ := json.Marshal(fields)
+	body := fmt.Sprintf(`{"v":2,"t":"event","p":"/pricing","w":1200,"g":"member","o":"search","n":"  Signup_Clicked ","l":%s}`, l)
+	if rr := postBeacon(t, d, body, headers); rr.Code != http.StatusNoContent {
+		t.Fatalf("event: %d %s", rr.Code, rr.Body.String())
+	}
+	if len(store.events) != 1 {
+		t.Fatalf("%d events stored, want 1", len(store.events))
+	}
+	ev := store.events[0]
+	if ev.name != "signup_clicked" {
+		t.Errorf("name %q, want trimmed and lowercased", ev.name)
+	}
+	if ev.actor != store.pageviews[0].actor || !webActorHex.MatchString(ev.actor) {
+		t.Errorf("event actor %q, page view actor %q: want the same w: visitor", ev.actor, store.pageviews[0].actor)
+	}
+	// Sorted valid keys: email, long, plan, z00..z06 is ten; z07 on is cut.
+	want := map[string]string{
+		"path": "/pricing", "device": "desktop", "segment": "member", "source": "search",
+		"plan": "pro", "long": strings.Repeat("a", 100),
+	}
+	for k, v := range want {
+		if ev.labels[k] != v {
+			t.Errorf("labels[%q] = %q, want %q", k, ev.labels[k], v)
+		}
+	}
+	if strings.Contains(ev.labels["email"], "anna@example.com") || ev.labels["email"] == "" {
+		t.Errorf("email field %q, want it scrubbed", ev.labels["email"])
+	}
+	for _, k := range []string{"n", "obj", "uc.stat", "", strings.Repeat("k", 61), "z07"} {
+		if _, ok := ev.labels[k]; ok {
+			t.Errorf("labels kept %q", k)
+		}
+	}
+	if len(ev.labels) != 14 {
+		t.Errorf("%d labels, want 10 fields and 4 server labels: %v", len(ev.labels), ev.labels)
+	}
+	if len(store.pageviews) != 1 || len(store.heatCalls) != 0 || len(store.engageCalls) != 0 {
+		t.Error("an event wrote a page view, heat or engaged time")
+	}
+}
+
+// A server label the door does not set is still never the page's: a forged
+// segment on an unadmitted beacon does not survive.
+func TestCollectEventDropsForgedServerLabels(t *testing.T) {
+	store := &fakeWebStore{}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	body := `{"v":2,"t":"event","p":"/","w":1200,"n":"x","l":{"segment":"vip","source":"search"}}`
+	if rr := postBeacon(t, d, body, map[string]string{"Origin": "https://example.com"}); rr.Code != http.StatusNoContent {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	if l := store.events[0].labels; l["segment"] != "" || l["source"] != "" {
+		t.Errorf("labels %v carry the page's segment or source", l)
+	}
+}
+
+func TestCollectEventRefusesBadNames(t *testing.T) {
+	for _, n := range []string{`""`, `"   "`, `"uc.pageview"`, `"UC.Custom"`, `"a\u0007b"`, fmt.Sprintf("%q", strings.Repeat("a", 41)), `5`} {
+		store := &fakeWebStore{}
+		body := fmt.Sprintf(`{"v":2,"t":"event","p":"/","w":1200,"n":%s}`, n)
+		rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, map[string]string{"Origin": "https://example.com"})
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "bad_beacon") {
+			t.Errorf("n=%s: %d %s, want 400 bad_beacon", n, rr.Code, rr.Body.String())
+		}
+		if len(store.events) != 0 {
+			t.Errorf("n=%s: stored", n)
+		}
+	}
+	store := &fakeWebStore{}
+	body := fmt.Sprintf(`{"v":2,"t":"event","p":"/","w":1200,"n":%q}`, strings.Repeat("a", 40))
+	if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, map[string]string{"Origin": "https://example.com"}); rr.Code != http.StatusNoContent || len(store.events) != 1 {
+		t.Errorf("a 40-byte name: %d, %d events, want 204 and stored", rr.Code, len(store.events))
+	}
+}
+
+func TestCollectEventOverTheVisitCapStoresNothingQuietly(t *testing.T) {
+	limit := int32(3000)
+	store := &fakeWebStore{quota: pgstore.WebQuota{Visits: 3000, MaxVisits: &limit}}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"event","p":"/","w":1200,"n":"signup"}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 || len(store.events) != 0 {
+		t.Errorf("%d %q, %d events; want a bare 204 storing nothing", rr.Code, rr.Body.String(), len(store.events))
 	}
 }

@@ -4658,6 +4658,10 @@ export interface components {
             };
             /** @description `people` only: a funnel's step event names, in journey order. The card is the journey's one definition. */
             steps?: string[];
+            /** @description `people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{"path": "/pricing"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`. */
+            stepWhere?: {
+                [key: string]: string;
+            }[];
             /** @description `people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return). */
             cohort?: string;
             /** @description `people` only: the event field a breakdown ranks the values of. */
@@ -4842,7 +4846,7 @@ export interface components {
             where?: {
                 [key: string]: string;
             };
-            /** @description Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption. */
+            /** @description Event reads, bare-name people reads and one-key people folds (a breakdown) only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). On a breakdown of `uc.pageview` by `from` with `{"path": "/pricing"}` it answers where the views of /pricing came from; by `path` with `{"from": "/pricing"}`, where they went next. A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption. */
             labels?: {
                 [key: string]: string;
             };
@@ -4855,6 +4859,10 @@ export interface components {
             group?: string[];
             /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */
             steps?: string[];
+            /** @description `people` funnels only, at most as many entries as `steps`: entry i narrows step i to the rows whose labels hold every pair, under the `labels` rules (at most 3 pairs). An empty object is no filter. Two steps may then share a name, and each is counted on its own. */
+            stepLabels?: {
+                [key: string]: string;
+            }[];
             /**
              * @description `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people.
              * @enum {string}
@@ -5219,14 +5227,24 @@ export interface components {
          * @description One request from `uc.js`. `t: view` is a page view, sent on load and on
          *     every path change. `t: heat` is everything one page view did,
          *     aggregated in the page and sent once, when the tab hides or the path
-         *     changes. Selectors are CSS paths the script builds from ids and
-         *     `:nth-of-type`, never from class names, which a build re-hashes.
+         *     changes. `t: event` is a named event the page sent (`upcontrol('track',
+         *     name, fields)`, or a click on an element carrying `data-uc-event`),
+         *     stored as an events row with the same visitor as the page views, so a
+         *     funnel can run from a page view to a click within a day. Selectors are
+         *     CSS paths the script builds from ids and `:nth-of-type`, never from
+         *     class names, which a build re-hashes.
          */
         WebBeacon: {
             /** @description The beacon format, 1. */
             v: number;
             /** @enum {string} */
-            t: "view" | "heat";
+            t: "view" | "heat" | "event";
+            /** @description event: the event name, 1-40 bytes, lowercased by the server; a name starting `uc.` is refused (the server's own). */
+            n?: string;
+            /** @description event: the event's fields, at most 10, keys 1-60 bytes not starting `uc.`, values at most 100 bytes. The page's `path`, `device`, `segment` and `source` are added by the server and win over a field of the same name. */
+            l?: {
+                [key: string]: string;
+            };
             /** @description location.pathname, at most 256 bytes. */
             p: string;
             /** @description window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop. */

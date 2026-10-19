@@ -27,38 +27,47 @@ const peopleCount = "count(DISTINCT actor) AS people"
 // enforced an order either, and silently changing what a number means is
 // worse than keeping a loose one. The step list rides one array parameter;
 // its width is the answer's width, so it is capped like every grouped read.
-func (s *Store) FunnelSteps(ctx context.Context, tenantID, projectID int64, steps []string, from, to time.Time) ([]LabelSum, error) {
+//
+// stepLabels[i] narrows step i to the rows whose labels hold its pairs; a
+// missing or empty entry matches every row. A step is counted by its INDEX,
+// so two steps of one name with different labels (two pages of
+// `uc.pageview`) are counted apart.
+func (s *Store) FunnelSteps(ctx context.Context, tenantID, projectID int64, steps []string, stepLabels []map[string]string, from, to time.Time) ([]LabelSum, error) {
 	if len(steps) == 0 || len(steps) > maxGroupRows {
 		return nil, fmt.Errorf("a funnel takes one to %d steps", maxGroupRows)
 	}
+	filters := make([]string, len(steps))
+	for i := range steps {
+		var l map[string]string
+		if i < len(stepLabels) {
+			l = stepLabels[i]
+		}
+		filters[i] = string(jsonb(l))
+	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, `+peopleCount+`
-		  FROM events
-		 WHERE tenant_id = $1 AND project_id = $2 AND name = ANY($3)
-		   AND actor <> '' AND ts >= $4 AND ts < $5
-		 GROUP BY name`,
-		tenantID, projectID, steps, from, to)
+		SELECT s.i, count(DISTINCT e.actor) AS people
+		  FROM unnest($3::text[], $4::text[]) WITH ORDINALITY AS s(name, labels, i)
+		  JOIN events e ON e.name = s.name AND (s.labels = '{}' OR e.labels @> s.labels::jsonb)
+		 WHERE e.tenant_id = $1 AND e.project_id = $2
+		   AND e.actor <> '' AND e.ts >= $5 AND e.ts < $6
+		 GROUP BY s.i`,
+		tenantID, projectID, steps, filters, from, to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	counts := map[string]int64{}
-	for rows.Next() {
-		var step string
-		var people int64
-		if err := rows.Scan(&step, &people); err != nil {
-			return nil, err
-		}
-		counts[step] = people
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	out := make([]LabelSum, len(steps))
 	for i, step := range steps {
-		out[i] = LabelSum{Labels: map[string]string{"step": step}, Sum: float64(counts[step])}
+		out[i] = LabelSum{Labels: map[string]string{"step": step}}
 	}
-	return out, nil
+	for rows.Next() {
+		var i, people int64
+		if err := rows.Scan(&i, &people); err != nil {
+			return nil, err
+		}
+		out[i-1].Sum = float64(people)
+	}
+	return out, rows.Err()
 }
 
 // BreakdownValues ranks the values of one label over one event name, most
@@ -71,20 +80,22 @@ func (s *Store) FunnelSteps(ctx context.Context, tenantID, projectID int64, step
 // filters them out. Without this such a card reads 0 and says nothing about
 // why. The actor filter goes with the aggregate rather than staying: counting
 // events among rows that happen to have a person would answer a third
-// question nobody asked.
-func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, name, labelKey string, countEvents bool, from, to time.Time) ([]LabelSum, error) {
+// question nobody asked. A non-empty `labels` folds only the rows holding its
+// pairs.
+func (s *Store) BreakdownValues(ctx context.Context, tenantID, projectID int64, name, labelKey string, labels map[string]string, countEvents bool, from, to time.Time) ([]LabelSum, error) {
 	fold, actors := peopleCount, "AND actor <> ''"
 	if countEvents {
 		fold, actors = "count(*) AS events", ""
 	}
+	narrow, args := eventLabels(labels, []any{tenantID, projectID, labelKey, name, from, to, maxGroupRows})
 	// ORDER BY the ordinal, because the aggregate's name changes with what it counts.
 	rows, err := s.pool.Query(ctx, `
 		SELECT labels->>$3 AS g, `+fold+`
 		  FROM events
 		 WHERE tenant_id = $1 AND project_id = $2 AND name = $4
-		   `+actors+` AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6
+		   `+actors+` AND labels->>$3 IS NOT NULL AND ts >= $5 AND ts < $6`+narrow+`
 		 GROUP BY g ORDER BY 2 DESC LIMIT $7`,
-		tenantID, projectID, labelKey, name, from, to, maxGroupRows)
+		args...)
 	if err != nil {
 		return nil, err
 	}
@@ -130,16 +141,18 @@ func (s *Store) RetentionCohorts(ctx context.Context, tenantID, projectID int64,
 		args = append(args, name)
 		only = fmt.Sprintf(" AND name = $%d", len(args))
 	}
+	// actor NOT LIKE 'w:%': the web door's visitor is a daily hash, so it would
+	// read as a new person every day.
 	rows, err := s.pool.Query(ctx, `
 		WITH firsts AS (
 			SELECT actor, floor((extract(epoch from min(ts)) + 259200) / 604800)::bigint AS cohort
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'`+only+`
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%' AND actor NOT LIKE 'w:%'`+only+`
 			 GROUP BY actor
 		), active AS (
 			SELECT actor, floor((extract(epoch from ts) + 259200) / 604800)::bigint AS wk
 			  FROM events
-			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%'`+only+`
+			 WHERE tenant_id = $1 AND project_id = $2 AND actor <> '' AND name NOT LIKE 'uc.%' AND actor NOT LIKE 'w:%'`+only+`
 			   AND ts >= $3 AND ts < $4
 		)
 		SELECT f.cohort * 604800 - 259200 AS monday, active.wk - f.cohort AS week, `+peopleCount+`

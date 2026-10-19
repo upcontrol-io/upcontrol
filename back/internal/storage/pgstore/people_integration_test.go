@@ -51,7 +51,7 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 	seedEvent(t, pool, at.Add(4*time.Second), "visit", "", nil)
 	seedEvent(t, pool, at.Add(5*time.Second), "signup", "ada", nil)
 
-	steps, err := s.FunnelSteps(ctx, peopleTenant, peopleProject, []string{"visit", "signup", "paid"}, from, to)
+	steps, err := s.FunnelSteps(ctx, peopleTenant, peopleProject, []string{"visit", "signup", "paid"}, nil, from, to)
 	if err != nil {
 		t.Fatalf("funnel steps: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 	seedEvent(t, pool, at.Add(2*time.Second), "purchase", "linus", map[string]string{"plan": "free"})
 	seedEvent(t, pool, at.Add(3*time.Second), "purchase", "", map[string]string{"plan": "pro"})
 	seedEvent(t, pool, at.Add(4*time.Second), "purchase", "ada", nil)
-	values, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", false, from, to)
+	values, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", nil, false, from, to)
 	if err != nil {
 		t.Fatalf("breakdown values: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 	// point: it is invisible to the people count above and must be counted
 	// here, or a dimension with no actors at all — a delivery outcome, an HTTP
 	// status — reads 0 and says nothing about why.
-	rowsPerPlan, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", true, from, to)
+	rowsPerPlan, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "purchase", "plan", nil, true, from, to)
 	if err != nil {
 		t.Fatalf("breakdown events: %v", err)
 	}
@@ -104,6 +104,33 @@ func TestPeopleFunnelAndBreakdown(t *testing.T) {
 		rowsPerPlan[0].Labels["plan"] != "pro" || rowsPerPlan[0].Sum != 3 ||
 		rowsPerPlan[1].Labels["plan"] != "free" || rowsPerPlan[1].Sum != 1 {
 		t.Fatalf("pro=3 events (the actorless one counts) then free=1; got %+v", rowsPerPlan)
+	}
+
+	// Two steps of one name, told apart by their labels and counted per
+	// index; a step with no entry matches every row of its name. The
+	// breakdown narrowed to one page folds only that page's rows.
+	seedEvent(t, pool, at, "uc.pageview", "ada", map[string]string{"path": "/"})
+	seedEvent(t, pool, at, "uc.pageview", "grace", map[string]string{"path": "/"})
+	seedEvent(t, pool, at, "uc.pageview", "linus", map[string]string{"path": "/"})
+	seedEvent(t, pool, at.Add(time.Second), "uc.pageview", "ada", map[string]string{"path": "/pricing", "from": "google"})
+	seedEvent(t, pool, at.Add(time.Second), "uc.pageview", "grace", map[string]string{"path": "/pricing", "from": "google"})
+	seedEvent(t, pool, at.Add(time.Second), "uc.pageview", "linus", map[string]string{"path": "/docs", "from": "google"})
+	seedEvent(t, pool, at.Add(2*time.Second), "uc.pageview", "linus", map[string]string{"path": "/docs", "from": "twitter"})
+	pages, err := s.FunnelSteps(ctx, peopleTenant, peopleProject, []string{"uc.pageview", "uc.pageview", "uc.pageview"},
+		[]map[string]string{{"path": "/"}, {"path": "/pricing"}}, from, to)
+	if err != nil {
+		t.Fatalf("funnel of pages: %v", err)
+	}
+	if len(pages) != 3 || pages[0].Sum != 3 || pages[1].Sum != 2 || pages[2].Sum != 3 ||
+		pages[1].Labels["step"] != "uc.pageview" {
+		t.Fatalf("/ = 3 people, /pricing = 2, the unfiltered step 3; got %+v", pages)
+	}
+	pricing, err := s.BreakdownValues(ctx, peopleTenant, peopleProject, "uc.pageview", "from", map[string]string{"path": "/pricing"}, false, from, to)
+	if err != nil {
+		t.Fatalf("breakdown of /pricing: %v", err)
+	}
+	if len(pricing) != 1 || pricing[0].Labels["from"] != "google" || pricing[0].Sum != 2 {
+		t.Fatalf("/pricing came from google, 2 people (linus's /docs rows are out); got %+v", pricing)
 	}
 
 	// The bare name: the people behind one event per bucket. ada logs in in
@@ -252,6 +279,10 @@ func TestPeopleRetentionByEvent(t *testing.T) {
 	seedEvent(t, pool, from.Add(day), "signin", "linus", nil)
 	seedEvent(t, pool, from.Add(8*day), "visit", "linus", nil)
 	seedEvent(t, pool, from.Add(3*day), "uc.pageview", "3f2a9c0d1e4b5a67", nil)
+	// The web door's visitor is a daily hash under `w:`: even on an event of
+	// the customer's own name it is never a person to retain.
+	seedEvent(t, pool, from.Add(day), "signin", "w:3f2a9c0d1e4b5a67", nil)
+	seedEvent(t, pool, from.Add(8*day), "signin", "w:3f2a9c0d1e4b5a67", nil)
 
 	first := from.Format("2006-01-02")
 	for _, c := range []struct {

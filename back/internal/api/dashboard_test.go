@@ -70,6 +70,7 @@ func TestValidateSeries_Labels(t *testing.T) {
 	for _, ok := range []seriesQuery{
 		{ID: "ev", Source: "event", Range: "24h", Name: "purchase", Labels: pro},
 		{ID: "bare", Source: "people", Range: "24h", Name: "purchase", Labels: pro},
+		{ID: "breakdown", Source: "people", Range: "24h", Name: "purchase", Group: []string{"plan"}, Labels: pro},
 		{ID: "caps", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
 			"a": "1", "b": "2", strings.Repeat("k", 60): strings.Repeat("v", 256)}},
 		// An empty object filters nothing, so it is nobody's business which read
@@ -86,7 +87,7 @@ func TestValidateSeries_Labels(t *testing.T) {
 		{ID: "metric", Source: "metric", Range: "24h", Name: "load", Labels: pro},
 		{ID: "funnel", Source: "people", Range: "24h", Steps: []string{"visit", "signup"}, Labels: pro},
 		{ID: "retention", Source: "people", Range: "24h", Cohort: "week", Labels: pro},
-		{ID: "breakdown", Source: "people", Range: "24h", Name: "purchase", Group: []string{"plan"}, Labels: pro},
+		{ID: "ab", Source: "people", Range: "24h", Name: "checkout", Group: []string{"uc.variant", "uc.stat"}, Labels: pro},
 		{ID: "four", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
 			"a": "1", "b": "2", "c": "3", "d": "4"}},
 		{ID: "emptykey", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"": "x"}},
@@ -95,6 +96,33 @@ func TestValidateSeries_Labels(t *testing.T) {
 		// Postgres refuses a NUL inside jsonb with a 500 for the whole board.
 		{ID: "nulvalue", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"plan": "pro\x00"}},
 		{ID: "ctrlkey", Source: "people", Range: "24h", Name: "purchase", Labels: map[string]string{"pl\nan": "pro"}},
+	} {
+		msg := validateSeries([]seriesQuery{bad})
+		if msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// stepLabels narrow a funnel step by step, under the labels rules, never past
+// the steps it has and never on any other shape.
+func TestValidateSeries_StepLabels(t *testing.T) {
+	pv := []string{"uc.pageview", "uc.pageview"}
+	for _, ok := range []seriesQuery{
+		{ID: "two", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/"}, {"path": "/pricing"}}},
+		{ID: "first", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "empty", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{}, {"path": "/pricing"}}},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s must be accepted; got %q", ok.ID, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "extra", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{}, {}, {"path": "/"}}},
+		{ID: "event", Source: "event", Range: "24h", Name: "uc.pageview", StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "bare", Source: "people", Range: "24h", Name: "uc.pageview", StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "four", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"a": "1", "b": "2", "c": "3", "d": "4"}}},
+		{ID: "ctrl", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/\x00"}}},
 	} {
 		msg := validateSeries([]seriesQuery{bad})
 		if msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
@@ -610,6 +638,29 @@ func TestValidateLayout_RefusesACountTheContractDoesNotName(t *testing.T) {
 		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourcePeople, Count: &c}}
 		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != want {
 			t.Fatalf("count %q = %q, want %q", count, got, want)
+		}
+	}
+}
+
+// A stored board never carries a filter for a step it lacks.
+func TestValidateLayout_StepWhereFitsTheSteps(t *testing.T) {
+	steps := []string{"uc.pageview", "signup"}
+	refused := `widget "w_1" narrows more steps than it has`
+	for _, c := range []struct {
+		name  string
+		steps *[]string
+		where []map[string]string
+		want  string
+	}{
+		{"one per step", &steps, []map[string]string{{"path": "/"}, {}}, ""},
+		{"fewer than steps", &steps, []map[string]string{{"path": "/"}}, ""},
+		{"more than steps", &steps, []map[string]string{{}, {}, {"path": "/"}}, refused},
+		{"no steps", nil, []map[string]string{{"path": "/"}}, refused},
+	} {
+		b := widget("w_1")
+		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourcePeople, Steps: c.steps, StepWhere: &c.where}}
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != c.want {
+			t.Fatalf("%s = %q, want %q", c.name, got, c.want)
 		}
 	}
 }

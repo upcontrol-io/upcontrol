@@ -41,11 +41,13 @@ type HeatCell struct {
 // a month lies over a layout that has moved since. maxVisitViews caps one
 // visitor's stored page views in a project per UTC day: a script, or an SPA
 // reporting every replaceState, is one visit a day however much it sends.
+// maxVisitEvents caps the same visitor's named events the same way.
 const (
-	MaxClickCells = 300
-	MaxMoveCells  = 600
-	webDays       = 31
-	maxVisitViews = 200
+	MaxClickCells  = 300
+	MaxMoveCells   = 600
+	webDays        = 31
+	maxVisitViews  = 200
+	maxVisitEvents = 200
 )
 
 // WebQuota is a workspace's web axes: this UTC month's visits, and the plan's
@@ -103,6 +105,24 @@ func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, t
 		       coalesce($4::jsonb->>'segment', ''), coalesce($4::jsonb->>'source', ''), 1 FROM ins
 		ON CONFLICT (tenant_id, project_id, hour, path, device, segment, source) DO UPDATE SET views = web_engage.views + 1`,
 		tenantID, projectID, ts, jsonb(labels), actor, monthOf(ts), ts.Truncate(24*time.Hour), maxVisitViews, ts.Truncate(time.Hour))
+	return err
+}
+
+// InsertWebEvent stores a page's named event under its page views' visitor,
+// unless that visitor already holds maxVisitEvents events other than page
+// views in the project since the UTC day began. A visit is counted by page
+// views, so neither web_usage nor web_engage moves.
+func (s *Store) InsertWebEvent(ctx context.Context, tenantID, projectID int64, ts time.Time, name string, labels map[string]string, actor string) error {
+	ts = ts.UTC()
+	_, err := s.pool.Exec(ctx, `
+		WITH seen AS (
+		  SELECT count(*) AS n FROM (
+		    SELECT 1 FROM events
+		     WHERE tenant_id = $1 AND project_id = $2 AND actor = $6 AND actor <> ''
+		       AND name <> 'uc.pageview' AND ts >= $7 LIMIT $8) x)
+		INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		SELECT $1, $2, $3::timestamptz, $4, $5::jsonb, $6 FROM seen WHERE n < $8`,
+		tenantID, projectID, ts, name, jsonb(labels), actor, ts.Truncate(24*time.Hour), maxVisitEvents)
 	return err
 }
 
