@@ -12,6 +12,9 @@
 	if (!me) return;
 	var base = new URL(me.src).origin;
 	var key = me.getAttribute('data-key');
+	// What counts as interactive, for norm() and the dead-click check alike.
+	// Above the overlay's start, which reads it through norm().
+	var INTERACTIVE = 'a,button,input,select,textarea,label,summary,[role=button],[role=link]';
 
 	// A heatmap token in the hash is saved for the tab and scrubbed from the
 	// URL, so a refresh or an SPA hop keeps drawing without re-opening the
@@ -52,6 +55,16 @@
 	var maxReach = 0;
 	var scrollSent = false;
 	var firstView = true;
+	var dead = new Map(); // cell key -> [sel, fx, fy, clicks]
+	var check = null; // the one dead-click candidate being watched
+	var hitSeen = new Set(); // selectors this view clicked
+	var hitNew = []; // of those, the ones not yet reported
+	var visible = document.visibilityState === 'visible';
+	var lastInput = performance.now(); // the page load counts as input
+	var engaged = 0; // engaged ms not yet reported
+	var viewEngaged = 0; // engaged ms this view, for the cap and the thresholds
+	var THRESHOLDS = [10000, 30000, 120000, 300000];
+	var aSent = 0; // thresholds this view already reported
 
 	function post(json) {
 		fetch(base + '/w?key=' + encodeURIComponent(key), {
@@ -64,20 +77,59 @@
 		}).catch(function () {});
 	}
 
-	function view() {
-		post(JSON.stringify({
+	function view(from) {
+		var body = {
 			v: 1, t: 'view', p: path, w: innerWidth,
 			r: firstView ? document.referrer : '',
 			q: location.search
-		}));
+		};
+		if (from) body.f = from;
+		post(JSON.stringify(body));
 		firstView = false;
+	}
+
+	// Engaged: visible, with input in the last 30 s. Every input credits the
+	// gap since the previous one, at most 30 s of it.
+	function credit() {
+		var now = performance.now();
+		var add = Math.min(now - lastInput, 30000, 1800000 - viewEngaged);
+		lastInput = now;
+		if (add > 0) { engaged += add; viewEngaged += add; }
+	}
+	['pointerdown', 'keydown', 'scroll', 'mousemove', 'touchstart', 'wheel'].forEach(function (t) {
+		document.addEventListener(t, function () { if (visible) credit(); }, { capture: true, passive: true });
+	});
+
+	// Ends the dead-click watch; with record, a click after which nothing
+	// changed becomes a dead cell. Unrecorded is never over-counted.
+	function endCheck(record) {
+		var w = check;
+		if (!w) return;
+		check = null;
+		clearTimeout(w.timer);
+		var quiet = !w.changed && !w.mo.takeRecords().length;
+		w.mo.disconnect();
+		if (!record || !quiet || location.href !== w.href ||
+			String(getSelection() || '') || document.activeElement !== w.active) return;
+		var k = w.s + ':' + w.x + ':' + w.y;
+		var entry = dead.get(k);
+		if (entry) entry[3]++;
+		else if (dead.size < 300) dead.set(k, [w.s, w.x, w.y, 1]);
+	}
+
+	function watchDead(s, c) {
+		var w = { s: s, x: c[0], y: c[1], href: location.href, active: document.activeElement, changed: false };
+		w.mo = new MutationObserver(function () { w.changed = true; });
+		w.mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+		w.timer = setTimeout(function () { endCheck(true); }, 600);
+		check = w;
 	}
 
 	// The element a position belongs to: the nearest interactive ancestor,
 	// or the element holding the svg the click landed in.
 	function norm(t) {
 		if (!(t instanceof Element)) return null;
-		var el = t.closest('a,button,input,select,textarea,label,summary,[role=button],[role=link]');
+		var el = t.closest(INTERACTIVE);
 		if (el) return el;
 		var svg = t.closest('svg');
 		return svg ? svg.parentElement : t;
@@ -140,8 +192,17 @@
 		if (!el) return;
 		var s = sel(el);
 		if (!s) return;
+		if (!hitSeen.has(s) && hitSeen.size < 300) { hitSeen.add(s); hitNew.push(s); }
 		var c = cell(el, e.clientX, e.clientY);
 		if (!c) return;
+		// A dead candidate: nothing interactive, not the page itself, and a
+		// box small enough to be something a reader meant to press. One watch
+		// at a time; rage already counts the repeats.
+		if (!check && !e.target.closest(INTERACTIVE) &&
+			el !== document.body && el !== document.documentElement) {
+			var b = el.getBoundingClientRect();
+			if (b.width * b.height < innerWidth * innerHeight / 4) watchDead(s, c);
+		}
 		var k = s + ':' + c[0] + ':' + c[1];
 		var entry = clicks.get(k);
 		if (!entry) {
@@ -205,49 +266,84 @@
 	// One depth per page view, or the histogram would count it twice.
 	function flush() {
 		measure();
-		if (clicks.size === 0 && moves.size === 0 && scrollSent) return;
+		endCheck(false);
+		if (visible) credit();
+		var e = Math.floor(engaged);
+		var a = [];
+		while (aSent < THRESHOLDS.length && viewEngaged >= THRESHOLDS[aSent]) a.push(aSent++);
+		if (clicks.size === 0 && moves.size === 0 && dead.size === 0 && !hitNew.length &&
+			scrollSent && !e && !a.length) return;
 		var body = { v: 1, t: 'heat', p: path, w: innerWidth };
 		if (!scrollSent) {
 			scrollSent = true;
 			body.s = Math.round(maxReach * 1000) / 1000;
 		}
-		var cArr = [], mArr = [];
+		if (e) { body.e = e; engaged -= e; }
+		if (a.length) body.a = a;
+		if (hitNew.length) body.h = hitNew;
+		var cArr = [], mArr = [], dArr = [];
 		clicks.forEach(function (v) { cArr.push(v); });
 		moves.forEach(function (v) { mArr.push(v); });
+		dead.forEach(function (v) { dArr.push(v); });
 		if (cArr.length) { cArr.sort(function (a, b) { return b[3] - a[3]; }); body.c = cArr; }
 		if (mArr.length) { mArr.sort(function (a, b) { return b[3] - a[3]; }); body.m = mArr; }
+		if (dArr.length) { dArr.sort(function (a, b) { return b[3] - a[3]; }); body.d = dArr; }
 		// The keepalive budget is 64 KB for the whole page, the host's own
 		// beacons included; keep to half of it by halving the richest lists
 		// first until the body fits.
+		function halve(k) {
+			var list = body[k];
+			if (!list || list.length < 2) return false;
+			body[k] = list.slice(0, Math.ceil(list.length / 2));
+			return true;
+		}
 		var json = JSON.stringify(body);
-		while (json.length > 30000) {
-			if (body.m && body.m.length > 1) body.m = body.m.slice(0, Math.ceil(body.m.length / 2));
-			else if (body.c && body.c.length > 1) body.c = body.c.slice(0, Math.ceil(body.c.length / 2));
-			else break;
+		while (json.length > 30000 && (halve('m') || halve('d') || halve('c') || halve('h'))) {
 			json = JSON.stringify(body);
 		}
 		post(json);
 		clicks.clear();
 		moves.clear();
+		dead.clear();
+		hitNew = [];
 	}
 
 	document.addEventListener('visibilitychange', function () {
-		if (document.visibilityState === 'hidden') flush();
+		if (document.visibilityState === 'hidden') {
+			flush();
+			visible = false;
+		} else {
+			visible = true;
+			lastInput = performance.now();
+		}
 	});
 	addEventListener('pagehide', flush);
 
 	function onRoute() {
 		if (location.pathname === path) return;
+		var from = path;
 		flush();
 		path = location.pathname;
 		scrollSent = false;
 		maxReach = 0;
-		view();
+		engaged = 0;
+		viewEngaged = 0;
+		aSent = 0;
+		hitSeen.clear();
+		hitNew = [];
+		dead.clear();
+		lastInput = performance.now();
+		view(from);
 	}
 	onHistory(onRoute);
 	addEventListener('popstate', onRoute);
 
-	view();
+	var from = '';
+	try {
+		var ref = new URL(document.referrer);
+		if (ref.origin === location.origin) from = ref.pathname;
+	} catch (e) {}
+	view(from);
 
 	// Calls fn after every pushState and replaceState; returns the undo, which
 	// puts the originals back.
@@ -271,8 +367,14 @@
 	function overlay(token) {
 		// Empty until the first answer: the server picks the deepest range the plan reaches.
 		var range = '';
-		var layers = { clicks: true, rage: false, moves: false, scroll: false };
+		var layers = { clicks: true, rage: false, dead: false, moves: false, scroll: false };
 		var hm = null;
+		var stats = new Map(); // selector -> { clicks, rage, dead, hits }, sums of n
+		var tipSel = null;
+		var tipEl = null;
+		var tipEv = null;
+		var tipTimer = 0;
+		var tipFrame = 0;
 		var resolved = new Map(); // selector -> element | null
 		var lastResolve = 0;
 		var retry = 0;
@@ -303,7 +405,10 @@
 			'button[aria-pressed="true"]{background:#e8e9ec;border-color:#e8e9ec;color:#16181d}' +
 			'.x{flex:none;padding:0 7px;font-size:16px;line-height:1.3}' +
 			'a{color:#7ab0ff}' +
+			'.pill{position:fixed;z-index:2147483646;padding:3px 8px;border-radius:6px;background:rgba(22,24,29,.92);color:#f4f5f7;font:12px system-ui,sans-serif;white-space:nowrap;pointer-events:none}' +
+			'.outline{position:fixed;z-index:2147483646;box-sizing:border-box;border:1px dashed rgba(255,255,255,.9);box-shadow:0 0 0 1px rgba(0,0,0,.6);pointer-events:none}' +
 			'</style>' +
+			'<div class="outline" hidden></div><div class="pill" hidden></div>' +
 			'<div class="bar">' +
 			'<div class="row head"><span class="title">UpControl heatmap</span><span class="path"></span>' +
 			'<button name="close" class="x" aria-label="Close">&#215;</button></div>' +
@@ -312,6 +417,7 @@
 			'<div class="row">' +
 			'<button name="clicks" aria-pressed="true">Clicks</button>' +
 			'<button name="rage" aria-pressed="false">Rage</button>' +
+			'<button name="dead" aria-pressed="false">Dead</button>' +
 			'<button name="moves" aria-pressed="false">Moves</button>' +
 			'<button name="scroll" aria-pressed="false">Scroll</button>' +
 			'<select><option value="24h">1 day</option><option value="7d" selected>7 days</option><option value="31d">31 days</option></select>' +
@@ -324,6 +430,8 @@
 		var noteEl = shadow.querySelector('.note');
 		var select = shadow.querySelector('select');
 		var head = shadow.querySelector('.head');
+		var pill = shadow.querySelector('.pill');
+		var outline = shadow.querySelector('.outline');
 		pathEl.textContent = path;
 
 		var canvas = document.createElement('canvas');
@@ -410,8 +518,16 @@
 					range = data.range;
 					select.value = range;
 					resolved = new Map();
-					['clicks', 'rage', 'moves'].forEach(function (k) {
+					['clicks', 'rage', 'dead', 'moves'].forEach(function (k) {
 						(hm[k] || []).forEach(function (c) { resolved.set(c.selector, null); });
+					});
+					stats = new Map();
+					['clicks', 'rage', 'dead', 'hits'].forEach(function (k) {
+						(hm[k] || []).forEach(function (c) {
+							var st = stats.get(c.selector);
+							if (!st) { st = { clicks: 0, rage: 0, dead: 0, hits: 0 }; stats.set(c.selector, st); }
+							st[k] += c.n;
+						});
 					});
 					lastResolve = 0;
 					updateStatus();
@@ -561,19 +677,101 @@
 			var heat = [];
 			if (layers.clicks) heat = heat.concat(hm.clicks || []);
 			if (layers.rage) heat = heat.concat(hm.rage || []);
+			if (layers.dead) heat = heat.concat(hm.dead || []);
 			if (heat.length) drawHeat(heat, 22);
 			if (layers.moves) drawHeat(hm.moves || [], 28);
-			// Counted from one layer: a rage click is a click too.
+			// Counted from one layer: a rage or dead click is a click too.
 			var lost = 0;
-			((layers.clicks ? hm.clicks : layers.rage ? hm.rage : null) || []).forEach(function (c) {
+			var layer = layers.clicks ? 'clicks' : layers.rage ? 'rage' : layers.dead ? 'dead' : '';
+			((layer && hm[layer]) || []).forEach(function (c) {
 				if (!box(c.selector)) lost += c.n;
 			});
 			noteEl.hidden = !lost;
-			noteEl.textContent = lost + (layers.clicks ? ' clicks' : ' rage clicks') + ' landed on elements not on this page now.';
+			noteEl.textContent = lost + (layer === 'clicks' ? ' clicks' : layer === 'rage' ? ' rage clicks' : ' dead clicks') +
+				' landed on elements not on this page now.';
 		}
 
 		function schedule() {
 			if (!raf) { raf = true; requestAnimationFrame(draw); }
+		}
+
+		function fmt(n) {
+			return n.toLocaleString('en-US');
+		}
+
+		function tipText(y) {
+			if (!hm) return '';
+			if (layers.scroll) {
+				var sc = hm.scroll || [];
+				if (!sc[0]) return '';
+				var band = Math.floor((scrollY + y) / (docHeight() / 20));
+				return Math.round((sc[band] || 0) / sc[0] * 100) + '% of views reached here';
+			}
+			var st = stats.get(tipSel);
+			var parts = [];
+			if (st) {
+				if (st.hits > 0 && hm.views > 0) {
+					var pct = st.hits / hm.views * 100;
+					parts.push(fmt(st.hits) + ' views clicked', pct < 1 ? '<1%' : Math.round(pct) + '%');
+				}
+				if (st.clicks > 0) parts.push(fmt(st.clicks) + ' clicks');
+				if (st.rage > 0) parts.push(fmt(st.rage) + ' rage');
+				if (st.dead > 0) parts.push(fmt(st.dead) + ' dead');
+			}
+			if (parts.length) return parts.join(' \u00b7 ');
+			return tipEl.closest(INTERACTIVE) ? 'No clicks \u00b7 ' + label(range) : '';
+		}
+
+		function hideTip() {
+			clearTimeout(tipTimer);
+			tipTimer = 0;
+			pill.hidden = true;
+			outline.hidden = true;
+		}
+
+		function showTip() {
+			tipTimer = 0;
+			var text = tipText(tipEv.clientY);
+			if (!text) { hideTip(); return; }
+			pill.textContent = text;
+			pill.hidden = false;
+			// The scroll share is the cursor's depth, not the element's.
+			outline.hidden = layers.scroll;
+			var r = tipEl.getBoundingClientRect();
+			outline.style.left = r.left + 'px';
+			outline.style.top = r.top + 'px';
+			outline.style.width = r.width + 'px';
+			outline.style.height = r.height + 'px';
+			var x = tipEv.clientX + 14, y = tipEv.clientY + 14;
+			if (x + pill.offsetWidth > innerWidth) x = tipEv.clientX - 14 - pill.offsetWidth;
+			if (y + pill.offsetHeight > innerHeight) y = tipEv.clientY - 14 - pill.offsetHeight;
+			pill.style.left = Math.max(0, x) + 'px';
+			pill.style.top = Math.max(0, y) + 'px';
+		}
+
+		function hover() {
+			tipFrame = 0;
+			if (tipEv.target === host) { tipSel = null; hideTip(); return; }
+			var el = norm(tipEv.target);
+			var s = el ? sel(el) : '';
+			if (s !== tipSel) {
+				tipSel = s;
+				tipEl = el;
+				hideTip();
+				if (s) tipTimer = setTimeout(showTip, 150);
+			} else if (!pill.hidden) {
+				showTip();
+			}
+		}
+
+		function onHover(e) {
+			tipEv = e;
+			if (!tipFrame) tipFrame = requestAnimationFrame(hover);
+		}
+
+		function onScrollTip() {
+			tipSel = null;
+			hideTip();
 		}
 
 		function onResize() {
@@ -594,6 +792,10 @@
 
 		function close() {
 			removeEventListener('scroll', schedule, { capture: true });
+			removeEventListener('scroll', onScrollTip, { capture: true });
+			document.removeEventListener('mousemove', onHover, { capture: true });
+			clearTimeout(tipTimer);
+			cancelAnimationFrame(tipFrame);
 			clearTimeout(retry);
 			removeEventListener('resize', onResize);
 			removeEventListener('popstate', onRoute);
@@ -644,6 +846,10 @@
 		});
 		// Capture: an app shell scrolls an inner container, not the window.
 		addEventListener('scroll', schedule, { capture: true, passive: true });
+		addEventListener('scroll', onScrollTip, { capture: true, passive: true });
+		if (matchMedia('(hover: hover)').matches) {
+			document.addEventListener('mousemove', onHover, { capture: true, passive: true });
+		}
 		addEventListener('resize', onResize);
 		addEventListener('popstate', onRoute);
 

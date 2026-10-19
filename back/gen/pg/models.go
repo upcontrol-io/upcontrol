@@ -464,6 +464,20 @@ type Tenant struct {
 	FirstCheckAt   pgtype.Timestamptz
 }
 
+type WebEngage struct {
+	TenantID  int64
+	ProjectID int64
+	Hour      pgtype.Timestamptz
+	Path      string
+	Device    string
+	Views     int64
+	Ms        int64
+	R10       int64
+	R30       int64
+	R120      int64
+	R300      int64
+}
+
 type WebEvent struct {
 	VisitorID   *int64
 	PersonID    *int64

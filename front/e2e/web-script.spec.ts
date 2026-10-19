@@ -20,6 +20,11 @@ type Beacon = {
 	w: number;
 	r?: string;
 	q?: string;
+	f?: string;
+	e?: number;
+	a?: number[];
+	h?: string[];
+	d?: MoveCell[]; // [sel, fx, fy, clicks]
 	s?: number;
 	c?: ClickCell[];
 	m?: MoveCell[];
@@ -283,6 +288,132 @@ test("an expired heatmap link says so", async ({ page }) => {
 		}));
 	await page.goto("https://site.test/#uc-heatmap=uch_dead");
 	await expect(page.getByText(/expired/)).toBeVisible();
+	expect(beacons).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
+const heats = (beacons: Beacon[]) => beacons.filter((b) => b.t === "heat");
+
+test("an SPA view names the path it came from", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, "<h1>Hello</h1>");
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	expect(beacons[0].f).toBeUndefined(); // no same-origin referrer on a fresh load
+	await page.evaluate(() => history.pushState({}, "", "/pricing"));
+	await expect
+		.poll(() => beacons.find((b) => b.t === "view" && b.p === "/pricing")?.f)
+		.toBe("/");
+	expect(errors).toEqual([]);
+});
+
+test("engaged time counts the seconds input backs, and its threshold once", async ({ page }) => {
+	const errors = watch(page);
+	await page.clock.install();
+	const beacons = await serve(page, "<h1>Read me</h1>");
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	for (let i = 0; i < 4; i++) {
+		await page.clock.runFor(3000);
+		await page.keyboard.press("Shift");
+	}
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	const heat = heats(beacons)[0];
+	expect(heat.e).toBeGreaterThanOrEqual(10000);
+	expect(heat.e).toBeLessThanOrEqual(14000);
+	expect(heat.a).toContain(0);
+	expect(errors).toEqual([]);
+});
+
+test("an idle visible tab earns at most 30 s of engaged time", async ({ page }) => {
+	const errors = watch(page);
+	await page.clock.install();
+	const beacons = await serve(page, "<h1>Read me</h1>");
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	await page.clock.runFor(60000);
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	expect(heats(beacons)[0].e).toBeLessThanOrEqual(30000);
+	expect(errors).toEqual([]);
+});
+
+test("each element a view clicks is a hit once", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(page, '<button id="a">A</button> <button id="b">B</button>');
+	await page.goto("https://site.test/");
+	await page.locator("#a").click();
+	await page.locator("#a").click();
+	await page.locator("#b").click();
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	expect([...heats(beacons)[0].h!].sort()).toEqual(["#a", "#b"]);
+	await page.locator("#a").click();
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(2);
+	const second = heats(beacons)[1];
+	expect(second.c?.length).toBe(1); // the click still counts
+	expect(second.h ?? []).not.toContain("#a");
+	expect(errors).toEqual([]);
+});
+
+test("a click after which nothing changes is dead, and only that one", async ({ page }) => {
+	const errors = watch(page);
+	const beacons = await serve(
+		page,
+		'<p id="plain">Plain text</p>' +
+			`<div id="live" onclick="this.textContent = 'changed'">Live</div>` +
+			'<button id="btn">Button</button>',
+	);
+	await page.goto("https://site.test/");
+	for (const id of ["#plain", "#live", "#btn"]) {
+		await page.locator(id).click();
+		await page.waitForTimeout(700);
+	}
+	await hide(page);
+	await expect.poll(() => heats(beacons)).toHaveLength(1);
+	const d = heats(beacons)[0].d!;
+	expect(d.map((cell) => cell[0])).toEqual(["#plain"]);
+	expect(d[0][3]).toBe(1);
+	expect(errors).toEqual([]);
+});
+
+test("hovering under the overlay names an element's numbers", async ({ page }) => {
+	test.skip(test.info().project.name === "mobile", "a phone has no hover");
+	const errors = watch(page);
+	const beacons = await serve(page, '<button id="buy">Buy</button> <button id="other">Other</button>');
+	await page.route(/api\.test\/w\/heatmap/, (route) =>
+		route.fulfill({
+			contentType: "application/json",
+			headers: { "Access-Control-Allow-Origin": "https://site.test" },
+			body: JSON.stringify({
+				path: "/",
+				device: "desktop",
+				range: "7d",
+				views: 1234,
+				clicks: [{ selector: "#buy", x: 32, y: 32, n: 1028 }],
+				rage: [{ selector: "#buy", x: 32, y: 32, n: 4 }],
+				moves: [],
+				hits: [{ selector: "#buy", x: 0, y: 0, n: 412 }],
+				dead: [],
+				scroll: Array.from({ length: 21 }, (_, i) => 1000 - i * 40),
+			}),
+		}));
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	await page.locator("#buy").hover();
+	await expect(page.getByText("412 views clicked · 33% · 1,028 clicks · 4 rage")).toBeVisible();
+	await page.locator("#other").hover();
+	await expect(page.getByText("No clicks · 7 days")).toBeVisible();
+	const dead = page.getByRole("button", { name: "Dead" });
+	await dead.click();
+	await expect(dead).toHaveAttribute("aria-pressed", "true");
+	await dead.click();
+	await expect(dead).toHaveAttribute("aria-pressed", "false");
+	await page.getByRole("button", { name: "Scroll" }).click();
+	await page.locator("#buy").hover();
+	await expect(page.getByText(/% of views reached here/)).toBeVisible();
 	expect(beacons).toEqual([]);
 	expect(errors).toEqual([]);
 });

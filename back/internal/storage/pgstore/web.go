@@ -79,7 +79,9 @@ func (s *Store) WebQuota(ctx context.Context, tenantID int64, now time.Time) (We
 // day in the project is a visit, counted into the workspace's month, and past
 // its maxVisitViews-th the view is not stored. One statement, so the check
 // reads the snapshot from before the insert and never finds the page view
-// itself; two racing first views may count twice.
+// itself; two racing first views may count twice. A stored view adds one to
+// its hour's web_engage row in the same statement, so engaged time divides by
+// exactly the views the events table holds.
 func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error {
 	ts = ts.UTC()
 	_, err := s.pool.Exec(ctx, `
@@ -91,10 +93,35 @@ func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, t
 		visit AS (
 		  INSERT INTO web_usage (tenant_id, month, visits)
 		  SELECT $1::bigint, $6::date, 1 FROM seen WHERE n = 0
-		  ON CONFLICT (tenant_id, month) DO UPDATE SET visits = web_usage.visits + 1)
-		INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
-		SELECT $1, $2, $3::timestamptz, 'uc.pageview', $4::jsonb, $5 FROM seen WHERE n < $8`,
-		tenantID, projectID, ts, jsonb(labels), actor, monthOf(ts), ts.Truncate(24*time.Hour), maxVisitViews)
+		  ON CONFLICT (tenant_id, month) DO UPDATE SET visits = web_usage.visits + 1),
+		ins AS (
+		  INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		  SELECT $1, $2, $3::timestamptz, 'uc.pageview', $4::jsonb, $5 FROM seen WHERE n < $8
+		  RETURNING 1)
+		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, views)
+		SELECT $1, $2, $9, coalesce($4::jsonb->>'path', ''), coalesce($4::jsonb->>'device', ''), 1 FROM ins
+		ON CONFLICT (tenant_id, project_id, hour, path, device) DO UPDATE SET views = web_engage.views + 1`,
+		tenantID, projectID, ts, jsonb(labels), actor, monthOf(ts), ts.Truncate(24*time.Hour), maxVisitViews, ts.Truncate(time.Hour))
+	return err
+}
+
+// EngageAdd is what one heat beacon adds to its hour's web_engage row: the
+// engaged milliseconds, and 1 for each reach threshold the view crossed.
+type EngageAdd struct {
+	MS, R10, R30, R120, R300 int64
+}
+
+// AddEngage adds a heat beacon's engaged time into its hour's row. One row per
+// statement, so there is no lock order to keep.
+func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device string, add EngageAdd) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, ms, r10, r30, r120, r300)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (tenant_id, project_id, hour, path, device) DO UPDATE SET
+		  ms = web_engage.ms + EXCLUDED.ms, r10 = web_engage.r10 + EXCLUDED.r10,
+		  r30 = web_engage.r30 + EXCLUDED.r30, r120 = web_engage.r120 + EXCLUDED.r120,
+		  r300 = web_engage.r300 + EXCLUDED.r300`,
+		tenantID, projectID, hour.UTC(), path, device, add.MS, add.R10, add.R30, add.R120, add.R300)
 	return err
 }
 

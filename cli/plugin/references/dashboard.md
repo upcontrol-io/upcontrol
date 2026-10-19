@@ -119,7 +119,7 @@ count described below.
 { "source": "...", "name": "...", "steps": ["..."], "cohort": "...", "field": "...", "count": "...", "where": { "...": "..." } }
 ```
 
-`source` is one of `logs check event metric service people`. An optional
+`source` is one of `logs check event metric service people web`. An optional
 `label` names the pick on the card, as its legend entry, in place of the name
 the board would work out; it changes nothing about what is drawn. What
 `name` and `where` mean, per source:
@@ -132,6 +132,7 @@ the board would work out; it changes nothing about what is drawn. What
 | `metric` | the metric name | label equalities (a funnel step: `funnel`, `step`) |
 | `service` | the service name | none |
 | `people` | the event name, on a breakdown, an A/B test or the `heatmap` card, optionally on a retention grid, or alone for a unique count | the event's own fields, on a `name` alone (below); none on the rest. `steps`, `cohort` and `field` pick the reading, and `count` picks what a breakdown counts |
+| `web` | `engaged` (average engaged seconds per page view) or `reach` (the percent of page views that stayed engaged that long), on `stat`, `line` or `bar` only, and only when the site tag is installed | `path` and `device` narrow either; `reach` needs `after`: `10`, `30`, `120` or `300` |
 
 A `people` ref is the definition itself - the card is built from event names,
 with nothing declared elsewhere to keep in sync. It counts distinct people: an

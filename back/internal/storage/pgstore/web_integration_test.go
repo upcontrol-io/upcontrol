@@ -203,3 +203,132 @@ func TestCompactWeb(t *testing.T) {
 		}
 	}
 }
+
+// A stored page view adds one to its hour's web_engage views, in the same
+// statement; one past maxVisitViews is not stored and adds nothing. AddEngage
+// sums into the same row.
+func TestWebEngageCountsStoredViewsAndSums(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	at := time.Date(2026, 9, 18, 10, 20, 0, 0, time.UTC)
+	hour := at.Truncate(time.Hour)
+	labels := map[string]string{"path": "/docs", "device": "mobile"}
+	for range maxVisitViews + 3 {
+		if err := s.InsertPageview(ctx, tenant, project, at, labels, "v"); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+	}
+	for _, add := range []EngageAdd{{MS: 4000, R10: 1}, {MS: 26000, R10: 0, R30: 1}} {
+		if err := s.AddEngage(ctx, tenant, project, hour, "/docs", "mobile", add); err != nil {
+			t.Fatalf("engage: %v", err)
+		}
+	}
+	var views, ms, r10, r30, r120 int64
+	if err := pool.QueryRow(ctx, `SELECT views, ms, r10, r30, r120 FROM web_engage
+		WHERE tenant_id = $1 AND project_id = $2 AND hour = $3 AND path = '/docs' AND device = 'mobile'`,
+		tenant, project, hour).Scan(&views, &ms, &r10, &r30, &r120); err != nil {
+		t.Fatalf("read engage row: %v", err)
+	}
+	if views != maxVisitViews || ms != 30000 || r10 != 1 || r30 != 1 || r120 != 0 {
+		t.Fatalf("row = views %d ms %d r10 %d r30 %d r120 %d, want %d stored views, 30000 ms, one r10, one r30",
+			views, ms, r10, r30, r120, maxVisitViews)
+	}
+}
+
+// The web series reads: buckets of sums from web_engage narrowed by path and
+// device, the oldest hour, engaged pages ranked, and a heat kind's pages
+// ranked from the day asked.
+func TestWebSeriesReads(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	from := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+	view := func(at time.Time, path, device string) {
+		t.Helper()
+		if err := s.InsertPageview(ctx, tenant, project, at, map[string]string{"path": path, "device": device}, fmt.Sprintf("v%d", at.UnixNano())); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+	}
+	engage := func(at time.Time, path, device string, add EngageAdd) {
+		t.Helper()
+		if err := s.AddEngage(ctx, tenant, project, at.Truncate(time.Hour), path, device, add); err != nil {
+			t.Fatalf("engage: %v", err)
+		}
+	}
+	// Hour 2: two views of / on desktop, 30 s engaged between them, one past
+	// 10 s. Hour 5: one view of /docs on mobile, 90 s, past 10 and 30 s.
+	h2, h5 := from.Add(2*time.Hour+time.Minute), from.Add(5*time.Hour+time.Minute)
+	view(h2, "/", "desktop")
+	view(h2, "/", "desktop")
+	engage(h2, "/", "desktop", EngageAdd{MS: 30000, R10: 1})
+	view(h5, "/docs", "mobile")
+	engage(h5, "/docs", "mobile", EngageAdd{MS: 90000, R10: 1, R30: 1})
+
+	all, err := s.EngageBuckets(ctx, tenant, project, "", "", from, from.Add(6*time.Hour), 3600)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("buckets = %+v (%v), want hours 2 and 5", all, err)
+	}
+	if b := all[0]; b.Index != 2 || b.Views != 2 || b.MS != 30000 || b.R != [4]int64{1, 0, 0, 0} {
+		t.Errorf("hour 2 = %+v", b)
+	}
+	if b := all[1]; b.Index != 5 || b.Views != 1 || b.MS != 90000 || b.R != [4]int64{1, 1, 0, 0} {
+		t.Errorf("hour 5 = %+v", b)
+	}
+	if mobile, err := s.EngageBuckets(ctx, tenant, project, "", "mobile", from, from.Add(6*time.Hour), 3600); err != nil || len(mobile) != 1 || mobile[0].Index != 5 {
+		t.Errorf("mobile buckets = %+v (%v), want hour 5 alone", mobile, err)
+	}
+	if one, err := s.EngageBuckets(ctx, tenant, project, "/", "", from, from.Add(6*time.Hour), 6*3600); err != nil || len(one) != 1 || one[0].Views != 2 {
+		t.Errorf("/ in one bucket = %+v (%v), want its 2 views", one, err)
+	}
+
+	paths, err := s.EngagePaths(ctx, tenant, project, "", from, from.Add(6*time.Hour))
+	if err != nil || len(paths) != 2 || paths[0].Labels["path"] != "/docs" || paths[0].Sum != 90 || paths[1].Sum != 15 {
+		t.Fatalf("engaged pages = %+v (%v), want /docs at 90 s then / at 15 s", paths, err)
+	}
+
+	for _, c := range []struct {
+		day  time.Time
+		path string
+		n    int64
+	}{{from, "/", 2}, {from, "/docs", 5}, {from.AddDate(0, 0, -1), "/", 10}} {
+		if err := s.AddHeat(ctx, tenant, project, c.day, c.path, "desktop", []HeatAdd{{Kind: "rage", Selector: "a", N: c.n}, {Kind: "click", Selector: "a", N: 100}}); err != nil {
+			t.Fatalf("heat: %v", err)
+		}
+	}
+	rage, err := s.HeatPaths(ctx, tenant, project, "rage", "", from)
+	if err != nil || len(rage) != 2 || rage[0].Labels["path"] != "/docs" || rage[0].Sum != 5 || rage[1].Sum != 2 {
+		t.Fatalf("rage pages from the day = %+v (%v), want /docs 5 then / 2", rage, err)
+	}
+	if rage, err = s.HeatPaths(ctx, tenant, project, "rage", "", from.AddDate(0, 0, -1)); err != nil || rage[0].Labels["path"] != "/" || rage[0].Sum != 12 {
+		t.Fatalf("rage pages from the day before = %+v (%v), want / at 12 first", rage, err)
+	}
+	if mobile, err := s.HeatPaths(ctx, tenant, project, "rage", "mobile", from); err != nil || len(mobile) != 0 {
+		t.Fatalf("mobile rage pages = %+v (%v), want none", mobile, err)
+	}
+}
+
+// history-trim drops web_engage rows past the web depth, like the page views
+// they count.
+func TestTrimHistoryDropsOldWebEngage(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency") // 365 days, 31 on the web
+	now := time.Now().UTC().Truncate(time.Hour)
+	for _, hour := range []time.Time{now.AddDate(0, 0, -40), now.Add(-time.Hour)} {
+		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", EngageAdd{MS: 1000}); err != nil {
+			t.Fatalf("engage: %v", err)
+		}
+	}
+	if _, err := s.TrimHistory(ctx); err != nil {
+		t.Fatalf("trim history: %v", err)
+	}
+	var left int64
+	var oldest time.Time
+	if err := pool.QueryRow(ctx, `SELECT count(*), min(hour) FROM web_engage WHERE tenant_id = $1`, tenant).Scan(&left, &oldest); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 1 || !oldest.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("%d rows left from %v, want the fresh one alone", left, oldest)
+	}
+}

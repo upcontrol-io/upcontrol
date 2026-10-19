@@ -48,6 +48,11 @@ type fakeWebStore struct {
 		path, device    string
 		cells           []pgstore.HeatAdd
 	}
+	engageCalls []struct {
+		hour         time.Time
+		path, device string
+		add          pgstore.EngageAdd
+	}
 
 	salt      []byte
 	origins   []string
@@ -83,6 +88,15 @@ func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day
 		path, device    string
 		cells           []pgstore.HeatAdd
 	}{tenantID, projectID, day, path, device, cells})
+	return nil
+}
+
+func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device string, add pgstore.EngageAdd) error {
+	f.engageCalls = append(f.engageCalls, struct {
+		hour         time.Time
+		path, device string
+		add          pgstore.EngageAdd
+	}{hour, path, device, add})
 	return nil
 }
 
@@ -431,6 +445,7 @@ func fakeReadStore() *fakeWebStore {
 		views:     42,
 		cells: map[string][]pgstore.HeatCell{
 			"click": {{Selector: "a", X: 1, Y: 2, N: 5}},
+			"hit":   {{Selector: "a", N: 3}},
 		},
 		scroll: [21]int64{10, 9, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
 	}
@@ -510,11 +525,17 @@ func TestHeatmapAnswersForListedOrigin(t *testing.T) {
 	if len(out.Scroll) != 21 || out.Scroll[3] != 7 {
 		t.Errorf("scroll[3] = %d of %d, want the store's cumulative array passed through", out.Scroll[3], len(out.Scroll))
 	}
+	if len(out.Hits) != 1 || out.Hits[0].Selector != "a" || out.Hits[0].N != 3 {
+		t.Errorf("hits = %+v, want the store's one hit cell", out.Hits)
+	}
 	// The empty kinds are [] on the wire, never null.
-	for _, cells := range [][]pgstore.HeatCell{out.Rage, out.Moves} {
+	for _, cells := range [][]pgstore.HeatCell{out.Rage, out.Moves, out.Dead} {
 		if cells == nil {
 			t.Error("an empty cell list answered null, want []")
 		}
+	}
+	if !strings.Contains(rr.Body.String(), `"dead":[]`) {
+		t.Errorf("body %s, want dead as [] on the wire", rr.Body.String())
 	}
 }
 
@@ -617,5 +638,90 @@ func TestHeatmapCarriesHeatPagesAndSnapsToTheWeek(t *testing.T) {
 	store.quota.HeatPages = nil
 	if rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200", nil); strings.Contains(rr.Body.String(), "heatPages") {
 		t.Errorf("an unlimited plan's read = %s, want no heatPages", rr.Body.String())
+	}
+}
+
+// f is the path the tab came from: stored as `from` when it is a path, and
+// dropped without a word when it is not.
+func TestCollectViewFrom(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct{ f, want string }{
+		{"/pricing", "/pricing"},
+		{"pricing", ""},
+		{"/" + strings.Repeat("a", maxWebPath), ""},
+	} {
+		store := &fakeWebStore{}
+		body := fmt.Sprintf(`{"v":2,"t":"view","p":"/signup","w":1200,"f":%q}`, tc.f)
+		if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, origin); rr.Code != http.StatusNoContent || len(store.pageviews) != 1 {
+			t.Fatalf("f %q: %d, %d page views; want 204 and the view stored", tc.f, rr.Code, len(store.pageviews))
+		}
+		got, ok := store.pageviews[0].labels["from"]
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("f %q: from = %q (%v), want %q", tc.f, got, ok, tc.want)
+		}
+	}
+}
+
+// h counts a view once per element it clicked: a selector repeated in one
+// beacon is still one hit. d is dead clicks, clamped like clicks.
+func TestCollectHitsAndDeadClicks(t *testing.T) {
+	store := &fakeWebStore{}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	rr := postBeacon(t, d, `{"v":2,"t":"heat","p":"/","w":1200,
+		"h":["a","a","b","",7],
+		"d":[["x",99,-5,5000],["x",99,-5,1],["skipped",1],["",1,1,1]]}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	hits := heatCellsOf(t, store, "hit")
+	if len(hits) != 2 {
+		t.Fatalf("hits = %+v, want a and b once each", hits)
+	}
+	for _, h := range hits {
+		if h.N != 1 || h.FX != 0 || h.FY != 0 {
+			t.Errorf("hit %+v, want n 1 at 0,0", h)
+		}
+	}
+	dead := heatCellsOf(t, store, "dead")
+	if len(dead) != 1 || dead[0].FX != 63 || dead[0].FY != 0 || dead[0].N != 1001 {
+		t.Errorf("dead = %+v, want one cell at 63,0 of the clamped 1000 plus 1", dead)
+	}
+}
+
+// e and a reach AddEngage in the beacon's hour: e clamped to 30 minutes, a
+// deduped and kept to 0..3, a wrong-typed one ignored rather than refused.
+func TestCollectEngage(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct {
+		name, extra string
+		want        pgstore.EngageAdd
+	}{
+		{"clamped e and deduped a", `"e":9999999,"a":[0,0,3,4,-1,"x"]`, pgstore.EngageAdd{MS: 1_800_000, R10: 1, R300: 1}},
+		{"a wrong-typed e", `"e":"lots","a":[1]`, pgstore.EngageAdd{R30: 1}},
+		{"a wrong-typed a", `"e":1500,"a":"all"`, pgstore.EngageAdd{MS: 1500}},
+	} {
+		store := &fakeWebStore{}
+		body := `{"v":2,"t":"heat","p":"/docs","w":390,` + tc.extra + `}`
+		if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, origin); rr.Code != http.StatusNoContent {
+			t.Fatalf("%s: status %d: %s", tc.name, rr.Code, rr.Body.String())
+		}
+		if len(store.engageCalls) != 1 {
+			t.Fatalf("%s: %d AddEngage calls, want 1", tc.name, len(store.engageCalls))
+		}
+		c := store.engageCalls[0]
+		if c.add != tc.want || c.path != "/docs" || c.device != "mobile" || !c.hour.Equal(time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)) {
+			t.Errorf("%s: AddEngage(%v, %q, %q, %+v), want the hour, /docs, mobile, %+v", tc.name, c.hour, c.path, c.device, c.add, tc.want)
+		}
+		// Nothing but engaged time is no heat at all.
+		if len(store.heatCalls) != 0 {
+			t.Errorf("%s: %d AddHeat calls for a beacon with no cells", tc.name, len(store.heatCalls))
+		}
+	}
+	// A heat beacon with nothing engaged writes no engage row.
+	store := &fakeWebStore{}
+	postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/","w":1200,"e":0,"s":0.5}`, origin)
+	if len(store.engageCalls) != 0 || len(store.heatCalls) != 1 {
+		t.Errorf("%d AddEngage, %d AddHeat calls; want none and the scroll", len(store.engageCalls), len(store.heatCalls))
 	}
 }

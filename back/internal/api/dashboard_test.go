@@ -765,3 +765,69 @@ func TestReadLayout_KeepsEveryRefACardCanCarry(t *testing.T) {
 		})
 	}
 }
+
+// The web source names five reads; reach needs a threshold, the per-page
+// heat sums need group [path], and every refusal names its query.
+func TestValidateSeries_Web(t *testing.T) {
+	byPath := []string{"path"}
+	for _, ok := range []seriesQuery{
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged"},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"path": "/", "device": "mobile"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Group: byPath},
+		{ID: "a", Source: "web", Range: "31d", Name: "engaged", Bucket: "day"},
+		{ID: "a", Source: "web", Range: "24h", Name: "reach", Where: map[string]string{"after": "30"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: byPath},
+		{ID: "a", Source: "web", Range: "7d", Name: "dead", Group: byPath, Where: map[string]string{"device": "desktop"}},
+		{ID: "a", Source: "web", Range: "365d", Name: "clicks", Group: byPath},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s %+v must be accepted; got %q", ok.Name, ok, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "q1", Source: "web", Range: "7d", Name: "visits"},
+		{ID: "q1", Source: "web", Range: "7d"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach", Where: map[string]string{"after": "60"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach", Where: map[string]string{"after": "10"}, Group: byPath},
+		{ID: "q1", Source: "web", Range: "7d", Name: "rage"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "clicks", Group: []string{"device"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Group: []string{"path", "device"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Labels: map[string]string{"path": "/"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "dead", Group: byPath, Count: "events"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Steps: []string{"a"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Cohort: "week"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "rage", Group: byPath, Bucket: "day"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in q1") {
+			t.Fatalf("%+v must be refused by name; got %q", bad, msg)
+		}
+	}
+}
+
+// A web read never steps below an hour, over the range's own span: a 1h
+// range is one bucket, a 24h range 24. With no store every bucket is null and
+// a grouped read answers no rows.
+func TestOneSeries_WebStepsInHours(t *testing.T) {
+	h := &writeAPI{}
+	now := time.Date(2026, 9, 19, 12, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		rng         string
+		step, count int
+	}{{"1h", 3600, 1}, {"4h", 3600, 4}, {"24h", 3600, 24}, {"7d", 10800, 56}} {
+		s, err := h.oneSeries(t.Context(), nil, 1, 1, seriesQuery{ID: "a", Source: "web", Range: tc.rng, Name: "engaged"}, now, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s["step"] != tc.step || len(s["points"].([]any)) != tc.count || s["total"] != nil {
+			t.Errorf("%s: step %v, %d points, total %v; want %d, %d, nil", tc.rng, s["step"], len(s["points"].([]any)), s["total"], tc.step, tc.count)
+		}
+	}
+	s, err := h.oneSeries(t.Context(), nil, 1, 1, seriesQuery{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: []string{"path"}}, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, ok := s["rows"].([]any); !ok || len(rows) != 0 {
+		t.Errorf("grouped rows = %v, want []", s["rows"])
+	}
+}

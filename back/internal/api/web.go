@@ -34,6 +34,7 @@ import (
 type webStore interface {
 	InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error
 	AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device string, cells []pgstore.HeatAdd) error
+	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device string, add pgstore.EngageAdd) error
 	DailySalt(ctx context.Context, day time.Time) ([]byte, error)
 	PublicOrigins(ctx context.Context, tenantID, projectID int64) ([]string, error)
 	MintHeatmapLink(ctx context.Context, tokenHash []byte, tenantID, projectID int64, expires time.Time) error
@@ -172,7 +173,8 @@ func utmLabels(q string, scrubOff bool) map[string]string {
 var rangeDaysWeb = map[string]int{"": 0, "24h": 1, "7d": 7, "31d": 31}
 
 // beaconBody is what uc.js sends. The cell entries ride json.RawMessage so a
-// malformed one is skipped, never a 400 for the whole batch.
+// malformed one is skipped, never a 400 for the whole batch; e and a are raw
+// whole, so a wrong-typed one is ignored.
 type beaconBody struct {
 	V int                 `json:"v"`
 	T string              `json:"t"`
@@ -180,9 +182,14 @@ type beaconBody struct {
 	W int                 `json:"w"`
 	R string              `json:"r"`
 	Q string              `json:"q"`
+	F string              `json:"f"`
 	S *float64            `json:"s"`
+	E json.RawMessage     `json:"e"`
+	A json.RawMessage     `json:"a"`
+	H []json.RawMessage   `json:"h"`
 	C [][]json.RawMessage `json:"c"`
 	M [][]json.RawMessage `json:"m"`
+	D [][]json.RawMessage `json:"d"`
 }
 
 // rawCellString and rawCellInt decode one beacon cell element; false when the
@@ -265,6 +272,9 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		for k, v := range utmLabels(b.Q, d.scrubOff) {
 			labels[k] = v
 		}
+		if from, ok := webPath(b.F, d.scrubOff); ok {
+			labels["from"] = from
+		}
 		country, osName, browser := d.describe(ip, ua)
 		if country != "" {
 			labels["country"] = country
@@ -321,34 +331,77 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 			add("rage", sel, int16(fx), int16(fy), rage)
 		}
 	}
-	for i, entry := range b.M {
-		if i >= pgstore.MaxMoveCells {
+	// Moves and dead clicks share one cell shape: [sel, fx, fy, n].
+	for _, set := range [...]struct {
+		kind    string
+		entries [][]json.RawMessage
+		cap     int
+	}{{"move", b.M, pgstore.MaxMoveCells}, {"dead", b.D, pgstore.MaxClickCells}} {
+		for i, entry := range set.entries {
+			if i >= set.cap {
+				break
+			}
+			if len(entry) != 4 {
+				continue
+			}
+			sel, okSel := rawCellString(entry[0])
+			fx, okFX := rawCellInt(entry[1])
+			fy, okFY := rawCellInt(entry[2])
+			n, okN := rawCellInt(entry[3])
+			if !okSel || !okFX || !okFY || !okN || sel == "" || len(sel) > maxHeatSelector {
+				continue
+			}
+			add(set.kind, sel, int16(min(max(fx, 0), 63)), int16(min(max(fy, 0), 63)), min(max(n, 1), 1000))
+		}
+	}
+	// A hit is one view that clicked an element: one per selector a beacon.
+	hits := map[string]bool{}
+	for _, raw := range b.H {
+		if len(hits) >= pgstore.MaxClickCells {
 			break
 		}
-		if len(entry) != 4 {
+		sel, ok := rawCellString(raw)
+		if !ok || sel == "" || len(sel) > maxHeatSelector || hits[sel] {
 			continue
 		}
-		sel, okSel := rawCellString(entry[0])
-		fx, okFX := rawCellInt(entry[1])
-		fy, okFY := rawCellInt(entry[2])
-		samples, okSamples := rawCellInt(entry[3])
-		if !okSel || !okFX || !okFY || !okSamples || sel == "" || len(sel) > maxHeatSelector {
-			continue
-		}
-		add("move", sel, int16(min(max(fx, 0), 63)), int16(min(max(fy, 0), 63)), min(max(samples, 1), 1000))
+		hits[sel] = true
+		add("hit", sel, 0, 0, 1)
 	}
 	if b.S != nil {
 		// fy = int(s * 20): a full-page reach lands on 20, the scroll fold's
 		// 21st bucket.
 		add("scroll", "", 0, int16(min(max(int64(*b.S*20), 0), 20)), 1)
 	}
-	list := make([]pgstore.HeatAdd, 0, len(cells))
-	for k, n := range cells {
-		list = append(list, pgstore.HeatAdd{Kind: k.kind, Selector: k.sel, FX: k.fx, FY: k.fy, N: n})
+	var engage pgstore.EngageAdd
+	if ms, ok := rawCellInt(b.E); ok {
+		engage.MS = min(max(ms, 0), 1_800_000)
 	}
-	if err := d.store.AddHeat(ctx, t.TenantID, t.ProjectID, now.Truncate(24*time.Hour), path, device, list); err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
+	var reached []json.RawMessage
+	if json.Unmarshal(b.A, &reached) == nil {
+		thresholds := [...]*int64{&engage.R10, &engage.R30, &engage.R120, &engage.R300}
+		for _, raw := range reached {
+			if i, ok := rawCellInt(raw); ok && i >= 0 && i < int64(len(thresholds)) {
+				*thresholds[i] = 1
+			}
+		}
+	}
+	if len(cells) > 0 {
+		list := make([]pgstore.HeatAdd, 0, len(cells))
+		for k, n := range cells {
+			list = append(list, pgstore.HeatAdd{Kind: k.kind, Selector: k.sel, FX: k.fx, FY: k.fy, N: n})
+		}
+		if err := d.store.AddHeat(ctx, t.TenantID, t.ProjectID, now.Truncate(24*time.Hour), path, device, list); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if engage != (pgstore.EngageAdd{}) {
+		// ponytail: the beacon's own hour, which may be the hour after its
+		// view; the reads divide by views across that edge.
+		if err := d.store.AddEngage(ctx, t.TenantID, t.ProjectID, now.Truncate(time.Hour), path, device, engage); err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -405,6 +458,8 @@ type heatOut struct {
 	Clicks []pgstore.HeatCell `json:"clicks"`
 	Rage   []pgstore.HeatCell `json:"rage"`
 	Moves  []pgstore.HeatCell `json:"moves"`
+	Hits   []pgstore.HeatCell `json:"hits"`
+	Dead   []pgstore.HeatCell `json:"dead"`
 	Scroll []int64            `json:"scroll"`
 	// The plan's heatmap pages; absent when unlimited.
 	HeatPages *int32 `json:"heatPages,omitempty"`
@@ -504,7 +559,9 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 	clicks, okClicks := read("click")
 	rage, okRage := read("rage")
 	moves, okMoves := read("move")
-	if !okClicks || !okRage || !okMoves {
+	hits, okHits := read("hit")
+	dead, okDead := read("dead")
+	if !okClicks || !okRage || !okMoves || !okHits || !okDead {
 		writeAPIErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -521,6 +578,8 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		Clicks:    clicks,
 		Rage:      rage,
 		Moves:     moves,
+		Hits:      hits,
+		Dead:      dead,
 		Scroll:    scroll[:],
 		HeatPages: quota.HeatPages,
 	})

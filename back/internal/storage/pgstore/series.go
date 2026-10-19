@@ -267,8 +267,8 @@ func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int6
 }
 
 // TrimHistory drops rollup rows past the tenant's plan depth and answers how
-// many went; the web door's web_heat rows and page views trim on the same
-// join to the web depth, the plan's capped at webDays, web_heat keyed by its
+// many went; the web door's web_heat and web_engage rows and page views trim
+// on the same join to the web depth, the plan's capped at webDays, web_heat keyed by its
 // UTC day, and a weekly bucket (older than a week, see CompactWeb) by its
 // Sunday, so a week straddling the edge stays whole. Every page view carries
 // an actor, and saying so lets the partial people index serve the trim.
@@ -307,7 +307,14 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 		   AND p.history_days IS NOT NULL
 		   AND (pr.frozen_at IS NULL OR e.ts > pr.frozen_at)
 		   AND e.name = 'uc.pageview' AND e.actor <> ''
-		   AND e.ts < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`,
+		   AND e.ts < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`, `
+		DELETE FROM web_engage w
+		 USING project pr, tenant t, plan_entitlement p
+		 WHERE pr.id = w.project_id AND pr.tenant_id = w.tenant_id
+		   AND t.id = pr.tenant_id AND p.plan = t.plan
+		   AND p.history_days IS NOT NULL
+		   AND (pr.frozen_at IS NULL OR w.hour > pr.frozen_at)
+		   AND w.hour < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`,
 	} {
 		tag, err = s.pool.Exec(ctx, stmt, webDays)
 		if err != nil {

@@ -83,8 +83,10 @@ so a visit to the site never hides an SDK that did not connect (topic `verify`).
 
 ## Offer the board
 
-Topic `dashboard`: a `heatmap` card (top pages, a Heatmap button per row) plus
-`breakdown` cards of `uc.pageview` by `referrer`, `country` and `device`. Apply
+Topic `dashboard`: a `heatmap` card (top pages with their engaged time, rage and
+dead clicks, a Heatmap button per row), a `stat` of
+`{ "source": "web", "name": "engaged" }` titled `Engaged time`, plus `breakdown`
+cards of `uc.pageview` by `referrer`, `country` and `device`. Apply
 with `npx upcontrol board --add`. If the user wants the site on a board of its
 own, `npx upcontrol board --new "Website"` makes one and prints its id: name
 that id with `--board <id>` on every later write, or the cards land on the
@@ -93,8 +95,11 @@ project's first board instead.
 ## What the owner gets
 
 Page views, visitors (a daily-rotating hash, no cookie), referrers, UTM tags,
-countries, devices; heatmaps of clicks, rage clicks, mouse movement and scroll
-depth per page and device, opened from the Heatmap card onto the live site.
+countries, devices, the page each view came from, and engaged time per page
+(the tab visible and in use); heatmaps of clicks, rage clicks, dead clicks,
+mouse movement and scroll depth per page and device, opened from the Heatmap
+card onto the live site, where hovering an element shows how many views
+clicked it.
 A plan records a number of visits a month: past it the tag records nothing
 until the next month and the app says so. Heatmaps are kept for the plan's
 busiest pages.

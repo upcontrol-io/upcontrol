@@ -4647,7 +4647,7 @@ export interface components {
         /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry. */
         DashboardMetricRef: {
             /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric" | "people" | "service" | "funnel" | "experiment" | "retention" | "dimension";
+            source: "logs" | "check" | "event" | "metric" | "people" | "web" | "service" | "funnel" | "experiment" | "retention" | "dimension";
             name?: string;
             where?: {
                 [key: string]: string;
@@ -4827,13 +4827,13 @@ export interface components {
             /** @description Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it. */
             id: string;
             /**
-             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`.
              * @enum {string}
              */
-            source: "logs" | "check" | "event" | "metric" | "people";
+            source: "logs" | "check" | "event" | "metric" | "people" | "web";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path` and `where.device`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`. A web bucket older than the oldest one kept is null. */
             name?: string;
             where?: {
                 [key: string]: string;
@@ -5231,6 +5231,16 @@ export interface components {
             r?: string;
             /** @description view: location.search. Only utm_source, utm_medium and utm_campaign are kept. */
             q?: string;
+            /** @description view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label. */
+            f?: string;
+            /** @description heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes. */
+            e?: number;
+            /** @description heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view. */
+            a?: number[];
+            /** @description heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element. */
+            h?: string[];
+            /** @description heat: at most 300 dead clicks as [selector, fx, fy, clicks]: a click on no interactive element after which nothing on the page changed for 600 ms. */
+            d?: unknown[][];
             /** @description heat: the deepest reach, (scrollY + innerHeight) / document height, clamped to 0..1. */
             s?: number;
             /** @description heat: at most 300 clicks as [selector, fx, fy, clicks, rage clicks]; fx and fy are the position inside the element in 64ths. */
@@ -5257,6 +5267,9 @@ export interface components {
             clicks: components["schemas"]["HeatCell"][];
             rage: components["schemas"]["HeatCell"][];
             moves: components["schemas"]["HeatCell"][];
+            /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
+            hits: components["schemas"]["HeatCell"][];
+            dead: components["schemas"]["HeatCell"][];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];
             /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */

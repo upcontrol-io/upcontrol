@@ -605,9 +605,10 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trim history: %v", err)
 	}
-	// Free's rollup row, and Free's and Agency's old page view and heat row.
-	if deleted != 5 {
-		t.Fatalf("got %d deleted, want 5", deleted)
+	// Free's rollup row, and Free's and Agency's old page view, heat row and
+	// the web_engage row that page view counted into.
+	if deleted != 7 {
+		t.Fatalf("got %d deleted, want 7", deleted)
 	}
 	left := func(table string, tenantID, projectID int64) int64 {
 		t.Helper()

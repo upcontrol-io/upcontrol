@@ -233,7 +233,7 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		seen[q.ID] = true
 		switch q.Source {
-		case "logs", "check", "event", "metric", "people":
+		case "logs", "check", "event", "metric", "people", "web":
 		default:
 			return "unknown source " + q.Source + " in " + q.ID
 		}
@@ -257,6 +257,13 @@ func validateSeries(qs []seriesQuery) string {
 		}
 		if q.Cohort != "" && q.Cohort != "week" {
 			return "unknown cohort " + q.Cohort + " in " + q.ID
+		}
+		if q.Source == "web" {
+			// The web source's names, group and where are its own.
+			if msg := validateWeb(q); msg != "" {
+				return msg
+			}
+			continue
 		}
 		if len(q.Group) > 0 {
 			if q.Source != "metric" && q.Source != "people" {
@@ -625,9 +632,15 @@ func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenant
 	// validateSeries allows one only on a read with points, so the two folds
 	// below always get their range's own step.
 	r := rebucket(seriesRanges[q.Range], q.Bucket)
+	if q.Source == "web" {
+		r = webRange(r)
+	}
 	from, to := r.window(now)
 	if q.Source == "people" && !q.bareName() {
 		return h.peopleSeries(ctx, tenantID, projectID, q, from, to, r)
+	}
+	if q.Source == "web" && len(q.Group) > 0 {
+		return h.webGroupedSeries(ctx, tenantID, projectID, q, from, to, r)
 	}
 	if len(q.Group) > 0 {
 		return h.groupedSeries(ctx, tenantID, projectID, q, from, to, r)
@@ -644,6 +657,8 @@ func (h *writeAPI) oneSeries(ctx context.Context, qb *query.QueryBuilder, tenant
 		points, total, previous, err = h.eventSeries(ctx, tenantID, projectID, q, from, to, r)
 	case "metric":
 		points, total, previous, err = h.metricSeries(ctx, tenantID, projectID, q, from, to, r)
+	case "web":
+		points, total, previous, err = h.webSeries(ctx, tenantID, projectID, q, from, to, r)
 	}
 	if err != nil {
 		return nil, err
