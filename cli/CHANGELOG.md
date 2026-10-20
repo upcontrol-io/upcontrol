@@ -3,6 +3,13 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-10-20 - upcontrol 0.6.1
+
+- The `dashboard` topic's kinds table lists `web` among the sources a `stat`, a `line` and a
+  `bar` take: the engaged time and reach refs were described below the table but missing
+  from the column an agent checks first, so an agent could decline to build those cards.
+  The installer's own code is unchanged.
+
 ## 2026-10-20 - upcontrol 0.6.0
 
 - **`npx upcontrol web <site> --segments member,anon` declares the project's segments** with the

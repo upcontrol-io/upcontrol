@@ -85,9 +85,9 @@ smallest the board accepts, and a kind that is not ranged must carry no
 
 | kind | draws | w | h | min w/h | ranged | metrics | `source` each ref takes |
 |---|---|---|---|---|---|---|---|
-| `stat` | one number and its trend | 3 | 6 | 2 / 6 | yes | exactly one | `logs`, `check`, `event`, `metric` or a bare-name `people` |
-| `line` | series over time | 6 | 8 | 3 / 6 | yes | one to three | `logs`, `check`, `event`, `metric` or a bare-name `people` |
-| `bar` | counts per time bucket | 6 | 8 | 3 / 6 | yes | one to three | `logs`, `check`, `event`, `metric` or a bare-name `people` |
+| `stat` | one number and its trend | 3 | 6 | 2 / 6 | yes | exactly one | `logs`, `check`, `event`, `metric`, `web` or a bare-name `people` |
+| `line` | series over time | 6 | 8 | 3 / 6 | yes | one to three | `logs`, `check`, `event`, `metric`, `web` or a bare-name `people` |
+| `bar` | counts per time bucket | 6 | 8 | 3 / 6 | yes | one to three | `logs`, `check`, `event`, `metric`, `web` or a bare-name `people` |
 | `donut` | how a total splits | 3 | 8 | 3 / 6 | yes | one or more | `logs`, `check`, `event` or `metric` |
 | `logs` | the latest lines of one service | 6 | 16 | 4 / 12 | no | exactly one | `service` |
 | `status` | uptime bars for the checks you pick | 6 | 12 | 3 / 6 | no | one or more | `check` |
