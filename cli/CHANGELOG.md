@@ -3,6 +3,24 @@
 Every release of a published package gets an entry here (repo rule: a bad
 deploy is rolled back, a bad published version is on other people's machines).
 
+## 2026-10-20 - upcontrol 0.6.0
+
+- **`npx upcontrol web <site> --segments member,anon` declares the project's segments** with the
+  project's key (`PUT /v1/web/segments`, at most four names of 1-24 `a-z0-9_-`, never four
+  digits in a row). Core 0.43.0 records a visitor's segment only for declared names. The list
+  is checked before anything is sent; the line `segments: member, anon` goes to stderr, and in
+  agent mode the JSON line gains a `segments` field. A refused list still prints the tag, then
+  the server's message, and exits 3. `--segments ""` clears the list. The key is never printed.
+- The bundled agent skill carries the references of core 0.43.0:
+  - `web`: engaged time, the clicked elements, dead clicks, form fields, the previous path;
+    marking signed-in visitors (declare first, `data-segment` or `upcontrol('segment')`, which
+    applies from the next view); named page events (`data-uc-event`, `upcontrol('track')`);
+    `upcontrol('source') || {}` to carry a visit's source to the backend's own signup event.
+  - `wire`: money on an event, `uc.amount` in minor units and `uc.currency`, from the server
+    with the secret key only.
+  - `dashboard`: `source: web` (engaged, reach), funnel steps narrowed to one page
+    (`stepWhere`), a breakdown's `where`, `measure: amount` + `currency`, and the `table` kind.
+
 ## 2026-10-15 - upcontrol 0.5.1
 
 - The bundled agent skill carries the references of core 0.41.0. The installer's own code is
