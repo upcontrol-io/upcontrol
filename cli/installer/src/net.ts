@@ -211,6 +211,12 @@ export async function appendBoard(endpoint: string, key: string, widgets: unknow
   if (!body?.widgets) return { ok: false, status: r.status, error: 'malformed' };
   return { ...r, total: body.widgets.length };
 }
+// The site's segments ride the board doors' shape: the secret key header and
+// the server's own sentence carried back on a refusal.
+export function putSegments(endpoint: string, key: string, names: string[]): Promise<BoardResult> {
+  return boardCall(endpoint + '/v1/web/segments', key, { method: 'PUT', body: JSON.stringify({ names }) });
+}
+
 interface HttpAnswer {
   ok: boolean;
   status: number;

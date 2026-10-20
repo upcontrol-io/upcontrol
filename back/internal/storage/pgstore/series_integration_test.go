@@ -12,6 +12,7 @@ import (
 	"context"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ const (
 	catalogProject  = 92
 	bucketProject   = 93
 	reporterProject = 94
+	moneyProject    = 90
 )
 
 // wrappedFingerprint is above MaxInt64, so it lands in the bigint column as
@@ -323,6 +325,53 @@ func TestCheckAndEventSeries(t *testing.T) {
 	same("plan pro in eu", count(map[string]string{"plan": "pro", "region": "eu"}, from, window, 60), map[int64]int64{0: 1})
 	same("a value nobody sent", count(map[string]string{"plan": "team"}, from, window, 60), map[int64]int64{})
 	same("plan pro, the previous span", count(map[string]string{"plan": "pro"}, from.Add(-10*time.Minute), from, 600), map[int64]int64{0: 1})
+
+	// --- amounts -------------------------------------------------------------
+	// A sum per bucket in one currency: the euros never join the dollars, a
+	// webhook's lower-case currency is the same currency, a row with no money
+	// sums to 0, and the label filter and the previous span hold as for counts.
+	money := []EventRow{
+		{Name: "paid", TS: from.Add(5 * time.Second), AmountMinor: 1999, Currency: "USD", Labels: map[string]string{"plan": "pro"}},
+		{Name: "paid", TS: from.Add(10 * time.Second), AmountMinor: 500, Currency: "usd", Labels: map[string]string{"plan": "free"}},
+		{Name: "paid", TS: from.Add(65 * time.Second), AmountMinor: 700, Currency: "EUR", Labels: map[string]string{"plan": "pro"}},
+		{Name: "paid", TS: from.Add(70 * time.Second), AmountMinor: 0, Currency: "USD"},
+		{Name: "paid", TS: from.Add(-5 * time.Minute), AmountMinor: 300, Currency: "USD"},
+		{Name: "paid", TS: from.Add(-4 * time.Minute)}, // no money at all
+	}
+	for i := range money {
+		money[i].TenantID, money[i].ProjectID = seriesTenant, moneyProject
+	}
+	if err := s.InsertEvents(ctx, money); err != nil {
+		t.Fatalf("insert money events: %v", err)
+	}
+	sum := func(currency string, labels map[string]string, lo, hi time.Time, step int) map[int64]int64 {
+		t.Helper()
+		rows, err := s.AmountBuckets(ctx, seriesTenant, moneyProject, "paid", currency, labels, lo, hi, step)
+		if err != nil {
+			t.Fatalf("amount buckets %s %v: %v", currency, labels, err)
+		}
+		got := map[int64]int64{}
+		for _, b := range rows {
+			got[b.Index] = b.Count
+		}
+		return got
+	}
+	same("USD", sum("USD", nil, from, window, 60), map[int64]int64{0: 2499, 1: 0})
+	same("EUR", sum("EUR", nil, from, window, 60), map[int64]int64{1: 700})
+	same("USD on pro", sum("USD", map[string]string{"plan": "pro"}, from, window, 60), map[int64]int64{0: 1999})
+	same("a currency nobody paid in", sum("GBP", nil, from, window, 60), map[int64]int64{})
+	same("USD, the previous span", sum("USD", nil, from.Add(-10*time.Minute), from, 600), map[int64]int64{0: 300})
+
+	moneyCat, err := s.CatalogEvents(ctx, seriesTenant, moneyProject, from.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("money catalog: %v", err)
+	}
+	if len(moneyCat) != 1 || !slices.Equal(moneyCat[0].Currencies, []string{"EUR", "USD"}) {
+		t.Fatalf("the catalog lists each currency an amount arrived in, upper case and sorted; got %+v", moneyCat)
+	}
+	if len(cat[0].Currencies) != 0 || len(cat[1].Currencies) != 0 {
+		t.Fatalf("an event that carried no money lists no currency; got %+v", cat)
+	}
 }
 
 // The field list is the picker's "what can I break this event down by", so
@@ -584,7 +633,7 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 			if err := s.InsertPageview(ctx, tenantID, projectID, ts, map[string]string{"path": "/"}, "v"); err != nil {
 				t.Fatalf("seed page view on %s: %v", plan, err)
 			}
-			if err := s.AddHeat(ctx, tenantID, projectID, ts.Truncate(24*time.Hour), "/", "desktop",
+			if err := s.AddHeat(ctx, tenantID, projectID, ts.Truncate(24*time.Hour), "/", "desktop", "", "",
 				[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
 				t.Fatalf("seed heat on %s: %v", plan, err)
 			}
@@ -596,18 +645,26 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 	self, selfProject := seed("Self-hosted") // NULL = unlimited
 	// A weekly bucket whose Monday is 33 days old still holds days inside the
 	// 31: it goes once its last day does.
-	if err := s.AddHeat(ctx, agency, agencyProject, now.AddDate(0, 0, -33).Truncate(24*time.Hour), "/week", "desktop",
+	if err := s.AddHeat(ctx, agency, agencyProject, now.AddDate(0, 0, -33).Truncate(24*time.Hour), "/week", "desktop", "", "",
 		[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
 		t.Fatalf("seed Agency's straddling bucket: %v", err)
+	}
+	// A page event the web door stored and one an SDK sent, both 40 days old:
+	// the door's goes with its page views, the SDK's lives the plan's year.
+	if _, err := pool.Exec(ctx, `INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		VALUES ($1, $2, $3, 'signup', '{}', 'w:0123456789abcdef'), ($1, $2, $3, 'signup', '{}', 'person-1')`,
+		agency, agencyProject, now.AddDate(0, 0, -40)); err != nil {
+		t.Fatalf("seed Agency's old events: %v", err)
 	}
 
 	deleted, err := s.TrimHistory(ctx)
 	if err != nil {
 		t.Fatalf("trim history: %v", err)
 	}
-	// Free's rollup row, and Free's and Agency's old page view and heat row.
-	if deleted != 5 {
-		t.Fatalf("got %d deleted, want 5", deleted)
+	// Free's rollup row, Free's and Agency's old page view, heat row and the
+	// web_engage row that page view counted into, and Agency's old w: event.
+	if deleted != 8 {
+		t.Fatalf("got %d deleted, want 8", deleted)
 	}
 	left := func(table string, tenantID, projectID int64) int64 {
 		t.Helper()
@@ -625,13 +682,18 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 		rollup, views, heat int64
 	}{
 		{"Free keeps the last day and nothing older", free, freeProject, 1, 1, 1},
-		{"a month is inside Agency's year, not its 31 web days", agency, agencyProject, 2, 1, 2},
+		// Agency's events: the fresh page view and the SDK's old event.
+		{"a month is inside Agency's year, not its 31 web days", agency, agencyProject, 2, 2, 2},
 		// NULL trims nothing: that is what makes Self-hosted unlimited.
 		{"a NULL depth keeps everything", self, selfProject, 2, 2, 2},
 	} {
 		if got := [3]int64{left("series_1h", tc.tenant, tc.project), left("events", tc.tenant, tc.project), left("web_heat", tc.tenant, tc.project)}; got != [3]int64{tc.rollup, tc.views, tc.heat} {
 			t.Errorf("%s: rollup, page views, heat = %v, want %v", tc.name, got, [3]int64{tc.rollup, tc.views, tc.heat})
 		}
+	}
+	var kept string
+	if err := pool.QueryRow(ctx, `SELECT string_agg(actor, ',') FROM events WHERE tenant_id = $1 AND name = 'signup'`, agency).Scan(&kept); err != nil || kept != "person-1" {
+		t.Errorf("Agency's old events left = %q (%v), want the SDK's alone", kept, err)
 	}
 }
 

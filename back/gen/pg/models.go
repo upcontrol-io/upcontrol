@@ -303,6 +303,7 @@ type PlanEntitlement struct {
 	WebVisitsMonth     *int32
 	WebHeatPages       *int32
 	Dashboards         *int32
+	ProductAlerts      *int32
 }
 
 type ProbeNode struct {
@@ -320,6 +321,28 @@ type ProbeTarget struct {
 	Keyword   *string
 	FirstOkAt pgtype.Timestamptz
 	CreatedAt pgtype.Timestamptz
+}
+
+type ProductAlert struct {
+	ID            int64
+	PublicID      pgtype.UUID
+	TenantID      int64
+	ProjectID     int64
+	Name          string
+	Event         string
+	Labels        []byte
+	Measure       string
+	Currency      string
+	Kind          string
+	Direction     string
+	Percent       int32
+	WindowHours   int32
+	WidgetID      string
+	Paused        bool
+	State         string
+	LastFiredAt   pgtype.Timestamptz
+	LastCheckedAt pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
 }
 
 type Project struct {
@@ -464,6 +487,22 @@ type Tenant struct {
 	FirstCheckAt   pgtype.Timestamptz
 }
 
+type WebEngage struct {
+	TenantID  int64
+	ProjectID int64
+	Hour      pgtype.Timestamptz
+	Path      string
+	Device    string
+	Views     int64
+	Ms        int64
+	R10       int64
+	R30       int64
+	R120      int64
+	R300      int64
+	Segment   string
+	Source    string
+}
+
 type WebEvent struct {
 	VisitorID   *int64
 	PersonID    *int64
@@ -495,11 +534,19 @@ type WebHeat struct {
 	Fx        int16
 	Fy        int16
 	N         int64
+	Segment   string
+	Source    string
 }
 
 type WebSalt struct {
 	Day  pgtype.Date
 	Salt []byte
+}
+
+type WebSegment struct {
+	ProjectID int64
+	Name      string
+	CreatedAt pgtype.Timestamptz
 }
 
 type WebUsage struct {

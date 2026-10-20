@@ -72,6 +72,24 @@ An A/B card divides the people who converted by the people who were exposed, so
 a conversion sent under another id than the exposure is a person nobody exposed:
 use the user's id, or the anonymous id the app already keeps, on both lines.
 
+## Money on an event
+
+An event can carry what was paid: `uc.amount`, an integer in the currency's
+MINOR units (cents for USD and EUR, yen for JPY), and `uc.currency`, the ISO
+4217 code. A refund is a negative amount.
+
+```
+{"ts":"...","msg":"payment","uc.event":true,"uc.actor":"u_1042","uc.amount":1999,"uc.currency":"USD","plan":"pro"}
+```
+
+Send it from the SERVER, where the payment is confirmed (the provider's
+webhook, or the checkout success handler), with the project's secret key: an
+amount sent with a public (browser) key is dropped, because a page could
+invent revenue. Both fields are read and removed, never stored as fields, and
+both must be valid or neither is kept. The board then sums them (`Revenue`
+picks, and the Table card's Revenue column), one currency at a time: two
+currencies are never added together.
+
 ## Marking deploys and releases
 
 The board draws a deploy, a release or an incident beside a line or a bar that

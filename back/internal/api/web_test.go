@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,12 +43,29 @@ type fakeWebStore struct {
 		labels          map[string]string
 		actor           string
 	}
+	events []struct {
+		name   string
+		labels map[string]string
+		actor  string
+	}
 	heatCalls []struct {
 		tenant, project int64
 		day             time.Time
 		path, device    string
+		segment, source string
 		cells           []pgstore.HeatAdd
 	}
+	engageCalls []struct {
+		hour            time.Time
+		path, device    string
+		segment, source string
+		add             pgstore.EngageAdd
+	}
+
+	declared     []string // the project's declared segments
+	segmentReads int
+	noView       bool      // the visitor has no stored page view: events and engaged time store nothing
+	readFilter   [2]string // the segment and source the last read was narrowed to
 
 	salt      []byte
 	origins   []string
@@ -58,8 +76,21 @@ type fakeWebStore struct {
 	views     int64
 	cells     map[string][]pgstore.HeatCell
 	scroll    [21]int64
+	forms     []pgstore.FormStat
 	quota     pgstore.WebQuota
 	heatFrom  time.Time // the fromDay HeatCells was last asked for
+	reads     []fakeRead
+
+	deploys, releases []pgstore.MarkRow
+	deployWindow      [2]time.Time // the [from, to) RecentDeploys was asked for
+}
+
+// fakeRead is one heatmap read: what ("views", a heat kind, "scroll",
+// "forms"), its [from, to) and its filters.
+type fakeRead struct {
+	what            string
+	from, to        time.Time
+	segment, source string
 }
 
 func (f *fakeWebStore) WebQuota(context.Context, int64, time.Time) (pgstore.WebQuota, error) {
@@ -76,14 +107,45 @@ func (f *fakeWebStore) InsertPageview(_ context.Context, tenantID, projectID int
 	return nil
 }
 
-func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day time.Time, path, device string, cells []pgstore.HeatAdd) error {
+func (f *fakeWebStore) InsertWebEvent(_ context.Context, _, _ int64, _ time.Time, name string, labels map[string]string, actor string) error {
+	if f.noView {
+		return nil
+	}
+	f.events = append(f.events, struct {
+		name   string
+		labels map[string]string
+		actor  string
+	}{name, labels, actor})
+	return nil
+}
+
+func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []pgstore.HeatAdd) error {
 	f.heatCalls = append(f.heatCalls, struct {
 		tenant, project int64
 		day             time.Time
 		path, device    string
+		segment, source string
 		cells           []pgstore.HeatAdd
-	}{tenantID, projectID, day, path, device, cells})
+	}{tenantID, projectID, day, path, device, segment, source, cells})
 	return nil
+}
+
+func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) (bool, error) {
+	if f.noView {
+		return false, nil
+	}
+	f.engageCalls = append(f.engageCalls, struct {
+		hour            time.Time
+		path, device    string
+		segment, source string
+		add             pgstore.EngageAdd
+	}{hour, path, device, segment, source, add})
+	return true, nil
+}
+
+func (f *fakeWebStore) Segments(context.Context, int64) ([]string, error) {
+	f.segmentReads++
+	return append([]string{}, f.declared...), nil
 }
 
 func (f *fakeWebStore) DailySalt(_ context.Context, _ time.Time) ([]byte, error) {
@@ -108,18 +170,36 @@ func (f *fakeWebStore) ResolveHeatmapLink(_ context.Context, _ []byte) (int64, i
 	return 7, 9, true, nil
 }
 
-func (f *fakeWebStore) PageviewCount(context.Context, int64, int64, string, string, time.Time) (int64, error) {
+func (f *fakeWebStore) PageviewCount(_ context.Context, _, _ int64, _, _, segment, source string, from, to time.Time) (int64, error) {
+	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"views", from, to, segment, source})
 	return f.views, nil
 }
 
 // HeatCells answers [] for a kind with no cells, never nil, as the real store does.
-func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, kind string, fromDay time.Time, _ int) ([]pgstore.HeatCell, error) {
+func (f *fakeWebStore) HeatCells(_ context.Context, _, _ int64, _, _, segment, source, kind string, fromDay, toDay time.Time, _ int) ([]pgstore.HeatCell, error) {
 	f.heatFrom = fromDay
+	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{kind, fromDay, toDay, segment, source})
 	return append([]pgstore.HeatCell{}, f.cells[kind]...), nil
 }
 
-func (f *fakeWebStore) ScrollReach(context.Context, int64, int64, string, string, time.Time) ([21]int64, error) {
+func (f *fakeWebStore) ScrollReach(_ context.Context, _, _ int64, _, _, segment, source string, fromDay, toDay time.Time) ([21]int64, error) {
+	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"scroll", fromDay, toDay, segment, source})
 	return f.scroll, nil
+}
+
+// FormStats answers [] for no rows, never nil, as the real store does.
+func (f *fakeWebStore) FormStats(_ context.Context, _, _ int64, _, _, segment, source string, fromDay, toDay time.Time) ([]pgstore.FormStat, error) {
+	f.readFilter = [2]string{segment, source}
+	f.reads = append(f.reads, fakeRead{"forms", fromDay, toDay, segment, source})
+	return append([]pgstore.FormStat{}, f.forms...), nil
+}
+
+func (f *fakeWebStore) RecentDeploys(_ context.Context, _, _ int64, from, to time.Time) ([]pgstore.MarkRow, []pgstore.MarkRow, error) {
+	f.deployWindow = [2]time.Time{from, to}
+	return f.deploys, f.releases, nil
 }
 
 func (f *fakeWebStore) HistoryRefusal(_ context.Context, _ int64, days int) (string, string, error) {
@@ -136,7 +216,8 @@ func newTestDoor(t ingest.Tenant, store webStore, isBot func(string) bool) *webD
 		describe: func(_, _ string) (string, string, string) {
 			return "DE", "macos", "safari"
 		},
-		now: func() time.Time { return time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC) },
+		now:      func() time.Time { return time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC) },
+		segments: &segmentCache{},
 	}
 }
 
@@ -151,7 +232,7 @@ func postBeacon(t *testing.T, d *webDoor, body string, headers map[string]string
 	return rr
 }
 
-var webActorHex = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var webActorHex = regexp.MustCompile(`^w:[0-9a-f]{16}$`)
 
 func TestDeviceFor(t *testing.T) {
 	for _, c := range []struct {
@@ -296,7 +377,7 @@ func TestCollectView(t *testing.T) {
 		}
 	}
 	if !webActorHex.MatchString(pv.actor) {
-		t.Errorf("actor %q is not 16 hex chars", pv.actor)
+		t.Errorf("actor %q is not w: and 16 hex chars", pv.actor)
 	}
 	if !pv.ts.Equal(time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)) {
 		t.Errorf("ts %v, want the door's clock", pv.ts)
@@ -431,6 +512,7 @@ func fakeReadStore() *fakeWebStore {
 		views:     42,
 		cells: map[string][]pgstore.HeatCell{
 			"click": {{Selector: "a", X: 1, Y: 2, N: 5}},
+			"hit":   {{Selector: "a", N: 3}},
 		},
 		scroll: [21]int64{10, 9, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
 	}
@@ -510,11 +592,17 @@ func TestHeatmapAnswersForListedOrigin(t *testing.T) {
 	if len(out.Scroll) != 21 || out.Scroll[3] != 7 {
 		t.Errorf("scroll[3] = %d of %d, want the store's cumulative array passed through", out.Scroll[3], len(out.Scroll))
 	}
+	if len(out.Hits) != 1 || out.Hits[0].Selector != "a" || out.Hits[0].N != 3 {
+		t.Errorf("hits = %+v, want the store's one hit cell", out.Hits)
+	}
 	// The empty kinds are [] on the wire, never null.
-	for _, cells := range [][]pgstore.HeatCell{out.Rage, out.Moves} {
+	for _, cells := range [][]pgstore.HeatCell{out.Rage, out.Moves, out.Dead} {
 		if cells == nil {
 			t.Error("an empty cell list answered null, want []")
 		}
+	}
+	if !strings.Contains(rr.Body.String(), `"dead":[]`) {
+		t.Errorf("body %s, want dead as [] on the wire", rr.Body.String())
 	}
 }
 
@@ -617,5 +705,571 @@ func TestHeatmapCarriesHeatPagesAndSnapsToTheWeek(t *testing.T) {
 	store.quota.HeatPages = nil
 	if rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200", nil); strings.Contains(rr.Body.String(), "heatPages") {
 		t.Errorf("an unlimited plan's read = %s, want no heatPages", rr.Body.String())
+	}
+}
+
+// f is the path the tab came from: stored as `from` when it is a path, and
+// dropped without a word when it is not.
+func TestCollectViewFrom(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct{ f, want string }{
+		{"/pricing", "/pricing"},
+		{"pricing", ""},
+		{"/" + strings.Repeat("a", maxWebPath), ""},
+	} {
+		store := &fakeWebStore{}
+		body := fmt.Sprintf(`{"v":2,"t":"view","p":"/signup","w":1200,"f":%q}`, tc.f)
+		if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, origin); rr.Code != http.StatusNoContent || len(store.pageviews) != 1 {
+			t.Fatalf("f %q: %d, %d page views; want 204 and the view stored", tc.f, rr.Code, len(store.pageviews))
+		}
+		got, ok := store.pageviews[0].labels["from"]
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("f %q: from = %q (%v), want %q", tc.f, got, ok, tc.want)
+		}
+	}
+}
+
+// h counts a view once per element it clicked: a selector repeated in one
+// beacon is still one hit. d is dead clicks, clamped like clicks.
+func TestCollectHitsAndDeadClicks(t *testing.T) {
+	store := &fakeWebStore{}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	rr := postBeacon(t, d, `{"v":2,"t":"heat","p":"/","w":1200,
+		"h":["a","a","b","",7],
+		"d":[["x",99,-5,5000],["x",99,-5,1],["skipped",1],["",1,1,1]]}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	hits := heatCellsOf(t, store, "hit")
+	if len(hits) != 2 {
+		t.Fatalf("hits = %+v, want a and b once each", hits)
+	}
+	for _, h := range hits {
+		if h.N != 1 || h.FX != 0 || h.FY != 0 {
+			t.Errorf("hit %+v, want n 1 at 0,0", h)
+		}
+	}
+	dead := heatCellsOf(t, store, "dead")
+	if len(dead) != 1 || dead[0].FX != 63 || dead[0].FY != 0 || dead[0].N != 1001 {
+		t.Errorf("dead = %+v, want one cell at 63,0 of the clamped 1000 plus 1", dead)
+	}
+}
+
+// e and a reach AddEngage in the beacon's hour: e clamped to 30 minutes, a
+// deduped and kept to 0..3, a wrong-typed one ignored rather than refused.
+func TestCollectEngage(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct {
+		name, extra string
+		want        pgstore.EngageAdd
+	}{
+		{"clamped e and deduped a", `"e":9999999,"a":[0,0,3,4,-1,"x"]`, pgstore.EngageAdd{MS: 1_800_000, R10: 1, R300: 1}},
+		{"a wrong-typed e", `"e":"lots","a":[1]`, pgstore.EngageAdd{R30: 1}},
+		{"a wrong-typed a", `"e":1500,"a":"all"`, pgstore.EngageAdd{MS: 1500}},
+	} {
+		store := &fakeWebStore{}
+		body := `{"v":2,"t":"heat","p":"/docs","w":390,` + tc.extra + `}`
+		if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, origin); rr.Code != http.StatusNoContent {
+			t.Fatalf("%s: status %d: %s", tc.name, rr.Code, rr.Body.String())
+		}
+		if len(store.engageCalls) != 1 {
+			t.Fatalf("%s: %d AddEngage calls, want 1", tc.name, len(store.engageCalls))
+		}
+		c := store.engageCalls[0]
+		if c.add != tc.want || c.path != "/docs" || c.device != "mobile" || !c.hour.Equal(time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)) {
+			t.Errorf("%s: AddEngage(%v, %q, %q, %+v), want the hour, /docs, mobile, %+v", tc.name, c.hour, c.path, c.device, c.add, tc.want)
+		}
+		// Nothing but engaged time is no heat at all.
+		if len(store.heatCalls) != 0 {
+			t.Errorf("%s: %d AddHeat calls for a beacon with no cells", tc.name, len(store.heatCalls))
+		}
+	}
+	// A heat beacon with nothing engaged writes no engage row.
+	store := &fakeWebStore{}
+	postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/","w":1200,"e":0,"s":0.5}`, origin)
+	if len(store.engageCalls) != 0 || len(store.heatCalls) != 1 {
+		t.Errorf("%d AddEngage, %d AddHeat calls; want none and the scroll", len(store.engageCalls), len(store.heatCalls))
+	}
+}
+
+func TestValidSegment(t *testing.T) {
+	for s, want := range map[string]bool{
+		"member": true, "trial_2": true, "a-b": true, "abc123": true, strings.Repeat("a", 24): true,
+		"": false, strings.Repeat("a", 25): false, "Member": false, "a b": false, "pro.": false,
+		"u1234": false, "2026": false, "x123y456": true,
+	} {
+		if got := validSegment(s); got != want {
+			t.Errorf("validSegment(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// g and o ride a view's labels and every heat and engage write; an invalid
+// one, or a name the project never declared, is stored as none, never a 400.
+func TestCollectSegmentAndSource(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	for _, tc := range []struct {
+		name, g, o           string
+		declared             []string
+		wantSegment, wantSrc string
+	}{
+		{"declared", "member", "search", []string{"member"}, "member", "search"},
+		{"undeclared", "member", "search", nil, "", "search"},
+		{"invalid g and o", "user_12345", "google", []string{"member"}, "", ""},
+		{"not among the four", "fifth", "direct", []string{"a", "b", "c", "d"}, "", "direct"},
+		{"one of the four", "c", "", []string{"a", "b", "c", "d"}, "c", ""},
+	} {
+		store := &fakeWebStore{declared: tc.declared}
+		d := newTestDoor(publicWebTenant(), store, nil)
+		view := fmt.Sprintf(`{"v":2,"t":"view","p":"/","w":1200,"g":%q,"o":%q}`, tc.g, tc.o)
+		heat := fmt.Sprintf(`{"v":2,"t":"heat","p":"/","w":1200,"g":%q,"o":%q,"s":0.5,"e":1000}`, tc.g, tc.o)
+		for _, body := range []string{view, heat} {
+			if rr := postBeacon(t, d, body, origin); rr.Code != http.StatusNoContent {
+				t.Fatalf("%s: status %d: %s", tc.name, rr.Code, rr.Body.String())
+			}
+		}
+		labels := store.pageviews[0].labels
+		if got, ok := labels["segment"]; got != tc.wantSegment || ok != (tc.wantSegment != "") {
+			t.Errorf("%s: labels segment = %q (%v), want %q", tc.name, got, ok, tc.wantSegment)
+		}
+		if got, ok := labels["source"]; got != tc.wantSrc || ok != (tc.wantSrc != "") {
+			t.Errorf("%s: labels source = %q (%v), want %q", tc.name, got, ok, tc.wantSrc)
+		}
+		h, e := store.heatCalls[0], store.engageCalls[0]
+		if h.segment != tc.wantSegment || h.source != tc.wantSrc || e.segment != tc.wantSegment || e.source != tc.wantSrc {
+			t.Errorf("%s: heat (%q, %q), engage (%q, %q), want (%q, %q)", tc.name, h.segment, h.source, e.segment, e.source, tc.wantSegment, tc.wantSrc)
+		}
+		if slices.Contains(store.declared, "fifth") {
+			t.Errorf("%s: a beacon declared a segment", tc.name)
+		}
+	}
+}
+
+// A site marking every beacon reads the project's names once per ten
+// minutes, whatever it marks, refusals included; a PUT drops the project's
+// entry, so a new name lands on the next beacon.
+func TestCollectCachesSegments(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	store := &fakeWebStore{declared: []string{"a", "b", "c", "d"}}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	clock := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	for range 5 {
+		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
+		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"fifth"}`, origin)
+	}
+	if store.segmentReads != 1 {
+		t.Fatalf("%d segment reads for 10 beacons of two names, want 1", store.segmentReads)
+	}
+	clock = clock.Add(segmentTTL + time.Second)
+	postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
+	if store.segmentReads != 2 {
+		t.Fatalf("%d segment reads past the TTL, want the names read again", store.segmentReads)
+	}
+	store.declared = []string{"fifth"}
+	d.segments.forget(9)
+	postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"fifth"}`, origin)
+	if got := store.pageviews[len(store.pageviews)-1].labels["segment"]; got != "fifth" || store.segmentReads != 3 {
+		t.Errorf("after forget: segment %q, %d reads; want fifth, read again", got, store.segmentReads)
+	}
+}
+
+// A heat beacon with no stored view behind it adds no engaged time: the store
+// updates no row, and the browser still gets its 204.
+func TestCollectEngageWithoutAViewStoresNothing(t *testing.T) {
+	store := &fakeWebStore{noView: true}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/","w":1200,"e":5000,"a":[0]}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || len(store.engageCalls) != 0 {
+		t.Errorf("%d, %d engage rows; want 204 and none", rr.Code, len(store.engageCalls))
+	}
+}
+
+// An event from a visitor with no page view today is not stored, and the
+// browser still gets its 204.
+func TestCollectEventWithoutAViewStoresNothing(t *testing.T) {
+	store := &fakeWebStore{noView: true}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"event","p":"/","w":1200,"n":"signup"}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || len(store.events) != 0 {
+		t.Errorf("%d, %d events; want 204 and none", rr.Code, len(store.events))
+	}
+}
+
+// The read narrows by segment and source, lists the project's segments, and
+// refuses a filter it could never match.
+func TestHeatmapSegmentAndSource(t *testing.T) {
+	store := fakeReadStore()
+	store.declared = []string{"member", "anon"}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+	rr := getHeatmap(t, d, base+"&segment=member&source=social", nil)
+	var out heatOut
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &out) != nil {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if store.readFilter != [2]string{"member", "social"} {
+		t.Errorf("reads narrowed to %v, want member, social", store.readFilter)
+	}
+	if !slices.Equal(out.Segments, []string{"member", "anon"}) {
+		t.Errorf("segments = %v, want the project's two, oldest first", out.Segments)
+	}
+	store.declared = nil
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"segments":[]`) || store.readFilter != [2]string{} {
+		t.Errorf("no filter: %s, reads narrowed to %v; want segments [] and no filter", rr.Body.String(), store.readFilter)
+	}
+	for _, bad := range []string{"&segment=Member", "&segment=u12345", "&source=google"} {
+		if rr := getHeatmap(t, d, base+bad, nil); rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "bad_request") {
+			t.Errorf("%s: %d %s, want 400 bad_request", bad, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// An event beacon is an events row under the same visitor as the request's
+// page view: its name lowercased, its string fields filtered, capped and
+// scrubbed, and the server's own labels winning over a field of that name.
+func TestCollectEvent(t *testing.T) {
+	headers := map[string]string{"Origin": "https://example.com", "User-Agent": "Mozilla/5.0"}
+	store := &fakeWebStore{declared: []string{"member"}}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	if rr := postBeacon(t, d, `{"v":2,"t":"view","p":"/pricing","w":1200,"g":"member","o":"search"}`, headers); rr.Code != http.StatusNoContent {
+		t.Fatalf("view: %d %s", rr.Code, rr.Body.String())
+	}
+	fields := map[string]any{
+		"plan": "pro", "email": "anna@example.com", "long": strings.Repeat("a", 150),
+		"n": 3, "obj": map[string]any{"x": 1}, "uc.stat": "x", "": "empty-key",
+		strings.Repeat("k", 61): "long-key", "path": "/forged", "device": "forged", "segment": "forged", "source": "forged",
+	}
+	for i := range 12 {
+		fields[fmt.Sprintf("z%02d", i)] = "v"
+	}
+	l, _ := json.Marshal(fields)
+	body := fmt.Sprintf(`{"v":2,"t":"event","p":"/pricing","w":1200,"g":"member","o":"search","n":"  Signup_Clicked ","l":%s}`, l)
+	if rr := postBeacon(t, d, body, headers); rr.Code != http.StatusNoContent {
+		t.Fatalf("event: %d %s", rr.Code, rr.Body.String())
+	}
+	if len(store.events) != 1 {
+		t.Fatalf("%d events stored, want 1", len(store.events))
+	}
+	ev := store.events[0]
+	if ev.name != "signup_clicked" {
+		t.Errorf("name %q, want trimmed and lowercased", ev.name)
+	}
+	if ev.actor != store.pageviews[0].actor || !webActorHex.MatchString(ev.actor) {
+		t.Errorf("event actor %q, page view actor %q: want the same w: visitor", ev.actor, store.pageviews[0].actor)
+	}
+	// Sorted valid keys: email, long, plan, z00..z06 is ten; z07 on is cut.
+	want := map[string]string{
+		"path": "/pricing", "device": "desktop", "segment": "member", "source": "search",
+		"plan": "pro", "long": strings.Repeat("a", 100),
+	}
+	for k, v := range want {
+		if ev.labels[k] != v {
+			t.Errorf("labels[%q] = %q, want %q", k, ev.labels[k], v)
+		}
+	}
+	if strings.Contains(ev.labels["email"], "anna@example.com") || ev.labels["email"] == "" {
+		t.Errorf("email field %q, want it scrubbed", ev.labels["email"])
+	}
+	for _, k := range []string{"n", "obj", "uc.stat", "", strings.Repeat("k", 61), "z07"} {
+		if _, ok := ev.labels[k]; ok {
+			t.Errorf("labels kept %q", k)
+		}
+	}
+	if len(ev.labels) != 14 {
+		t.Errorf("%d labels, want 10 fields and 4 server labels: %v", len(ev.labels), ev.labels)
+	}
+	if len(store.pageviews) != 1 || len(store.heatCalls) != 0 || len(store.engageCalls) != 0 {
+		t.Error("an event wrote a page view, heat or engaged time")
+	}
+}
+
+// A server label the door does not set is still never the page's: a forged
+// segment on an undeclared beacon does not survive.
+func TestCollectEventDropsForgedServerLabels(t *testing.T) {
+	store := &fakeWebStore{}
+	d := newTestDoor(publicWebTenant(), store, nil)
+	body := `{"v":2,"t":"event","p":"/","w":1200,"n":"x","l":{"segment":"vip","source":"search"}}`
+	if rr := postBeacon(t, d, body, map[string]string{"Origin": "https://example.com"}); rr.Code != http.StatusNoContent {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	if l := store.events[0].labels; l["segment"] != "" || l["source"] != "" {
+		t.Errorf("labels %v carry the page's segment or source", l)
+	}
+}
+
+func TestCollectEventRefusesBadNames(t *testing.T) {
+	for _, n := range []string{`""`, `"   "`, `"uc.pageview"`, `"UC.Custom"`, `"a\u0007b"`, fmt.Sprintf("%q", strings.Repeat("a", 41)), `5`} {
+		store := &fakeWebStore{}
+		body := fmt.Sprintf(`{"v":2,"t":"event","p":"/","w":1200,"n":%s}`, n)
+		rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, map[string]string{"Origin": "https://example.com"})
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "bad_beacon") {
+			t.Errorf("n=%s: %d %s, want 400 bad_beacon", n, rr.Code, rr.Body.String())
+		}
+		if len(store.events) != 0 {
+			t.Errorf("n=%s: stored", n)
+		}
+	}
+	store := &fakeWebStore{}
+	body := fmt.Sprintf(`{"v":2,"t":"event","p":"/","w":1200,"n":%q}`, strings.Repeat("a", 40))
+	if rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), body, map[string]string{"Origin": "https://example.com"}); rr.Code != http.StatusNoContent || len(store.events) != 1 {
+		t.Errorf("a 40-byte name: %d, %d events, want 204 and stored", rr.Code, len(store.events))
+	}
+}
+
+func TestCollectEventOverTheVisitCapStoresNothingQuietly(t *testing.T) {
+	limit := int32(3000)
+	store := &fakeWebStore{quota: pgstore.WebQuota{Visits: 3000, MaxVisits: &limit}}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"event","p":"/","w":1200,"n":"signup"}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 || len(store.events) != 0 {
+		t.Errorf("%d %q, %d events; want a bare 204 storing nothing", rr.Code, rr.Body.String(), len(store.events))
+	}
+}
+
+// fm items land in web_heat under their f-kinds, one per kind and selector a
+// beacon; a malformed item is skipped, and the 101st is never read.
+func TestCollectFormItems(t *testing.T) {
+	origin := map[string]string{"Origin": "https://example.com"}
+	store := &fakeWebStore{}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/signup","w":1200,"fm":[
+		["focus","#email"],["focus","#email"],["fill","#email"],["submit","form#signup"],["left","#name"],
+		["blur","#email"],["focus",""],["focus"],["focus","#a","x"],[1,"#b"],["fill",2]
+	]}`, origin)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	for kind, want := range map[string]string{"ffocus": "#email", "ffill": "#email", "fsubmit": "form#signup", "fleft": "#name"} {
+		cells := heatCellsOf(t, store, kind)
+		if len(cells) != 1 || cells[0].Selector != want || cells[0].N != 1 || cells[0].FX != 0 || cells[0].FY != 0 {
+			t.Errorf("%s = %+v, want %s once at 0,0", kind, cells, want)
+		}
+	}
+	if n := len(store.heatCalls[0].cells); n != 4 {
+		t.Errorf("%d cells, want the 4 valid items: %+v", n, store.heatCalls[0].cells)
+	}
+
+	var b strings.Builder
+	b.WriteString(`{"v":2,"t":"heat","p":"/","w":1200,"fm":[`)
+	for i := range maxFormItems + 1 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `["focus","#f%d"]`, i)
+	}
+	b.WriteString(`]}`)
+	store = &fakeWebStore{}
+	postBeacon(t, newTestDoor(publicWebTenant(), store, nil), b.String(), origin)
+	if got := len(heatCellsOf(t, store, "ffocus")); got != maxFormItems {
+		t.Errorf("%d focus cells, want the %d cap", got, maxFormItems)
+	}
+}
+
+// The read answers the store's form stats under the same filters as the
+// heat, and [] when there are none.
+func TestHeatmapAnswersForms(t *testing.T) {
+	store := fakeReadStore()
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"forms":[]`) {
+		t.Errorf("no forms: %s, want forms as [] on the wire", rr.Body.String())
+	}
+	store.forms = []pgstore.FormStat{{Selector: "#email", Focus: 10, Fill: 8, Left: 2}}
+	rr := getHeatmap(t, d, base+"&segment=member&source=search", nil)
+	if !strings.Contains(rr.Body.String(), `"forms":[{"selector":"#email","focus":10,"fill":8,"submit":0,"left":2}]`) {
+		t.Errorf("body %s, want the store's one form field", rr.Body.String())
+	}
+	if store.readFilter != [2]string{"member", "search"} {
+		t.Errorf("form read narrowed to %v, want member, search", store.readFilter)
+	}
+}
+
+// Every answer carries the project's deploys and releases inside the web
+// depth, worded like the board's marks (a burst folded into one), newest
+// first, at most 10; [] when there are none. The door's clock is Saturday
+// 2026-09-19.
+func TestHeatmapDeploys(t *testing.T) {
+	at := func(h, m int) time.Time { return time.Date(2026, 9, 10, h, m, 0, 0, time.UTC) }
+	store := fakeReadStore()
+	d := newTestDoor(publicWebTenant(), store, nil)
+	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
+
+	rr := getHeatmap(t, d, base, nil)
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, `"deploys":[]`) {
+		t.Fatalf("no deploys: %d %s, want deploys as []", rr.Code, body)
+	}
+	if strings.Contains(body, `"from"`) || strings.Contains(body, `"before"`) || strings.Contains(body, `"to"`) {
+		t.Errorf("no split: %s, want no from, to or before", body)
+	}
+	want := [2]time.Time{time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)}
+	if store.deployWindow != want {
+		t.Errorf("deploys read over %v, want the 31-day web depth to the end of today", store.deployWindow)
+	}
+
+	// Oldest first, as the store reads them: 12 hourly deploys, the last one
+	// followed 5 minutes later by a sha-less event of the same burst.
+	for i := range 12 {
+		store.deploys = append(store.deploys, pgstore.MarkRow{At: at(i, 0), Name: "deploy", SHA: fmt.Sprintf("%02dabcdef0123", i)})
+	}
+	store.deploys = append(store.deploys, pgstore.MarkRow{At: at(11, 5), Name: "deploy.live"})
+	store.releases = []pgstore.MarkRow{{At: at(5, 30), Name: "v1.2.0"}}
+	rr = getHeatmap(t, d, base, nil)
+	var out heatOut
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Deploys) != 10 {
+		t.Fatalf("%d deploys, want the latest 10: %+v", len(out.Deploys), out.Deploys)
+	}
+	if got := out.Deploys[0]; !got.At.Equal(at(11, 5)) || got.Label != "11abcde" {
+		t.Errorf("newest = %+v, want the burst at its last event, keeping its sha", got)
+	}
+	if got := out.Deploys[6]; !got.At.Equal(at(5, 30)) || got.Label != "v1.2.0" {
+		t.Errorf("deploys[6] = %+v, want the release merged in its place", got)
+	}
+	if got := out.Deploys[9]; !got.At.Equal(at(3, 0)) {
+		t.Errorf("oldest kept = %+v, want 03:00", got)
+	}
+
+	// Only the first look lists them: a read with a range or a split is the
+	// overlay's own, and carries [].
+	for _, q := range []string{"&range=7d", "&split=2026-09-18T00:00:00Z"} {
+		store.deployWindow = [2]time.Time{}
+		if rr := getHeatmap(t, d, base+q, nil); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"deploys":[]`) || !store.deployWindow[0].IsZero() {
+			t.Errorf("%s: %d, read %v; want deploys [] and no deploy read: %s", q, rr.Code, store.deployWindow, rr.Body.String())
+		}
+	}
+
+	// A 7-day plan reads them over its 7 days and offers only those whose
+	// before window it can read: 09-16 (n 4, 7 days back) fits, 09-15 (9) not.
+	store.histDays = 7
+	store.deploys = []pgstore.MarkRow{
+		{At: time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "aaaaaaaaaa"},
+		{At: time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "bbbbbbbbbb"},
+	}
+	store.releases = nil
+	rr = getHeatmap(t, d, base, nil)
+	out = heatOut{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if store.deployWindow[0] != time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC) {
+		t.Errorf("7-day plan: deploys from %v, want 09-12", store.deployWindow[0])
+	}
+	if len(out.Deploys) != 1 || out.Deploys[0].Label != "bbbbbbb" {
+		t.Errorf("7-day plan offers %+v, want the 09-16 deploy alone", out.Deploys)
+	}
+	// Past 15 days the before window outruns the 31 days ever kept.
+	store.histDays = 0
+	store.deploys = []pgstore.MarkRow{{At: time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "cccccccccc"}}
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"deploys":[]`) {
+		t.Errorf("a 16-day-old deploy: %s, want deploys []", rr.Body.String())
+	}
+}
+
+// With split the main numbers read from the split's UTC day to today, n days,
+// and before the n days before it, with the same filters. Past a week each
+// heat bound snaps back to its Monday, so a weekly row lands on one side only;
+// page views stay day-exact.
+func TestHeatmapSplitWindows(t *testing.T) {
+	date := func(m, d int) time.Time { return time.Date(2026, time.Month(m), d, 0, 0, 0, 0, time.UTC) }
+	var zero time.Time
+	for _, tc := range []struct {
+		name, split                    string
+		from, heatFrom                 time.Time // the after window's; it runs to now
+		bFrom, bTo, bHeatFrom, bHeatTo time.Time
+	}{
+		{"2 days old", "2026-09-17T15:00:00Z", date(9, 17), date(9, 17), date(9, 14), date(9, 17), date(9, 14), date(9, 17)},
+		{"today, in another zone", "2026-09-18T22:00:00-05:00", date(9, 19), date(9, 19), date(9, 18), date(9, 19), date(9, 18), date(9, 19)},
+		// Wednesday 09-09: n = 11, before from Saturday 08-29.
+		{"10 days old", "2026-09-09T10:00:00Z", date(9, 9), date(9, 7), date(8, 29), date(9, 9), date(8, 24), date(9, 7)},
+	} {
+		store := fakeReadStore()
+		d := newTestDoor(publicWebTenant(), store, nil)
+		rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200&range=7d&segment=member&source=search&split="+tc.split, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", tc.name, rr.Code, rr.Body.String())
+		}
+		for _, r := range store.reads {
+			if r.segment != "member" || r.source != "search" {
+				t.Errorf("%s: %s read narrowed to %q %q, want member, search", tc.name, r.what, r.segment, r.source)
+			}
+			after := r.to.IsZero()
+			var from, to time.Time
+			switch {
+			case after && r.what == "views":
+				from, to = tc.from, zero
+			case after:
+				from, to = tc.heatFrom, zero
+			case r.what == "views":
+				from, to = tc.bFrom, tc.bTo
+			default:
+				from, to = tc.bHeatFrom, tc.bHeatTo
+			}
+			if !r.from.Equal(from) || !r.to.Equal(to) {
+				t.Errorf("%s: %s read over [%v, %v), want [%v, %v)", tc.name, r.what, r.from, r.to, from, to)
+			}
+		}
+		if len(store.reads) != 16 {
+			t.Errorf("%s: %d reads, want 8 per window", tc.name, len(store.reads))
+		}
+		var out struct {
+			Range  string `json:"range"`
+			From   string `json:"from"`
+			Views  int64  `json:"views"`
+			Before map[string]json.RawMessage
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Range != "31d" || out.From != tc.from.Format(time.DateOnly) || out.Views != 42 {
+			t.Errorf("%s: range %q from %q views %d, want the deepest range, the split's day, the store's views", tc.name, out.Range, out.From, out.Views)
+		}
+		if string(out.Before["from"]) != `"`+tc.bFrom.Format(time.DateOnly)+`"` || string(out.Before["to"]) != `"`+tc.bTo.Format(time.DateOnly)+`"` {
+			t.Errorf("%s: before from %s to %s", tc.name, out.Before["from"], out.Before["to"])
+		}
+		for _, k := range []string{"views", "clicks", "rage", "dead", "hits", "scroll", "forms"} {
+			if _, ok := out.Before[k]; !ok {
+				t.Errorf("%s: before has no %s", tc.name, k)
+			}
+		}
+		if _, ok := out.Before["moves"]; ok {
+			t.Errorf("%s: before carries moves, which HeatmapWindow has not", tc.name)
+		}
+	}
+}
+
+// A split is refused when it is not a time, lies in a future day, or its
+// before window reaches past what the plan can read: n days from the split
+// through today read 2n - 1 days back, inside the 31 days ever kept and the
+// plan's history. Such a split could not have been offered, so it is a 400,
+// never the 402 a range would be.
+func TestHeatmapSplitRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		split    string
+		histDays int
+		want     int
+	}{
+		{"yesterday", 0, http.StatusBadRequest},
+		{"2026-09-20T00:00:00Z", 0, http.StatusBadRequest},
+		{"2026-09-19T23:00:00Z", 0, http.StatusOK},         // later today: the split's day is today
+		{"2026-09-04T12:00:00Z", 0, http.StatusOK},         // n 16: 31 days back
+		{"2026-09-03T12:00:00Z", 0, http.StatusBadRequest}, // n 17: 33 days, past the 31 kept
+		{"2026-08-19T12:00:00Z", 0, http.StatusBadRequest},
+		{"2026-09-16T12:00:00Z", 7, http.StatusOK},         // before from 09-12: 7 days
+		{"2026-09-15T12:00:00Z", 7, http.StatusBadRequest}, // 9 days
+		{"2026-09-12T12:00:00Z", 7, http.StatusBadRequest},
+		{"2026-09-19T12:00:00Z", 1, http.StatusOK},
+		{"2026-09-18T12:00:00Z", 1, http.StatusBadRequest}, // before from 09-16: 3 days
+	} {
+		store := fakeReadStore()
+		store.histDays = tc.histDays
+		d := newTestDoor(publicWebTenant(), store, nil)
+		rr := getHeatmap(t, d, "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200&split="+tc.split, nil)
+		if rr.Code != tc.want {
+			t.Errorf("split %s on a %d-day plan: %d %s, want %d", tc.split, tc.histDays, rr.Code, rr.Body.String(), tc.want)
+		}
 	}
 }

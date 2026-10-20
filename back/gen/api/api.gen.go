@@ -183,6 +183,21 @@ func (e DashboardMetricRefCount) Valid() bool {
 	}
 }
 
+// Defines values for DashboardMetricRefMeasure.
+const (
+	DashboardMetricRefMeasureAmount DashboardMetricRefMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the DashboardMetricRefMeasure enum.
+func (e DashboardMetricRefMeasure) Valid() bool {
+	switch e {
+	case DashboardMetricRefMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DashboardMetricRefSource.
 const (
 	DashboardMetricRefSourceCheck      DashboardMetricRefSource = "check"
@@ -195,6 +210,7 @@ const (
 	DashboardMetricRefSourcePeople     DashboardMetricRefSource = "people"
 	DashboardMetricRefSourceRetention  DashboardMetricRefSource = "retention"
 	DashboardMetricRefSourceService    DashboardMetricRefSource = "service"
+	DashboardMetricRefSourceWeb        DashboardMetricRefSource = "web"
 )
 
 // Valid indicates whether the value is a known member of the DashboardMetricRefSource enum.
@@ -220,6 +236,8 @@ func (e DashboardMetricRefSource) Valid() bool {
 		return true
 	case DashboardMetricRefSourceService:
 		return true
+	case DashboardMetricRefSourceWeb:
+		return true
 	default:
 		return false
 	}
@@ -241,6 +259,7 @@ const (
 	DashboardWidgetKindRetention  DashboardWidgetKind = "retention"
 	DashboardWidgetKindStat       DashboardWidgetKind = "stat"
 	DashboardWidgetKindStatus     DashboardWidgetKind = "status"
+	DashboardWidgetKindTable      DashboardWidgetKind = "table"
 )
 
 // Valid indicates whether the value is a known member of the DashboardWidgetKind enum.
@@ -273,6 +292,8 @@ func (e DashboardWidgetKind) Valid() bool {
 	case DashboardWidgetKindStat:
 		return true
 	case DashboardWidgetKindStatus:
+		return true
+	case DashboardWidgetKindTable:
 		return true
 	default:
 		return false
@@ -705,6 +726,141 @@ func (e ProbeStageLabel) Valid() bool {
 	}
 }
 
+// Defines values for ProductAlertDirection.
+const (
+	ProductAlertDirectionAny  ProductAlertDirection = "any"
+	ProductAlertDirectionDown ProductAlertDirection = "down"
+	ProductAlertDirectionUp   ProductAlertDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertDirection enum.
+func (e ProductAlertDirection) Valid() bool {
+	switch e {
+	case ProductAlertDirectionAny:
+		return true
+	case ProductAlertDirectionDown:
+		return true
+	case ProductAlertDirectionUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertKind.
+const (
+	ProductAlertKindChange  ProductAlertKind = "change"
+	ProductAlertKindSilence ProductAlertKind = "silence"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertKind enum.
+func (e ProductAlertKind) Valid() bool {
+	switch e {
+	case ProductAlertKindChange:
+		return true
+	case ProductAlertKindSilence:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertMeasure.
+const (
+	ProductAlertMeasureAmount ProductAlertMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertMeasure enum.
+func (e ProductAlertMeasure) Valid() bool {
+	switch e {
+	case ProductAlertMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertState.
+const (
+	ProductAlertStateFiring   ProductAlertState = "firing"
+	ProductAlertStateFrozen   ProductAlertState = "frozen"
+	ProductAlertStateLearning ProductAlertState = "learning"
+	ProductAlertStateOk       ProductAlertState = "ok"
+	ProductAlertStatePaused   ProductAlertState = "paused"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertState enum.
+func (e ProductAlertState) Valid() bool {
+	switch e {
+	case ProductAlertStateFiring:
+		return true
+	case ProductAlertStateFrozen:
+		return true
+	case ProductAlertStateLearning:
+		return true
+	case ProductAlertStateOk:
+		return true
+	case ProductAlertStatePaused:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteDirection.
+const (
+	ProductAlertWriteDirectionAny  ProductAlertWriteDirection = "any"
+	ProductAlertWriteDirectionDown ProductAlertWriteDirection = "down"
+	ProductAlertWriteDirectionUp   ProductAlertWriteDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteDirection enum.
+func (e ProductAlertWriteDirection) Valid() bool {
+	switch e {
+	case ProductAlertWriteDirectionAny:
+		return true
+	case ProductAlertWriteDirectionDown:
+		return true
+	case ProductAlertWriteDirectionUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteKind.
+const (
+	ProductAlertWriteKindChange  ProductAlertWriteKind = "change"
+	ProductAlertWriteKindSilence ProductAlertWriteKind = "silence"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteKind enum.
+func (e ProductAlertWriteKind) Valid() bool {
+	switch e {
+	case ProductAlertWriteKindChange:
+		return true
+	case ProductAlertWriteKindSilence:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProductAlertWriteMeasure.
+const (
+	ProductAlertWriteMeasureAmount ProductAlertWriteMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the ProductAlertWriteMeasure enum.
+func (e ProductAlertWriteMeasure) Valid() bool {
+	switch e {
+	case ProductAlertWriteMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PublicStatusResponseStateKind.
 const (
 	PublicStatusResponseStateKindCouldNotMeasure PublicStatusResponseStateKind = "could_not_measure"
@@ -816,6 +972,21 @@ func (e SeriesQueryCount) Valid() bool {
 	}
 }
 
+// Defines values for SeriesQueryMeasure.
+const (
+	SeriesQueryMeasureAmount SeriesQueryMeasure = "amount"
+)
+
+// Valid indicates whether the value is a known member of the SeriesQueryMeasure enum.
+func (e SeriesQueryMeasure) Valid() bool {
+	switch e {
+	case SeriesQueryMeasureAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SeriesQueryRange.
 const (
 	SeriesQueryRangeN12h  SeriesQueryRange = "12h"
@@ -856,6 +1027,7 @@ const (
 	SeriesQuerySourceLogs   SeriesQuerySource = "logs"
 	SeriesQuerySourceMetric SeriesQuerySource = "metric"
 	SeriesQuerySourcePeople SeriesQuerySource = "people"
+	SeriesQuerySourceWeb    SeriesQuerySource = "web"
 )
 
 // Valid indicates whether the value is a known member of the SeriesQuerySource enum.
@@ -870,6 +1042,8 @@ func (e SeriesQuerySource) Valid() bool {
 	case SeriesQuerySourceMetric:
 		return true
 	case SeriesQuerySourcePeople:
+		return true
+	case SeriesQuerySourceWeb:
 		return true
 	default:
 		return false
@@ -942,18 +1116,48 @@ func (e WatchStatus) Valid() bool {
 	}
 }
 
+// Defines values for WebBeaconO.
+const (
+	WebBeaconOCampaign WebBeaconO = "campaign"
+	WebBeaconODirect   WebBeaconO = "direct"
+	WebBeaconOReferral WebBeaconO = "referral"
+	WebBeaconOSearch   WebBeaconO = "search"
+	WebBeaconOSocial   WebBeaconO = "social"
+)
+
+// Valid indicates whether the value is a known member of the WebBeaconO enum.
+func (e WebBeaconO) Valid() bool {
+	switch e {
+	case WebBeaconOCampaign:
+		return true
+	case WebBeaconODirect:
+		return true
+	case WebBeaconOReferral:
+		return true
+	case WebBeaconOSearch:
+		return true
+	case WebBeaconOSocial:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for WebBeaconT.
 const (
-	Heat WebBeaconT = "heat"
-	View WebBeaconT = "view"
+	WebBeaconTEvent WebBeaconT = "event"
+	WebBeaconTHeat  WebBeaconT = "heat"
+	WebBeaconTView  WebBeaconT = "view"
 )
 
 // Valid indicates whether the value is a known member of the WebBeaconT enum.
 func (e WebBeaconT) Valid() bool {
 	switch e {
-	case Heat:
+	case WebBeaconTEvent:
 		return true
-	case View:
+	case WebBeaconTHeat:
+		return true
+	case WebBeaconTView:
 		return true
 	default:
 		return false
@@ -1083,6 +1287,36 @@ func (e GetWHeatmapParamsRange) Valid() bool {
 	}
 }
 
+// Defines values for GetWHeatmapParamsSource.
+const (
+	GetWHeatmapParamsSourceCampaign GetWHeatmapParamsSource = "campaign"
+	GetWHeatmapParamsSourceDirect   GetWHeatmapParamsSource = "direct"
+	GetWHeatmapParamsSourceEmpty    GetWHeatmapParamsSource = ""
+	GetWHeatmapParamsSourceReferral GetWHeatmapParamsSource = "referral"
+	GetWHeatmapParamsSourceSearch   GetWHeatmapParamsSource = "search"
+	GetWHeatmapParamsSourceSocial   GetWHeatmapParamsSource = "social"
+)
+
+// Valid indicates whether the value is a known member of the GetWHeatmapParamsSource enum.
+func (e GetWHeatmapParamsSource) Valid() bool {
+	switch e {
+	case GetWHeatmapParamsSourceCampaign:
+		return true
+	case GetWHeatmapParamsSourceDirect:
+		return true
+	case GetWHeatmapParamsSourceEmpty:
+		return true
+	case GetWHeatmapParamsSourceReferral:
+		return true
+	case GetWHeatmapParamsSourceSearch:
+		return true
+	case GetWHeatmapParamsSourceSocial:
+		return true
+	default:
+		return false
+	}
+}
+
 // Account defines model for Account.
 type Account struct {
 	Email openapi_types.Email `json:"email"`
@@ -1183,6 +1417,9 @@ type CatalogCheck struct {
 
 // CatalogEvent One event name the project sent, and the field keys its recent rows carried. The fields are what a breakdown folds by: an event is picked, then one of its own fields, so nobody has to remember what they named it. Reserved `uc.`-prefixed keys are left out — they are the wire's, not a dimension.
 type CatalogEvent struct {
+	// Currencies The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money.
+	Currencies *[]string `json:"currencies,omitempty"`
+
 	// Fields Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth.
 	Fields []string  `json:"fields"`
 	LastTs time.Time `json:"lastTs"`
@@ -1387,11 +1624,20 @@ type DashboardMetricRef struct {
 	// Count `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
 	Count *DashboardMetricRefCount `json:"count,omitempty"`
 
+	// Currency ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together.
+	Currency *string `json:"currency,omitempty"`
+
 	// Field `people` only: the event field a breakdown ranks the values of.
-	Field  *string                  `json:"field,omitempty"`
-	Label  *string                  `json:"label,omitempty"`
-	Name   *string                  `json:"name,omitempty"`
-	Source DashboardMetricRefSource `json:"source"`
+	Field *string `json:"field,omitempty"`
+	Label *string `json:"label,omitempty"`
+
+	// Measure `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+	Measure *DashboardMetricRefMeasure `json:"measure,omitempty"`
+	Name    *string                    `json:"name,omitempty"`
+	Source  DashboardMetricRefSource   `json:"source"`
+
+	// StepWhere `people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{"path": "/pricing"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`.
+	StepWhere *[]map[string]string `json:"stepWhere,omitempty"`
 
 	// Steps `people` only: a funnel's step event names, in journey order. The card is the journey's one definition.
 	Steps *[]string          `json:"steps,omitempty"`
@@ -1400,6 +1646,9 @@ type DashboardMetricRef struct {
 
 // DashboardMetricRefCount `people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning.
 type DashboardMetricRefCount string
+
+// DashboardMetricRefMeasure `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+type DashboardMetricRefMeasure string
 
 // DashboardMetricRefSource defines model for DashboardMetricRef.Source.
 type DashboardMetricRefSource string
@@ -1491,6 +1740,19 @@ type Error struct {
 	} `json:"error"`
 }
 
+// FormField defines model for FormField.
+type FormField struct {
+	Fill  int `json:"fill"`
+	Focus int `json:"focus"`
+
+	// Left The views whose last focused field in an unsubmitted form was this one.
+	Left     int    `json:"left"`
+	Selector string `json:"selector"`
+
+	// Submit Non-zero on a form element: the views that submitted it.
+	Submit int `json:"submit"`
+}
+
 // HealthLine defines model for HealthLine.
 type HealthLine struct {
 	Segments    []HealthStatus `json:"segments"`
@@ -1514,18 +1776,39 @@ type HeatCell struct {
 
 // Heatmap defines model for Heatmap.
 type Heatmap struct {
-	Clicks []HeatCell    `json:"clicks"`
+	// Before The window before a `split`, read exactly like the main numbers.
+	Before *HeatmapWindow `json:"before,omitempty"`
+	Clicks []HeatCell     `json:"clicks"`
+	Dead   []HeatCell     `json:"dead"`
+
+	// Deploys The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read.
+	Deploys []struct {
+		At    time.Time `json:"at"`
+		Label string    `json:"label"`
+	} `json:"deploys"`
 	Device HeatmapDevice `json:"device"`
 
+	// Forms Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`.
+	Forms []FormField `json:"forms"`
+
+	// From With `split`: the first UTC day the main numbers read.
+	From *openapi_types.Date `json:"from,omitempty"`
+
 	// HeatPages How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them.
-	HeatPages *int         `json:"heatPages,omitempty"`
-	Moves     []HeatCell   `json:"moves"`
-	Path      string       `json:"path"`
-	Rage      []HeatCell   `json:"rage"`
-	Range     HeatmapRange `json:"range"`
+	HeatPages *int `json:"heatPages,omitempty"`
+
+	// Hits One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through.
+	Hits  []HeatCell   `json:"hits"`
+	Moves []HeatCell   `json:"moves"`
+	Path  string       `json:"path"`
+	Rage  []HeatCell   `json:"rage"`
+	Range HeatmapRange `json:"range"`
 
 	// Scroll 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %.
 	Scroll []int `json:"scroll"`
+
+	// Segments The segments this project declared, at most 4, oldest first: what the overlay offers to filter by.
+	Segments []string `json:"segments"`
 
 	// Views Page views of this path on this device in the range: what every other number is read against.
 	Views int `json:"views"`
@@ -1549,6 +1832,21 @@ type HeatmapLink struct {
 type HeatmapLinkRequest struct {
 	// Path Starts with /, at most 256 bytes.
 	Path string `json:"path"`
+}
+
+// HeatmapWindow The window before a `split`, read exactly like the main numbers.
+type HeatmapWindow struct {
+	Clicks []HeatCell         `json:"clicks"`
+	Dead   []HeatCell         `json:"dead"`
+	Forms  []FormField        `json:"forms"`
+	From   openapi_types.Date `json:"from"`
+	Hits   []HeatCell         `json:"hits"`
+	Rage   []HeatCell         `json:"rage"`
+	Scroll []int              `json:"scroll"`
+
+	// To Exclusive: the split's day.
+	To    openapi_types.Date `json:"to"`
+	Views int                `json:"views"`
 }
 
 // Incident defines model for Incident.
@@ -1922,6 +2220,9 @@ type PlanResponse struct {
 	Owned *bool `json:"owned,omitempty"`
 	Plan  Plan  `json:"plan"`
 
+	// ProductAlerts Product alert rules across the workspace (plan_entitlement.product_alerts): `used` counts every rule, `max` is the plan's. Absent when the plan is unlimited (every paid plan and Self-hosted). Rules past `max` after a downgrade are kept and frozen, newest first, never deleted.
+	ProductAlerts *UsedMax `json:"productAlerts,omitempty"`
+
 	// Projects Absent when the plan is unlimited (Self-hosted): a usage bar needs a remainder, and an unlimited axis has none to draw. `used` counts LIVE projects only, because live projects are what a plan buys.
 	Projects *struct {
 		// Frozen The workspace's frozen projects: snapshots past the plan's projects limit, kept whole and thawed by a plan that carries them. Absent when zero.
@@ -1957,6 +2258,82 @@ type ProbeStage struct {
 
 // ProbeStageLabel `wait` is the server thinking once the connection exists, NOT time-to-first-byte: TTFB is measured from the start of the request and already contains dns+tcp+tls, so emitting it here would make the bars sum past the total. Derived as ttfb-(dns+tcp+tls); `html` is the tail after the first byte. The stages sum to probe.total_ms.
 type ProbeStageLabel string
+
+// ProductAlert A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window.
+type ProductAlert struct {
+	CreatedAt time.Time `json:"createdAt"`
+	Currency  *string   `json:"currency,omitempty"`
+
+	// Direction `change` only.
+	Direction *ProductAlertDirection `json:"direction,omitempty"`
+
+	// Event The event name the rule counts.
+	Event string           `json:"event"`
+	Id    string           `json:"id"`
+	Kind  ProductAlertKind `json:"kind"`
+
+	// Labels Count only the rows whose labels hold every pair, under the series `labels` rules.
+	Labels        *map[string]string `json:"labels,omitempty"`
+	LastCheckedAt *time.Time         `json:"lastCheckedAt,omitempty"`
+	LastFiredAt   *time.Time         `json:"lastFiredAt,omitempty"`
+
+	// Measure Sum the money in `currency` instead of counting.
+	Measure *ProductAlertMeasure `json:"measure,omitempty"`
+
+	// Name What the messages call it; the event name when empty.
+	Name   *string `json:"name,omitempty"`
+	Paused *bool   `json:"paused,omitempty"`
+
+	// Percent `change` only: how far from the same hours a week ago, in percent.
+	Percent *int `json:"percent,omitempty"`
+
+	// State `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+	State ProductAlertState `json:"state"`
+
+	// WidgetId The board card it was made from, so the card can show it. Optional.
+	WidgetId *string `json:"widgetId,omitempty"`
+
+	// WindowHours One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago.
+	WindowHours int `json:"windowHours"`
+}
+
+// ProductAlertDirection `change` only.
+type ProductAlertDirection string
+
+// ProductAlertKind defines model for ProductAlert.Kind.
+type ProductAlertKind string
+
+// ProductAlertMeasure Sum the money in `currency` instead of counting.
+type ProductAlertMeasure string
+
+// ProductAlertState `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+type ProductAlertState string
+
+// ProductAlertWrite Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset.
+type ProductAlertWrite struct {
+	Currency  *string                     `json:"currency,omitempty"`
+	Direction *ProductAlertWriteDirection `json:"direction,omitempty"`
+	Event     *string                     `json:"event,omitempty"`
+	Kind      *ProductAlertWriteKind      `json:"kind,omitempty"`
+	Labels    *map[string]string          `json:"labels,omitempty"`
+	Measure   *ProductAlertWriteMeasure   `json:"measure,omitempty"`
+	Name      *string                     `json:"name,omitempty"`
+	Paused    *bool                       `json:"paused,omitempty"`
+	Percent   *int                        `json:"percent,omitempty"`
+	WidgetId  *string                     `json:"widgetId,omitempty"`
+
+	// WindowHours One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago.
+	WindowHours *int `json:"windowHours,omitempty"`
+}
+
+// ProductAlertWriteDirection defines model for ProductAlertWrite.Direction.
+type ProductAlertWriteDirection string
+
+// ProductAlertWriteKind defines model for ProductAlertWrite.Kind.
+type ProductAlertWriteKind string
+
+// ProductAlertWriteMeasure defines model for ProductAlertWrite.Measure.
+type ProductAlertWriteMeasure string
 
 // Project defines model for Project.
 type Project struct {
@@ -2152,21 +2529,30 @@ type SeriesQuery struct {
 	// Count What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ''`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
 	Count *SeriesQueryCount `json:"count,omitempty"`
 
+	// Currency Required with `measure`, refused without it.
+	Currency *string `json:"currency,omitempty"`
+
 	// Group Label keys to fold by, and the answer's rows are labelled by exactly these keys. For `metric` it folds a counter's labels. For `people` `name` is the event name in both shapes: one key is the field a breakdown ranks the values of, two are an A/B test's arm and stat labels — `uc.variant` and `uc.stat` as the wire writes them (`npx upcontrol skills wire`). With `group` the answer carries `rows` instead of a time series. One read per card, whatever the label set turns out to hold.
 	Group *[]string `json:"group,omitempty"`
 
 	// Id Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it.
 	Id string `json:"id"`
 
-	// Labels Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
+	// Labels Event reads, bare-name people reads and one-key people folds (a breakdown) only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). On a breakdown of `uc.pageview` by `from` with `{"path": "/pricing"}` it answers where the views of /pricing came from; by `path` with `{"from": "/pricing"}`, where they went next. A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption.
 	Labels *map[string]string `json:"labels,omitempty"`
 
-	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads.
+	// Measure `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+	Measure *SeriesQueryMeasure `json:"measure,omitempty"`
+
+	// Name check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null.
 	Name  *string          `json:"name,omitempty"`
 	Range SeriesQueryRange `json:"range"`
 
-	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+	// Source `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`.
 	Source SeriesQuerySource `json:"source"`
+
+	// StepLabels `people` funnels only, at most as many entries as `steps`: entry i narrows step i to the rows whose labels hold every pair, under the `labels` rules (at most 3 pairs). An empty object is no filter. Two steps may then share a name, and each is counted on its own.
+	StepLabels *[]map[string]string `json:"stepLabels,omitempty"`
 
 	// Steps `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order.
 	Steps *[]string          `json:"steps,omitempty"`
@@ -2182,10 +2568,13 @@ type SeriesQueryCohort string
 // SeriesQueryCount What a one-key `people` fold counts, `people` by default. `events` counts rows instead of distinct actors, and is the honest reading of a dimension nobody is behind: a delivery outcome, an HTTP status, a queue name. Without it such a card reads 0 and says nothing about why, because every people read filters `actor <> ”`. It is refused on a funnel, a retention grid and an A/B test: those ARE people by definition, and a conversion rate over rows is not a rate.
 type SeriesQueryCount string
 
+// SeriesQueryMeasure `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+type SeriesQueryMeasure string
+
 // SeriesQueryRange defines model for SeriesQuery.Range.
 type SeriesQueryRange string
 
-// SeriesQuerySource `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+// SeriesQuerySource `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`.
 type SeriesQuerySource string
 
 // SeriesRequest Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer.
@@ -2462,14 +2851,48 @@ type WatchStatus string
 // WebBeacon One request from `uc.js`. `t: view` is a page view, sent on load and on
 // every path change. `t: heat` is everything one page view did,
 // aggregated in the page and sent once, when the tab hides or the path
-// changes. Selectors are CSS paths the script builds from ids and
-// `:nth-of-type`, never from class names, which a build re-hashes.
+// changes. `t: event` is a named event the page sent (`upcontrol('track',
+// name, fields)`, or a click on an element carrying `data-uc-event`),
+// stored as an events row with the same visitor as the page views, so a
+// funnel can run from a page view to a click within a day. Selectors are
+// CSS paths the script builds from ids and `:nth-of-type`, never from
+// class names, which a build re-hashes.
 type WebBeacon struct {
+	// A heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view.
+	A *[]int `json:"a,omitempty"`
+
 	// C heat: at most 300 clicks as [selector, fx, fy, clicks, rage clicks]; fx and fy are the position inside the element in 64ths.
 	C *[][]interface{} `json:"c,omitempty"`
 
+	// D heat: at most 300 dead clicks as [selector, fx, fy, clicks]: a click on no interactive element after which nothing on the page changed for 600 ms.
+	D *[][]interface{} `json:"d,omitempty"`
+
+	// E heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes.
+	E *int `json:"e,omitempty"`
+
+	// F view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label.
+	F *string `json:"f,omitempty"`
+
+	// Fm heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent.
+	Fm *[][]string `json:"fm,omitempty"`
+
+	// G view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view.
+	G *string `json:"g,omitempty"`
+
+	// H heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element.
+	H *[]string `json:"h,omitempty"`
+
+	// L event: the event's fields, at most 10, keys 1-60 bytes not starting `uc.`, values at most 100 bytes. The page's `path`, `device`, `segment` and `source` are added by the server and win over a field of the same name.
+	L *map[string]string `json:"l,omitempty"`
+
 	// M heat: at most 600 mouse cells as [selector, fx, fy, samples], sampled every 100 ms on a fine pointer that can hover.
 	M *[][]interface{} `json:"m,omitempty"`
+
+	// N event: the event name, 1-40 bytes, lowercased by the server; a name starting `uc.` is refused (the server's own).
+	N *string `json:"n,omitempty"`
+
+	// O view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+	O *WebBeaconO `json:"o,omitempty"`
 
 	// P location.pathname, at most 256 bytes.
 	P string `json:"p"`
@@ -2491,8 +2914,16 @@ type WebBeacon struct {
 	W int `json:"w"`
 }
 
+// WebBeaconO view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+type WebBeaconO string
+
 // WebBeaconT defines model for WebBeacon.T.
 type WebBeaconT string
+
+// WebSegments defines model for WebSegments.
+type WebSegments struct {
+	Names []string `json:"names"`
+}
 
 // BadRequest defines model for BadRequest.
 type BadRequest = Error
@@ -2738,10 +3169,22 @@ type GetWHeatmapParams struct {
 
 	// Range Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used.
 	Range *GetWHeatmapParamsRange `form:"range,omitempty" json:"range,omitempty"`
+
+	// Split A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present.
+	Split *time.Time `form:"split,omitempty" json:"split,omitempty"`
+
+	// Segment Only the views the site marked with this segment. Absent or empty: every view, marked or not.
+	Segment *string `form:"segment,omitempty" json:"segment,omitempty"`
+
+	// Source Only the views whose page load came from this kind of source. Absent or empty: every view.
+	Source *GetWHeatmapParamsSource `form:"source,omitempty" json:"source,omitempty"`
 }
 
 // GetWHeatmapParamsRange defines parameters for GetWHeatmap.
 type GetWHeatmapParamsRange string
+
+// GetWHeatmapParamsSource defines parameters for GetWHeatmap.
+type GetWHeatmapParamsSource string
 
 // PostHooksProviderJSONRequestBody defines body for PostHooksProvider for application/json ContentType.
 type PostHooksProviderJSONRequestBody PostHooksProviderJSONBody
@@ -2827,6 +3270,12 @@ type PostV1MonitorsJSONRequestBody = MonitorCreate
 // PatchV1MonitorsIdJSONRequestBody defines body for PatchV1MonitorsId for application/json ContentType.
 type PatchV1MonitorsIdJSONRequestBody = MonitorPatch
 
+// PostV1ProductAlertsJSONRequestBody defines body for PostV1ProductAlerts for application/json ContentType.
+type PostV1ProductAlertsJSONRequestBody = ProductAlertWrite
+
+// PatchV1ProductAlertsIdJSONRequestBody defines body for PatchV1ProductAlertsId for application/json ContentType.
+type PatchV1ProductAlertsIdJSONRequestBody = ProductAlertWrite
+
 // PostV1ProjectSwitchJSONRequestBody defines body for PostV1ProjectSwitch for application/json ContentType.
 type PostV1ProjectSwitchJSONRequestBody PostV1ProjectSwitchJSONBody
 
@@ -2856,6 +3305,9 @@ type PutV1StatusPageJSONRequestBody = StatusPageUpdate
 
 // PostV1TelegramInvitesJSONRequestBody defines body for PostV1TelegramInvites for application/json ContentType.
 type PostV1TelegramInvitesJSONRequestBody PostV1TelegramInvitesJSONBody
+
+// PutV1WebSegmentsJSONRequestBody defines body for PutV1WebSegments for application/json ContentType.
+type PutV1WebSegmentsJSONRequestBody = WebSegments
 
 // PostWTextRequestBody defines body for PostW for text/plain ContentType.
 type PostWTextRequestBody = WebBeacon

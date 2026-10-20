@@ -3621,6 +3621,213 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/product-alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The current project's product alert rules, oldest first, each with its state. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"][];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        /**
+         * Add a rule to the current project. Any member who can sign in may. The
+         *     workspace's rule count is a plan axis (Free 2, paid unlimited): past it
+         *     the answer is a 402 naming the plan that lifts it.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProductAlertWrite"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                402: components["responses"]["PaymentRequired"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/product-alerts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a rule of the current project. */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Change a rule of the current project; a change resets its episode. */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProductAlertWrite"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProductAlert"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
+    "/v1/web/segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The segment names the current project accepts from its site tag, oldest first. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WebSegments"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Replace the names the current project accepts as segments, at most 4,
+         *     each 1-24 of a-z, 0-9, _ and -, never four digits in a row. A signed-in
+         *     member who can manage the project, or the project's SECRET key (the
+         *     CLI's `npx upcontrol web --segments`); a public key is refused, because
+         *     a page holding it could otherwise declare its own. Names dropped from
+         *     the list stop being recorded; what they recorded is kept.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["WebSegments"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WebSegments"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/heatmap/link": {
         parameters: {
             query?: never;
@@ -4124,6 +4331,12 @@ export interface paths {
                     w: number;
                     /** @description Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used. */
                     range?: "24h" | "7d" | "31d";
+                    /** @description A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present. */
+                    split?: string;
+                    /** @description Only the views the site marked with this segment. Absent or empty: every view, marked or not. */
+                    segment?: string;
+                    /** @description Only the views whose page load came from this kind of source. Absent or empty: every view. */
+                    source?: "" | "search" | "social" | "campaign" | "referral" | "direct";
                 };
                 header?: never;
                 path?: never;
@@ -4647,13 +4860,17 @@ export interface components {
         /** @description What a widget draws: a source and the filter that narrows it. The front interprets it; the server keeps it. This schema is what a board is STORED as, so every field a card can carry has to be listed here — the write decodes strictly, and a field missing from this list is a 400 on a board the server itself just served. `funnel`, `experiment`, `retention` and `dimension` are the counter feeds boards saved before the `people` source still carry. */
         DashboardMetricRef: {
             /** @enum {string} */
-            source: "logs" | "check" | "event" | "metric" | "people" | "service" | "funnel" | "experiment" | "retention" | "dimension";
+            source: "logs" | "check" | "event" | "metric" | "people" | "web" | "service" | "funnel" | "experiment" | "retention" | "dimension";
             name?: string;
             where?: {
                 [key: string]: string;
             };
             /** @description `people` only: a funnel's step event names, in journey order. The card is the journey's one definition. */
             steps?: string[];
+            /** @description `people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{"path": "/pricing"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`. */
+            stepWhere?: {
+                [key: string]: string;
+            }[];
             /** @description `people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return). */
             cohort?: string;
             /** @description `people` only: the event field a breakdown ranks the values of. */
@@ -4663,6 +4880,13 @@ export interface components {
              * @enum {string}
              */
             count?: "people" | "events";
+            /**
+             * @description `amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`.
+             * @enum {string}
+             */
+            measure?: "amount";
+            /** @description ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together. */
+            currency?: string;
             label?: string;
         };
         DashboardWidget: {
@@ -4672,7 +4896,7 @@ export interface components {
              * @description `ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share.
              * @enum {string}
              */
-            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap" | "ratio";
+            kind: "stat" | "line" | "bar" | "donut" | "logs" | "status" | "network" | "calendar" | "funnel" | "experiment" | "retention" | "breakdown" | "heatmap" | "ratio" | "table";
             title: string;
             metrics: components["schemas"]["DashboardMetricRef"][];
             /**
@@ -4815,6 +5039,8 @@ export interface components {
             lastTs: string;
             /** @description Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth. */
             fields: string[];
+            /** @description The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money. */
+            currencies?: string[];
         };
         CatalogMetric: {
             name: string;
@@ -4827,18 +5053,18 @@ export interface components {
             /** @description Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it. */
             id: string;
             /**
-             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed.
+             * @description `people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`.
              * @enum {string}
              */
-            source: "logs" | "check" | "event" | "metric" | "people";
+            source: "logs" | "check" | "event" | "metric" | "people" | "web";
             /** @enum {string} */
             range: "1h" | "4h" | "12h" | "24h" | "7d" | "31d" | "365d";
-            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. */
+            /** @description check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null. */
             name?: string;
             where?: {
                 [key: string]: string;
             };
-            /** @description Event reads and bare-name people reads only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption. */
+            /** @description Event reads, bare-name people reads and one-key people folds (a breakdown) only: count only the rows whose labels hold every one of these pairs (keys 1-60 bytes, values at most 256 bytes, no control characters). On a breakdown of `uc.pageview` by `from` with `{"path": "/pricing"}` it answers where the views of /pricing came from; by `path` with `{"from": "/pricing"}`, where they went next. A field of its own, not a `where` key, so a core that predates it refuses the query as an unknown field instead of answering the unfiltered count under a filtered caption. */
             labels?: {
                 [key: string]: string;
             };
@@ -4851,6 +5077,10 @@ export interface components {
             group?: string[];
             /** @description `people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order. */
             steps?: string[];
+            /** @description `people` funnels only, at most as many entries as `steps`: entry i narrows step i to the rows whose labels hold every pair, under the `labels` rules (at most 3 pairs). An empty object is no filter. Two steps may then share a name, and each is counted on its own. */
+            stepLabels?: {
+                [key: string]: string;
+            }[];
             /**
              * @description `people` only: read a retention grid. An actor's cohort is the Monday of their FIRST event ever, not their first inside the window, and only cohorts beginning inside the window are returned — an older cohort would come back as a fraction of itself. With a `name`, both the cohort and the returns read that one event, so the grid counts only its people.
              * @enum {string}
@@ -4861,6 +5091,13 @@ export interface components {
              * @enum {string}
              */
             count?: "people" | "events";
+            /**
+             * @description `amount`: sum the events' money in `currency` (minor units) instead of counting: on an `event` read (points, total, previous) and on a one-key `people` fold (rows: the amount per value; the actor filter does not apply, money is money whoever paid). Refused elsewhere and with `count`.
+             * @enum {string}
+             */
+            measure?: "amount";
+            /** @description Required with `measure`, refused without it. */
+            currency?: string;
         };
         /** @description Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer. */
         SeriesRequest: {
@@ -4895,6 +5132,72 @@ export interface components {
             };
             value: number;
         };
+        WebSegments: {
+            names: string[];
+        };
+        /** @description A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window. */
+        ProductAlert: {
+            id: string;
+            /** @description What the messages call it; the event name when empty. */
+            name?: string;
+            /** @description The event name the rule counts. */
+            event: string;
+            /** @description Count only the rows whose labels hold every pair, under the series `labels` rules. */
+            labels?: {
+                [key: string]: string;
+            };
+            /**
+             * @description Sum the money in `currency` instead of counting.
+             * @enum {string}
+             */
+            measure?: "amount";
+            currency?: string;
+            /** @enum {string} */
+            kind: "change" | "silence";
+            /**
+             * @description `change` only.
+             * @enum {string}
+             */
+            direction?: "down" | "up" | "any";
+            /** @description `change` only: how far from the same hours a week ago, in percent. */
+            percent?: number;
+            /** @description One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago. */
+            windowHours: number;
+            /** @description The board card it was made from, so the card can show it. Optional. */
+            widgetId?: string;
+            paused?: boolean;
+            /**
+             * @description `learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count.
+             * @enum {string}
+             */
+            state: "ok" | "firing" | "learning" | "frozen" | "paused";
+            /** Format: date-time */
+            lastFiredAt?: string;
+            /** Format: date-time */
+            lastCheckedAt?: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset. */
+        ProductAlertWrite: {
+            name?: string;
+            event?: string;
+            labels?: {
+                [key: string]: string;
+            };
+            /** @enum {string} */
+            measure?: "amount";
+            currency?: string;
+            /** @enum {string} */
+            kind?: "change" | "silence";
+            /** @enum {string} */
+            direction?: "down" | "up" | "any";
+            percent?: number;
+            /** @description One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago. */
+            windowHours?: number;
+            widgetId?: string;
+            paused?: boolean;
+        };
         UsedMax: {
             used: number;
             max: number;
@@ -4923,6 +5226,8 @@ export interface components {
             incidentHistoryDays: number;
             /** @description How far back the dashboard's series reach, in days (plan_entitlement.history_days). Absent when the plan is unlimited (Self-hosted). A `POST /v1/series` range wider than this is a 402, and the board reads this number first so it never asks for one. A depth, not a consumption: the client renders it as a sentence, and it counts from the day a plan is switched, since what an earlier plan did not keep cannot be sold back. */
             historyDays?: number;
+            /** @description Product alert rules across the workspace (plan_entitlement.product_alerts): `used` counts every rule, `max` is the plan's. Absent when the plan is unlimited (every paid plan and Self-hosted). Rules past `max` after a downgrade are kept and frozen, newest first, never deleted. */
+            productAlerts?: components["schemas"]["UsedMax"];
             /** @description Boards per project (plan_entitlement.dashboards). Absent when the plan is unlimited (Self-hosted). A per-project axis, so it has no workspace-wide remainder to draw: the client renders `max` as a sentence, never a bar. */
             dashboards?: {
                 /** @description Boards ONE project may hold. */
@@ -5215,14 +5520,24 @@ export interface components {
          * @description One request from `uc.js`. `t: view` is a page view, sent on load and on
          *     every path change. `t: heat` is everything one page view did,
          *     aggregated in the page and sent once, when the tab hides or the path
-         *     changes. Selectors are CSS paths the script builds from ids and
-         *     `:nth-of-type`, never from class names, which a build re-hashes.
+         *     changes. `t: event` is a named event the page sent (`upcontrol('track',
+         *     name, fields)`, or a click on an element carrying `data-uc-event`),
+         *     stored as an events row with the same visitor as the page views, so a
+         *     funnel can run from a page view to a click within a day. Selectors are
+         *     CSS paths the script builds from ids and `:nth-of-type`, never from
+         *     class names, which a build re-hashes.
          */
         WebBeacon: {
             /** @description The beacon format, 1. */
             v: number;
             /** @enum {string} */
-            t: "view" | "heat";
+            t: "view" | "heat" | "event";
+            /** @description event: the event name, 1-40 bytes, lowercased by the server; a name starting `uc.` is refused (the server's own). */
+            n?: string;
+            /** @description event: the event's fields, at most 10, keys 1-60 bytes not starting `uc.`, values at most 100 bytes. The page's `path`, `device`, `segment` and `source` are added by the server and win over a field of the same name. */
+            l?: {
+                [key: string]: string;
+            };
             /** @description location.pathname, at most 256 bytes. */
             p: string;
             /** @description window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop. */
@@ -5231,6 +5546,25 @@ export interface components {
             r?: string;
             /** @description view: location.search. Only utm_source, utm_medium and utm_campaign are kept. */
             q?: string;
+            /** @description view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label. */
+            f?: string;
+            /** @description view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view. */
+            g?: string;
+            /** @description heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent. */
+            fm?: string[][];
+            /**
+             * @description view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site).
+             * @enum {string}
+             */
+            o?: "search" | "social" | "campaign" | "referral" | "direct";
+            /** @description heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes. */
+            e?: number;
+            /** @description heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view. */
+            a?: number[];
+            /** @description heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element. */
+            h?: string[];
+            /** @description heat: at most 300 dead clicks as [selector, fx, fy, clicks]: a click on no interactive element after which nothing on the page changed for 600 ms. */
+            d?: unknown[][];
             /** @description heat: the deepest reach, (scrollY + innerHeight) / document height, clamped to 0..1. */
             s?: number;
             /** @description heat: at most 300 clicks as [selector, fx, fy, clicks, rage clicks]; fx and fy are the position inside the element in 64ths. */
@@ -5257,10 +5591,55 @@ export interface components {
             clicks: components["schemas"]["HeatCell"][];
             rage: components["schemas"]["HeatCell"][];
             moves: components["schemas"]["HeatCell"][];
+            /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
+            hits: components["schemas"]["HeatCell"][];
+            dead: components["schemas"]["HeatCell"][];
+            /** @description The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read. */
+            deploys: {
+                /** Format: date-time */
+                at: string;
+                label: string;
+            }[];
+            /**
+             * Format: date
+             * @description With `split`: the first UTC day the main numbers read.
+             */
+            from?: string;
+            before?: components["schemas"]["HeatmapWindow"];
+            /** @description Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`. */
+            forms: components["schemas"]["FormField"][];
+            /** @description The segments this project declared, at most 4, oldest first: what the overlay offers to filter by. */
+            segments: string[];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];
             /** @description How many pages this plan keeps a heatmap for, its busiest by views. Absent when unlimited. A page with views and no heat is one outside them. */
             heatPages?: number;
+        };
+        /** @description The window before a `split`, read exactly like the main numbers. */
+        HeatmapWindow: {
+            /** Format: date */
+            from: string;
+            /**
+             * Format: date
+             * @description Exclusive: the split's day.
+             */
+            to: string;
+            views: number;
+            clicks: components["schemas"]["HeatCell"][];
+            rage: components["schemas"]["HeatCell"][];
+            dead: components["schemas"]["HeatCell"][];
+            hits: components["schemas"]["HeatCell"][];
+            scroll: number[];
+            forms: components["schemas"]["FormField"][];
+        };
+        FormField: {
+            selector: string;
+            focus: number;
+            fill: number;
+            /** @description Non-zero on a form element: the views that submitted it. */
+            submit: number;
+            /** @description The views whose last focused field in an unsubmitted form was this one. */
+            left: number;
         };
         HeatmapLinkRequest: {
             /** @description Starts with /, at most 256 bytes. */

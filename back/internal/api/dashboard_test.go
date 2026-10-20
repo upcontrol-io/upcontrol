@@ -70,6 +70,7 @@ func TestValidateSeries_Labels(t *testing.T) {
 	for _, ok := range []seriesQuery{
 		{ID: "ev", Source: "event", Range: "24h", Name: "purchase", Labels: pro},
 		{ID: "bare", Source: "people", Range: "24h", Name: "purchase", Labels: pro},
+		{ID: "breakdown", Source: "people", Range: "24h", Name: "purchase", Group: []string{"plan"}, Labels: pro},
 		{ID: "caps", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
 			"a": "1", "b": "2", strings.Repeat("k", 60): strings.Repeat("v", 256)}},
 		// An empty object filters nothing, so it is nobody's business which read
@@ -86,7 +87,7 @@ func TestValidateSeries_Labels(t *testing.T) {
 		{ID: "metric", Source: "metric", Range: "24h", Name: "load", Labels: pro},
 		{ID: "funnel", Source: "people", Range: "24h", Steps: []string{"visit", "signup"}, Labels: pro},
 		{ID: "retention", Source: "people", Range: "24h", Cohort: "week", Labels: pro},
-		{ID: "breakdown", Source: "people", Range: "24h", Name: "purchase", Group: []string{"plan"}, Labels: pro},
+		{ID: "ab", Source: "people", Range: "24h", Name: "checkout", Group: []string{"uc.variant", "uc.stat"}, Labels: pro},
 		{ID: "four", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{
 			"a": "1", "b": "2", "c": "3", "d": "4"}},
 		{ID: "emptykey", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"": "x"}},
@@ -95,6 +96,33 @@ func TestValidateSeries_Labels(t *testing.T) {
 		// Postgres refuses a NUL inside jsonb with a 500 for the whole board.
 		{ID: "nulvalue", Source: "event", Range: "24h", Name: "purchase", Labels: map[string]string{"plan": "pro\x00"}},
 		{ID: "ctrlkey", Source: "people", Range: "24h", Name: "purchase", Labels: map[string]string{"pl\nan": "pro"}},
+	} {
+		msg := validateSeries([]seriesQuery{bad})
+		if msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// stepLabels narrow a funnel step by step, under the labels rules, never past
+// the steps it has and never on any other shape.
+func TestValidateSeries_StepLabels(t *testing.T) {
+	pv := []string{"uc.pageview", "uc.pageview"}
+	for _, ok := range []seriesQuery{
+		{ID: "two", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/"}, {"path": "/pricing"}}},
+		{ID: "first", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "empty", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{}, {"path": "/pricing"}}},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s must be accepted; got %q", ok.ID, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "extra", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{}, {}, {"path": "/"}}},
+		{ID: "event", Source: "event", Range: "24h", Name: "uc.pageview", StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "bare", Source: "people", Range: "24h", Name: "uc.pageview", StepLabels: []map[string]string{{"path": "/"}}},
+		{ID: "four", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"a": "1", "b": "2", "c": "3", "d": "4"}}},
+		{ID: "ctrl", Source: "people", Range: "24h", Steps: pv, StepLabels: []map[string]string{{"path": "/\x00"}}},
 	} {
 		msg := validateSeries([]seriesQuery{bad})
 		if msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
@@ -614,6 +642,99 @@ func TestValidateLayout_RefusesACountTheContractDoesNotName(t *testing.T) {
 	}
 }
 
+// An amount is read in one currency: a measure without a currency, a currency
+// without a measure, and a currency that is not three upper-case letters are
+// all refused by widget.
+func TestValidateLayout_MeasureTravelsWithACurrency(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	amount := apigen.DashboardMetricRefMeasureAmount
+	unknown := apigen.DashboardMetricRefMeasure("median")
+	pair := `widget "w_1": a measure needs a currency of three upper-case letters, and a currency a measure`
+	for _, c := range []struct {
+		name     string
+		measure  *apigen.DashboardMetricRefMeasure
+		currency *string
+		want     string
+	}{
+		{"neither", nil, nil, ""},
+		{"both", &amount, ptr("USD"), ""},
+		{"measure alone", &amount, nil, pair},
+		{"currency alone", nil, ptr("USD"), pair},
+		{"lower case", &amount, ptr("usd"), pair},
+		{"two letters", &amount, ptr("US"), pair},
+		{"unknown measure", &unknown, ptr("USD"), `widget "w_1" measures an unknown "median"`},
+	} {
+		b := widget("w_1")
+		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourceEvent, Measure: c.measure, Currency: c.currency}}
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != c.want {
+			t.Fatalf("%s = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Money sums on an event read and a breakdown, in one currency, and nowhere
+// else: a funnel, a retention grid and an A/B test are people.
+func TestValidateSeries_Measure(t *testing.T) {
+	for _, ok := range []seriesQuery{
+		{ID: "a", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "USD"},
+		{ID: "b", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "EUR", Labels: map[string]string{"plan": "pro"}, Bucket: "day"},
+		{ID: "c", Source: "people", Range: "7d", Name: "purchase", Group: []string{"plan"}, Measure: "amount", Currency: "USD"},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s must be accepted; got %q", ok.ID, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "nocur", Source: "event", Range: "7d", Name: "purchase", Measure: "amount"},
+		{ID: "lower", Source: "event", Range: "7d", Name: "purchase", Measure: "amount", Currency: "usd"},
+		{ID: "curonly", Source: "event", Range: "7d", Name: "purchase", Currency: "USD"},
+		{ID: "unknown", Source: "event", Range: "7d", Name: "purchase", Measure: "avg", Currency: "USD"},
+		{ID: "count", Source: "people", Range: "7d", Name: "purchase", Group: []string{"plan"}, Count: "events", Measure: "amount", Currency: "USD"},
+		{ID: "bare", Source: "people", Range: "7d", Name: "purchase", Measure: "amount", Currency: "USD"},
+		{ID: "funnel", Source: "people", Range: "7d", Steps: []string{"a", "b"}, Measure: "amount", Currency: "USD"},
+		{ID: "cohort", Source: "people", Range: "31d", Cohort: "week", Measure: "amount", Currency: "USD"},
+		{ID: "ab", Source: "people", Range: "7d", Name: "x", Group: []string{"uc.variant", "uc.stat"}, Measure: "amount", Currency: "USD"},
+		{ID: "logs", Source: "logs", Range: "7d", Measure: "amount", Currency: "USD"},
+		{ID: "metric", Source: "metric", Range: "7d", Name: "cpu", Measure: "amount", Currency: "USD"},
+		{ID: "web", Source: "web", Range: "7d", Name: "views", Measure: "amount", Currency: "USD"},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in "+bad.ID) {
+			t.Fatalf("%s must be refused by name; got %q", bad.ID, msg)
+		}
+	}
+}
+
+// A stored board never carries a filter for a step it lacks.
+func TestValidateLayout_StepWhereFitsTheSteps(t *testing.T) {
+	steps := []string{"uc.pageview", "signup"}
+	refused := `widget "w_1" narrows more steps than it has`
+	for _, c := range []struct {
+		name  string
+		steps *[]string
+		where []map[string]string
+		want  string
+	}{
+		{"one per step", &steps, []map[string]string{{"path": "/"}, {}}, ""},
+		{"fewer than steps", &steps, []map[string]string{{"path": "/"}}, ""},
+		{"more than steps", &steps, []map[string]string{{}, {}, {"path": "/"}}, refused},
+		{"no steps", nil, []map[string]string{{"path": "/"}}, refused},
+		{"four pairs", &steps, []map[string]string{{}, {"a": "1", "b": "2", "c": "3", "d": "4"}},
+			`at most 3 labels per query, got 4 in widget "w_1" step 2`},
+		{"long value", &steps, []map[string]string{{"path": strings.Repeat("x", 257)}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
+		{"control character", &steps, []map[string]string{{"path": "/a\n"}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
+		{"empty key", &steps, []map[string]string{{"": "/"}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
+	} {
+		b := widget("w_1")
+		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourcePeople, Steps: c.steps, StepWhere: &c.where}}
+		if got := validateLayout(apigen.DashboardLayout{Version: 2, Widgets: []apigen.DashboardWidget{b}}); got != c.want {
+			t.Fatalf("%s = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // The empty answer is the contract's own literal, and its version is the
 // CURRENT one: an empty board has no heights, so the field says nothing except
 // which unit the next writer should use. It read 1 until 2026-09-08, which
@@ -763,5 +884,74 @@ func TestReadLayout_KeepsEveryRefACardCanCarry(t *testing.T) {
 				t.Fatalf("%s must survive the round trip; %s is missing from %s", one.name, one.token, out)
 			}
 		})
+	}
+}
+
+// The web source names five reads; reach needs a threshold, the per-page
+// heat sums need group [path], and every refusal names its query.
+func TestValidateSeries_Web(t *testing.T) {
+	byPath := []string{"path"}
+	for _, ok := range []seriesQuery{
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged"},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"path": "/", "device": "mobile"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Group: byPath},
+		{ID: "a", Source: "web", Range: "31d", Name: "engaged", Bucket: "day"},
+		{ID: "a", Source: "web", Range: "24h", Name: "reach", Where: map[string]string{"after": "30"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: byPath},
+		{ID: "a", Source: "web", Range: "7d", Name: "dead", Group: byPath, Where: map[string]string{"device": "desktop"}},
+		{ID: "a", Source: "web", Range: "365d", Name: "clicks", Group: byPath},
+		{ID: "a", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"segment": "member", "source": "search"}},
+		{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: byPath, Where: map[string]string{"segment": "Not Even Valid", "source": ""}},
+	} {
+		if msg := validateSeries([]seriesQuery{ok}); msg != "" {
+			t.Fatalf("%s %+v must be accepted; got %q", ok.Name, ok, msg)
+		}
+	}
+	for _, bad := range []seriesQuery{
+		{ID: "q1", Source: "web", Range: "7d", Name: "visits"},
+		{ID: "q1", Source: "web", Range: "7d"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach", Where: map[string]string{"after": "60"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "reach", Where: map[string]string{"after": "10"}, Group: byPath},
+		{ID: "q1", Source: "web", Range: "7d", Name: "rage"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "clicks", Group: []string{"device"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Group: []string{"path", "device"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Labels: map[string]string{"path": "/"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "dead", Group: byPath, Count: "events"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Steps: []string{"a"}},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Cohort: "week"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "rage", Group: byPath, Bucket: "day"},
+		{ID: "q1", Source: "web", Range: "7d", Name: "engaged", Where: map[string]string{"source": "google"}},
+	} {
+		if msg := validateSeries([]seriesQuery{bad}); msg == "" || !strings.HasSuffix(msg, " in q1") {
+			t.Fatalf("%+v must be refused by name; got %q", bad, msg)
+		}
+	}
+}
+
+// A web read never steps below an hour, over the range's own span: a 1h
+// range is one bucket, a 24h range 24. With no store every bucket is null and
+// a grouped read answers no rows.
+func TestOneSeries_WebStepsInHours(t *testing.T) {
+	h := &writeAPI{}
+	now := time.Date(2026, 9, 19, 12, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		rng         string
+		step, count int
+	}{{"1h", 3600, 1}, {"4h", 3600, 4}, {"24h", 3600, 24}, {"7d", 10800, 56}} {
+		s, err := h.oneSeries(t.Context(), nil, 1, 1, seriesQuery{ID: "a", Source: "web", Range: tc.rng, Name: "engaged"}, now, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s["step"] != tc.step || len(s["points"].([]any)) != tc.count || s["total"] != nil {
+			t.Errorf("%s: step %v, %d points, total %v; want %d, %d, nil", tc.rng, s["step"], len(s["points"].([]any)), s["total"], tc.step, tc.count)
+		}
+	}
+	s, err := h.oneSeries(t.Context(), nil, 1, 1, seriesQuery{ID: "a", Source: "web", Range: "7d", Name: "rage", Group: []string{"path"}}, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, ok := s["rows"].([]any); !ok || len(rows) != 0 {
+		t.Errorf("grouped rows = %v, want []", s["rows"])
 	}
 }

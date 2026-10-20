@@ -466,7 +466,7 @@ func (h *install) adoptTenant(ctx context.Context, w http.ResponseWriter, s sqlc
 		"source_connection", "api_key", "install_token", "dashboard",
 		// The data, which every read filters by tenant: left behind, the
 		// claimed project opens empty and its install reads unverified.
-		"logs", "events", "metrics", "series_1m", "series_1h", "web_heat",
+		"logs", "events", "metrics", "series_1m", "series_1h", "web_heat", "web_engage",
 	} {
 		if _, err := tx.Exec(ctx,
 			`UPDATE `+table+` SET tenant_id = $1 WHERE tenant_id = $2`, own, anonTenantID); err != nil {

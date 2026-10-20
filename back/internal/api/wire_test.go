@@ -208,6 +208,18 @@ func TestDecodeRowsEventServiceLabel(t *testing.T) {
 	}
 }
 
+// The amount ingest lifted off uc.amount / uc.currency reaches the events row.
+func TestDecodeRowsEventCarriesAmount(t *testing.T) {
+	raw := mustMarshalEnvelope(t, &ingest.RowEnvelope{
+		TenantID: 7, ProjectID: 9, Level: "info", Message: "m", Event: "payment",
+		AmountMinor: 1999, Currency: "USD",
+	})
+	_, eventRows := decodeRows([][]byte{raw})
+	if len(eventRows) != 1 || eventRows[0].AmountMinor != 1999 || eventRows[0].Currency != "USD" {
+		t.Fatalf("event rows = %+v, want one carrying 1999 USD", eventRows)
+	}
+}
+
 func mustMarshalEnvelope(t *testing.T, env *ingest.RowEnvelope) []byte {
 	t.Helper()
 	b, err := json.Marshal(env)

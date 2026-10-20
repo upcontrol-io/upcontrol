@@ -120,6 +120,9 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// read, all on the recorder's visitor reducer and /i's public-key gates.
 	webDoor := api.NewWebDoor(ingester, pgs, pgPool, recorder.Describe, d.Config.ScrubOff)
 	mux.Handle("GET /uc.js", http.HandlerFunc(web.Script))
+	// The heatmap overlay, loaded by uc.js only when a heatmap link opened the page; under /w/
+	// so every Caddyfile already proxies it.
+	mux.Handle("GET /w/overlay.js", http.HandlerFunc(web.Overlay))
 	mux.Handle("POST /w", http.HandlerFunc(webDoor.Collect))
 	mux.Handle("GET /w/heatmap", http.HandlerFunc(webDoor.Heatmap))
 
@@ -280,6 +283,8 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	// The overlay's token mint: session-authed like the series read, and
 	// registered beside it for the same reason every wa route is.
 	mux.Handle("POST /v1/heatmap/link", wa)
+	mux.Handle("GET /v1/web/segments", wa)
+	mux.Handle("PUT /v1/web/segments", wa)
 	mux.Handle("GET /v1/dashboard", wa)
 	mux.Handle("PUT /v1/dashboard", wa)
 	// The agent's additive door and the session's two proposal doors. Every one
@@ -302,6 +307,10 @@ func wireRoutes(ctx context.Context, d app.Deps, mux *http.ServeMux) error {
 	mux.Handle("POST /v1/dashboards/{id}/widgets", wa)
 	mux.Handle("GET /v1/dashboards/{id}/proposal", wa)
 	mux.Handle("DELETE /v1/dashboards/{id}/proposal", wa)
+	mux.Handle("GET /v1/product-alerts", wa)
+	mux.Handle("POST /v1/product-alerts", wa)
+	mux.Handle("PATCH /v1/product-alerts/{id}", wa)
+	mux.Handle("DELETE /v1/product-alerts/{id}", wa)
 	mux.Handle("GET /v1/incidents/{id}", wa)
 	mux.Handle("GET /v1/export", wa)
 	mux.Handle("DELETE /v1/project", wa)

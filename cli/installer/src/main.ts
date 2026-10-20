@@ -30,6 +30,7 @@ import {
   listBoards,
   mintAnonymousProject,
   mintPublicKey,
+  putSegments,
   readBoard,
   redeemInstallToken,
 } from './net.js';
@@ -42,6 +43,7 @@ interface Flags {
   add?: string;
   board?: string;
   new?: string;
+  segments?: string;
   copilot: boolean;
   noKey: boolean;
   json: boolean;
@@ -92,6 +94,9 @@ function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags;
         break;
       case '--new':
         flags.new = value(a);
+        break;
+      case '--segments':
+        flags.segments = value(a);
         break;
       case '--copilot':
         flags.copilot = true;
@@ -169,6 +174,10 @@ Board flags:
 
   A single dash reads stdin for either flag. On a human-curated board --apply is kept
   as a proposal: open /app/dashboard in the app and press Review to apply it.
+
+Web flags:
+  --segments <a,b>     declare the site's segments (at most 4; a-z, 0-9, _ and -, up to
+                       24 characters), e.g. --segments member,anon
 
 The skill teaches your agent event names and placement
 rules; say what you want in plain language ("send all my logs to upcontrol")
@@ -612,8 +621,23 @@ async function cmdWeb(det: Detection, flags: Flags, args: string[]): Promise<num
   const cwd = process.cwd();
   const endpoint = endpointFrom(process.env, flags.endpoint);
   if (args.length === 0) {
-    err('usage: npx upcontrol web <site> [site...]');
+    err('usage: npx upcontrol web <site> [site...] [--segments a,b]');
     return 2;
+  }
+  // Checked before any request, by the server's own rule, so a bad name
+  // neither mints a key nor half-applies.
+  let segments: string[] | undefined;
+  if (flags.segments !== undefined) {
+    segments = [...new Set(flags.segments.split(',').map((s) => s.trim()).filter(Boolean))];
+    const bad = segments.find((s) => !/^[a-z0-9_-]{1,24}$/.test(s) || /\d{4}/.test(s));
+    if (bad) {
+      err(`not a segment name: ${bad} (a-z, 0-9, _ and -, up to 24 characters, never four digits in a row)`);
+      return 2;
+    }
+    if (segments.length > 4) {
+      err(`at most 4 segments, got ${segments.length}`);
+      return 2;
+    }
   }
   const key = process.env.UPCONTROL_API_KEY?.trim() || readDotenvKey(cwd);
   if (!key) {
@@ -669,6 +693,20 @@ async function cmdWeb(det: Detection, flags: Flags, args: string[]): Promise<num
       `(Sources, Manage keys), remove UPCONTROL_PUBLIC_KEY from ${where} and rerun naming every address`;
     err(`key: reused - ${note}`);
   }
+  // The segments go out before anything prints, so the agent's one JSON line
+  // carries them; a refusal still prints the tag, which stays valid, and fails
+  // after it. The line goes to stderr like the reuse note: stdout stays the tag.
+  let segmentsFail: string | undefined;
+  if (segments) {
+    const r = await putSegments(endpoint, key, segments);
+    if (!r.ok) {
+      segmentsFail =
+        r.error === 'unreachable'
+          ? `segments: cannot reach ${endpoint}`
+          : `segments: ${r.message ?? r.code ?? 'refused'} (HTTP ${r.status ?? '?'})`;
+    }
+  }
+  const declared = segments && !segmentsFail ? segments : undefined;
   if (flags.json || det.mode !== 'interactive') {
     out(
       JSON.stringify({
@@ -676,13 +714,19 @@ async function cmdWeb(det: Detection, flags: Flags, args: string[]): Promise<num
         tag,
         ...(note ? { note } : { origins: unique }),
         key: state,
+        ...(declared ? { segments: declared } : {}),
         next: 'put the tag inside <head> on every page: npx upcontrol skills web',
       }),
     );
-    return 0;
+  } else {
+    out(tag);
+    out('Put it inside <head> on every page. Where that is in your framework: npx upcontrol skills web');
   }
-  out(tag);
-  out('Put it inside <head> on every page. Where that is in your framework: npx upcontrol skills web');
+  if (segmentsFail) {
+    err(segmentsFail);
+    return 3;
+  }
+  if (declared) err(`segments: ${declared.join(', ') || 'none'}`);
   return 0;
 }
 

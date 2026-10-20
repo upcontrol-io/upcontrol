@@ -791,7 +791,7 @@ components:
       properties:
         source:
           type: string
-          enum: [logs, check, event, metric, people, service, funnel, experiment, retention, dimension]
+          enum: [logs, check, event, metric, people, web, service, funnel, experiment, retention, dimension]
         name: { type: string }
         where:
           type: object
@@ -800,6 +800,12 @@ components:
           type: array
           description: "`people` only: a funnel's step event names, in journey order. The card is the journey's one definition."
           items: { type: string }
+        stepWhere:
+          type: array
+          description: "`people` funnels only: one entry per step, at the step's index, holding the event fields that step must carry (`{\"path\": \"/pricing\"}` makes a `uc.pageview` step one page). An empty object, or a missing entry, is no filter. Read as the query's `stepLabels`."
+          items:
+            type: object
+            additionalProperties: { type: string }
         cohort:
           type: string
           description: "`people` only: `week` reads the retention grid; with a `name`, only the people of that event (their first such event is the cohort, the same event in a later week a return)."
@@ -810,6 +816,14 @@ components:
           type: string
           enum: [people, events]
           description: "`people` only: what a breakdown counts. Absent means people, so every board saved before this keeps its meaning."
+        measure:
+          type: string
+          enum: [amount]
+          description: "`amount` sums the money the events carried (`uc.amount` in minor units, in `currency`) instead of counting them. On an `event` ref or a breakdown/table. Read as the query's `measure`."
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          description: "ISO 4217, upper case. Required with `measure: amount`: two currencies are never added together."
         label: { type: string }
     DashboardWidget:
       type: object
@@ -818,7 +832,7 @@ components:
         id: { type: string, example: "w_1" }
         kind:
           type: string
-          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap, ratio]
+          enum: [stat, line, bar, donut, logs, status, network, calendar, funnel, experiment, retention, breakdown, heatmap, ratio, table]
           description: "`ratio` reads its two refs as a numerator and a denominator, in that order, and draws the share."
         title: { type: string }
         metrics:
@@ -1048,6 +1062,10 @@ components:
           type: array
           description: "Counted over the newest rows of the window rather than all of them: expanding every event into one row per field is not what a picker is worth."
           items: { type: string }
+        currencies:
+          type: array
+          description: "The currencies this event's recent rows carried an amount in, upper case: what a revenue pick offers. Absent or empty: the event carries no money."
+          items: { type: string }
     CatalogMetric:
       type: object
       required: [name, readings, labels]
@@ -1068,14 +1086,14 @@ components:
           description: "Echoed back on the answer; unique within the request, because that is how the client matches a series to the card that asked for it."
         source:
           type: string
-          enum: [logs, check, event, metric, people]
-          description: "`people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed."
+          enum: [logs, check, event, metric, people, web]
+          description: "`people` counts DISTINCT actors over the events the project sent, which is how a funnel, a retention grid, an A/B test or a dimension is read now: the shape of the query picks which. A `name` alone, with no steps, cohort or group, reads the distinct people behind that event per bucket, and its `total` and `previous` are distinct counts of their own windows, never sums of buckets. It needs nothing but events carrying `uc.actor`, so it answers for a sender in any language — see `POST /i`. The older counter kinds still read through `metric` with `group`, for boards saved before this existed. `web` reads what the site tag (`uc.js`) measured beyond page views: engaged time, attention reach, and per-page rage, dead and click counts; see `name`."
         range:
           type: string
           enum: ["1h", "4h", "12h", "24h", "7d", "31d", "365d"]
         name:
           type: string
-          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads."
+          description: "check: `response`, `uptime`, `dns`, `tcp`, `tls`, `wait`, or `p50` and `p95` of the response time over the ok probes; event: the event name; metric: the metric name; people: the event name a breakdown, an A/B test, a bare-name read or a named retention grid reads. web: `engaged` is the average engaged seconds per page view (the tab visible and input within the last 30 s, at most 30 minutes a view); `reach` is the percent of page views whose engaged time reached `where.after` seconds (10, 30, 120 or 300); both narrow by `where.path`, `where.device`, `where.segment` and `where.source`, and with `group: [path]` `engaged` ranks pages by it. `rage`, `dead` and `clicks` are per-page sums and need `group: [path]`, narrowed by `where.device`, `where.segment` and `where.source` too. A web bucket older than the oldest one kept is null."
         where:
           type: object
           additionalProperties: { type: string }
@@ -1084,9 +1102,12 @@ components:
           maxProperties: 3
           additionalProperties: { type: string, maxLength: 256 }
           description: >
-            Event reads and bare-name people reads only: count only the rows
-            whose labels hold every one of these pairs (keys 1-60 bytes, values
-            at most 256 bytes, no control characters).
+            Event reads, bare-name people reads and one-key people folds (a
+            breakdown) only: count only the rows whose labels hold every one of
+            these pairs (keys 1-60 bytes, values at most 256 bytes, no control
+            characters). On a breakdown of `uc.pageview` by `from` with
+            `{"path": "/pricing"}` it answers where the views of /pricing came
+            from; by `path` with `{"from": "/pricing"}`, where they went next.
             A field of its own, not a `where` key, so a core that predates it
             refuses the query as an unknown field instead of answering the
             unfiltered count under a filtered caption.
@@ -1108,6 +1129,14 @@ components:
           maxItems: 12
           items: { type: string }
           description: "`people` only: the event names of a funnel's steps, in order. The answer carries one row per step in exactly that order, zeros included — a funnel's shape is itself the reading. A funnel is defined here, by the card that draws it, and nowhere else: there is no declaration to keep in sync with the code that emits the events. Counts distinct people AT each step, not people who passed through in order."
+        stepLabels:
+          type: array
+          maxItems: 12
+          description: "`people` funnels only, at most as many entries as `steps`: entry i narrows step i to the rows whose labels hold every pair, under the `labels` rules (at most 3 pairs). An empty object is no filter. Two steps may then share a name, and each is counted on its own."
+          items:
+            type: object
+            maxProperties: 3
+            additionalProperties: { type: string, maxLength: 256 }
         cohort:
           type: string
           enum: [week]
@@ -1123,6 +1152,19 @@ components:
             why, because every people read filters `actor <> ''`. It is refused
             on a funnel, a retention grid and an A/B test: those ARE people by
             definition, and a conversion rate over rows is not a rate.
+        measure:
+          type: string
+          enum: [amount]
+          description: >
+            `amount`: sum the events' money in `currency` (minor units) instead
+            of counting: on an `event` read (points, total, previous) and on a
+            one-key `people` fold (rows: the amount per value; the actor filter
+            does not apply, money is money whoever paid). Refused elsewhere and
+            with `count`.
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          description: "Required with `measure`, refused without it."
     SeriesRequest:
       type: object
       description: "Every chart on the board in one round trip: a widget asks for one query per metric it draws, and the whole board renders from one answer."
@@ -1179,6 +1221,60 @@ components:
         value: { type: number }
 
     # --- plan ---------------------------------------------------------------
+    WebSegments:
+      type: object
+      required: [names]
+      properties:
+        names:
+          type: array
+          maxItems: 4
+          items: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+    ProductAlert:
+      type: object
+      description: "A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window."
+      required: [id, event, kind, windowHours, state, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string, description: "What the messages call it; the event name when empty." }
+        event: { type: string, description: "The event name the rule counts." }
+        labels:
+          type: object
+          maxProperties: 3
+          additionalProperties: { type: string, maxLength: 256 }
+          description: "Count only the rows whose labels hold every pair, under the series `labels` rules."
+        measure: { type: string, enum: [amount], description: "Sum the money in `currency` instead of counting." }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        kind: { type: string, enum: [change, silence] }
+        direction: { type: string, enum: [down, up, any], description: "`change` only." }
+        percent: { type: integer, minimum: 10, maximum: 1000, description: "`change` only: how far from the same hours a week ago, in percent." }
+        windowHours: { type: integer, minimum: 1, maximum: 24, description: "One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago." }
+        widgetId: { type: string, description: "The board card it was made from, so the card can show it. Optional." }
+        paused: { type: boolean }
+        state:
+          type: string
+          enum: [ok, firing, learning, frozen, paused]
+          description: "`learning`: the week before has too little to compare with (under 20 events in the window, or the event does not usually arrive), so the rule stays quiet rather than alert on noise. `frozen`: past the plan's rule count."
+        lastFiredAt: { type: string, format: date-time }
+        lastCheckedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+    ProductAlertWrite:
+      type: object
+      description: "Create: `event`, `kind` and `windowHours` are required, and `direction` + `percent` with `change`. Patch: any subset."
+      properties:
+        name: { type: string, maxLength: 80 }
+        event: { type: string, maxLength: 40 }
+        labels:
+          type: object
+          maxProperties: 3
+          additionalProperties: { type: string, maxLength: 256 }
+        measure: { type: string, enum: [amount] }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        kind: { type: string, enum: [change, silence] }
+        direction: { type: string, enum: [down, up, any] }
+        percent: { type: integer, minimum: 10, maximum: 1000 }
+        windowHours: { type: integer, minimum: 1, maximum: 24, description: "One of 1, 3, 6, 12 or 24: the window counted, and compared with the same hours a week ago." }
+        widgetId: { type: string, maxLength: 64 }
+        paused: { type: boolean }
     UsedMax:
       type: object
       required: [used, max]
@@ -1252,6 +1348,13 @@ components:
             A depth, not a consumption: the client renders it as a sentence,
             and it counts from the day a plan is switched, since what an
             earlier plan did not keep cannot be sold back.
+        productAlerts:
+          allOf: [{ $ref: "#/components/schemas/UsedMax" }]
+          description: >
+            Product alert rules across the workspace (plan_entitlement.product_alerts):
+            `used` counts every rule, `max` is the plan's. Absent when the plan is
+            unlimited (every paid plan and Self-hosted). Rules past `max` after a
+            downgrade are kept and frozen, newest first, never deleted.
         dashboards:
           type: object
           description: >
@@ -1862,16 +1965,45 @@ components:
         One request from `uc.js`. `t: view` is a page view, sent on load and on
         every path change. `t: heat` is everything one page view did,
         aggregated in the page and sent once, when the tab hides or the path
-        changes. Selectors are CSS paths the script builds from ids and
-        `:nth-of-type`, never from class names, which a build re-hashes.
+        changes. `t: event` is a named event the page sent (`upcontrol('track',
+        name, fields)`, or a click on an element carrying `data-uc-event`),
+        stored as an events row with the same visitor as the page views, so a
+        funnel can run from a page view to a click within a day. Selectors are
+        CSS paths the script builds from ids and `:nth-of-type`, never from
+        class names, which a build re-hashes.
       required: [v, t, p, w]
       properties:
         v: { type: integer, description: "The beacon format, 1." }
-        t: { type: string, enum: [view, heat] }
+        t: { type: string, enum: [view, heat, event] }
+        n: { type: string, description: "event: the event name, 1-40 bytes, lowercased by the server; a name starting `uc.` is refused (the server's own)." }
+        l:
+          type: object
+          description: "event: the event's fields, at most 10, keys 1-60 bytes not starting `uc.`, values at most 100 bytes. The page's `path`, `device`, `segment` and `source` are added by the server and win over a field of the same name."
+          additionalProperties: { type: string }
         p: { type: string, description: "location.pathname, at most 256 bytes." }
         w: { type: integer, description: "window.innerWidth. Under 768 is mobile, under 1024 tablet, anything wider desktop." }
         r: { type: string, description: "view: document.referrer. Stored as its host; a referrer on the page's own host is dropped." }
         q: { type: string, description: "view: location.search. Only utm_source, utm_medium and utm_campaign are kept." }
+        f: { type: string, description: "view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label." }
+        g: { type: string, description: "view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view." }
+        fm:
+          type: array
+          description: "heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent."
+          items: { type: array, items: { type: string } }
+        o: { type: string, enum: [search, social, campaign, referral, direct], description: "view and heat: the kind of source the page load came from, worked out by the script from the referrer and the UTM tags of the tab's first view. Absent when unknown (a later page of a multi-page site)." }
+        e: { type: integer, description: "heat: engaged milliseconds since this view's previous heat beacon (visible, with input in the last 30 s); a view counts at most 30 minutes." }
+        a:
+          type: array
+          description: "heat: the engaged-time thresholds this view crossed since its previous heat beacon, as indices 0..3 for 10, 30, 120 and 300 seconds. Each is sent once per view."
+          items: { type: integer }
+        h:
+          type: array
+          description: "heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element."
+          items: { type: string }
+        d:
+          type: array
+          description: "heat: at most 300 dead clicks as [selector, fx, fy, clicks]: a click on no interactive element after which nothing on the page changed for 600 ms."
+          items: { type: array, items: {} }
         s: { type: number, description: "heat: the deepest reach, (scrollY + innerHeight) / document height, clamped to 0..1." }
         c:
           type: array
@@ -1891,7 +2023,7 @@ components:
         n: { type: integer }
     Heatmap:
       type: object
-      required: [path, device, range, views, clicks, rage, moves, scroll]
+      required: [path, device, range, views, clicks, rage, moves, scroll, hits, dead, segments, forms, deploys]
       properties:
         path: { type: string }
         device: { type: string, enum: [mobile, tablet, desktop] }
@@ -1902,6 +2034,31 @@ components:
         clicks: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
         rage: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
         moves: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        hits:
+          type: array
+          description: "One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through."
+          items: { $ref: "#/components/schemas/HeatCell" }
+        dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        deploys:
+          type: array
+          description: "The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read."
+          items:
+            type: object
+            required: [at, label]
+            properties:
+              at: { type: string, format: date-time }
+              label: { type: string }
+        from: { type: string, format: date, description: "With `split`: the first UTC day the main numbers read." }
+        before:
+          $ref: "#/components/schemas/HeatmapWindow"
+        forms:
+          type: array
+          description: "Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`."
+          items: { $ref: "#/components/schemas/FormField" }
+        segments:
+          type: array
+          description: "The segments this project declared, at most 4, oldest first: what the overlay offers to filter by."
+          items: { type: string }
         scroll:
           type: array
           description: "21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %."
@@ -1912,6 +2069,29 @@ components:
             How many pages this plan keeps a heatmap for, its busiest by views.
             Absent when unlimited. A page with views and no heat is one outside
             them.
+    HeatmapWindow:
+      type: object
+      description: "The window before a `split`, read exactly like the main numbers."
+      required: [from, to, views, clicks, rage, dead, hits, scroll, forms]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date, description: "Exclusive: the split's day." }
+        views: { type: integer }
+        clicks: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        rage: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        hits: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
+        scroll: { type: array, items: { type: integer } }
+        forms: { type: array, items: { $ref: "#/components/schemas/FormField" } }
+    FormField:
+      type: object
+      required: [selector, focus, fill, submit, left]
+      properties:
+        selector: { type: string }
+        focus: { type: integer }
+        fill: { type: integer }
+        submit: { type: integer, description: "Non-zero on a form element: the views that submitted it." }
+        left: { type: integer, description: "The views whose last focused field in an unsubmitted form was this one." }
     HeatmapLinkRequest:
       type: object
       required: [path]
@@ -4177,6 +4357,100 @@ paths:
                         lastAt: { type: string, format: date-time }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/product-alerts:
+    get:
+      tags: [alerts]
+      summary: The current project's product alert rules, oldest first, each with its state.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ProductAlert" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [alerts]
+      summary: |
+        Add a rule to the current project. Any member who can sign in may. The
+        workspace's rule count is a plan axis (Free 2, paid unlimited): past it
+        the answer is a 402 naming the plan that lifts it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductAlertWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAlert" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+
+  /v1/product-alerts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [alerts]
+      summary: Change a rule of the current project; a change resets its episode.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductAlertWrite" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAlert" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [alerts]
+      summary: Delete a rule of the current project.
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/web/segments:
+    get:
+      tags: [web]
+      summary: The segment names the current project accepts from its site tag, oldest first.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebSegments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [web]
+      summary: |
+        Replace the names the current project accepts as segments, at most 4,
+        each 1-24 of a-z, 0-9, _ and -, never four digits in a row. A signed-in
+        member who can manage the project, or the project's SECRET key (the
+        CLI's `npx upcontrol web --segments`); a public key is refused, because
+        a page holding it could otherwise declare its own. Names dropped from
+        the list stop being recorded; what they recorded is kept.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebSegments" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebSegments" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/heatmap/link:
     post:
       tags: [web]
@@ -4481,6 +4755,21 @@ paths:
           required: false
           description: "Absent: the deepest range the plan reaches, so a first look is never a 402. The answer names the range it used."
           schema: { type: string, enum: ["24h", "7d", "31d"] }
+        - name: split
+          in: query
+          required: false
+          description: "A moment to compare around, usually a deploy's: the main numbers read from that UTC day to today, `before` the same number of days before it. Day-exact inside the last 7 days, whole weeks past them (older heat is kept per week). `range` is ignored when this is present."
+          schema: { type: string, format: date-time }
+        - name: segment
+          in: query
+          required: false
+          description: "Only the views the site marked with this segment. Absent or empty: every view, marked or not."
+          schema: { type: string }
+        - name: source
+          in: query
+          required: false
+          description: "Only the views whose page load came from this kind of source. Absent or empty: every view."
+          schema: { type: string, enum: ["", search, social, campaign, referral, direct] }
       responses:
         "200":
           description: OK

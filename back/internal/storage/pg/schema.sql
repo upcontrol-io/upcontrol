@@ -1181,3 +1181,107 @@ UPDATE person p SET email_verified_at = p.created_at
    AND (EXISTS (SELECT 1 FROM session s WHERE s.person_id = p.id)
         OR EXISTS (SELECT 1 FROM web_events e WHERE e.person_id = p.id AND e.name = 'signed_in'));
 
+-- Engaged time, an hourly rollup beside web_heat rather than a kind inside it:
+-- web_heat keeps only a plan's busiest pages and folds weeks, and an average
+-- read over three pages, or a 31-day line in weekly points, would be a wrong
+-- number rather than a coarse one. One row is one path on one device in one
+-- UTC hour. views counts the page views the door stored; ms adds what each
+-- heat beacon reports as engaged since the previous one (the tab visible and
+-- input in the last 30 s); r10..r300 count the views that reached 10, 30, 120
+-- and 300 engaged seconds, each sent once a view, so reach is exact rather
+-- than read off an average. A heat beacon lands in its own hour, which may be
+-- the hour after its view. ucworker's history-trim drops rows past the web
+-- depth, like web_heat.
+CREATE TABLE web_engage (
+  tenant_id     bigint NOT NULL,
+  project_id    bigint NOT NULL,
+  hour          timestamptz NOT NULL,
+  path          text NOT NULL,
+  device        text NOT NULL,
+  views         bigint NOT NULL DEFAULT 0,
+  ms            bigint NOT NULL DEFAULT 0,
+  r10           bigint NOT NULL DEFAULT 0,
+  r30           bigint NOT NULL DEFAULT 0,
+  r120          bigint NOT NULL DEFAULT 0,
+  r300          bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, project_id, hour, path, device)
+);
+
+-- Segments: what the site says about a visitor (member, anon, trial, new),
+-- set by data-segment on the tag or upcontrol('segment', name), and the kind
+-- of source the page load came from (search, social, campaign, referral,
+-- direct), worked out by the script. Neither is an identity: a segment is one
+-- of at most four short names the project declared (PUT /v1/web/segments),
+-- and a source is a fixed class. '' is "not marked" on both, which every read without a filter
+-- still counts.
+--
+-- Both join the heat key and the engage key. The compaction's cell caps rank
+-- per path, device, day and kind across every segment and source together, so
+-- a completed day costs no more rows than before; only the current day grows.
+ALTER TABLE web_heat ADD COLUMN segment text NOT NULL DEFAULT '';
+ALTER TABLE web_heat ADD COLUMN source text NOT NULL DEFAULT '';
+ALTER TABLE web_heat DROP CONSTRAINT web_heat_pkey;
+ALTER TABLE web_heat ADD PRIMARY KEY
+  (tenant_id, project_id, path, device, day, kind, segment, source, selector, fx, fy);
+
+ALTER TABLE web_engage ADD COLUMN segment text NOT NULL DEFAULT '';
+ALTER TABLE web_engage ADD COLUMN source text NOT NULL DEFAULT '';
+ALTER TABLE web_engage DROP CONSTRAINT web_engage_pkey;
+ALTER TABLE web_engage ADD PRIMARY KEY (tenant_id, project_id, hour, path, device, segment, source);
+
+-- A project's declared segments, at most four: the cap is what keeps a
+-- segment from becoming a user id. Keyed by project, which a claim keeps.
+CREATE TABLE web_segment (
+  project_id    bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  name          text NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, name)
+);
+
+-- Product alerts: a rule on one event of a project (its count, or the money it
+-- carried in one currency) that tells the project's alert channels when the
+-- last window moved past a threshold against the same hours a week ago, or
+-- went silent. The worker's product-alerts job evaluates every live rule and
+-- keeps the episode here: one message when it starts, one when it ends.
+CREATE TABLE product_alert (
+  id              bigserial PRIMARY KEY,
+  public_id       uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  tenant_id       bigint NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
+  project_id      bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  name            text NOT NULL DEFAULT '',
+  event           text NOT NULL,
+  labels          jsonb NOT NULL DEFAULT '{}',
+  measure         text NOT NULL DEFAULT '' CHECK (measure IN ('', 'amount')),
+  currency        text NOT NULL DEFAULT '',
+  kind            text NOT NULL CHECK (kind IN ('change', 'silence')),
+  direction       text NOT NULL DEFAULT 'any' CHECK (direction IN ('down', 'up', 'any')),
+  percent         int NOT NULL DEFAULT 50,
+  window_hours    int NOT NULL CHECK (window_hours IN (1, 3, 6, 12, 24)),
+  widget_id       text NOT NULL DEFAULT '',
+  paused          boolean NOT NULL DEFAULT false,
+  -- The episode: firing since last_fired_at; learning when the week before
+  -- holds too little to compare with, so the rule keeps quiet.
+  state           text NOT NULL DEFAULT 'learning' CHECK (state IN ('ok', 'firing', 'learning')),
+  last_fired_at   timestamptz,
+  last_checked_at timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX product_alert_by_tenant ON product_alert (tenant_id, created_at);
+CREATE INDEX product_alert_by_project ON product_alert (project_id, created_at);
+
+-- The rule count is a workspace axis, NULL = unlimited: Free keeps two, every
+-- paid plan and Self-hosted have no ceiling (owner decision, 2026-10-19).
+ALTER TABLE plan_entitlement ADD COLUMN product_alerts int;
+UPDATE plan_entitlement SET product_alerts = CASE plan WHEN 'Free' THEN 2 END;
+
+-- Product alerts read one event's rows over a window every five minutes, actor
+-- or not, and the only index that served them was (tenant_id, project_id, ts):
+-- every row of the window was fetched just to test its name, page views
+-- included. Built concurrently, so a busy events table keeps taking writes. A
+-- failed concurrent build leaves an INVALID index that IF NOT EXISTS would skip
+-- on the retry, so the retry drops it first. The new index covers the partial
+-- one on the same columns (WHERE actor <> ''), which only costs writes now.
+DROP INDEX CONCURRENTLY IF EXISTS events_by_name;
+CREATE INDEX CONCURRENTLY events_by_name ON events (tenant_id, project_id, name, ts);
+DROP INDEX CONCURRENTLY IF EXISTS events_people_by_name;
+

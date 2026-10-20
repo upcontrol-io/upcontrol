@@ -26,6 +26,7 @@ import (
 	"go.upcontrol.io/back/internal/notify/mailer"
 	"go.upcontrol.io/back/internal/platform/app"
 	"go.upcontrol.io/back/internal/platform/config"
+	"go.upcontrol.io/back/internal/productalert"
 	"go.upcontrol.io/back/internal/storage/pg"
 	"go.upcontrol.io/back/internal/storage/pgstore"
 )
@@ -193,6 +194,15 @@ func Start(ctx context.Context, d app.Deps, pool *pg.Pool) error {
 		}
 	})
 	jobs += "+errorlog"
+	// Product alerts, every 5 minutes: each live rule's window against the
+	// same hours a week ago, one message per episode start and end.
+	alerts := productalert.New(pool, pgs, d.Logger)
+	go runWithLock(ctx, pool, d, "product-alerts", 5*time.Minute, func(ctx context.Context) {
+		if err := alerts.Tick(ctx); err != nil {
+			d.Logger.Warn("product alerts tick error", "err", err)
+		}
+	})
+	jobs += "+product-alerts"
 	// Heartbeat miss sweep, every minute: a window that closed without
 	// a ping is a failed check. Shares the lifecycle with detect below.
 	hb := heartbeat.New(pool, pgs, lc)
