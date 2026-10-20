@@ -1211,8 +1211,8 @@ CREATE TABLE web_engage (
 -- set by data-segment on the tag or upcontrol('segment', name), and the kind
 -- of source the page load came from (search, social, campaign, referral,
 -- direct), worked out by the script. Neither is an identity: a segment is one
--- of at most four short names a project keeps, first come, and a source is a
--- fixed class. '' is "not marked" on both, which every read without a filter
+-- of at most four short names the project declared (PUT /v1/web/segments),
+-- and a source is a fixed class. '' is "not marked" on both, which every read without a filter
 -- still counts.
 --
 -- Both join the heat key and the engage key. The compaction's cell caps rank
@@ -1229,7 +1229,7 @@ ALTER TABLE web_engage ADD COLUMN source text NOT NULL DEFAULT '';
 ALTER TABLE web_engage DROP CONSTRAINT web_engage_pkey;
 ALTER TABLE web_engage ADD PRIMARY KEY (tenant_id, project_id, hour, path, device, segment, source);
 
--- A project's segments, at most four, first come: the cap is what keeps a
+-- A project's declared segments, at most four: the cap is what keeps a
 -- segment from becoming a user id. Keyed by project, which a claim keeps.
 CREATE TABLE web_segment (
   project_id    bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,
@@ -1273,4 +1273,15 @@ CREATE INDEX product_alert_by_project ON product_alert (project_id, created_at);
 -- paid plan and Self-hosted have no ceiling (owner decision, 2026-10-19).
 ALTER TABLE plan_entitlement ADD COLUMN product_alerts int;
 UPDATE plan_entitlement SET product_alerts = CASE plan WHEN 'Free' THEN 2 END;
+
+-- Product alerts read one event's rows over a window every five minutes, actor
+-- or not, and the only index that served them was (tenant_id, project_id, ts):
+-- every row of the window was fetched just to test its name, page views
+-- included. Built concurrently, so a busy events table keeps taking writes. A
+-- failed concurrent build leaves an INVALID index that IF NOT EXISTS would skip
+-- on the retry, so the retry drops it first. The new index covers the partial
+-- one on the same columns (WHERE actor <> ''), which only costs writes now.
+DROP INDEX CONCURRENTLY IF EXISTS events_by_name;
+CREATE INDEX CONCURRENTLY events_by_name ON events (tenant_id, project_id, name, ts);
+DROP INDEX CONCURRENTLY IF EXISTS events_people_by_name;
 

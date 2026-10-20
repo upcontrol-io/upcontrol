@@ -1221,6 +1221,14 @@ components:
         value: { type: number }
 
     # --- plan ---------------------------------------------------------------
+    WebSegments:
+      type: object
+      required: [names]
+      properties:
+        names:
+          type: array
+          maxItems: 4
+          items: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
     ProductAlert:
       type: object
       description: "A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window."
@@ -1977,7 +1985,7 @@ components:
         r: { type: string, description: "view: document.referrer. Stored as its host; a referrer on the page's own host is dropped." }
         q: { type: string, description: "view: location.search. Only utm_source, utm_medium and utm_campaign are kept." }
         f: { type: string, description: "view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label." }
-        g: { type: string, description: "view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment." }
+        g: { type: string, description: "view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view." }
         fm:
           type: array
           description: "heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent."
@@ -2033,7 +2041,7 @@ components:
         dead: { type: array, items: { $ref: "#/components/schemas/HeatCell" } }
         deploys:
           type: array
-          description: "The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around."
+          description: "The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read."
           items:
             type: object
             required: [at, label]
@@ -2049,7 +2057,7 @@ components:
           items: { $ref: "#/components/schemas/FormField" }
         segments:
           type: array
-          description: "The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by."
+          description: "The segments this project declared, at most 4, oldest first: what the overlay offers to filter by."
           items: { type: string }
         scroll:
           type: array
@@ -4408,6 +4416,40 @@ paths:
         "204": { description: Deleted }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/web/segments:
+    get:
+      tags: [web]
+      summary: The segment names the current project accepts from its site tag, oldest first.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebSegments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [web]
+      summary: |
+        Replace the names the current project accepts as segments, at most 4,
+        each 1-24 of a-z, 0-9, _ and -, never four digits in a row. A signed-in
+        member who can manage the project, or the project's SECRET key (the
+        CLI's `npx upcontrol web --segments`); a public key is refused, because
+        a page holding it could otherwise declare its own. Names dropped from
+        the list stop being recorded; what they recorded is kept.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebSegments" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebSegments" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/heatmap/link:
     post:

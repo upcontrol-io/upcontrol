@@ -31,6 +31,7 @@ interface WebMock {
   url: string;
   seen: Seen[];
   setMint(status: number, code?: string): void;
+  setSegments(status: number): void;
   close(): Promise<void>;
 }
 
@@ -38,6 +39,7 @@ function mockWeb(): Promise<WebMock> {
   const seen: Seen[] = [];
   let mintStatus = 201;
   let mintCode = '';
+  let segStatus = 200;
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
@@ -62,6 +64,12 @@ function mockWeb(): Promise<WebMock> {
             }),
           );
         }
+      } else if (req.url === '/v1/web/segments' && req.method === 'PUT') {
+        if (segStatus !== 200) {
+          res.writeHead(segStatus).end(JSON.stringify({ error: { code: 'bad_segments', message: 'stub segment refusal' } }));
+        } else {
+          res.writeHead(200).end(JSON.stringify({ names: (body as { names: string[] }).names }));
+        }
       } else if (req.url === '/v1/install/status') {
         // A site-only install: page views, no marker, no log lines.
         res.writeHead(200).end(JSON.stringify({ verified: false, lines: 0, recent: [], web: { views: 2 } }));
@@ -78,6 +86,9 @@ function mockWeb(): Promise<WebMock> {
         setMint: (s, c) => {
           mintStatus = s;
           mintCode = c ?? '';
+        },
+        setSegments: (s) => {
+          segStatus = s;
         },
         close: () => new Promise<void>((r) => server.close(() => r())),
       }),
@@ -243,6 +254,68 @@ test('no key exits 2 and stdout stays empty', async () => {
   assert.equal(code, 2, 'no key must exit 2, the code verify uses');
   assert.equal(stdout, '');
   assert.match(stderr, /no key/);
+  assert.ok(!stdout.includes('uc_live_') && !stderr.includes('uc_live_'), 'THE SECRET KEY MUST NEVER APPEAR IN OUTPUT');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('--segments PUTs the list with the secret key after the mint, says it, never prints the key', async () => {
+  const srv = await mockWeb();
+  const cwd = webCwd();
+  const { stdout, stderr, code } = await runWeb(cwd, ['web', 'example.com', '--segments', ' member, ,anon,', '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 0);
+  assert.equal(srv.seen.length, 2);
+  assert.equal(srv.seen[0].url, '/v1/keys');
+  assert.equal(srv.seen[1].method, 'PUT');
+  assert.equal(srv.seen[1].url, '/v1/web/segments');
+  assert.equal(srv.seen[1].key, KEY, 'the PUT must carry the secret key');
+  assert.deepEqual(srv.seen[1].body, { names: ['member', 'anon'] });
+  const line = JSON.parse(stdout.trim()) as { tag: string; segments: string[] };
+  assert.deepEqual(line.segments, ['member', 'anon']);
+  assert.match(stderr, /^segments: member, anon$/m);
+  assert.ok(!stdout.includes('uc_live_') && !stderr.includes('uc_live_'), 'THE SECRET KEY MUST NEVER APPEAR IN OUTPUT');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a bad segment name exits 2 naming it before any request', async () => {
+  const srv = await mockWeb();
+  const cwd = webCwd();
+  for (const bad of ['Member', 'cohort2026', 'a'.repeat(25), 'a b']) {
+    const r = await runWeb(cwd, ['web', 'example.com', '--segments', `member,${bad}`, '--endpoint', srv.url]);
+    assert.equal(r.code, 2, bad);
+    assert.ok(r.stderr.includes(`not a segment name: ${bad.trim()}`), r.stderr);
+  }
+  const many = await runWeb(cwd, ['web', 'example.com', '--segments', 'a,b,c,d,e', '--endpoint', srv.url]);
+  assert.equal(many.code, 2);
+  assert.match(many.stderr, /at most 4 segments/);
+  await srv.close();
+  assert.equal(srv.seen.length, 0, 'a bad segment list must not reach the server');
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('no --segments sends no PUT', async () => {
+  const srv = await mockWeb();
+  const cwd = webCwd();
+  const { stdout, stderr, code } = await runWeb(cwd, ['web', 'example.com', '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 0);
+  assert.ok(!srv.seen.some((s) => s.url === '/v1/web/segments'));
+  assert.equal((JSON.parse(stdout.trim()) as { segments?: string[] }).segments, undefined);
+  assert.doesNotMatch(stderr, /segments:/);
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test('a refused PUT still prints the tag, then the server message, and exits 3', async () => {
+  const srv = await mockWeb();
+  srv.setSegments(400);
+  const cwd = webCwd();
+  const { stdout, stderr, code } = await runWeb(cwd, ['web', 'example.com', '--segments', 'member', '--endpoint', srv.url]);
+  await srv.close();
+  assert.equal(code, 3);
+  const line = JSON.parse(stdout.trim()) as { tag: string; segments?: string[] };
+  assert.match(line.tag, /data-key="uc_pub_/);
+  assert.equal(line.segments, undefined);
+  assert.match(stderr, /segments: stub segment refusal \(HTTP 400\)/);
   assert.ok(!stdout.includes('uc_live_') && !stderr.includes('uc_live_'), 'THE SECRET KEY MUST NEVER APPEAR IN OUTPUT');
   rmSync(cwd, { recursive: true, force: true });
 });

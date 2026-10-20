@@ -87,11 +87,21 @@ func TestProductAlertsRoundTrip(t *testing.T) {
 	if code != http.StatusOK || got.Percent != 80 || got.State != "learning" || got.LastFiredAt != "" {
 		t.Fatalf("a changed threshold resets the episode = %d %s", code, body)
 	}
+	// A pause closes the episode, so a resume never sends a stale recovery.
+	if _, err := pool.Raw().Exec(t.Context(),
+		`UPDATE product_alert SET state = 'firing', last_fired_at = now() WHERE tenant_id = $1`, tenantID); err != nil {
+		t.Fatalf("put the rule in an episode: %v", err)
+	}
 	code, body = sessionCall(t, h, http.MethodPatch, "/v1/product-alerts/"+a.ID, `{"paused":true}`)
 	got = productAlertOut{}
 	_ = json.Unmarshal([]byte(body), &got)
-	if code != http.StatusOK || got.State != "paused" || !got.Paused {
+	if code != http.StatusOK || got.State != "paused" || !got.Paused || got.LastFiredAt != "" {
 		t.Fatalf("a paused rule reads as paused = %d %s", code, body)
+	}
+	var stored string
+	if err := pool.Raw().QueryRow(t.Context(),
+		`SELECT state FROM product_alert WHERE tenant_id = $1`, tenantID).Scan(&stored); err != nil || stored != "learning" {
+		t.Fatalf("a paused firing rule is stored %q (err %v), want learning", stored, err)
 	}
 	if code, body := sessionCall(t, h, http.MethodPatch, "/v1/product-alerts/"+a.ID, `{"currency":"USD"}`); code != http.StatusBadRequest {
 		t.Fatalf("a currency without measure = %d %s", code, body)

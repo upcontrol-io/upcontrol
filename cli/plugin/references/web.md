@@ -89,10 +89,13 @@ can read the map of members and of anonymous visitors apart:
   upcontrol('segment', user ? 'member' : 'anon');
   ```
 
-A segment is 1-24 of `a-z`, `0-9`, `_` and `-`, never an id, an email or a
-name, and a project keeps its first four, so pick them on purpose (`member`,
-`anon`, `trial`, `new` for an account younger than a week). Never send a test
-value from a dev machine: it takes one of the four for good. The source of a
+Declare the names first, or they are ignored: re-run the web command with
+`--segments member,anon` (it declares them with the project's key and prints
+the list), or the owner adds them in the app under Connect, website card. A
+segment is 1-24 of `a-z`, `0-9`, `_` and `-`, never an id, an email or a
+name, at most four per project (`member`, `anon`, `trial`, `new` for an
+account younger than a week). A segment set after the page loaded applies from
+the next page view. The source of a
 visit (search, social, campaign, referral, direct) is worked out by the script
 itself and needs nothing.
 
@@ -111,7 +114,7 @@ visitor, so `Page /pricing → cta_click` is one funnel within a day. Names are
 1-40 characters, never `uc.`; fields are short strings, never an email.
 
 To credit signups and payments to a campaign, have the signup form carry
-`upcontrol('source')` (it returns the visit's `source`, `utm_*` and `landing`)
+`upcontrol('source') || {}` (it returns the visit's `source`, `utm_*` and `landing`; before the script has loaded it returns nothing)
 to the backend, and send it on the server's own event:
 `track('signup', { source, campaign: utm_campaign })`. The visit and the
 account are never joined; the event carries where it came from.

@@ -2388,6 +2388,13 @@ func validateLayout(doc apigen.DashboardLayout) string {
 			if m.StepWhere != nil && len(*m.StepWhere) > steps {
 				return fmt.Sprintf("widget %q narrows more steps than it has", wd.Id)
 			}
+			if m.StepWhere != nil {
+				for i, where := range *m.StepWhere {
+					if msg := labelsMsg(where, fmt.Sprintf("widget %q step %d", wd.Id, i+1)); msg != "" {
+						return msg
+					}
+				}
+			}
 		}
 	}
 	return ""

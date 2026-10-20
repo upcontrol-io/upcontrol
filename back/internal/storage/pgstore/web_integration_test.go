@@ -107,15 +107,104 @@ func TestInsertWebEventCapsOneVisitorsDay(t *testing.T) {
 	if events != maxVisitEvents || views != 5 {
 		t.Fatalf("%d events and %d page views stored, want %d and 5", events, views, maxVisitEvents)
 	}
-	// The next UTC day starts a fresh budget.
+	// The next UTC day starts a fresh budget, once that day holds a page view.
+	if err := s.InsertPageview(ctx, tenant, project, at.AddDate(0, 0, 1), map[string]string{"path": "/"}, "w:v"); err != nil {
+		t.Fatalf("page view: %v", err)
+	}
 	if err := s.InsertWebEvent(ctx, tenant, project, at.AddDate(0, 0, 1), "signup", map[string]string{"path": "/"}, "w:v"); err != nil {
 		t.Fatalf("event: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE tenant_id = $1 AND name = 'signup'`, tenant).Scan(&events); err != nil || events != maxVisitEvents+1 {
 		t.Fatalf("%d events after a new day (%v), want %d", events, err, maxVisitEvents+1)
 	}
-	if q, _ := s.WebQuota(ctx, tenant, at); q.Visits != 1 {
-		t.Fatalf("%d visits, want the page views' 1: an event counts no visit", q.Visits)
+	if q, _ := s.WebQuota(ctx, tenant, at); q.Visits != 2 {
+		t.Fatalf("%d visits, want the page views' 2: an event counts no visit", q.Visits)
+	}
+}
+
+// A page event needs a stored page view by the same visitor in the project
+// since the UTC day began: yesterday's view, another visitor's or another
+// project's does not admit it.
+func TestInsertWebEventNeedsAView(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	_, other := seedWebTenant(t, pool, "Agency")
+	at := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	for _, v := range []struct {
+		project int64
+		ts      time.Time
+		actor   string
+	}{{project, at.AddDate(0, 0, -1), "w:a"}, {project, at, "w:b"}, {other, at, "w:a"}} {
+		if err := s.InsertPageview(ctx, tenant, v.project, v.ts, map[string]string{"path": "/"}, v.actor); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+	}
+	event := func(actor string) {
+		t.Helper()
+		if err := s.InsertWebEvent(ctx, tenant, project, at.Add(time.Minute), "signup", map[string]string{"path": "/"}, actor); err != nil {
+			t.Fatalf("event: %v", err)
+		}
+	}
+	event("w:a")
+	event("w:b")
+	var stored string
+	if err := pool.QueryRow(ctx, `SELECT coalesce(string_agg(actor, ','), '') FROM events WHERE tenant_id = $1 AND name = 'signup'`, tenant).Scan(&stored); err != nil || stored != "w:b" {
+		t.Fatalf("events stored for %q (%v), want w:b alone: the one with a view today here", stored, err)
+	}
+}
+
+// Engaged time lands only on a row a stored page view made: the beacon's
+// hour, else the hour before; with neither nothing is stored.
+func TestAddEngageNeedsAView(t *testing.T) {
+	s, pool := openStore(t)
+	ctx := context.Background()
+	tenant, project := seedWebTenant(t, pool, "Agency")
+	hour := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	labels := map[string]string{"path": "/", "device": "desktop"}
+	// One view at 09:55 and one at 10:05.
+	for _, ts := range []time.Time{hour.Add(-5 * time.Minute), hour.Add(5 * time.Minute)} {
+		if err := s.InsertPageview(ctx, tenant, project, ts, labels, "v"); err != nil {
+			t.Fatalf("page view: %v", err)
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		hour   time.Time
+		path   string
+		stored bool
+	}{
+		{"the view's own hour", hour, "/", true},
+		{"the hour after the 10:05 view", hour.Add(time.Hour), "/", true},
+		{"two hours after it", hour.Add(2 * time.Hour), "/", false},
+		{"a path nobody viewed", hour, "/other", false},
+	} {
+		if ok, err := s.AddEngage(ctx, tenant, project, c.hour, c.path, "desktop", "", "", EngageAdd{MS: 1000, R10: 1}); err != nil || ok != c.stored {
+			t.Errorf("%s: stored %v (%v), want %v", c.name, ok, err, c.stored)
+		}
+	}
+	var rows, ms09, ms10 int64
+	if err := pool.QueryRow(ctx, `SELECT count(*), coalesce(sum(ms) FILTER (WHERE hour = $2), 0), coalesce(sum(ms) FILTER (WHERE hour = $3), 0)
+		FROM web_engage WHERE tenant_id = $1`, tenant, hour.Add(-time.Hour), hour).Scan(&rows, &ms09, &ms10); err != nil {
+		t.Fatalf("read engage: %v", err)
+	}
+	if rows != 2 || ms09 != 0 || ms10 != 2000 {
+		t.Fatalf("%d rows, 09:00 %d ms, 10:00 %d ms; want the views' 2 rows and both beacons on 10:00", rows, ms09, ms10)
+	}
+	// A flood of beacons behind the one 10:05 view cannot outgrow it: at most 30
+	// minutes and one reach per view.
+	for range 5 {
+		if _, err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", "", "", EngageAdd{MS: 1_800_000, R10: 1, R300: 1}); err != nil {
+			t.Fatalf("flood: %v", err)
+		}
+	}
+	var views, ms, r10, r300 int64
+	if err := pool.QueryRow(ctx, `SELECT views, ms, r10, r300 FROM web_engage WHERE tenant_id = $1 AND hour = $2`,
+		tenant, hour).Scan(&views, &ms, &r10, &r300); err != nil {
+		t.Fatalf("read the flooded row: %v", err)
+	}
+	if views != 1 || ms > 1_800_000 || r10 > 1 || r300 > 1 {
+		t.Fatalf("views %d, ms %d, r10 %d, r300 %d; want everything capped by the one view", views, ms, r10, r300)
 	}
 }
 
@@ -258,8 +347,8 @@ func TestWebEngageCountsStoredViewsAndSums(t *testing.T) {
 		}
 	}
 	for _, add := range []EngageAdd{{MS: 4000, R10: 1}, {MS: 26000, R10: 0, R30: 1}} {
-		if err := s.AddEngage(ctx, tenant, project, hour, "/docs", "mobile", "", "", add); err != nil {
-			t.Fatalf("engage: %v", err)
+		if ok, err := s.AddEngage(ctx, tenant, project, hour, "/docs", "mobile", "", "", add); err != nil || !ok {
+			t.Fatalf("engage = %v (%v), want stored", ok, err)
 		}
 	}
 	var views, ms, r10, r30, r120 int64
@@ -290,8 +379,8 @@ func TestWebSeriesReads(t *testing.T) {
 	}
 	engage := func(at time.Time, path, device string, add EngageAdd) {
 		t.Helper()
-		if err := s.AddEngage(ctx, tenant, project, at.Truncate(time.Hour), path, device, "", "", add); err != nil {
-			t.Fatalf("engage: %v", err)
+		if ok, err := s.AddEngage(ctx, tenant, project, at.Truncate(time.Hour), path, device, "", "", add); err != nil || !ok {
+			t.Fatalf("engage = %v (%v), want stored", ok, err)
 		}
 	}
 	// Hour 2: two views of / on desktop, 30 s engaged between them, one past
@@ -354,8 +443,9 @@ func TestTrimHistoryDropsOldWebEngage(t *testing.T) {
 	tenant, project := seedWebTenant(t, pool, "Agency") // 365 days, 31 on the web
 	now := time.Now().UTC().Truncate(time.Hour)
 	for _, hour := range []time.Time{now.AddDate(0, 0, -40), now.Add(-time.Hour)} {
-		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", "", "", EngageAdd{MS: 1000}); err != nil {
-			t.Fatalf("engage: %v", err)
+		if _, err := pool.Exec(ctx, `INSERT INTO web_engage (tenant_id, project_id, hour, path, device, segment, source, views, ms)
+			VALUES ($1, $2, $3, '/', 'desktop', '', '', 1, 1000)`, tenant, project, hour); err != nil {
+			t.Fatalf("seed engage: %v", err)
 		}
 	}
 	if _, err := s.TrimHistory(ctx); err != nil {
@@ -371,30 +461,44 @@ func TestTrimHistoryDropsOldWebEngage(t *testing.T) {
 	}
 }
 
-// A project keeps its first four segments: a fifth is refused, an admitted
-// one answers yes again, and the list reads oldest first.
-func TestAdmitSegment(t *testing.T) {
+// ReplaceSegments makes the list the project's whole set: a dropped name goes,
+// a kept one keeps its place, a new one lands after it, another project is
+// untouched, and an empty list clears the set.
+func TestReplaceSegments(t *testing.T) {
 	s, pool := openStore(t)
 	ctx := context.Background()
 	_, project := seedWebTenant(t, pool, "Agency")
 	_, other := seedWebTenant(t, pool, "Agency")
-	for _, name := range []string{"zeta", "alpha", "mid", "beta"} {
-		if ok, err := s.AdmitSegment(ctx, project, name); err != nil || !ok {
-			t.Fatalf("admit %s = %v (%v), want admitted", name, ok, err)
+	for _, step := range []struct {
+		project int64
+		names   []string
+	}{{project, []string{"zeta"}}, {project, []string{"zeta", "alpha"}}, {other, []string{"beta"}}} {
+		if err := s.ReplaceSegments(ctx, step.project, step.names); err != nil {
+			t.Fatalf("replace %v: %v", step.names, err)
 		}
 	}
-	if ok, err := s.AdmitSegment(ctx, project, "fifth"); err != nil || ok {
-		t.Fatalf("a fifth name = %v (%v), want refused", ok, err)
-	}
-	if ok, err := s.AdmitSegment(ctx, project, "alpha"); err != nil || !ok {
-		t.Fatalf("an admitted name again = %v (%v), want admitted", ok, err)
-	}
-	if ok, err := s.AdmitSegment(ctx, other, "fifth"); err != nil || !ok {
-		t.Fatalf("another project's first name = %v (%v), want admitted: the cap is per project", ok, err)
+	// A later statement, so a later created_at for the names it adds.
+	if err := s.ReplaceSegments(ctx, project, []string{"mid", "alpha", "zeta"}); err != nil {
+		t.Fatalf("replace: %v", err)
 	}
 	got, err := s.Segments(ctx, project)
-	if err != nil || fmt.Sprint(got) != "[zeta alpha mid beta]" {
-		t.Fatalf("segments = %v (%v), want the four oldest first", got, err)
+	if err != nil || fmt.Sprint(got) != "[zeta alpha mid]" {
+		t.Fatalf("segments = %v (%v), want zeta, alpha, mid: kept names keep their place", got, err)
+	}
+	if err := s.ReplaceSegments(ctx, project, []string{"alpha"}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if got, err = s.Segments(ctx, project); err != nil || fmt.Sprint(got) != "[alpha]" {
+		t.Fatalf("segments = %v (%v), want alpha alone", got, err)
+	}
+	if err := s.ReplaceSegments(ctx, project, []string{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got, err = s.Segments(ctx, project); err != nil || len(got) != 0 {
+		t.Fatalf("segments after an empty list = %v (%v), want none", got, err)
+	}
+	if got, err = s.Segments(ctx, other); err != nil || fmt.Sprint(got) != "[beta]" {
+		t.Fatalf("the other project's segments = %v (%v), want beta untouched", got, err)
 	}
 	if none, err := s.Segments(ctx, 0); err != nil || none == nil || len(none) != 0 {
 		t.Fatalf("no segments = %#v (%v), want []", none, err)
@@ -512,8 +616,8 @@ func TestWebEngageSplitsBySegmentAndSource(t *testing.T) {
 		if err := s.InsertPageview(ctx, tenant, project, at, labels, fmt.Sprintf("v%d", i)); err != nil {
 			t.Fatalf("page view: %v", err)
 		}
-		if err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", v.segment, v.source, EngageAdd{MS: 10000, R10: 1}); err != nil {
-			t.Fatalf("engage: %v", err)
+		if ok, err := s.AddEngage(ctx, tenant, project, hour, "/", "desktop", v.segment, v.source, EngageAdd{MS: 10000, R10: 1}); err != nil || !ok {
+			t.Fatalf("engage = %v (%v), want stored", ok, err)
 		}
 	}
 	var rows int64

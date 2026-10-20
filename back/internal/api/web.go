@@ -38,8 +38,7 @@ type webStore interface {
 	InsertPageview(ctx context.Context, tenantID, projectID int64, ts time.Time, labels map[string]string, actor string) error
 	InsertWebEvent(ctx context.Context, tenantID, projectID int64, ts time.Time, name string, labels map[string]string, actor string) error
 	AddHeat(ctx context.Context, tenantID, projectID int64, day time.Time, path, device, segment, source string, cells []pgstore.HeatAdd) error
-	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) error
-	AdmitSegment(ctx context.Context, projectID int64, name string) (bool, error)
+	AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) (bool, error)
 	Segments(ctx context.Context, projectID int64) ([]string, error)
 	DailySalt(ctx context.Context, day time.Time) ([]byte, error)
 	PublicOrigins(ctx context.Context, tenantID, projectID int64) ([]string, error)
@@ -55,36 +54,68 @@ type webStore interface {
 }
 
 // webDoor is the /w handler pair. The day's visitor salt is cached per UTC
-// date: one database read per day, not one per beacon. Segment admissions are
-// cached per project and name for segmentTTL, refusals included, so a site
-// marking every beacon costs one query per name per ten minutes.
+// date: one database read per day, not one per beacon. A project's declared
+// segments are cached in segments.
 type webDoor struct {
 	ing      *ingest.Ingester
 	store    webStore
 	describe func(ip, ua string) (country, os, browser string)
 	scrubOff bool
 	now      func() time.Time
+	segments *segmentCache
 
-	mu       sync.Mutex
-	saltDay  string
-	salt     []byte
-	segments map[segmentKey]segmentAnswer
+	mu      sync.Mutex
+	saltDay string
+	salt    []byte
 }
 
-type segmentKey struct {
-	project int64
-	name    string
+// segmentCache holds each project's declared segment names for segmentTTL, so
+// a site marking every beacon costs one query per project per ten minutes,
+// whatever it marks. webSegments is the process's one cache: PUT
+// /v1/web/segments, on the writeAPI, drops a project from it.
+//
+// ponytail: per process; another replica, or a read racing the PUT, keeps
+// the old set for up to segmentTTL. A shared generation if that matters.
+type segmentCache struct {
+	mu sync.Mutex
+	m  map[int64]segmentSet
 }
 
-type segmentAnswer struct {
-	ok    bool
+type segmentSet struct {
+	names []string
 	until time.Time
 }
+
+var webSegments = &segmentCache{}
 
 const (
 	segmentTTL       = 10 * time.Minute
 	maxSegmentCached = 10000
 )
+
+func (c *segmentCache) get(projectID int64, now time.Time) ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, ok := c.m[projectID]
+	return s.names, ok && !now.After(s.until)
+}
+
+func (c *segmentCache) put(projectID int64, names []string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// ponytail: the whole cache drops at the bound; per-entry eviction if a
+	// deployment ever holds that many live projects.
+	if c.m == nil || len(c.m) >= maxSegmentCached {
+		c.m = map[int64]segmentSet{}
+	}
+	c.m[projectID] = segmentSet{names, now.Add(segmentTTL)}
+}
+
+func (c *segmentCache) forget(projectID int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.m, projectID)
+}
 
 // webStorePool is the production webStore: the pgstore methods plus the
 // history wall, read from the same pool every other door reads.
@@ -119,6 +150,7 @@ func NewWebDoor(ing *ingest.Ingester, pgs *pgstore.Store, pool *pg.Pool, describ
 		describe: describe,
 		scrubOff: scrubOff,
 		now:      time.Now,
+		segments: webSegments,
 	}
 }
 
@@ -259,31 +291,21 @@ var (
 )
 
 // segment answers the beacon's g as stored: itself when valid and one of the
-// project's segments, empty otherwise. The store is asked outside the lock.
+// names the project declared, empty otherwise, so a page cannot invent one.
+// The store is asked outside the cache's lock.
 func (d *webDoor) segment(ctx context.Context, now time.Time, projectID int64, g string) (string, error) {
 	if !validSegment(g) {
 		return "", nil
 	}
-	key := segmentKey{projectID, g}
-	d.mu.Lock()
-	a, hit := d.segments[key]
-	d.mu.Unlock()
-	if !hit || now.After(a.until) {
-		ok, err := d.store.AdmitSegment(ctx, projectID, g)
-		if err != nil {
+	names, hit := d.segments.get(projectID, now)
+	if !hit {
+		var err error
+		if names, err = d.store.Segments(ctx, projectID); err != nil {
 			return "", err
 		}
-		a = segmentAnswer{ok: ok, until: now.Add(segmentTTL)}
-		d.mu.Lock()
-		// ponytail: the whole cache drops at the bound; per-entry eviction if
-		// a deployment ever holds that many live names.
-		if d.segments == nil || len(d.segments) >= maxSegmentCached {
-			d.segments = map[segmentKey]segmentAnswer{}
-		}
-		d.segments[key] = a
-		d.mu.Unlock()
+		d.segments.put(projectID, names, now)
 	}
-	if !a.ok {
+	if !slices.Contains(names, g) {
 		return "", nil
 	}
 	return g, nil
@@ -590,9 +612,10 @@ func (d *webDoor) Collect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if engage != (pgstore.EngageAdd{}) {
-		// ponytail: the beacon's own hour, which may be the hour after its
-		// view; the reads divide by views across that edge.
-		if err := d.store.AddEngage(ctx, t.TenantID, t.ProjectID, now.Truncate(time.Hour), path, device, segment, source, engage); err != nil {
+		// The store adds into the row the view's own insert made, this hour's
+		// or the last; with no view behind the beacon nothing is stored, and
+		// the browser has nothing to be told.
+		if _, err := d.store.AddEngage(ctx, t.TenantID, t.ProjectID, now.Truncate(time.Hour), path, device, segment, source, engage); err != nil {
 			writeAPIErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -650,7 +673,8 @@ type heatOut struct {
 	Device string `json:"device"`
 	Range  string `json:"range"`
 	heatWindow
-	// The project's latest deploys and releases inside the web depth.
+	// The deploys and releases a split can still compare around, on the first
+	// look only; [] on every other read.
 	Deploys []heatDeploy `json:"deploys"`
 	// With a split: the window before it.
 	Before *heatWindow `json:"before,omitempty"`
@@ -753,22 +777,32 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 	}
 	now := d.now().UTC()
 	today := now.Truncate(24 * time.Hour)
+	// No range and no split is the overlay's first look, the only answer that
+	// lists deploys: every later read is one the overlay asked for itself.
+	firstLook := rng == "" && split.IsZero()
 	var splitDay, beforeFrom time.Time
 	wall := days // the oldest day read, in days back from today; 0 is no wall
 	switch {
 	case !split.IsZero():
 		// After the split: its UTC day to today, n days. Before it: the n days
-		// before that. `range` is ignored; the answer names the deepest.
+		// before that. `range` is ignored; the answer names the deepest. A
+		// split whose before window the plan cannot read is one the overlay
+		// could not have offered, so a 400, not a wall.
 		splitDay = split.UTC().Truncate(24 * time.Hour)
-		if splitDay.After(today) || splitDay.Before(today.AddDate(0, 0, -deepDays)) {
+		fits := false
+		if !splitDay.After(today) {
+			if fits, err = d.splitFits(ctx, tenantID, splitDay, today); err != nil {
+				writeAPIErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+		}
+		if !fits {
 			writeAPIErr(w, http.StatusBadRequest, "bad_request")
 			return
 		}
 		days = int(today.Sub(splitDay) / (24 * time.Hour)) // back to the split's day: n is days+1
 		beforeFrom = splitDay.AddDate(0, 0, -(days + 1))
-		// The wall is the before window's first day, capped at 31: no web
-		// data is kept past them whatever the plan.
-		rng, wall = deepRng, min(2*days+1, rangeDaysWeb["31d"])
+		rng, wall = deepRng, 0
 	case rng == "":
 		// No range asked is the overlay's first look: the deepest one the plan reaches, so
 		// opening a map is never a wall. The wall stays where the reader asks for more.
@@ -806,10 +840,26 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		b.From, b.To, b.Moves = beforeFrom.Format(time.DateOnly), splitDay.Format(time.DateOnly), nil
 		before = &b
 	}
-	deploys, releases, err := d.store.RecentDeploys(ctx, tenantID, projectID, today.AddDate(0, 0, -deepDays), today.AddDate(0, 0, 1))
-	if err != nil {
-		writeAPIErr(w, http.StatusInternalServerError, "internal")
-		return
+	offered := []heatDeploy{}
+	if firstLook {
+		deploys, releases, err := d.store.RecentDeploys(ctx, tenantID, projectID, today.AddDate(0, 0, -deepDays), today.AddDate(0, 0, 1))
+		if err != nil {
+			writeAPIErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		// Newest first, so the before windows only grow: the first that does
+		// not fit ends the list.
+		for _, dep := range heatDeploys(deploys, releases) {
+			fits, err := d.splitFits(ctx, tenantID, dep.At.UTC().Truncate(24*time.Hour), today)
+			if err != nil {
+				writeAPIErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			if !fits {
+				break
+			}
+			offered = append(offered, dep)
+		}
 	}
 	segments, err := d.store.Segments(ctx, projectID)
 	if err != nil {
@@ -821,11 +871,26 @@ func (d *webDoor) Heatmap(w http.ResponseWriter, r *http.Request) {
 		Device:     device,
 		Range:      rng,
 		heatWindow: after,
-		Deploys:    heatDeploys(deploys, releases),
+		Deploys:    offered,
 		Before:     before,
 		Segments:   segments,
 		HeatPages:  quota.HeatPages,
 	})
+}
+
+// splitFits answers whether a split on splitDay can be compared on this plan:
+// with n days from it through today, the before window reaches 2n - 1 days
+// back, which must be inside the 31 days of web data ever kept and inside
+// the plan's history.
+// ponytail: one history read per call, up to maxHeatDeploys on a first look;
+// derive the plan's depth once if that read ever shows.
+func (d *webDoor) splitFits(ctx context.Context, tenantID int64, splitDay, today time.Time) (bool, error) {
+	wall := 2*int(today.Sub(splitDay)/(24*time.Hour)) + 1
+	if wall > rangeDaysWeb["31d"] {
+		return false, nil
+	}
+	msg, _, err := d.store.HistoryRefusal(ctx, tenantID, wall)
+	return msg == "", err
 }
 
 // heatRead reads one window's numbers: page views over [from, to), and the

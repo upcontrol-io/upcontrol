@@ -1781,7 +1781,7 @@ type Heatmap struct {
 	Clicks []HeatCell     `json:"clicks"`
 	Dead   []HeatCell     `json:"dead"`
 
-	// Deploys The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around.
+	// Deploys The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read.
 	Deploys []struct {
 		At    time.Time `json:"at"`
 		Label string    `json:"label"`
@@ -1807,7 +1807,7 @@ type Heatmap struct {
 	// Scroll 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %.
 	Scroll []int `json:"scroll"`
 
-	// Segments The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by.
+	// Segments The segments this project declared, at most 4, oldest first: what the overlay offers to filter by.
 	Segments []string `json:"segments"`
 
 	// Views Page views of this path on this device in the range: what every other number is read against.
@@ -2876,7 +2876,7 @@ type WebBeacon struct {
 	// Fm heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent.
 	Fm *[][]string `json:"fm,omitempty"`
 
-	// G view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment.
+	// G view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view.
 	G *string `json:"g,omitempty"`
 
 	// H heat: the selectors this view clicked for the first time since its previous heat beacon, at most 300; each counts one view that clicked that element.
@@ -2919,6 +2919,11 @@ type WebBeaconO string
 
 // WebBeaconT defines model for WebBeacon.T.
 type WebBeaconT string
+
+// WebSegments defines model for WebSegments.
+type WebSegments struct {
+	Names []string `json:"names"`
+}
 
 // BadRequest defines model for BadRequest.
 type BadRequest = Error
@@ -3300,6 +3305,9 @@ type PutV1StatusPageJSONRequestBody = StatusPageUpdate
 
 // PostV1TelegramInvitesJSONRequestBody defines body for PostV1TelegramInvites for application/json ContentType.
 type PostV1TelegramInvitesJSONRequestBody PostV1TelegramInvitesJSONBody
+
+// PutV1WebSegmentsJSONRequestBody defines body for PutV1WebSegments for application/json ContentType.
+type PutV1WebSegmentsJSONRequestBody = WebSegments
 
 // PostWTextRequestBody defines body for PostW for text/plain ContentType.
 type PostWTextRequestBody = WebBeacon

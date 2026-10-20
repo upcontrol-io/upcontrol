@@ -109,19 +109,24 @@ func (s *Store) InsertPageview(ctx context.Context, tenantID, projectID int64, t
 }
 
 // InsertWebEvent stores a page's named event under its page views' visitor,
-// unless that visitor already holds maxVisitEvents events other than page
-// views in the project since the UTC day began. A visit is counted by page
-// views, so neither web_usage nor web_engage moves.
+// only when that visitor has a stored page view in the project since the UTC
+// day began, and unless they already hold maxVisitEvents events other than
+// page views there since then. A visitor is minted by a page view, which
+// counts against the month's visits, so forging visitors costs views. A visit
+// is counted by page views, so neither web_usage nor web_engage moves.
 func (s *Store) InsertWebEvent(ctx context.Context, tenantID, projectID int64, ts time.Time, name string, labels map[string]string, actor string) error {
 	ts = ts.UTC()
 	_, err := s.pool.Exec(ctx, `
 		WITH seen AS (
-		  SELECT count(*) AS n FROM (
-		    SELECT 1 FROM events
-		     WHERE tenant_id = $1 AND project_id = $2 AND actor = $6 AND actor <> ''
-		       AND name <> 'uc.pageview' AND ts >= $7 LIMIT $8) x)
+		  SELECT (SELECT count(*) FROM (
+		            SELECT 1 FROM events
+		             WHERE tenant_id = $1 AND project_id = $2 AND actor = $6 AND actor <> ''
+		               AND name <> 'uc.pageview' AND ts >= $7 LIMIT $8) x) AS n,
+		         EXISTS (SELECT 1 FROM events
+		                  WHERE tenant_id = $1 AND project_id = $2 AND actor = $6 AND actor <> ''
+		                    AND name = 'uc.pageview' AND ts >= $7) AS viewed)
 		INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
-		SELECT $1, $2, $3::timestamptz, $4, $5::jsonb, $6 FROM seen WHERE n < $8`,
+		SELECT $1, $2, $3::timestamptz, $4, $5::jsonb, $6 FROM seen WHERE viewed AND n < $8`,
 		tenantID, projectID, ts, name, jsonb(labels), actor, ts.Truncate(24*time.Hour), maxVisitEvents)
 	return err
 }
@@ -132,18 +137,29 @@ type EngageAdd struct {
 	MS, R10, R30, R120, R300 int64
 }
 
-// AddEngage adds a heat beacon's engaged time into its hour's row. One row per
-// statement, so there is no lock order to keep.
-func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add EngageAdd) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO web_engage (tenant_id, project_id, hour, path, device, segment, source, ms, r10, r30, r120, r300)
-		VALUES ($1, $2, $3, $4, $5, $11, $12, $6, $7, $8, $9, $10)
-		ON CONFLICT (tenant_id, project_id, hour, path, device, segment, source) DO UPDATE SET
-		  ms = web_engage.ms + EXCLUDED.ms, r10 = web_engage.r10 + EXCLUDED.r10,
-		  r30 = web_engage.r30 + EXCLUDED.r30, r120 = web_engage.r120 + EXCLUDED.r120,
-		  r300 = web_engage.r300 + EXCLUDED.r300`,
+// AddEngage adds a heat beacon's engaged time into the row a stored page view
+// created: the beacon's hour, else the hour before (a view near the hour's
+// end). With neither there is no view behind the beacon and nothing is
+// stored, so engaged time cannot outgrow the views it divides by. false when
+// no row took it. One row per statement, so there is no lock order to keep.
+func (s *Store) AddEngage(ctx context.Context, tenantID, projectID int64, hour time.Time, path, device, segment, source string, add EngageAdd) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		WITH target AS (
+		  SELECT hour FROM web_engage
+		   WHERE tenant_id = $1 AND project_id = $2 AND hour IN ($3::timestamptz, $3::timestamptz - interval '1 hour')
+		     AND path = $4 AND device = $5 AND segment = $11 AND source = $12
+		   ORDER BY hour DESC LIMIT 1)
+		UPDATE web_engage w SET
+		  -- Never more than the views it divides by can hold: one view and a flood of
+		  -- beacons for it cannot push an average past 30 minutes or a reach past 100%.
+		  ms = least(w.ms + $6, w.views * 1800000),
+		  r10 = least(w.r10 + $7, w.views), r30 = least(w.r30 + $8, w.views),
+		  r120 = least(w.r120 + $9, w.views), r300 = least(w.r300 + $10, w.views)
+		  FROM target
+		 WHERE w.tenant_id = $1 AND w.project_id = $2 AND w.hour = target.hour
+		   AND w.path = $4 AND w.device = $5 AND w.segment = $11 AND w.source = $12`,
 		tenantID, projectID, hour.UTC(), path, device, add.MS, add.R10, add.R30, add.R120, add.R300, segment, source)
-	return err
+	return tag.RowsAffected() > 0, err
 }
 
 // CompactWeb is the daily compaction that bounds web_heat whatever the
@@ -231,24 +247,18 @@ func (s *Store) AddHeat(ctx context.Context, tenantID, projectID int64, day time
 	return err
 }
 
-// AdmitSegment answers whether name is one of the project's segments, making
-// it one while the project holds fewer than four, in one statement. The outer
-// read sees the snapshot from before the insert, so a name already there
-// answers through it and a new one through ins.
-//
-// ponytail: two racing first-time names may both pass the count and land a
-// fifth row; the cap bounds cardinality, it is not a promise.
-func (s *Store) AdmitSegment(ctx context.Context, projectID int64, name string) (bool, error) {
-	var ok bool
-	err := s.pool.QueryRow(ctx, `
-		WITH ins AS (
-		  INSERT INTO web_segment (project_id, name)
-		  SELECT $1, $2 WHERE (SELECT count(*) FROM web_segment WHERE project_id = $1) < 4
-		  ON CONFLICT DO NOTHING RETURNING 1)
-		SELECT EXISTS (SELECT 1 FROM ins)
-		    OR EXISTS (SELECT 1 FROM web_segment WHERE project_id = $1 AND name = $2)`,
-		projectID, name).Scan(&ok)
-	return ok, err
+// ReplaceSegments makes names the project's whole segment set: the rows not in
+// it go, the new ones land, a kept one keeps its created_at. One statement, so
+// one transaction; its two halves touch disjoint names. The caller validates,
+// dedupes and caps the list.
+func (s *Store) ReplaceSegments(ctx context.Context, projectID int64, names []string) error {
+	_, err := s.pool.Exec(ctx, `
+		WITH gone AS (
+		  DELETE FROM web_segment WHERE project_id = $1 AND name <> ALL(coalesce($2::text[], '{}')))
+		INSERT INTO web_segment (project_id, name)
+		SELECT $1, unnest($2::text[])
+		ON CONFLICT DO NOTHING`, projectID, names)
+	return err
 }
 
 // Segments lists the project's segments, oldest first.

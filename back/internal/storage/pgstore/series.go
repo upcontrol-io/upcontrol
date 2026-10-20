@@ -271,7 +271,8 @@ func (s *Store) oldest(ctx context.Context, sql string, tenantID, projectID int6
 }
 
 // TrimHistory drops rollup rows past the tenant's plan depth and answers how
-// many went; the web door's web_heat and web_engage rows and page views trim
+// many went; the web door's web_heat and web_engage rows, page views and the
+// page events its "w:" visitors sent trim
 // on the same join to the web depth, the plan's capped at webDays, web_heat keyed by its
 // UTC day, and a weekly bucket (older than a week, see CompactWeb) by its
 // Sunday, so a week straddling the edge stays whole. Every page view carries
@@ -310,7 +311,7 @@ func (s *Store) TrimHistory(ctx context.Context) (int64, error) {
 		   AND t.id = pr.tenant_id AND p.plan = t.plan
 		   AND p.history_days IS NOT NULL
 		   AND (pr.frozen_at IS NULL OR e.ts > pr.frozen_at)
-		   AND e.name = 'uc.pageview' AND e.actor <> ''
+		   AND e.actor <> '' AND (e.name = 'uc.pageview' OR e.actor LIKE 'w:%')
 		   AND e.ts < date_trunc('day', now(), 'UTC') - make_interval(days => least(p.history_days, $1::int))`, `
 		DELETE FROM web_engage w
 		 USING project pr, tenant t, plan_entitlement p

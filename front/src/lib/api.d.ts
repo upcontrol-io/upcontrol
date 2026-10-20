@@ -3758,6 +3758,76 @@ export interface paths {
         };
         trace?: never;
     };
+    "/v1/web/segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The segment names the current project accepts from its site tag, oldest first. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WebSegments"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Replace the names the current project accepts as segments, at most 4,
+         *     each 1-24 of a-z, 0-9, _ and -, never four digits in a row. A signed-in
+         *     member who can manage the project, or the project's SECRET key (the
+         *     CLI's `npx upcontrol web --segments`); a public key is refused, because
+         *     a page holding it could otherwise declare its own. Names dropped from
+         *     the list stop being recorded; what they recorded is kept.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["WebSegments"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WebSegments"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/heatmap/link": {
         parameters: {
             query?: never;
@@ -5062,6 +5132,9 @@ export interface components {
             };
             value: number;
         };
+        WebSegments: {
+            names: string[];
+        };
         /** @description A rule that watches one event of the project and notifies its alert channels when the count (or the money) moves past a threshold against the same hours a week ago, or goes silent. One message per episode, one when it is back to normal, each naming the deploys and releases in the window. */
         ProductAlert: {
             id: string;
@@ -5475,7 +5548,7 @@ export interface components {
             q?: string;
             /** @description view: the path this tab was on before, the previous SPA path or a same-origin referrer's path. Stored as the page view's `from` label. */
             f?: string;
-            /** @description view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. A project keeps its first 4; any other is stored as no segment. */
+            /** @description view and heat: the segment the site marked this visitor with (`data-segment` on the tag, or `upcontrol('segment', name)`): 1-24 of a-z, 0-9, _ and -, never four digits in a row. Stored only when the project declared that name (`PUT /v1/web/segments`, at most 4); any other is stored as no segment, so a page cannot invent one. A segment changed mid-view applies from the next view. */
             g?: string;
             /** @description heat: form fields and forms this view touched for the first time since its previous heat beacon, at most 100, as [kind, selector]: `focus` (a field got focus), `fill` (a field holds a value when it loses focus), `submit` (a form was submitted, the form's selector), `left` (the last field focused in a form that was not submitted when the page closed or the route changed). Each once per view. Values are never sent. */
             fm?: string[][];
@@ -5521,7 +5594,7 @@ export interface components {
             /** @description One cell per element, x and y 0: n is the page views that clicked it at least once, so n / views is the element's click-through. */
             hits: components["schemas"]["HeatCell"][];
             dead: components["schemas"]["HeatCell"][];
-            /** @description The project's deploys and releases inside the web depth, newest first, at most 10: what the overlay offers to compare around. */
+            /** @description The project's deploys and releases a split can still compare around on this plan (the split's before-window inside the history the plan keeps), newest first, at most 10: what the overlay offers. Filled only on the first look (no `range`, no `split`), empty on every later read. */
             deploys: {
                 /** Format: date-time */
                 at: string;
@@ -5535,7 +5608,7 @@ export interface components {
             before?: components["schemas"]["HeatmapWindow"];
             /** @description Per form field (or form): the page views that focused it, filled it, submitted it (a form) or left the page from it without submitting. Read each against `views`. */
             forms: components["schemas"]["FormField"][];
-            /** @description The segments this project's site has marked visitors with, at most 4, oldest first: what the overlay offers to filter by. */
+            /** @description The segments this project declared, at most 4, oldest first: what the overlay offers to filter by. */
             segments: string[];
             /** @description 21 counts: scroll[i] is the page views whose deepest reach was at least i × 5 %. */
             scroll: number[];

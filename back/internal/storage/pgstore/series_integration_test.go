@@ -649,15 +649,22 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 		[]HeatAdd{{Kind: "click", Selector: "a", N: 1}}); err != nil {
 		t.Fatalf("seed Agency's straddling bucket: %v", err)
 	}
+	// A page event the web door stored and one an SDK sent, both 40 days old:
+	// the door's goes with its page views, the SDK's lives the plan's year.
+	if _, err := pool.Exec(ctx, `INSERT INTO events (tenant_id, project_id, ts, name, labels, actor)
+		VALUES ($1, $2, $3, 'signup', '{}', 'w:0123456789abcdef'), ($1, $2, $3, 'signup', '{}', 'person-1')`,
+		agency, agencyProject, now.AddDate(0, 0, -40)); err != nil {
+		t.Fatalf("seed Agency's old events: %v", err)
+	}
 
 	deleted, err := s.TrimHistory(ctx)
 	if err != nil {
 		t.Fatalf("trim history: %v", err)
 	}
-	// Free's rollup row, and Free's and Agency's old page view, heat row and
-	// the web_engage row that page view counted into.
-	if deleted != 7 {
-		t.Fatalf("got %d deleted, want 7", deleted)
+	// Free's rollup row, Free's and Agency's old page view, heat row and the
+	// web_engage row that page view counted into, and Agency's old w: event.
+	if deleted != 8 {
+		t.Fatalf("got %d deleted, want 8", deleted)
 	}
 	left := func(table string, tenantID, projectID int64) int64 {
 		t.Helper()
@@ -675,13 +682,18 @@ func TestTrimHistoryFollowsThePlan(t *testing.T) {
 		rollup, views, heat int64
 	}{
 		{"Free keeps the last day and nothing older", free, freeProject, 1, 1, 1},
-		{"a month is inside Agency's year, not its 31 web days", agency, agencyProject, 2, 1, 2},
+		// Agency's events: the fresh page view and the SDK's old event.
+		{"a month is inside Agency's year, not its 31 web days", agency, agencyProject, 2, 2, 2},
 		// NULL trims nothing: that is what makes Self-hosted unlimited.
 		{"a NULL depth keeps everything", self, selfProject, 2, 2, 2},
 	} {
 		if got := [3]int64{left("series_1h", tc.tenant, tc.project), left("events", tc.tenant, tc.project), left("web_heat", tc.tenant, tc.project)}; got != [3]int64{tc.rollup, tc.views, tc.heat} {
 			t.Errorf("%s: rollup, page views, heat = %v, want %v", tc.name, got, [3]int64{tc.rollup, tc.views, tc.heat})
 		}
+	}
+	var kept string
+	if err := pool.QueryRow(ctx, `SELECT string_agg(actor, ',') FROM events WHERE tenant_id = $1 AND name = 'signup'`, agency).Scan(&kept); err != nil || kept != "person-1" {
+		t.Errorf("Agency's old events left = %q (%v), want the SDK's alone", kept, err)
 	}
 }
 

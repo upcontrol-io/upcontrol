@@ -718,6 +718,14 @@ func TestValidateLayout_StepWhereFitsTheSteps(t *testing.T) {
 		{"fewer than steps", &steps, []map[string]string{{"path": "/"}}, ""},
 		{"more than steps", &steps, []map[string]string{{}, {}, {"path": "/"}}, refused},
 		{"no steps", nil, []map[string]string{{"path": "/"}}, refused},
+		{"four pairs", &steps, []map[string]string{{}, {"a": "1", "b": "2", "c": "3", "d": "4"}},
+			`at most 3 labels per query, got 4 in widget "w_1" step 2`},
+		{"long value", &steps, []map[string]string{{"path": strings.Repeat("x", 257)}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
+		{"control character", &steps, []map[string]string{{"path": "/a\n"}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
+		{"empty key", &steps, []map[string]string{{"": "/"}},
+			`a label key is 1 to 60 bytes and its value at most 256, with no control characters, in widget "w_1" step 1`},
 	} {
 		b := widget("w_1")
 		b.Metrics = []apigen.DashboardMetricRef{{Source: apigen.DashboardMetricRefSourcePeople, Steps: c.steps, StepWhere: &c.where}}

@@ -192,6 +192,15 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.putBoardLayout(w, r, d, boardPathID(r.URL.Path))
 			}
 			return
+		// The CLI's `web --segments`: a SECRET key reads and replaces the
+		// key's project's declared segments.
+		case r.URL.Path == "/v1/web/segments" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+			if h.keys == nil {
+				writeAPIErr(w, http.StatusUnauthorized, "bad_key")
+			} else {
+				segmentsByKey(w, r, h.keys, h.pgs)
+			}
+			return
 		}
 	}
 
@@ -292,6 +301,10 @@ func (h *writeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// POST, like /v1/series above.
 	case r.URL.Path == "/v1/heatmap/link" && r.Method == http.MethodPost:
 		h.postHeatmapLink(w, r, tenantID)
+	// The current project's declared segments: any member reads, a manager
+	// (the gate above) replaces.
+	case r.URL.Path == "/v1/web/segments" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+		serveSegments(w, r, h.pgs, currentProjectID(r.Context(), h.pool, s, tenantID))
 	// The board itself: one stored layout per project, read by any member
 	// and replaced whole by a login member (the gate above). The proposal
 	// doors: a notify member may READ what the key offered; dropping it is a
@@ -1091,6 +1104,9 @@ func releaseProject(ctx context.Context, tx pgx.Tx, projectID int64) error {
 	for _, table := range [...]string{
 		"api_key", "install_token",
 		"alert_channel", "telegram_invite", "project_member", "error_alert_state",
+		// A rule left behind keeps its tenant_id and would count against the
+		// leaving workspace's product_alerts forever, invisible and undeletable.
+		"product_alert",
 	} {
 		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE project_id = $1`, projectID); err != nil {
 			return err

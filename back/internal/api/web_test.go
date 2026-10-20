@@ -62,9 +62,10 @@ type fakeWebStore struct {
 		add             pgstore.EngageAdd
 	}
 
-	admitted   []string // the project's segments, first come, at most 4
-	admitCalls int
-	readFilter [2]string // the segment and source the last read was narrowed to
+	declared     []string // the project's declared segments
+	segmentReads int
+	noView       bool      // the visitor has no stored page view: events and engaged time store nothing
+	readFilter   [2]string // the segment and source the last read was narrowed to
 
 	salt      []byte
 	origins   []string
@@ -107,6 +108,9 @@ func (f *fakeWebStore) InsertPageview(_ context.Context, tenantID, projectID int
 }
 
 func (f *fakeWebStore) InsertWebEvent(_ context.Context, _, _ int64, _ time.Time, name string, labels map[string]string, actor string) error {
+	if f.noView {
+		return nil
+	}
 	f.events = append(f.events, struct {
 		name   string
 		labels map[string]string
@@ -126,30 +130,22 @@ func (f *fakeWebStore) AddHeat(_ context.Context, tenantID, projectID int64, day
 	return nil
 }
 
-func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) error {
+func (f *fakeWebStore) AddEngage(_ context.Context, _, _ int64, hour time.Time, path, device, segment, source string, add pgstore.EngageAdd) (bool, error) {
+	if f.noView {
+		return false, nil
+	}
 	f.engageCalls = append(f.engageCalls, struct {
 		hour            time.Time
 		path, device    string
 		segment, source string
 		add             pgstore.EngageAdd
 	}{hour, path, device, segment, source, add})
-	return nil
-}
-
-func (f *fakeWebStore) AdmitSegment(_ context.Context, _ int64, name string) (bool, error) {
-	f.admitCalls++
-	if slices.Contains(f.admitted, name) {
-		return true, nil
-	}
-	if len(f.admitted) >= 4 {
-		return false, nil
-	}
-	f.admitted = append(f.admitted, name)
 	return true, nil
 }
 
 func (f *fakeWebStore) Segments(context.Context, int64) ([]string, error) {
-	return append([]string{}, f.admitted...), nil
+	f.segmentReads++
+	return append([]string{}, f.declared...), nil
 }
 
 func (f *fakeWebStore) DailySalt(_ context.Context, _ time.Time) ([]byte, error) {
@@ -220,7 +216,8 @@ func newTestDoor(t ingest.Tenant, store webStore, isBot func(string) bool) *webD
 		describe: func(_, _ string) (string, string, string) {
 			return "DE", "macos", "safari"
 		},
-		now: func() time.Time { return time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC) },
+		now:      func() time.Time { return time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC) },
+		segments: &segmentCache{},
 	}
 }
 
@@ -809,20 +806,21 @@ func TestValidSegment(t *testing.T) {
 }
 
 // g and o ride a view's labels and every heat and engage write; an invalid
-// one, or a segment past the project's four, is stored as none, never a 400.
+// one, or a name the project never declared, is stored as none, never a 400.
 func TestCollectSegmentAndSource(t *testing.T) {
 	origin := map[string]string{"Origin": "https://example.com"}
 	for _, tc := range []struct {
 		name, g, o           string
-		admitted             []string
+		declared             []string
 		wantSegment, wantSrc string
 	}{
-		{"admitted", "member", "search", nil, "member", "search"},
-		{"invalid g and o", "user_12345", "google", nil, "", ""},
-		{"a fifth name", "fifth", "direct", []string{"a", "b", "c", "d"}, "", "direct"},
+		{"declared", "member", "search", []string{"member"}, "member", "search"},
+		{"undeclared", "member", "search", nil, "", "search"},
+		{"invalid g and o", "user_12345", "google", []string{"member"}, "", ""},
+		{"not among the four", "fifth", "direct", []string{"a", "b", "c", "d"}, "", "direct"},
 		{"one of the four", "c", "", []string{"a", "b", "c", "d"}, "c", ""},
 	} {
-		store := &fakeWebStore{admitted: tc.admitted}
+		store := &fakeWebStore{declared: tc.declared}
 		d := newTestDoor(publicWebTenant(), store, nil)
 		view := fmt.Sprintf(`{"v":2,"t":"view","p":"/","w":1200,"g":%q,"o":%q}`, tc.g, tc.o)
 		heat := fmt.Sprintf(`{"v":2,"t":"heat","p":"/","w":1200,"g":%q,"o":%q,"s":0.5,"e":1000}`, tc.g, tc.o)
@@ -842,14 +840,18 @@ func TestCollectSegmentAndSource(t *testing.T) {
 		if h.segment != tc.wantSegment || h.source != tc.wantSrc || e.segment != tc.wantSegment || e.source != tc.wantSrc {
 			t.Errorf("%s: heat (%q, %q), engage (%q, %q), want (%q, %q)", tc.name, h.segment, h.source, e.segment, e.source, tc.wantSegment, tc.wantSrc)
 		}
+		if slices.Contains(store.declared, "fifth") {
+			t.Errorf("%s: a beacon declared a segment", tc.name)
+		}
 	}
 }
 
-// A site marking every beacon asks the store once per name per ten minutes,
-// refusals included.
-func TestCollectCachesSegmentAdmission(t *testing.T) {
+// A site marking every beacon reads the project's names once per ten
+// minutes, whatever it marks, refusals included; a PUT drops the project's
+// entry, so a new name lands on the next beacon.
+func TestCollectCachesSegments(t *testing.T) {
 	origin := map[string]string{"Origin": "https://example.com"}
-	store := &fakeWebStore{admitted: []string{"a", "b", "c", "d"}}
+	store := &fakeWebStore{declared: []string{"a", "b", "c", "d"}}
 	d := newTestDoor(publicWebTenant(), store, nil)
 	clock := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return clock }
@@ -857,13 +859,41 @@ func TestCollectCachesSegmentAdmission(t *testing.T) {
 		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
 		postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"fifth"}`, origin)
 	}
-	if store.admitCalls != 2 {
-		t.Fatalf("%d AdmitSegment calls for 10 beacons of two names, want 2", store.admitCalls)
+	if store.segmentReads != 1 {
+		t.Fatalf("%d segment reads for 10 beacons of two names, want 1", store.segmentReads)
 	}
 	clock = clock.Add(segmentTTL + time.Second)
 	postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"a"}`, origin)
-	if store.admitCalls != 3 {
-		t.Fatalf("%d AdmitSegment calls past the TTL, want the name asked again", store.admitCalls)
+	if store.segmentReads != 2 {
+		t.Fatalf("%d segment reads past the TTL, want the names read again", store.segmentReads)
+	}
+	store.declared = []string{"fifth"}
+	d.segments.forget(9)
+	postBeacon(t, d, `{"v":2,"t":"view","p":"/","w":1200,"g":"fifth"}`, origin)
+	if got := store.pageviews[len(store.pageviews)-1].labels["segment"]; got != "fifth" || store.segmentReads != 3 {
+		t.Errorf("after forget: segment %q, %d reads; want fifth, read again", got, store.segmentReads)
+	}
+}
+
+// A heat beacon with no stored view behind it adds no engaged time: the store
+// updates no row, and the browser still gets its 204.
+func TestCollectEngageWithoutAViewStoresNothing(t *testing.T) {
+	store := &fakeWebStore{noView: true}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"heat","p":"/","w":1200,"e":5000,"a":[0]}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || len(store.engageCalls) != 0 {
+		t.Errorf("%d, %d engage rows; want 204 and none", rr.Code, len(store.engageCalls))
+	}
+}
+
+// An event from a visitor with no page view today is not stored, and the
+// browser still gets its 204.
+func TestCollectEventWithoutAViewStoresNothing(t *testing.T) {
+	store := &fakeWebStore{noView: true}
+	rr := postBeacon(t, newTestDoor(publicWebTenant(), store, nil), `{"v":2,"t":"event","p":"/","w":1200,"n":"signup"}`,
+		map[string]string{"Origin": "https://example.com"})
+	if rr.Code != http.StatusNoContent || len(store.events) != 0 {
+		t.Errorf("%d, %d events; want 204 and none", rr.Code, len(store.events))
 	}
 }
 
@@ -871,7 +901,7 @@ func TestCollectCachesSegmentAdmission(t *testing.T) {
 // refuses a filter it could never match.
 func TestHeatmapSegmentAndSource(t *testing.T) {
 	store := fakeReadStore()
-	store.admitted = []string{"member", "anon"}
+	store.declared = []string{"member", "anon"}
 	d := newTestDoor(publicWebTenant(), store, nil)
 	base := "/w/heatmap?token=uch_good&key=uc_pub_test&path=/&w=1200"
 	rr := getHeatmap(t, d, base+"&segment=member&source=social", nil)
@@ -885,7 +915,7 @@ func TestHeatmapSegmentAndSource(t *testing.T) {
 	if !slices.Equal(out.Segments, []string{"member", "anon"}) {
 		t.Errorf("segments = %v, want the project's two, oldest first", out.Segments)
 	}
-	store.admitted = nil
+	store.declared = nil
 	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"segments":[]`) || store.readFilter != [2]string{} {
 		t.Errorf("no filter: %s, reads narrowed to %v; want segments [] and no filter", rr.Body.String(), store.readFilter)
 	}
@@ -901,7 +931,7 @@ func TestHeatmapSegmentAndSource(t *testing.T) {
 // scrubbed, and the server's own labels winning over a field of that name.
 func TestCollectEvent(t *testing.T) {
 	headers := map[string]string{"Origin": "https://example.com", "User-Agent": "Mozilla/5.0"}
-	store := &fakeWebStore{}
+	store := &fakeWebStore{declared: []string{"member"}}
 	d := newTestDoor(publicWebTenant(), store, nil)
 	if rr := postBeacon(t, d, `{"v":2,"t":"view","p":"/pricing","w":1200,"g":"member","o":"search"}`, headers); rr.Code != http.StatusNoContent {
 		t.Fatalf("view: %d %s", rr.Code, rr.Body.String())
@@ -956,7 +986,7 @@ func TestCollectEvent(t *testing.T) {
 }
 
 // A server label the door does not set is still never the page's: a forged
-// segment on an unadmitted beacon does not survive.
+// segment on an undeclared beacon does not survive.
 func TestCollectEventDropsForgedServerLabels(t *testing.T) {
 	store := &fakeWebStore{}
 	d := newTestDoor(publicWebTenant(), store, nil)
@@ -1103,11 +1133,39 @@ func TestHeatmapDeploys(t *testing.T) {
 		t.Errorf("oldest kept = %+v, want 03:00", got)
 	}
 
-	// A 7-day plan offers the deploys of its 7 days.
+	// Only the first look lists them: a read with a range or a split is the
+	// overlay's own, and carries [].
+	for _, q := range []string{"&range=7d", "&split=2026-09-18T00:00:00Z"} {
+		store.deployWindow = [2]time.Time{}
+		if rr := getHeatmap(t, d, base+q, nil); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"deploys":[]`) || !store.deployWindow[0].IsZero() {
+			t.Errorf("%s: %d, read %v; want deploys [] and no deploy read: %s", q, rr.Code, store.deployWindow, rr.Body.String())
+		}
+	}
+
+	// A 7-day plan reads them over its 7 days and offers only those whose
+	// before window it can read: 09-16 (n 4, 7 days back) fits, 09-15 (9) not.
 	store.histDays = 7
-	getHeatmap(t, d, base, nil)
+	store.deploys = []pgstore.MarkRow{
+		{At: time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "aaaaaaaaaa"},
+		{At: time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "bbbbbbbbbb"},
+	}
+	store.releases = nil
+	rr = getHeatmap(t, d, base, nil)
+	out = heatOut{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
 	if store.deployWindow[0] != time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC) {
 		t.Errorf("7-day plan: deploys from %v, want 09-12", store.deployWindow[0])
+	}
+	if len(out.Deploys) != 1 || out.Deploys[0].Label != "bbbbbbb" {
+		t.Errorf("7-day plan offers %+v, want the 09-16 deploy alone", out.Deploys)
+	}
+	// Past 15 days the before window outruns the 31 days ever kept.
+	store.histDays = 0
+	store.deploys = []pgstore.MarkRow{{At: time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC), Name: "deploy", SHA: "cccccccccc"}}
+	if rr := getHeatmap(t, d, base, nil); !strings.Contains(rr.Body.String(), `"deploys":[]`) {
+		t.Errorf("a 16-day-old deploy: %s, want deploys []", rr.Body.String())
 	}
 }
 
@@ -1183,9 +1241,11 @@ func TestHeatmapSplitWindows(t *testing.T) {
 	}
 }
 
-// A split is refused when it is not a time, lies in a future day, or is older
-// than the web depth the plan reaches; one whose before window reaches past
-// the plan's history is the 402 a range would be.
+// A split is refused when it is not a time, lies in a future day, or its
+// before window reaches past what the plan can read: n days from the split
+// through today read 2n - 1 days back, inside the 31 days ever kept and the
+// plan's history. Such a split could not have been offered, so it is a 400,
+// never the 402 a range would be.
 func TestHeatmapSplitRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		split    string
@@ -1195,14 +1255,14 @@ func TestHeatmapSplitRefusals(t *testing.T) {
 		{"yesterday", 0, http.StatusBadRequest},
 		{"2026-09-20T00:00:00Z", 0, http.StatusBadRequest},
 		{"2026-09-19T23:00:00Z", 0, http.StatusOK},         // later today: the split's day is today
-		{"2026-08-18T12:00:00Z", 0, http.StatusBadRequest}, // 32 days: past the 31-day depth
-		{"2026-08-19T12:00:00Z", 0, http.StatusOK},
-		{"2026-09-11T12:00:00Z", 7, http.StatusBadRequest},
-		{"2026-09-12T12:00:00Z", 7, http.StatusPaymentRequired}, // before from 09-04: 15 days
-		{"2026-09-16T12:00:00Z", 7, http.StatusOK},              // before from 09-12: 7 days
+		{"2026-09-04T12:00:00Z", 0, http.StatusOK},         // n 16: 31 days back
+		{"2026-09-03T12:00:00Z", 0, http.StatusBadRequest}, // n 17: 33 days, past the 31 kept
+		{"2026-08-19T12:00:00Z", 0, http.StatusBadRequest},
+		{"2026-09-16T12:00:00Z", 7, http.StatusOK},         // before from 09-12: 7 days
+		{"2026-09-15T12:00:00Z", 7, http.StatusBadRequest}, // 9 days
+		{"2026-09-12T12:00:00Z", 7, http.StatusBadRequest},
 		{"2026-09-19T12:00:00Z", 1, http.StatusOK},
-		{"2026-09-18T12:00:00Z", 1, http.StatusPaymentRequired}, // inside the 24h depth, before from 09-16
-		{"2026-09-17T12:00:00Z", 1, http.StatusBadRequest},
+		{"2026-09-18T12:00:00Z", 1, http.StatusBadRequest}, // before from 09-16: 3 days
 	} {
 		store := fakeReadStore()
 		store.histDays = tc.histDays

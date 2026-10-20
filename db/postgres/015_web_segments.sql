@@ -4,8 +4,8 @@
 -- set by data-segment on the tag or upcontrol('segment', name), and the kind
 -- of source the page load came from (search, social, campaign, referral,
 -- direct), worked out by the script. Neither is an identity: a segment is one
--- of at most four short names a project keeps, first come, and a source is a
--- fixed class. '' is "not marked" on both, which every read without a filter
+-- of at most four short names the project declared (PUT /v1/web/segments),
+-- and a source is a fixed class. '' is "not marked" on both, which every read without a filter
 -- still counts.
 --
 -- Both join the heat key and the engage key. The compaction's cell caps rank
@@ -22,7 +22,7 @@ ALTER TABLE web_engage ADD COLUMN source text NOT NULL DEFAULT '';
 ALTER TABLE web_engage DROP CONSTRAINT web_engage_pkey;
 ALTER TABLE web_engage ADD PRIMARY KEY (tenant_id, project_id, hour, path, device, segment, source);
 
--- A project's segments, at most four, first come: the cap is what keeps a
+-- A project's declared segments, at most four: the cap is what keeps a
 -- segment from becoming a user id. Keyed by project, which a claim keeps.
 CREATE TABLE web_segment (
   project_id    bigint NOT NULL REFERENCES project(id) ON DELETE CASCADE,

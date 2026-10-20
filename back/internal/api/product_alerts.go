@@ -147,10 +147,11 @@ func validateProductAlert(r productAlertRule) string {
 	return ""
 }
 
-// episodeChanged: anything but the name or the pause changes what the rule
-// measures, so the episode it was in no longer describes it.
+// episodeChanged: anything but the name changes what the rule measures, so
+// the episode it was in no longer describes it. A pause closes it too: a
+// firing rule resumed later must not send a stale "back to normal".
 func episodeChanged(a, b productAlertRule) bool {
-	return a.Event != b.Event || !maps.Equal(a.Labels, b.Labels) || a.Measure != b.Measure ||
+	return a.Paused != b.Paused || a.Event != b.Event || !maps.Equal(a.Labels, b.Labels) || a.Measure != b.Measure ||
 		a.Currency != b.Currency || a.Kind != b.Kind || a.Direction != b.Direction ||
 		a.Percent != b.Percent || a.WindowHours != b.WindowHours || a.WidgetID != b.WidgetID
 }

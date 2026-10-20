@@ -10,6 +10,10 @@ const SCRIPT = readFileSync(
 	fileURLToPath(new URL("../../back/internal/web/uc.js", import.meta.url)),
 	"utf8",
 );
+const OVERLAY = readFileSync(
+	fileURLToPath(new URL("../../back/internal/web/overlay.js", import.meta.url)),
+	"utf8",
+);
 
 type ClickCell = [string, number, number, number, number]; // [sel, fx, fy, clicks, rage]
 type MoveCell = [string, number, number, number]; // [sel, fx, fy, samples]
@@ -49,6 +53,8 @@ async function serve(page: Page, body: string, opts?: SiteOpts) {
 	const beacons: Beacon[] = [];
 	await page.route("https://api.test/uc.js", (route) =>
 		route.fulfill({ contentType: "text/javascript", body: SCRIPT }));
+	await page.route("https://api.test/w/overlay.js", (route) =>
+		route.fulfill({ contentType: "text/javascript", body: OVERLAY }));
 	await page.route(/api\.test\/w\?/, (route) => {
 		beacons.push(JSON.parse(route.request().postData() ?? "{}") as Beacon);
 		return route.fulfill({ status: 204 });
@@ -448,7 +454,7 @@ test("a segment queued before the script loads marks the first view", async ({ p
 	expect(errors).toEqual([]);
 });
 
-test("a segment change reports the heat gathered before it under the old one", async ({ page }) => {
+test("a segment set mid-view applies from the next view", async ({ page }) => {
 	const errors = watch(page);
 	const beacons = await serve(page, '<button id="a">A</button> <button id="b">B</button>');
 	await page.goto("https://site.test/");
@@ -456,16 +462,17 @@ test("a segment change reports the heat gathered before it under the old one", a
 	await page.locator("#a").click();
 	await page.evaluate(() =>
 		(window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol("segment", "member"));
-	await expect.poll(() => heats(beacons)).toHaveLength(1);
 	await page.locator("#b").click();
-	await hide(page);
-	await expect.poll(() => heats(beacons)).toHaveLength(2);
-	const [before, after] = heats(beacons);
-	expect(before.g).toBeUndefined();
-	expect(before.c!.map((c) => c[0])).toEqual(["#a"]);
-	expect(after.g).toBe("member");
-	expect(after.c!.map((c) => c[0])).toEqual(["#b"]);
-	expect(beacons.filter((b) => b.t === "view")).toHaveLength(1); // the view is not re-sent
+	await page.waitForTimeout(100);
+	expect(heats(beacons)).toEqual([]); // no flush of its own
+	await page.evaluate(() => history.pushState({}, "", "/next"));
+	await expect.poll(() => beacons.filter((b) => b.t === "view" && b.p === "/next")).toHaveLength(1);
+	const heat = heats(beacons);
+	expect(heat).toHaveLength(1);
+	expect(heat[0].p).toBe("/");
+	expect(heat[0].g).toBeUndefined(); // the segment the view was sent with
+	expect(heat[0].c!.map((c) => c[0]).sort()).toEqual(["#a", "#b"]);
+	expect(beacons.find((b) => b.t === "view" && b.p === "/next")!.g).toBe("member");
 	expect(errors).toEqual([]);
 });
 
@@ -560,6 +567,67 @@ test("the overlay offers no segment filter for a site that sets none", async ({ 
 	await expect(page.getByRole("combobox", { name: "Source" })).toBeVisible();
 	await page.evaluate(() =>
 		(window as unknown as { upcontrol: (c: string, a: string) => void }).upcontrol("segment", "member"));
+	expect(errors).toEqual([]);
+});
+
+test("a visitor never downloads the overlay; a heatmap link does, and it draws", async ({ page }) => {
+	const errors = watch(page);
+	const overlayLoads: string[] = [];
+	page.on("request", (r) => { if (r.url().endsWith("/w/overlay.js")) overlayLoads.push(r.url()); });
+	const beacons = await serve(page, '<button id="buy">Buy</button>');
+	await heatmapWith(page, []);
+	await page.goto("https://site.test/");
+	await expect.poll(() => beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	await page.waitForTimeout(100);
+	expect(overlayLoads).toEqual([]);
+	// Another path: a hash-only goto would not load the page again.
+	await page.goto("https://site.test/map#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	await expect(page.locator("canvas")).toHaveCount(1);
+	expect(overlayLoads).toEqual(["https://api.test/w/overlay.js"]);
+	expect(beacons.filter((b) => b.t === "view")).toHaveLength(1);
+	expect(errors).toEqual([]);
+});
+
+test("under the overlay, upcontrol('source') hands back an empty object", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button>');
+	await heatmapWith(page, []);
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("1,234 desktop views · 7 days")).toBeVisible();
+	expect(await page.evaluate(() =>
+		(window as unknown as { upcontrol: (c: string) => unknown }).upcontrol("source"))).toEqual({});
+	expect(errors).toEqual([]);
+});
+
+test("a slower, older heatmap answer never overwrites a newer one", async ({ page }) => {
+	const errors = watch(page);
+	await serve(page, '<button id="buy">Buy</button>');
+	let slowAnswered = false;
+	await page.route(/api\.test\/w\/heatmap/, async (route) => {
+		const slow = route.request().url().includes("source=search");
+		if (slow) await new Promise((r) => setTimeout(r, 1000));
+		await route.fulfill({
+			contentType: "application/json",
+			headers: { "Access-Control-Allow-Origin": "https://site.test" },
+			body: JSON.stringify({
+				path: "/", device: "desktop", range: "7d", views: slow ? 111 : 222,
+				clicks: [], rage: [], moves: [], hits: [], dead: [], segments: [],
+				scroll: Array.from({ length: 21 }, () => 0),
+			}),
+		});
+		if (slow) slowAnswered = true;
+	});
+	await page.goto("https://site.test/#uc-heatmap=uch_test");
+	await expect(page.getByText("222 desktop views · 7 days")).toBeVisible();
+	const src = page.getByRole("combobox", { name: "Source" });
+	await src.selectOption("search");
+	await src.selectOption("social");
+	await expect(page.getByText("222 desktop views · 7 days · from social")).toBeVisible();
+	await expect.poll(() => slowAnswered).toBe(true);
+	await page.waitForTimeout(200);
+	await expect(page.getByText("222 desktop views · 7 days · from social")).toBeVisible();
+	await expect(page.getByText(/111 desktop views/)).toHaveCount(0);
 	expect(errors).toEqual([]);
 });
 
@@ -798,7 +866,8 @@ async function heatmapCompare(page: Page, beforeViews = 1000) {
 				rage: [], moves: [], dead: [], segments: [], forms: [],
 				hits: [{ selector: "#buy", x: 0, y: 0, n: 120 }],
 				scroll: Array.from({ length: 21 }, (_, i) => 1000 - i * 40),
-				deploys: [{ at: "2026-10-17T14:03:00Z", label: "v1.4.2" }],
+				// As the server answers: the list rides the first look only.
+				deploys: split || url.includes("range=") ? [] : [{ at: "2026-10-17T14:03:00Z", label: "v1.4.2" }],
 				...(split ? {
 					from: "2026-10-17",
 					before: {
@@ -857,6 +926,8 @@ test("comparing re-reads around the deploy, and No comparison goes back to the r
 	expect(urls.at(-1)).not.toContain("split=");
 	expect(urls.at(-1)).toContain("range=7d");
 	await expect(range).toBeEnabled();
+	// Later answers carry no deploys; the first look's list stays on offer.
+	await expect(cmp.locator("option")).toHaveText(["No comparison", "Before / after v1.4.2 · Oct 17"]);
 	expect(errors).toEqual([]);
 });
 

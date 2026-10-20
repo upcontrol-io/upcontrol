@@ -2,7 +2,9 @@
 
 // One product-alerts episode end to end: a drop fires once per channel, a
 // second tick repeats nothing, the recovery is sent once, a rule past Free's
-// two is not evaluated, and a thin week ago keeps a rule learning and quiet.
+// two is not evaluated, a thin week ago keeps a rule learning and quiet, a
+// tick that read a rule since changed writes nothing, and an event that only
+// began inside the week-ago window is no baseline.
 // Run with -tags=integration, UC_TEST_POSTGRES set.
 package productalert
 
@@ -76,10 +78,12 @@ func TestTickEpisode(t *testing.T) {
 	dropRule := rule(signup, 3*time.Hour)
 	thinRule := rule(thin, 2*time.Hour)
 	extraRule := rule(extra, time.Hour) // the third: past Free's two
+	events(signup, 1, now.Add(-2*week)) // the event is older than its baseline
 	events(signup, 40, weekAgo)
 	events(signup, 10, now.Add(-3*time.Hour))
+	events(thin, 1, now.Add(-2*week))
 	events(thin, 19, weekAgo)
-	events(extra, 40, weekAgo)
+	events(extra, 40, weekAgo) // began inside the week-ago window
 
 	e := New(pool, pgstore.New(pool.Raw()), slog.New(slog.DiscardHandler))
 	e.now = func() time.Time { return now }
@@ -130,11 +134,37 @@ func TestTickEpisode(t *testing.T) {
 		t.Fatalf("thin rule queued %d rows", n)
 	}
 
+	// A tick that read the thin rule firing, before a PATCH reset it, would
+	// send a recovery; the row has moved, so nothing is written or queued.
+	firedAgo := now.Add(-time.Hour)
+	stale := Rule{ID: thinRule, TenantID: tenantID, ProjectID: projectID, Event: thin, Labels: map[string]string{},
+		Kind: "change", Direction: "down", Percent: 50, WindowHours: 6, State: StateFiring, LastFiredAt: &firedAgo}
+	if err := e.evaluate(ctx, stale, now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("stale evaluate: %v", err)
+	}
+	if n := queued(thinRule, "%"); n != 0 {
+		t.Fatalf("a stale tick queued %d rows", n)
+	}
+	if err := pool.Raw().QueryRow(ctx, `SELECT state FROM product_alert WHERE id = $1`, thinRule).Scan(&state); err != nil || state != StateLearning {
+		t.Fatalf("a stale tick overwrote the thin rule: state %q err %v", state, err)
+	}
+
 	var checked *time.Time
 	if err := pool.Raw().QueryRow(ctx, `SELECT last_checked_at FROM product_alert WHERE id = $1`, extraRule).Scan(&checked); err != nil || checked != nil {
 		t.Fatalf("the third rule was evaluated: last_checked_at %v err %v", checked, err)
 	}
 	if n := queued(extraRule, "%"); n != 0 {
 		t.Fatalf("the third rule queued %d rows", n)
+	}
+
+	// On a plan that carries it, the third rule is read: 40 events a week ago
+	// and none now, but none before that window either, so it stays learning.
+	exec("lift the plan", `UPDATE tenant SET plan = 'Indie' WHERE id = $1`, tenantID)
+	tick()
+	if err := pool.Raw().QueryRow(ctx, `SELECT state, last_checked_at FROM product_alert WHERE id = $1`, extraRule).Scan(&state, &checked); err != nil || state != StateLearning || checked == nil {
+		t.Fatalf("the new event's rule: state %q checked %v err %v, want learning and checked", state, checked, err)
+	}
+	if n := queued(extraRule, "%"); n != 0 {
+		t.Fatalf("the new event's rule queued %d rows", n)
 	}
 }

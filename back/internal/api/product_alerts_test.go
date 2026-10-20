@@ -86,13 +86,13 @@ func TestPatchValidatesTheMergedRule(t *testing.T) {
 	}
 }
 
-// Only what the rule measures resets the episode; renaming or pausing it does not.
+// What the rule measures, and pausing it, reset the episode; renaming it does not.
 func TestEpisodeChanged(t *testing.T) {
 	stored := productAlertRule{Event: "signup", Kind: "change", Direction: "down", Percent: 50,
 		WindowHours: 6, Labels: map[string]string{"plan": "pro"}}
 	for body, want := range map[string]bool{
 		`{"name":"Signups"}`:         false,
-		`{"paused":true}`:            false,
+		`{"paused":true}`:            true,
 		`{"labels":{"plan":"pro"}}`:  false,
 		`{"percent":60}`:             true,
 		`{"labels":{"plan":"free"}}`: true,

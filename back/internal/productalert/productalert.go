@@ -53,10 +53,13 @@ type Rule struct {
 // Reading is what one evaluation measured. Cur and Base are the rule's value
 // (a count, or minor units of money) over the window and the same hours a
 // week ago; BaseEvents is the week-ago event count the guard reads even for
-// money; CurEvents and History (events in the 7 days before the window) are
-// what a silence rule reads.
+// money; Prior says the event (with the rule's labels) arrived before that
+// week-ago window began, so the window is not the event's first days;
+// CurEvents and History (events in the 7 days before the window) are what a
+// silence rule reads.
 type Reading struct {
 	Cur, Base, BaseEvents, CurEvents, History int64
+	Prior                                     bool
 }
 
 func (rd Reading) pct() float64 {
@@ -76,7 +79,10 @@ func Condition(r Rule, rd Reading) string {
 			return StateLearning
 		}
 	}
-	if rd.BaseEvents < minBaseEvents || rd.Base == 0 {
+	// A base of zero or below (refunds larger than the charges) has no
+	// percentage to compare with, and a week ago that was the event's first
+	// week is a launch, not a baseline.
+	if !rd.Prior || rd.BaseEvents < minBaseEvents || rd.Base <= 0 {
 		return StateLearning
 	}
 	pct, p := rd.pct(), float64(r.Percent)
@@ -342,6 +348,12 @@ func (e *Evaluator) read(ctx context.Context, r Rule, now time.Time) (Reading, e
 		return rd, err
 	}
 	rd.BaseEvents = count(from.Add(-week), now.Add(-week))
+	if err == nil {
+		err = e.pool.Raw().QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM events
+			 WHERE tenant_id = $1 AND project_id = $2 AND name = $3 AND ts < $4 AND labels @> $5::jsonb)`,
+			r.TenantID, r.ProjectID, r.Event, from.Add(-week), labelsJSON(r.Labels)).Scan(&rd.Prior)
+	}
 	if r.money() {
 		rd.Cur = amount(from, now)
 		rd.Base = amount(from.Add(-week), now.Add(-week))
@@ -350,6 +362,16 @@ func (e *Evaluator) read(ctx context.Context, r Rule, now time.Time) (Reading, e
 		rd.Base = rd.BaseEvents
 	}
 	return rd, err
+}
+
+// labelsJSON is the rule's filter as a jsonb literal; no filter is {}, never
+// null, so containment and equality both read it as "every event".
+func labelsJSON(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "{}"
+	}
+	b, _ := json.Marshal(labels)
+	return string(b)
 }
 
 func total(bs []pgstore.Bucket) int64 {
@@ -415,10 +437,21 @@ func (e *Evaluator) evaluate(ctx context.Context, r Rule, now time.Time) error {
 			return fmt.Errorf("enqueue: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE product_alert SET state = $2, last_fired_at = $3, last_checked_at = $4 WHERE id = $1`,
-		r.ID, next, firedAt, now); err != nil {
+	// The row moves only from what this tick read: a PATCH or a pause that
+	// landed meanwhile wins, and the deferred rollback drops the deliveries
+	// measured against the rule it replaced.
+	tag, err := tx.Exec(ctx,
+		`UPDATE product_alert SET state = $2, last_fired_at = $3, last_checked_at = $4
+		  WHERE id = $1 AND NOT paused AND state = $5 AND last_fired_at IS NOT DISTINCT FROM $6
+		    AND event = $7 AND labels = $8::jsonb AND measure = $9 AND currency = $10 AND kind = $11
+		    AND direction = $12 AND percent = $13 AND window_hours = $14`,
+		r.ID, next, firedAt, now, r.State, r.LastFiredAt,
+		r.Event, labelsJSON(r.Labels), r.Measure, r.Currency, r.Kind, r.Direction, r.Percent, r.WindowHours)
+	if err != nil {
 		return fmt.Errorf("update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 	return tx.Commit(ctx)
 }
